@@ -15,6 +15,8 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Final
 
+from sqlalchemy.engine import CursorResult
+
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
@@ -570,7 +572,8 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         from services.type_system import normalize_logical_type
     except Exception:
         normalize_logical_type = lambda x: str(x or "").lower()  # type: ignore[assignment]
-    ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
+    declared = str(dest_types.get(col, "") or "") if dest_types else ""
+    ctype = normalize_logical_type(declared) if dest_types else ""
     if ctype in {"date", "datetime", "time"}:
         from connectors.sql_temporal import (
             coerce_sql_temporal,
@@ -578,7 +581,16 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
             logical_to_temporal_ddl,
         )
 
-        ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
+        # ``normalize_logical_type`` folds every timestamp flavour into
+        # ``datetime``, so resolving the carrier from it alone downgraded an
+        # offset-bearing column to NTZ ``DATETIME`` and the wire value kept the
+        # local wall clock while losing the offset — a different instant. The
+        # declared type names the carrier, so ask it first.
+        ddl = (
+            logical_to_temporal_ddl(declared)
+            or logical_to_temporal_ddl(ctype)
+            or "DATETIME"
+        )
         try:
             coerced = coerce_sql_temporal(value, ddl)
             wire = format_wire_value(value, ddl)
@@ -1327,6 +1339,26 @@ def transform_error_policy_for_validation_mode(validation_mode: str | None) -> s
     if mode in _VALIDATION_MODE_POLICIES:
         return _VALIDATION_MODE_POLICIES[mode]
     return transform_error_policy()
+
+
+def multi_row_insert_written(result: CursorResult[Any], batch_len: int) -> int:
+    """Rows landed by one multi-row INSERT that did not raise.
+
+    ``rowcount`` after an executemany / insertmanyvalues INSERT is undefined on
+    every dialect that does not declare ``supports_sane_multi_rowcount`` — SQL
+    Server (pymssql and pyodbc) reports only the last parameter sub-batch. Read
+    as the batch total it under-counts a complete write, and the engine's
+    reconcile then charges the difference to rejected rows: a full 10,000-row
+    transfer reported "7,961 rejected" while the destination held all rows. A
+    non-raising multi-row INSERT wrote the whole batch; a failure is the
+    caller's except path.
+    """
+    count = int(result.rowcount)
+    if batch_len <= 1:
+        return batch_len if count < 0 else count
+    if result.context.dialect.supports_sane_multi_rowcount and count >= batch_len:
+        return count
+    return batch_len
 
 
 def _rejected_row_count(

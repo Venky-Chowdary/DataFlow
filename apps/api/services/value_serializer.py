@@ -689,6 +689,21 @@ def json_default(value: Any) -> Any:
     return _json_default(value)
 
 
+#: Scalars the BSON encoder carries natively. ``datetime`` is here but ``date``
+#: is not — BSON has no date-only wire — and ``bool`` is matched before ``int``
+#: by ``isinstance`` anyway, so both are listed for the reader, not the check.
+_BSON_NATIVE_SCALARS: tuple[type, ...] = (
+    str,
+    bool,
+    int,
+    float,
+    bytes,
+    bytearray,
+    datetime,
+    uuid.UUID,
+)
+
+
 def bson_safe_document(value: Any) -> Any:
     """Rewrite a metadata document into types BSON can encode.
 
@@ -697,6 +712,11 @@ def bson_safe_document(value: Any) -> Any:
     fallback path. ``Decimal128`` is the exact carrier for it — 34 significant
     digits, no float — and a value wider than that keeps its exact digits as
     text rather than being rounded into the wire.
+
+    Constraint values are taken from real column data, so a document can also
+    hold ``date``/``time``/``UUID``/``bytes``/enum members. The ones BSON encodes
+    itself are left alone; the rest settle through ``json_default``, the same
+    owner the JSON surfaces use, instead of raising ``InvalidDocument``.
     """
     if isinstance(value, Decimal):
         text = safe_decimal_text(value)
@@ -716,7 +736,12 @@ def bson_safe_document(value: Any) -> Any:
         return [bson_safe_document(v) for v in value]
     if isinstance(value, set):
         return [bson_safe_document(v) for v in sorted(value, key=repr)]
-    return value
+    if value is None or isinstance(value, _BSON_NATIVE_SCALARS):
+        return value
+    if type(value).__module__.split(".")[0] == "bson":
+        # ObjectId / Decimal128 / Binary / Timestamp: already a BSON carrier.
+        return value
+    return json_default(value)
 
 
 _JSON_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")

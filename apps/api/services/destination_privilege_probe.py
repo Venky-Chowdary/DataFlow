@@ -2150,6 +2150,24 @@ def evaluate_kafka_acls(
 
 # ── Elasticsearch / OpenSearch ───────────────────────────────────────────────
 
+
+def _es_security_disabled(client: Any) -> bool:
+    """True only when the cluster itself reports security as disabled.
+
+    ``_xpack`` is the cluster's own statement of posture. Returning False when
+    it cannot be read keeps the probe fail-closed: an unreadable posture is not
+    evidence that writes are permitted.
+    """
+    try:
+        info = client.xpack.info()
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+        return False
+    features = (info or {}).get("features") or {}
+    security = features.get("security") or {}
+    return security.get("enabled") is False
+
+
 def _probe_elasticsearch(
     *,
     host: str,
@@ -2199,6 +2217,25 @@ def _probe_elasticsearch(
             }
         )
     except Exception as exc:
+        # The privileges API only exists while security is enabled. Whether it
+        # is disabled is measurable, not a guess: ``_xpack`` reports the
+        # cluster's own security posture, and a cluster with security disabled
+        # authorizes every request — that is proof, not a connectivity soft-pass.
+        if _es_security_disabled(client):
+            return PrivilegeProbeResult(
+                can_write=True,
+                can_create_table=True,
+                status="ok",
+                detail=(
+                    "Elasticsearch reports xpack.security.enabled=false — the "
+                    "cluster authorizes every request, so index/write and "
+                    "create_index are permitted (enable security for "
+                    "catalog-verified grants)"
+                ),
+                engine="elasticsearch",
+                method="xpack.security.enabled=false",
+                signals={"index_exists": bool(exists)},
+            )
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,

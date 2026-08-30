@@ -148,7 +148,7 @@ class MongoContractStore(ContractStore):
         try:
             db["contract_breakers"].update_one(
                 {"contract_id": breaker.contract_id},
-                {"$set": breaker.to_dict()},
+                {"$set": bson_safe_document(breaker.to_dict())},
                 upsert=True,
             )
         except Exception as exc:

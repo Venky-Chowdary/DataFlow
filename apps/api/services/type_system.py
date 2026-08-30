@@ -1339,6 +1339,27 @@ def dest_create_new_decimal_carrier(*, dest_db: str = "") -> str:
     return str((DDL_TYPES.get(db) or {}).get(LOGICAL_DECIMAL) or "")
 
 
+#: Stores whose numeric carrier is one fully specified exact-decimal type with
+#: no per-field width: BSON ``decimal`` (decimal128, 34 digits) and DynamoDB
+#: ``N`` (38 significant digits, exponent 10^-130..10^125, stored exactly).
+_SINGLE_CAPACITY_DECIMAL_DIGITS: dict[str, int] = {
+    "mongodb": DECIMAL128_SIGNIFICANT_DIGITS,
+    "dynamodb": 38,
+}
+
+
+def dest_decimal_single_capacity_digits(*, dest_db: str = "") -> int | None:
+    """Significant digits of a dialect's single exact-decimal carrier, if any.
+
+    Generalizes the decimal128 reading: these stores have no per-attribute
+    ``(p, s)`` to narrow, so a source within capacity lands exactly and only a
+    source needing more significant digits is a real collapse.
+    """
+    return _SINGLE_CAPACITY_DECIMAL_DIGITS.get(
+        _normalize_dest_db(dest_db) if dest_db else ""
+    )
+
+
 def bare_decimal_platform_default(
     target_type: str = "",
     *,
@@ -1433,14 +1454,15 @@ def decimal_params_would_narrow(
         return False
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
-    if dest_decimal_is_decimal128(dest_db=dest_db):
-        # BSON decimal has one capacity — 34 significant digits at any in-range
-        # scale — and no per-field width to narrow. Any ``(p, s)`` on this side
-        # was inferred from sampled documents, so comparing against it treats a
-        # description of the rows that happen to be there as a constraint the
-        # store does not have: a placeholder holding 0.00 made the field look
-        # like DECIMAL(5,4) and refused every real salary that followed.
-        return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
+    single_capacity = dest_decimal_single_capacity_digits(dest_db=dest_db)
+    if single_capacity is not None:
+        # These carriers have one capacity at any in-range scale and no per-field
+        # width to narrow. Any ``(p, s)`` on this side was inferred from sampled
+        # documents/items, so comparing against it treats a description of the
+        # rows that happen to be there as a constraint the store does not have:
+        # a placeholder holding 0.00 made the field look like DECIMAL(5,4) and
+        # refused every real salary that followed.
+        return (sp if sp is not None else 0) > single_capacity
     if sp is None and ss is None:
         # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved,
         # except when (p,s) is the very carrier this dialect's create-new
@@ -1461,11 +1483,12 @@ def decimal_params_would_narrow(
         # other engines invent platform defaults — resolve then compare.
         if bare_decimal_is_unbounded(dest_db=dest_db):
             return False
-        if dest_decimal_is_decimal128(dest_db=dest_db):
-            # decimal128 keeps the source scale and narrows only when the source
+        single_capacity = dest_decimal_single_capacity_digits(dest_db=dest_db)
+        if single_capacity is not None:
+            # The carrier keeps the source scale and narrows only when the source
             # needs more significant digits than it holds. A single (p, s) pair
             # cannot say that, since the scale it preserves is the source's own.
-            return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
+            return (sp if sp is not None else 0) > single_capacity
         defaults = bare_decimal_platform_default(target_type, dest_db=dest_db)
         if defaults is None:
             return True

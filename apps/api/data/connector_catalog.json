@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "total": 741,
+  "total": 717,
   "connectors": [
     {
       "id": "postgresql",
@@ -308,14 +308,14 @@
       "name": "DynamoDB",
       "category": "database",
       "status": "live",
-      "description": "AWS DynamoDB source and destination \u2014 KeySchema-aware map, typed writes, cloud object-store routes"
+      "description": "AWS DynamoDB source and destination — KeySchema-aware map, typed writes, cloud object-store routes"
     },
     {
       "id": "openshift",
       "name": "OpenShift PostgreSQL (CNPG / Crunchy)",
       "category": "database",
       "status": "live",
-      "description": "Hosted alias of PostgreSQL on OpenShift \u2014 Service DNS dest, not the Kubernetes API. DynamoDB snapshot uses consistent Scan; Streams CDC is at-least-once upsert."
+      "description": "Hosted alias of PostgreSQL on OpenShift — Service DNS dest, not the Kubernetes API. DynamoDB snapshot uses consistent Scan; Streams CDC is at-least-once upsert."
     },
     {
       "id": "documentdb",
@@ -1379,7 +1379,7 @@
       "name": "Amazon S3",
       "category": "cloud_storage",
       "status": "beta",
-      "description": "Amazon S3 object storage \u2014 use the S3 connector"
+      "description": "Amazon S3 object storage — use the S3 connector"
     },
     {
       "id": "google_cloud_storage",
@@ -4410,21 +4410,21 @@
       "name": "Redis",
       "category": "database",
       "status": "beta",
-      "description": "Redis key-value store \u2014 PING probe and key scan"
+      "description": "Redis key-value store — PING probe and key scan"
     },
     {
       "id": "elasticsearch",
       "name": "Elasticsearch",
       "category": "database",
       "status": "beta",
-      "description": "Elasticsearch cluster \u2014 health probe and index listing"
+      "description": "Elasticsearch cluster — health probe and index listing"
     },
     {
       "id": "s3",
       "name": "Amazon S3",
       "category": "cloud_storage",
       "status": "beta",
-      "description": "Amazon S3 buckets \u2014 credential test, object ingest and export"
+      "description": "Amazon S3 buckets — credential test, object ingest and export"
     },
     {
       "id": "apache_iceberg",
@@ -4441,27 +4441,6 @@
       "description": "ACID transactions on data lakes"
     },
     {
-      "id": "clickhouse",
-      "name": "ClickHouse",
-      "category": "warehouse",
-      "status": "planned",
-      "description": "Column-oriented OLAP database"
-    },
-    {
-      "id": "cockroachdb",
-      "name": "CockroachDB",
-      "category": "database",
-      "status": "planned",
-      "description": "Distributed SQL database"
-    },
-    {
-      "id": "cassandra",
-      "name": "Apache Cassandra",
-      "category": "database",
-      "status": "planned",
-      "description": "Wide-column NoSQL store"
-    },
-    {
       "id": "neo4j",
       "name": "Neo4j",
       "category": "database",
@@ -4474,13 +4453,6 @@
       "category": "database",
       "status": "planned",
       "description": "In-process analytical database"
-    },
-    {
-      "id": "trino",
-      "name": "Trino",
-      "category": "warehouse",
-      "status": "planned",
-      "description": "Fast distributed SQL engine"
     },
     {
       "id": "apache_kafka",
@@ -4502,27 +4474,6 @@
       "category": "database",
       "status": "planned",
       "description": "Multi-model Azure database"
-    },
-    {
-      "id": "workday",
-      "name": "Workday",
-      "category": "saas",
-      "status": "planned",
-      "description": "HR and finance cloud data"
-    },
-    {
-      "id": "netsuite",
-      "name": "NetSuite",
-      "category": "saas",
-      "status": "planned",
-      "description": "ERP and financial data"
-    },
-    {
-      "id": "servicenow",
-      "name": "ServiceNow",
-      "category": "saas",
-      "status": "planned",
-      "description": "IT service management data"
     },
     {
       "id": "avro",
@@ -4553,74 +4504,11 @@
       "description": "Spreadsheet source and destination"
     },
     {
-      "id": "airtable",
-      "name": "Airtable",
-      "category": "saas",
-      "status": "planned",
-      "description": "Spreadsheet-database hybrid"
-    },
-    {
-      "id": "notion",
-      "name": "Notion",
-      "category": "saas",
-      "status": "planned",
-      "description": "Workspace database export"
-    },
-    {
-      "id": "github",
-      "name": "GitHub",
-      "category": "saas",
-      "status": "planned",
-      "description": "Repository and issue metadata"
-    },
-    {
-      "id": "jira",
-      "name": "Jira",
-      "category": "saas",
-      "status": "planned",
-      "description": "Issue and project data export"
-    },
-    {
-      "id": "zendesk",
-      "name": "Zendesk",
-      "category": "saas",
-      "status": "planned",
-      "description": "Support ticket and user sync"
-    },
-    {
-      "id": "segment",
-      "name": "Segment",
-      "category": "saas",
-      "status": "planned",
-      "description": "Customer data platform"
-    },
-    {
-      "id": "firebolt",
-      "name": "Firebolt",
-      "category": "warehouse",
-      "status": "planned",
-      "description": "Cloud data warehouse"
-    },
-    {
       "id": "motherduck",
       "name": "MotherDuck",
       "category": "warehouse",
       "status": "planned",
       "description": "DuckDB in the cloud"
-    },
-    {
-      "id": "dremio",
-      "name": "Dremio",
-      "category": "warehouse",
-      "status": "planned",
-      "description": "Data lakehouse engine"
-    },
-    {
-      "id": "greenplum",
-      "name": "Greenplum",
-      "category": "warehouse",
-      "status": "planned",
-      "description": "MPP analytics database"
     },
     {
       "id": "planetscale",
@@ -4658,13 +4546,6 @@
       "description": "Binary structured data format"
     },
     {
-      "id": "amazon_kinesis",
-      "name": "Amazon Kinesis",
-      "category": "streaming",
-      "status": "planned",
-      "description": "AWS real-time data streaming"
-    },
-    {
       "id": "google_pubsub",
       "name": "Google Pub/Sub",
       "category": "streaming",
@@ -4672,39 +4553,11 @@
       "description": "GCP messaging service"
     },
     {
-      "id": "azure_event_hubs",
-      "name": "Azure Event Hubs",
-      "category": "streaming",
-      "status": "planned",
-      "description": "Azure streaming ingestion"
-    },
-    {
-      "id": "minio",
-      "name": "MinIO",
-      "category": "lake",
-      "status": "planned",
-      "description": "S3-compatible object storage"
-    },
-    {
       "id": "apache_spark",
       "name": "Apache Spark",
       "category": "lake",
       "status": "planned",
       "description": "Unified analytics engine"
-    },
-    {
-      "id": "datadog",
-      "name": "Datadog",
-      "category": "saas",
-      "status": "planned",
-      "description": "Monitoring and metrics export"
-    },
-    {
-      "id": "splunk",
-      "name": "Splunk",
-      "category": "saas",
-      "status": "planned",
-      "description": "Observability and log analytics"
     },
     {
       "id": "hightouch",
@@ -4735,39 +4588,11 @@
       "description": "Analytics engineering platform"
     },
     {
-      "id": "sap_hana",
-      "name": "SAP HANA",
-      "category": "database",
-      "status": "planned",
-      "description": "In-memory enterprise database"
-    },
-    {
       "id": "teradata_vantage",
       "name": "Teradata Vantage",
       "category": "warehouse",
       "status": "planned",
       "description": "Enterprise analytics platform"
-    },
-    {
-      "id": "mariadb",
-      "name": "MariaDB",
-      "category": "database",
-      "status": "planned",
-      "description": "Open-source relational database"
-    },
-    {
-      "id": "influxdb",
-      "name": "InfluxDB",
-      "category": "database",
-      "status": "planned",
-      "description": "Time-series database"
-    },
-    {
-      "id": "timescaledb",
-      "name": "TimescaleDB",
-      "category": "database",
-      "status": "planned",
-      "description": "Time-series on PostgreSQL"
     },
     {
       "id": "parquet",
@@ -4788,14 +4613,14 @@
       "name": "Google Cloud Storage",
       "category": "cloud_storage",
       "status": "live",
-      "description": "GCS buckets \u2014 credential test, object ingest and export"
+      "description": "GCS buckets — credential test, object ingest and export"
     },
     {
       "id": "opensearch",
       "name": "OpenSearch",
       "category": "database",
       "status": "live",
-      "description": "OpenSearch cluster \u2014 Elasticsearch-compatible driver"
+      "description": "OpenSearch cluster — Elasticsearch-compatible driver"
     },
     {
       "id": "amazon_elasticsearch",
@@ -4816,7 +4641,7 @@
       "name": "Amazon Redshift",
       "category": "warehouse",
       "status": "live",
-      "description": "AWS Redshift warehouse \u2014 batched load and unload"
+      "description": "AWS Redshift warehouse — batched load and unload"
     },
     {
       "id": "google_bigquery",

@@ -108,6 +108,9 @@ def detect_format(filename: str, content: bytes) -> str:
         return "csv"
     if lower.endswith(".tsv"):
         return "tsv"
+    #: ``.psv`` is pipe-delimited text; the reader sniffs the delimiter itself.
+    if lower.endswith(".psv"):
+        return "csv"
     if lower.endswith((".xlsx", ".xls")):
         return "excel"
     if lower.endswith(".json"):
@@ -622,6 +625,8 @@ class FileParser:
                 return "csv"
             if name.endswith(".tsv"):
                 return "tsv"
+            if name.endswith(".psv"):
+                return "csv"
             if name.endswith((".jsonl", ".ndjson")):
                 return "jsonl" if name.endswith(".jsonl") else "ndjson"
             if name.endswith((".xlsx", ".xls")):

@@ -181,6 +181,16 @@ def _is_path(value: Any) -> bool:
     return isinstance(value, (str, os.PathLike))
 
 
+def _xml_source(content: bytes | str | os.PathLike) -> bytes | Path:
+    """XML readers take bytes or ``Path``; to them a ``str`` is document text.
+
+    ``content`` here is either an in-memory payload or a filesystem path, and a
+    path arrives as ``str`` (see ``prepare_stream_content``). Handed on
+    unconverted it would be counted as though the path itself were the document.
+    """
+    return Path(os.fspath(content)) if _is_path(content) else bytes(content)
+
+
 def _source_suffix(filename: str) -> str:
     name = os.path.basename(filename or "upload")
     _, ext = os.path.splitext(name)
@@ -402,7 +412,7 @@ def peek_file_source(
                     if name and name not in columns:
                         columns[name] = None
                 if len(sample_objs) < 100:
-                    sample_objs.append(_json_empty_to_none(obj))
+                    sample_objs.append(obj)
         if total == 0:
             raise ValueError("JSONL file is empty")
         headers = list(columns.keys())
@@ -435,7 +445,7 @@ def peek_file_source(
                 sample.extend(batch.to_pylist())
                 if len(sample) >= 100:
                     break
-            sample = [_json_empty_to_none(r) for r in sample[:100]]
+            sample = sample[:100]
         finally:
             pf.close()
         return headers, schema, total, sample
@@ -503,7 +513,7 @@ def peek_file_source(
                     total += 1
                     columns.update(obj.keys())
                     if len(sample_objs) < 100:
-                        sample_objs.append(_json_empty_to_none(obj))
+                        sample_objs.append(obj)
         else:
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
@@ -511,7 +521,7 @@ def peek_file_source(
                     raw = bio.read()
             records = load_json_records(bytes(raw))
             total = len(records)
-            sample_objs = [_json_empty_to_none(r) for r in records[:100]]
+            sample_objs = [r for r in records[:100] if isinstance(r, dict)]
             for obj in records:
                 if isinstance(obj, dict):
                     columns.update(obj.keys())
@@ -528,7 +538,8 @@ def peek_file_source(
         from services.dest_precount import UnmeasuredArtifact
         from services.file_parser import count_xml_records, iter_xml_dicts
 
-        total = count_xml_records(content)
+        xml_src = _xml_source(content)
+        total = count_xml_records(xml_src)
         if total is None:
             raise ValueError(
                 "XML document is unmeasured — sibling collections or document XML "
@@ -537,7 +548,7 @@ def peek_file_source(
         sample_objs: list[dict] = []
         columns: dict[str, None] = {}
         try:
-            for rec in iter_xml_dicts(content):
+            for rec in iter_xml_dicts(xml_src):
                 if not isinstance(rec, dict):
                     continue
                 for key in rec:
@@ -545,7 +556,7 @@ def peek_file_source(
                     if name and name not in columns:
                         columns[name] = None
                 if len(sample_objs) < 100:
-                    sample_objs.append(_json_empty_to_none(rec))
+                    sample_objs.append(rec)
                 if len(sample_objs) >= 100:
                     break
         except UnmeasuredArtifact as exc:
@@ -560,18 +571,14 @@ def peek_file_source(
 
 
 def _csv_empty_to_none(value: Any) -> Any:
+    """Delimited carriers cannot spell NULL — RFC 4180 has no such token, so an
+    empty field is absence.
+
+    Self-describing carriers (JSON, JSONL, Parquet, ORC, Avro, XML) do spell NULL
+    separately and are read verbatim: their ``""`` is a value. Blank cells bound
+    for *typed* columns are still nulled downstream by ``empty_cells_as_null``.
+    """
     return None if value == "" else value
-
-
-def _json_empty_to_none(value: Any) -> Any:
-    """JSON/JSONL empty strings are conventionally missing values, not literals."""
-    if value == "":
-        return None
-    if isinstance(value, dict):
-        return {k: _json_empty_to_none(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_json_empty_to_none(v) for v in value]
-    return value
 
 
 def _parse_jsonl_object(line: str, line_no: int) -> dict:
@@ -636,7 +643,7 @@ def _iter_jsonl_batches(
                 continue
             line_no += 1
             obj = _parse_jsonl_object(line, line_no)
-            batch.append(_json_empty_to_none(obj))
+            batch.append(obj)
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
@@ -651,7 +658,7 @@ def _iter_json_array_batches(
     from services.json_tabular import iter_json_record_dicts
 
     for batch in iter_json_record_dicts(_open_binary, content, chunk_size=chunk_size):
-        yield [_json_empty_to_none(r) for r in batch]
+        yield list(batch)
 
 
 def _batch_iterator_for_type(
@@ -684,7 +691,7 @@ def _batch_iterator_for_type(
                 for record_batch in pf.iter_batches(batch_size=batch_size):
                     # Arrow → pylist preserves nested types; pandas path fails on arrays.
                     for record in record_batch.to_pylist():
-                        batch.append(_json_empty_to_none(record))
+                        batch.append(record)
                         if len(batch) >= batch_size:
                             yield batch
                             batch = []
@@ -740,10 +747,10 @@ def _batch_iterator_for_type(
 
         def _xml_batches():
             batch: list[dict] = []
-            for rec in iter_xml_dicts(content):
+            for rec in iter_xml_dicts(_xml_source(content)):
                 if not isinstance(rec, dict):
                     continue
-                batch.append(_json_empty_to_none(rec))
+                batch.append(rec)
                 if len(batch) >= batch_size:
                     yield batch
                     batch = []

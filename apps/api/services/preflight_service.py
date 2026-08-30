@@ -33,7 +33,7 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.data_profiler import source_types_are_authoritative
-from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.db_type_utils import dest_declares_column_ddl, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.preflight_fk_gate import build_fk_block
 from services.coercion_gate_reconcile import reconcile_coercion_report
@@ -1126,7 +1126,11 @@ def run_file_preflight(
     ]
     from services.mapping_constraints import is_intentional_omit, write_mappings
 
-    dest_types = destination_column_types or {}
+    # A sink with no column DDL (document/KV store, object-store prefix) reports
+    # types profiled from sampled values. Judging the source against them is
+    # judging it against Dataflow's own sample, so the Map stamp is the contract.
+    dest_declares_ddl = dest_declares_column_ddl(destination_db_type)
+    dest_types = (destination_column_types or {}) if dest_declares_ddl else {}
     dest_nulls = destination_column_nullability or {}
     write_maps = write_mappings(mappings)
     dest_cols = []
@@ -1147,7 +1151,7 @@ def run_file_preflight(
         # Existing table: only live introspect counts as dest_types for Validate.
         # Map target_type fallback greens empties as VARCHAR while write binds
         # physical DATE/INT — refuse that false-green invent.
-        if destination_table_exists is True:
+        if destination_table_exists is True and dest_declares_ddl:
             if not live:
                 continue
             inferred = str(live).upper()
@@ -1235,10 +1239,14 @@ def run_file_preflight(
     from services.schema_drift import detect_schema_drift
 
     dest_kind = normalize_dest_kind(destination_db_type, default="postgresql")
-    schemaless = dest_kind in SCHEMALESS_DESTS
+    # Document/KV stores and object-store prefixes alike declare no column
+    # types: what a probe returns for them was profiled from sampled values, so
+    # binding it as the live DDL contract makes the gates judge the source
+    # against Dataflow's own sample (``DECIMAL(12,2)`` → ``DECIMAL(2,2)``).
+    schemaless = not dest_declares_column_ddl(dest_kind)
 
     # Split drift vs DDL contracts:
-    # - create-new / schemaless: no live dest types (stale Studio maps are noise)
+    # - create-new / no dest DDL: no live dest types (stale Studio maps are noise)
     # - unknown existence: keep type hints for G6 lossy/width checks, but drift
     #   still treats the dest as non-live (no fingerprint / orphan locks)
     # - existing table: full live contract

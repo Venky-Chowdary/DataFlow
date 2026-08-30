@@ -279,6 +279,53 @@ def _backfill_widened_type(
     return ""
 
 
+def _sample_inferred_widened_type(
+    live_type: str,
+    row: dict[str, Any],
+    src_types: dict[str, str],
+    *,
+    dest_db: str,
+) -> str:
+    """The source's type when the live carrier was inferred from values, else "".
+
+    A Mongo collection, a Redis keyspace or a Parquet prefix has no column DDL:
+    its "live type" is profiled from whatever documents were sampled, so a
+    ``DECIMAL(12,2)`` source column holding ``0.01 … 9.99`` in the sampled window
+    comes back as ``DECIMAL(3,2)``. Binding that as the destination carrier is
+    the bind-existing rule applied to evidence that does not exist — the second
+    run of a route that has already landed every row then reads its own sample
+    as a narrower destination and refuses (``DDL identity mismatch``, ``fidelity
+    collapse``), with no DDL to protect and no remap that would be more correct.
+
+    Only a strictly wider source passes, so a genuinely richer destination
+    document (``DECIMAL(18,4)`` where the source is ``DECIMAL(12,2)``) still
+    wins, and an operator-chosen carrier is never touched.
+    """
+    if row.get("user_override") or row.get("risk_acknowledged"):
+        return ""
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if dest_declares_column_ddl(dest_db):
+        return ""
+    source_type = (
+        str(row.get("source_type") or "").strip()
+        or column_type_or_none(src_types, str(row.get("source") or ""))
+        or ""
+    )
+    if not source_type:
+        return ""
+    # Function-local: connectors.schema_drift imports the type layer, so a
+    # module-level import here would close an import cycle.
+    from connectors.schema_drift import is_wider_type
+
+    try:
+        if is_wider_type(str(live_type), source_type, dest_db=dest_db):
+            return source_type
+    except (ValueError, TypeError, KeyError):
+        return ""
+    return ""
+
+
 def stamp_additive_mapping_types(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -294,6 +341,9 @@ def stamp_additive_mapping_types(
     Fail-closed honesty:
     * ``pending_dest_schema`` — never invent (Studio must reload).
     * Live dest carrier present — bind that stamp; never invent from source.
+      On a sink with no column DDL (Mongo/Redis/DynamoDB, object stores) the
+      "live" carrier is profiled from sampled values, so it may only widen to
+      the source carrier (:func:`_sample_inferred_widened_type`).
     * Column absent from live types + (``create_new`` / create strategies /
       ``backfill_new_fields`` / ``dest_table_exists is False``) — invent via
       :func:`invent_dest_type` ``CREATE_NEW``.
@@ -352,9 +402,21 @@ def stamp_additive_mapping_types(
                 dest_db=db,
                 backfill_new_fields=backfill_new_fields,
             )
-            row["target_type"] = widened or str(live_hit)
+            sampled = (
+                ""
+                if widened
+                else _sample_inferred_widened_type(
+                    live_hit, row, src_types, dest_db=db
+                )
+            )
+            row["target_type"] = widened or sampled or str(live_hit)
             row["create_new"] = False
-            if widened:
+            if sampled:
+                # No DDL exists to alter — the sink writes the value as the
+                # source carries it, so the stamp stays bind-existing.
+                if strategy in {"create_compatible_new", "identity_passthrough"}:
+                    row["assignment_strategy"] = "bind_existing"
+            elif widened:
                 # The ALTER is planned, not performed here: the writer's
                 # widen pass owns the DDL and keeps its own refusals.
                 row["assignment_strategy"] = "backfill_widen_existing"

@@ -152,6 +152,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     split_dense_sparse_rows,
+    multi_row_insert_written,
     stamp_is_operator_ceiling,
     transform_error_policy,
 )
@@ -3674,7 +3675,7 @@ def _upsert_batch(
         raise
     if not conflict_cols:
         result = conn.execute(table_obj.insert(), batch)
-        return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
+        return multi_row_insert_written(result, len(batch))
 
     from connectors.writer_common import partition_dense_upsert_rows
 
@@ -5512,9 +5513,9 @@ def write_mapped_rows(
                                 chunk_written = len(batch)
                         else:
                             result = conn.execute(table_obj.insert(), batch)
-                            chunk_written = max(
-                                0, getattr(result, "rowcount", None) or 0
-                            ) or len(batch)
+                            chunk_written = multi_row_insert_written(
+                                result, len(batch)
+                            )
                         if ledger_table is not None:
                             mark_sqlalchemy_chunk_committed(
                                 conn,

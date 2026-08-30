@@ -1022,6 +1022,10 @@ export interface CatalogConnector {
   driver_type?: string;
   effective_status?: string;
   transfer_ready?: boolean;
+  /** Can take the source side (source-only, file source, or duplex). */
+  source_ready?: boolean;
+  /** Can take the destination side (dest-only or duplex). */
+  dest_ready?: boolean;
   connect_only?: boolean;
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
