@@ -53,12 +53,24 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
     "sftp",
 })
 
+# Keyspace / document sources with no identity aggregate to push down, whose
+# whole population is still readable through the batch reader the transfer
+# uses. Same proof as an object payload: scan and count, cap-aware. Leaving
+# them unsupported closed every uniqueness-required sync out of Redis or
+# Elasticsearch even though the rows were fully readable.
+READER_PAGED_SOURCE_TYPES = frozenset({"redis", "elasticsearch", "opensearch"})
+
+#: Sources whose population the payload scan can page through.
+PAYLOAD_SCANNED_SOURCE_TYPES = (
+    OBJECT_PAYLOAD_SOURCE_TYPES | READER_PAGED_SOURCE_TYPES
+)
+
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
     | frozenset(
         {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce", "stripe"}
     )
-    | OBJECT_PAYLOAD_SOURCE_TYPES
+    | PAYLOAD_SCANNED_SOURCE_TYPES
 )
 
 #: Rows scanned before a payload probe reports partial coverage instead of proof.
@@ -254,12 +266,19 @@ def _object_payload_duplicates(
     """
     from collections import Counter
 
-    from src.transfer.batch_readers import _read_batch_impl
+    from src.transfer.batch_readers import CONTINUATION_KWARG, _read_batch_impl
+    from src.transfer.connector_capabilities import resolve_driver_type
 
     counts: Counter[tuple[str, ...]] = Counter()
     scanned = 0
     offset = 0
     total: int | None = None
+    # SCAN / search_after sources ignore ``offset``: page two only exists if the
+    # token page one returned is handed back. Paged by offset instead, the probe
+    # re-read page one and reported its own re-reads as source duplicate keys —
+    # a fail-closed gate on a unique keyspace.
+    token_kwarg = CONTINUATION_KWARG.get(resolve_driver_type(db_type), "")
+    token: Any = None
     while True:
         result = _read_batch_impl(
             db_type,
@@ -269,8 +288,11 @@ def _object_payload_duplicates(
             offset,
             _PAYLOAD_PAGE,
             known_total_rows=total,
+            **({token_kwarg: token} if token_kwarg and token is not None else {}),
         )
         batch = result[0] if isinstance(result, tuple) else result
+        if token_kwarg:
+            token = result[1] if isinstance(result, tuple) and len(result) == 2 else None
         headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
         rows = list(getattr(batch, "rows", None) or [])
         if total is None:
@@ -301,6 +323,10 @@ def _object_payload_duplicates(
         if total is not None and offset >= int(total):
             break
         if len(rows) < _PAYLOAD_PAGE:
+            break
+        if token_kwarg and token is None:
+            # Reader handed back no continuation: it cannot be resumed, and
+            # re-reading from the top would count its own re-reads as duplicates.
             break
     return _counter_findings(counts, pk_columns, limit), scanned, True
 
@@ -669,7 +695,7 @@ def probe_source_duplicate_keys_result(
                 primary_key_columns=pk_columns,
             )
 
-        if db_type in OBJECT_PAYLOAD_SOURCE_TYPES:
+        if db_type in PAYLOAD_SCANNED_SOURCE_TYPES:
             obj = source_table or source_collection
             if not obj:
                 return SourceDuplicateProbeResult(

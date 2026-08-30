@@ -339,25 +339,26 @@ def read_collection_cursor_batch(
     cursor_kind = stored_cursor_bson_kind(coll, cursor_column)
     pk_kind = stored_cursor_bson_kind(coll, pk) if use_composite else ""
 
-    def _as_mongo_cursor(raw: str, *, as_id: bool = False) -> Any:
-        casted = _cast_cursor_value(raw, cursor_type if not as_id else "STRING")
+    def _as_mongo_cursor(raw: str, *, tiebreak: bool = False) -> Any:
+        """Cast one half of the bookmark against the field it belongs to.
+
+        Each half of a composite bookmark is compared against its own column, so
+        it must be aligned to *that* column's stored BSON family. Aligning the
+        tie-break half to the cursor column's family made every ``_id``-ordered
+        Mongo snapshot with a non-``_id`` tie-break (any collection paged past
+        one chunk) die on page 2 with "Watermark 'N' is not an ObjectId".
+        """
+        field = pk if tiebreak else cursor_column
+        casted = _cast_cursor_value(raw, "STRING" if tiebreak else cursor_type)
         if (
-            as_id
-            and isinstance(casted, str)
-            and len(casted) == 24
-            and ObjectId.is_valid(casted)
-        ):
-            return ObjectId(casted)
-        if (
-            not as_id
-            and cursor_column == "_id"
+            field == "_id"
             and isinstance(casted, str)
             and len(casted) == 24
             and ObjectId.is_valid(casted)
         ):
             return ObjectId(casted)
         return _align_cursor_to_stored_kind(
-            raw, casted, pk_kind if as_id else cursor_kind
+            raw, casted, pk_kind if tiebreak else cursor_kind
         )
 
     bookmark = present_cursor_bookmark(cursor_after)
@@ -367,7 +368,7 @@ def read_collection_cursor_batch(
         )
         if use_composite and pk_raw != "":
             casted = _as_mongo_cursor(cur_raw)
-            pk_casted = _as_mongo_cursor(pk_raw, as_id=(pk == "_id"))
+            pk_casted = _as_mongo_cursor(pk_raw, tiebreak=True)
             query["$or"] = [
                 {cursor_column: {"$gt": casted}},
                 {cursor_column: casted, pk: {"$gt": pk_casted}},

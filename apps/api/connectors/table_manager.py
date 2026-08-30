@@ -123,6 +123,8 @@ def drop_table(
         return _drop_generic_sql(cfg, table_name, schema)
     if dt == "mongodb":
         return _drop_mongodb(cfg, table_name, schema)
+    if dt == "elasticsearch":
+        return _drop_elasticsearch(cfg, table_name)
     if dt == "snowflake":
         return _drop_snowflake(cfg, table_name, schema)
     if dt == "bigquery":
@@ -332,6 +334,24 @@ def _drop_mongodb(cfg: dict[str, Any], table_name: str, schema: str | None) -> b
         client = _mongo_client(conn_str)
         db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
         client[db_name].drop_collection(table_name)
+        return True
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
+def _drop_elasticsearch(cfg: dict[str, Any], table_name: str) -> bool:
+    """Delete the destination index so a full refresh starts empty.
+
+    Without it an overwrite reached the bulk writer with the index intact and
+    every document came back a version conflict (``op_type=create`` deliberately
+    refuses to clobber existing docs), so a second pass was unrunnable instead
+    of being an overwrite.
+    """
+    from connectors.elasticsearch_reader import _client
+
+    try:
+        client = _client(cfg)
+        client.indices.delete(index=table_name, ignore_unavailable=True)
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc

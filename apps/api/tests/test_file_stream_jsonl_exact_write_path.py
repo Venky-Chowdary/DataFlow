@@ -55,7 +55,10 @@ def test_iter_jsonl_batches_match_peek_and_refuse_ieee():
     assert batches[0][0]["amt"] == Decimal(LONG)
     assert batches[0][0]["n"] == 1.5
     assert isinstance(batches[0][0]["n"], float)
-    assert batches[1][0]["amt"] is None
+    # JSON spells null separately from "": the reader keeps the empty string the
+    # document stated instead of inventing absence. A blank bound for a typed
+    # column is still nulled at write time by ``empty_cells_as_null``.
+    assert batches[1][0]["amt"] == ""
     typed = list(_batch_iterator_for_type("jsonl", raw, 10))
     assert typed[0][0]["amt"] == Decimal(LONG)
     peeked = peek_file_source(raw, "amt.jsonl")[3]

@@ -62,6 +62,15 @@ def _enriched_connectors() -> list[dict]:
     return enriched
 
 
+def enriched_connectors() -> list[dict]:
+    """Every catalog row with canonical capability enrichment applied.
+
+    One enrichment owner: any surface that lists connectors reads this, so a
+    raw ``status: live`` tile cannot reach a client through a second path.
+    """
+    return [dict(row) for row in _enriched_connectors()]
+
+
 def search_catalog(
     query: str = "",
     role: str = "all",

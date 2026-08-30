@@ -58,6 +58,55 @@ def normalize_dest_kind(dest_db_type: str | None, default: str = "") -> str:
     return raw
 
 
+_NO_DDL_KIND_TOKENS = (
+    "s3",
+    "gcs",
+    "google_cloud_storage",
+    "adls",
+    "azure_blob",
+    "azure_data_lake",
+    "minio",
+    "object_store",
+)
+
+
+def dest_declares_column_ddl(dest_db_type: str | None) -> bool:
+    """True when the destination's live column types come from real DDL.
+
+    A relational/warehouse destination hands back the catalog: ``DECIMAL(12,2)``
+    is a declared capacity the writer must respect. A document store, a KV store
+    and an object-store prefix hand back a *profile* of whatever values happened
+    to be sampled, so the same column reads as ``DECIMAL(2,2)`` on one pass and
+    ``DECIMAL(6,2)`` on the next. Treating that as declared DDL is what made a
+    route refuse its own second run for a "narrow_type" collapse onto a sink
+    that has no column types at all.
+
+    Alias-tolerant on purpose: ``amazon_s3`` / ``google_cloud_storage`` reach
+    this helper unnormalized from catalog ids.
+    """
+    kind = normalize_dest_kind(dest_db_type)
+    if not kind:
+        return True
+    if kind in SCHEMALESS_DESTS or kind in NO_RELATIONAL_DDL_DESTS:
+        return False
+    return not any(token in kind for token in _NO_DDL_KIND_TOKENS)
+
+
+def sample_inferred_carrier(inferred: str | None) -> str:
+    """A profiled carrier with its fabricated capacity dropped.
+
+    ``DECIMAL(2,2)`` inferred from 200 sampled CSV rows states a precision the
+    destination never declared. Keeping the family and dropping the parameters
+    is the honest reading: the sink stores what the source carries.
+    """
+    text = (inferred or "").strip()
+    if "(" not in text:
+        return text
+    head, _, rest = text.partition("(")
+    tail = rest.partition(")")[2].strip()
+    return f"{head.strip()} {tail}".strip() if tail else head.strip()
+
+
 def ci_get(schema: dict[str, str], key: str) -> str | None:
     """Case-insensitive key lookup in a schema dict."""
     key_l = key.lower()

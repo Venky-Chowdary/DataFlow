@@ -14,6 +14,7 @@ import struct
 import tempfile
 import uuid
 from contextlib import contextmanager, suppress
+from itertools import chain
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
@@ -647,6 +648,9 @@ def canonical_checksum_from_iter(
         acc.add(row_key, fp)
     return acc.digest()
 
+
+#: Hits per Elasticsearch read-back page while paging a whole index.
+_ES_RECONCILE_PAGE: Final[int] = 10_000
 
 # Digest every checksum path produces for a population with no rows. Both
 # sides fold zero fingerprints into SHA-256, so this value is a proof of
@@ -2969,7 +2973,7 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _redis_client, redis_json_row
+        from connectors.redis_reader import _redis_client, redis_json_row, scan_all_keys
 
         client = _redis_client(
             {
@@ -2983,15 +2987,7 @@ def verify_redis_prefix(
             }
         )
         pattern = f"{prefix}:*" if prefix else "*"
-        keys: list[str] = []
-        cursor = 0
-        while True:
-            cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
-            for raw in batch:
-                keys.append(raw.decode() if isinstance(raw, bytes) else str(raw))
-            if cursor == 0:
-                break
-
+        keys: list[str] = scan_all_keys(client, pattern)
         total = len(keys)
         scoped_ids, _pk = keyed_readback_scope(written_ids, pk_column)
         if scoped_ids:
@@ -3042,43 +3038,74 @@ def verify_elasticsearch_index(
             "ssl": ssl,
             "api_key": api_key,
         }
-        batch, _ = read_index_batch(
-            cfg=cfg,
-            index=index,
-            columns=target_columns,
-            limit=max(int(limit or 500), 1),
-        )
-        headers = list(batch.headers or target_columns or [])
-        dict_rows: list[Any] = []
-        for row in batch.rows or []:
-            if isinstance(row, dict):
-                dict_rows.append(row)
-            elif headers:
-                dict_rows.append(
-                    {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
-                )
-        columns = headers or target_columns or (
-            sorted({k for r in dict_rows if isinstance(r, dict) for k in r}) if dict_rows else []
-        )
-        # Prefer index cardinality when available (batch may be LIMIT-capped).
-        count = len(dict_rows)
-        try:
-            from connectors.elasticsearch_reader import _client
+        # A single 500-hit page was hashed against the source's whole-table
+        # digest, so strict reconcile reported a checksum mismatch for every
+        # index holding more than 500 documents even when all rows landed
+        # intact. ``limit=0`` means the whole population, so page the index
+        # with ``search_after`` until it is exhausted.
+        page = max(int(limit or 0), 0) or _ES_RECONCILE_PAGE
+        page = min(page, _ES_RECONCILE_PAGE)
+        headers: list[str] = []
 
-            es = _client(cfg)
-            try:
-                count = int(es.count(index=index).get("count", count))
-            finally:
-                es.close()
-        except Exception:
-            pass
-        return count, canonical_checksum_from_iter(
-            dict_rows,
+        def _row_iter() -> Iterator[dict[str, Any]]:
+            nonlocal headers
+            cursor: list | None = None
+            seen = 0
+            while True:
+                batch, cursor = read_index_batch(
+                    cfg=cfg,
+                    index=index,
+                    columns=target_columns,
+                    limit=page,
+                    search_after=cursor,
+                )
+                if not headers:
+                    headers = list(batch.headers or target_columns or [])
+                rows = list(batch.rows or [])
+                for row in rows:
+                    if isinstance(row, dict):
+                        yield row
+                    elif headers:
+                        yield {
+                            headers[i]: row[i] if i < len(row) else None
+                            for i in range(len(headers))
+                        }
+                seen += len(rows)
+                if not rows or cursor is None:
+                    return
+                if limit and seen >= int(limit):
+                    return
+
+        # ``columns`` must be known before hashing; the first page settles the
+        # headers, and ``target_columns`` already carries the mapped projection.
+        rows_iter = _row_iter()
+        first = next(rows_iter, None)
+        columns = list(target_columns or []) or (
+            headers or (sorted(first.keys()) if isinstance(first, dict) else [])
+        )
+        replay: Iterator[dict[str, Any]] = (
+            chain([first], rows_iter) if first is not None else iter(())
+        )
+        checksum = canonical_checksum_from_iter(
+            replay,
             columns,
             limit=limit,
             dest_db_type="elasticsearch",
             dest_types=dest_types,
         )
+        count = 0
+        try:
+            from connectors.elasticsearch_reader import _client
+
+            es = _client(cfg)
+            try:
+                count = int(es.count(index=index).get("count", 0))
+            finally:
+                es.close()
+        except Exception as exc:
+            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            return -1, ""
+        return count, checksum
     except Exception as exc:
         logger.warning("Elasticsearch reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""

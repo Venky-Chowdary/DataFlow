@@ -722,6 +722,33 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["Custom object properties may vary by account."],
         "recommended_batch_size": 100,
     },
+    # Stripe resolves from TRANSFER_READY_CATALOG_IDS, so F7 requires a row here.
+    # Reader is cursor-paged (starting_after, max 100/page) and has no introspect;
+    # writer creates/updates with per-request Idempotency-Key, so upsert needs a
+    # conflict column 'id' and there is no destination-wide overwrite.
+    "stripe": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": False,
+        "supports_merge": False,
+        "requires_schema": False,
+        "pagination": "cursor",
+        "rate_limit_notes": (
+            "Stripe list APIs cap at 100 objects per page and rate-limit per account; "
+            "starting_after is page walking, not an incremental cursor."
+        ),
+        "auth_notes": "Secret API key (sk_...). Restricted keys need write scope to load.",
+        "common_issues": [
+            "Upsert refuses rows without an 'id' conflict value — quarantined, not guessed.",
+            "No local emulator: live proof needs a hosted Stripe test-mode account.",
+        ],
+        "recommended_batch_size": 100,
+    },
     "zendesk": {
         "transfer_ready": False,
         "tier": TIER_HIGH,

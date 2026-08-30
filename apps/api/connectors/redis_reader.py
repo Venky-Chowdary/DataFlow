@@ -202,6 +202,28 @@ def resolve_key_pattern(name: str | None) -> str:
     return pattern
 
 
+def scan_all_keys(client: Any, pattern: str, *, page: int = 1000) -> list[str]:
+    """Every key matching ``pattern`` — one full SCAN, deduped.
+
+    Redis SCAN gives no cardinality and may repeat a key across pages, so the
+    only honest population figure is the deduped walk. One owner for it: the
+    reader's page total, introspection's row estimate and reconcile's key list
+    must agree or an operator sees three different Redis row counts.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    cursor = 0
+    while True:
+        cursor, batch = client.scan(cursor=cursor, match=pattern or "*", count=page)
+        for raw in batch:
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if cursor == 0:
+            return keys
+
+
 def _read_redis_value(client: Any, key: str, ktype: str) -> str:
     """Typed Redis value read — never WRONGTYPE on set/zset/stream; refuse truncation."""
     if ktype == "hash":
@@ -267,6 +289,7 @@ def read_keys_batch(
     from connectors.header_union import union_attribute_keys
 
     state = RedisScanState.from_any(scan_state)
+    first_page = not state.keys_seen and not state.cursor and not state.pending_keys
     client = _redis_client(cfg)
     try:
         identity_headers = ["redis_key", "redis_value", "redis_type"]
@@ -346,7 +369,17 @@ def read_keys_batch(
         else:
             headers = identity_headers
 
-        total = known_total_rows if known_total_rows is not None else state.keys_seen
+        # ``keys_seen`` is how far this scan has walked, not how many keys exist.
+        # Reported as the total it told the stream engine "source drained" at the
+        # end of the first page: a 100k-key namespace landed 20k rows and the run
+        # still reported success. The population is counted once, on the first
+        # page, and carried by the caller as ``known_total_rows`` after that.
+        if known_total_rows is not None:
+            total = known_total_rows
+        elif first_page:
+            total = len(scan_all_keys(client, pattern or "*"))
+        else:
+            total = None
         return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state
     finally:
         client.close()
