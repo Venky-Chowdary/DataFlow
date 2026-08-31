@@ -85,6 +85,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Every source column not carried to the destination holds a typed reduction reason. A reason that claims a fact about the data (empty / constant) is checked against the Validate sample and blocks when the sample disproves it; archive_only must name the archive. Sample evidence — never population proof.",
   },
   {
+    id: "g19_dest_schema_replacement",
+    label: "Destination schema replacement",
+    icon: "layers",
+    rule: "A full refresh drops and recreates the destination from the source shape. Where an existing column declares a carrier the source would overflow, the replacement is named and blocks — a signed Migration Risk Contract records it instead of hiding it.",
+  },
+  {
     id: "g18_cdc_snapshot_mode",
     label: "CDC snapshot mode",
     icon: "transfer",
