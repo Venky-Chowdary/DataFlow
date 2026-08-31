@@ -2089,6 +2089,14 @@ def _write_destination_database(
     raise ValueError(f"Database destination '{db_type}' write not implemented")
 
 
+#: Export formats whose bytes are a binary/structured container the destination
+#: asked for. There is no JSON fallback for these: the file either is that
+#: container or the export refuses.
+_CONTAINER_EXPORT_FORMATS: frozenset[str] = frozenset(
+    {"excel", "parquet", "avro", "orc", "xml"}
+)
+
+
 def write_destination_file(
     endpoint: EndpointConfig,
     records: list[dict],
@@ -2245,9 +2253,20 @@ def write_destination_file(
 
     # JSON/JSONL must use omit-aware serialization below — the grid convert path
     # renders DF_MISSING / reader-null as empty (never the extract token).
-    if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
+    #
+    # A container format is decided by the *destination*, never by whether the
+    # source's own format can be converted into it: a database source has no
+    # file format to convert from, so ``can_convert("postgresql", "avro")`` is
+    # false and the export used to fall through to the JSON writer — landing
+    # JSON bytes under an ``.avro`` name that no Avro reader can open. An empty
+    # population is still that container, not an empty JSON array.
+    container = fmt in _CONTAINER_EXPORT_FORMATS
+    if fmt not in {"json", "jsonl"} and (container or (can_convert(src_fmt, fmt) and grid)):
         content, mime = convert_rows(
-            export_columns, grid, source_format=src_fmt, target_format=fmt
+            export_columns,
+            grid,
+            source_format="csv" if container else src_fmt,
+            target_format=fmt,
         )
         ext = (
             "tsv"
@@ -2328,17 +2347,12 @@ def write_destination_file(
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
         export_mime = "application/x-ndjson"
-    elif fmt == "excel":
-        content, export_mime = convert_rows(
-            export_columns, grid, source_format="csv", target_format=fmt
-        )
-        filename = "export.xlsx"
-    elif fmt == "parquet":
-        content, export_mime = convert_rows(
-            export_columns, grid, source_format="csv", target_format=fmt
-        )
-        filename = "export.parquet"
     else:
+        if fmt not in {"json", "csv", "tsv", "jsonl"}:
+            raise ValueError(
+                f"File export format '{fmt}' is not supported — refusing to "
+                "write JSON bytes under that name"
+            )
         records = _json_export_records(export_records)
         content = json.dumps(
             records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
