@@ -167,3 +167,88 @@ def test_overwrite_ladder_fail_still_vetoes_when_not_cdc_count_scope():
     out = apply_fidelity_veto(recon)
     assert out["passed"] is False
     assert out.get("migration_proven") is False
+
+
+def _isolated_chain(tmp_path, monkeypatch):
+    """File-backed audit chain scoped to one test."""
+    from services import audit_log, evidence_chain
+
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    monkeypatch.setattr(
+        evidence_chain, "truncation_store_path", lambda: tmp_path / "truncations.jsonl"
+    )
+
+
+def test_building_a_pack_stays_pure_unless_anchoring_is_asked_for(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services.evidence_chain import read_chain
+
+    pack = build_signed_proof_pack(job_id="job-a", reconciliation={"passed": True})
+
+    assert "chain_anchor" not in pack
+    assert read_chain() == []
+
+
+def test_an_exported_pack_occupies_the_chain_position_it_claims(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services.evidence_chain import find_anchor, verify_chain
+    from services.signed_proof_pack import pack_body_digest_excluding_anchor
+
+    pack = export_proof_pack_for_job(
+        {"_id": "job-anchored", "reconciliation": {"passed": True, "phase": "sample_verified"}},
+        actor="ops@example.com",
+    )
+
+    anchor = pack["chain_anchor"]
+    assert anchor["anchored"] is True
+    assert anchor["evidence_sha256"] == pack_body_digest_excluding_anchor(pack)
+    record = find_anchor(anchor["evidence_sha256"])
+    assert record is not None
+    assert record["event_hash"] == anchor["event_hash"]
+    assert verify_signed_proof_pack(pack)["ok"] is True
+    assert verify_chain()["verified"] is True
+
+
+def test_an_altered_anchored_pack_no_longer_matches_its_chain_record(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+
+    pack = export_proof_pack_for_job(
+        {"_id": "job-altered", "reconciliation": {"passed": True}}, actor="ops@example.com"
+    )
+    pack["gate8"] = {"passed": True, "source_rows": 999}
+
+    result = verify_signed_proof_pack(pack)
+
+    assert result["ok"] is False
+    assert any("chain_anchor digest does not match" in e for e in result["errors"])
+
+
+def test_an_anchor_lifted_from_another_pack_is_rejected(tmp_path, monkeypatch):
+    _isolated_chain(tmp_path, monkeypatch)
+
+    first = export_proof_pack_for_job({"_id": "job-1", "reconciliation": {"passed": True}})
+    second = export_proof_pack_for_job({"_id": "job-2", "reconciliation": {"passed": True}})
+    second["chain_anchor"] = first["chain_anchor"]
+
+    assert any(
+        "chain_anchor digest does not match" in e
+        for e in verify_signed_proof_pack(second)["errors"]
+    )
+
+
+def test_export_survives_an_unavailable_audit_store_without_claiming_an_anchor(
+    tmp_path, monkeypatch
+):
+    _isolated_chain(tmp_path, monkeypatch)
+    from services import audit_log
+
+    def boom(**_kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(audit_log, "append_audit_event", boom)
+
+    pack = export_proof_pack_for_job({"_id": "job-3", "reconciliation": {"passed": True}})
+
+    assert pack["chain_anchor"]["anchored"] is False
+    assert verify_signed_proof_pack(pack)["ok"] is True

@@ -202,7 +202,31 @@ def emit_run_completed(
         payload["cdc_lag_basis"] = dest.get("cdc_lag_basis")
     event = _emit("run_completed", payload)
     persist_event_on_job(job_id, event)
+    _seal_run_evidence(job_id=job_id, run_id=run_id, records=records_transferred, dest=dest)
     return event
+
+
+def _seal_run_evidence(
+    *, job_id: str, run_id: str, records: int, dest: dict[str, Any]
+) -> None:
+    """Chain a durable record of the finished run (best effort).
+
+    This ring buffer is bounded and process-local, and the job document is
+    mutable, so a run nobody exported a proof pack for otherwise leaves no
+    tamper-evident trace that it happened at all.
+    """
+    try:
+        from services.evidence_chain import seal_run_evidence
+
+        recon = dest.get("reconciliation") if isinstance(dest.get("reconciliation"), dict) else None
+        seal_run_evidence(
+            run_id=run_id,
+            job_id=job_id,
+            records_transferred=records,
+            reconciliation=recon,
+        )
+    except Exception:
+        return
 
 
 def emit_run_failed(
