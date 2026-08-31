@@ -2819,6 +2819,8 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return f"{'CHAR' if fixed else 'VARCHAR'}({w})"
     if db in {"mysql", "mariadb"}:
         # Preserve NATIONAL CHAR/VARCHAR — never invent non-national from NCHAR.
+        # The alias's utf8mb3 repertoire is widened only for a source whose
+        # national type is genuinely wider (see carry_national_unicode_charset).
         if national:
             return f"{'NCHAR' if fixed else 'NVARCHAR'}({min(width, cap)})"
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
@@ -4215,6 +4217,66 @@ def unicode_safe_target_carrier(
     return f"{'NCHAR' if is_fixed_width_char_carrier(text) else 'NVARCHAR'}({width})"
 
 
+def carry_national_unicode_charset(db: str, inferred: object, result: str) -> str:
+    """Widen a MySQL create-new wire fed by a wider national source.
+
+    MySQL's own national spelling is an alias for ``CHARACTER SET utf8mb3``
+    (three bytes, BMP only), and an unstamped ``TEXT``/``VARCHAR`` inherits
+    whatever character set the target database happens to default to —
+    ``latin1`` on an older server. A SQL Server ``NVARCHAR`` or Oracle
+    ``NVARCHAR2``/``NCLOB`` source holds astral scalars that either carrier
+    refuses at the write (1366 Incorrect string value), so the national
+    polarity is carried as *capacity*: ``utf8mb4`` stated on the column.
+
+    A MySQL-family source keeps its own spelling — its ``NVARCHAR`` really is
+    utf8mb3, and re-spelling it would report a widen the source never had.
+    """
+    if _normalize_dest_db(db) not in {"mysql", "mariadb"}:
+        return result
+    raw = strip_identity_qualifier(
+        inferred if isinstance(inferred, str) else str(inferred)
+    )
+    if not is_national_string_carrier(raw):
+        return result
+    src_engine = _normalize_dest_db(active_source_engine() or "")
+    if src_engine in {"mysql", "mariadb", ""}:
+        return result
+    if re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", result or "", re.I):
+        return result
+    parts = re.split(r"\s+COLLATE\s+", result or "", maxsplit=1, flags=re.I)
+    head = parts[0].strip()
+    collation = parts[1].strip() if len(parts) > 1 else ""
+    if not _is_mysql_character_wire(head):
+        return result
+    # NCHAR/NVARCHAR *is* the utf8mb3 alias — a charset clause on it is a
+    # syntax error, so the plain carrier takes the stated character set.
+    head = re.sub(r"^N(?=CHAR|VARCHAR)", "", head.strip(), flags=re.I)
+    tail = f" COLLATE {collation}" if collation else ""
+    return f"{head} CHARACTER SET utf8mb4{tail}"
+
+
+_MYSQL_CHARACTER_WIRE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:N?VARCHAR|N?CHAR|CHARACTER(?:\s+VARYING)?|TINYTEXT|TEXT|MEDIUMTEXT"
+    r"|LONGTEXT|ENUM|SET)\b",
+    re.I,
+)
+
+
+def _is_mysql_character_wire(stamp: str) -> bool:
+    """True for MySQL types that accept a CHARACTER SET clause."""
+    return bool(_MYSQL_CHARACTER_WIRE_RE.match((stamp or "").strip()))
+
+
+def _target_holds_full_unicode(dest_db: str, target_type: str) -> bool:
+    """True when the target stamp's own character set stores every scalar."""
+    if not re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", target_type or "", re.I):
+        return False
+    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+
+    cap = classify_capacity(dest_db, target_type)
+    return cap.form == "utf8" and cap.max_code_point >= UNICODE_MAX
+
+
 def national_charset_would_collapse(
     source_type: str,
     target_type: str,
@@ -4228,6 +4290,12 @@ def national_charset_would_collapse(
     with a code-page-dependent non-national type can actually lose characters.
     """
     if not is_national_string_carrier(source_type):
+        return False
+    if dest_db and _target_holds_full_unicode(dest_db, target_type):
+        # A stamp that declares its own full-Unicode character set keeps every
+        # scalar the national source held, whatever the type is *named*:
+        # MySQL ``VARCHAR(64) CHARACTER SET utf8mb4`` is wider than the
+        # ``NVARCHAR(64)`` alias, which is utf8mb3 (BMP only).
         return False
     if is_national_string_carrier(target_type):
         return False

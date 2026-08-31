@@ -66,6 +66,7 @@ from services.type_system import (
     _with_collation_clause,
     arrow_dtype_to_carrier,
     avro_logical_token_to_carrier,
+    carry_national_unicode_charset,
     ddl_carrier_type,
     destination_is_file_export,
     float_mantissa_bits,
@@ -893,9 +894,13 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
             return "NCLOB" if national else "CLOB"
         string_ddl = _string_ddl_for_dest(db, inferred)
         if string_ddl:
-            return _with_collation_clause(db, inferred, string_ddl, logical)
+            return carry_national_unicode_charset(
+                db, inferred, _with_collation_clause(db, inferred, string_ddl, logical)
+            )
     result = DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
-    return _with_collation_clause(db, inferred, result, logical)
+    return carry_national_unicode_charset(
+        db, inferred, _with_collation_clause(db, inferred, result, logical)
+    )
 
 
 
