@@ -15,6 +15,7 @@ from services.type_system import (
     specialty_carrier_base,
     specialty_wire_preserves_value,
     uuid_capacity_string_carrier,
+    uuid_carrier_is_dialect_equivalent,
 )
 
 
@@ -91,6 +92,11 @@ def validate_mapping_coercions(
         specialty = specialty_carrier_base(src_type)
         wire_ok = (
             (src_logical == "uuid" and uuid_capacity_string_carrier(tgt_type))
+            # SQLite-class engines declare one untyped TEXT carrier: VARCHAR(36)
+            # would enforce nothing more, so TEXT is the value-preserving wire.
+            or uuid_carrier_is_dialect_equivalent(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             or (specialty and specialty_wire_preserves_value(specialty, tgt_type))
             or (specialty and specialty_carrier_base(tgt_type) == specialty)
         )

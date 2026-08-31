@@ -25,6 +25,7 @@ from typing import Any, Final
 from services.dest_dialect_facts import (  # noqa: F401  (re-exported)
     _collation_compatible_with_dest,
     _normalize_dest_db,
+    dest_string_length_is_unenforced,
 )
 from services.source_engine_scope import active_source_engine
 
@@ -4811,6 +4812,10 @@ def fixed_width_pad_polarity_loss(
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        # A dynamically typed engine has no fixed-width carrier to lose: SQLite
+        # never blank-pads, so CHAR(36) there is the same TEXT the invent picks.
+        if dest_string_length_is_unenforced(dest_db):
+            return False
         src_fixed = is_fixed_width_char_carrier(source_type)
         tgt_fixed = is_fixed_width_char_carrier(target_type)
         # Only when at least one side is clearly fixed-width (CHAR/BPCHAR).
@@ -5801,19 +5806,43 @@ def objectid_would_collapse(source_type: str, target_type: str) -> bool:
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_BINARY}
 
 
-def uuid_would_collapse(source_type: str, target_type: str) -> bool:
+def uuid_carrier_is_dialect_equivalent(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when the destination has no text carrier narrower than this one.
+
+    On SQLite every string carrier is the same untyped TEXT affinity, so
+    ``UUID → TEXT`` is the widest wire the dialect can spell, not a narrowing:
+    the 36-char value round-trips byte-exact and ``VARCHAR(36)`` would enforce
+    nothing extra. The lost UUID *domain* is still reported as a warn-level
+    carrier note; it is the fail-closed collapse that does not apply.
+    """
+    if not dest_string_length_is_unenforced(dest_db):
+        return False
+    if normalize_logical_type(source_type) != LOGICAL_UUID:
+        return False
+    return normalize_logical_type(target_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def uuid_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when UUID polarity collapses to opaque string/text.
 
     Top-level UUID→bare VARCHAR/TEXT/STRING is common on Snowflake/Databricks
     and must surface in preflight — never silent green. Dialect-native
     ``CHAR(36)`` / ``VARCHAR(36)`` carriers (MySQL create-new) preserve the
-    value *and* the 36-char contract, so they are not a collapse.
+    value *and* the 36-char contract, so they are not a collapse. Nor is the
+    single untyped text carrier of a dynamically typed engine (SQLite), where
+    no spellable DDL enforces more.
     """
     if normalize_logical_type(source_type) != LOGICAL_UUID:
         return False
     if normalize_logical_type(target_type) == LOGICAL_UUID:
         return False
     if uuid_capacity_string_carrier(target_type):
+        return False
+    if uuid_carrier_is_dialect_equivalent(source_type, target_type, dest_db=dest_db):
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
@@ -7086,7 +7115,7 @@ def is_precision_collapse_coercion(
         and specialty_wire_preserves_value("OBJECTID", target_type)
     ):
         return False
-    if uuid_would_collapse(source_type, target_type):
+    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if objectid_would_collapse(source_type, target_type):
         return True
@@ -7363,6 +7392,20 @@ def assess_create_new_type_risk(
                 f"and create-new stamped bounded {tgt}. Use CLOB/TEXT/MAX or Accept · Risk Contract."
             ),
         })
+    if (
+        dest_string_length_is_unenforced(db)
+        and is_fixed_width_char_carrier(src)
+        and normalize_logical_type(tgt) in {LOGICAL_STRING, LOGICAL_TEXT}
+    ):
+        risks.append({
+            "kind": "fixed_width_not_enforced",
+            "severity": "warn",
+            "message": (
+                f"Source {src} declares a fixed width; {db or 'this engine'} stores "
+                "every text carrier as untyped TEXT, so the value lands exactly as "
+                "read but no padding or length is enforced at the destination."
+            ),
+        })
     if src_w and tgt_w and tgt_w < src_w:
         risks.append({
             "kind": "varchar_narrow",
@@ -7406,7 +7449,7 @@ def assess_create_new_type_risk(
                     "1000..9999 range, or accept that out-of-range rows quarantine."
                 ),
             })
-    if uuid_would_collapse(src, tgt):
+    if uuid_would_collapse(src, tgt, dest_db=db):
         risks.append({
             "kind": "uuid_domain",
             "severity": "warn",
@@ -7414,6 +7457,19 @@ def assess_create_new_type_risk(
                 f"Create-new stores UUID as {tgt}"
                 + (f" on {db}" if db else "")
                 + " — UUID domain is not enforced at destination."
+            ),
+        })
+    elif uuid_carrier_is_dialect_equivalent(src, tgt, dest_db=db):
+        # The dialect has one untyped text carrier, so this is the widest wire it
+        # can spell — stated as a note, never a refusal the operator cannot act on.
+        risks.append({
+            "kind": "uuid_carrier_equivalent",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — every text carrier on this engine is the same untyped TEXT, "
+                "so values round-trip exactly but the UUID domain is not enforced."
             ),
         })
     elif (
@@ -7593,7 +7649,7 @@ def is_lossy_coercion(
             return True
         if sql_variant_would_collapse(source_type, target_type):
             return True
-        if uuid_would_collapse(source_type, target_type):
+        if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if objectid_would_collapse(source_type, target_type):
             return True
@@ -7763,7 +7819,7 @@ def is_lossy_coercion(
         return True
     if sql_variant_would_collapse(source_type, target_type):
         return True
-    if uuid_would_collapse(source_type, target_type):
+    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if objectid_would_collapse(source_type, target_type):
         return True

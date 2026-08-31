@@ -28,6 +28,8 @@ from typing import Any, Mapping, Sequence
 from src.transfer.models import EndpointConfig, TransferResult
 
 from tests.scale.sql_engines import Engine, build_engines, live_engines
+from services.dest_dialect_facts import dest_string_length_is_unenforced
+
 from tests.scale.fixture import (
     domain_contract_columns,
     engine_columns,
@@ -462,8 +464,9 @@ def run_blocking_cell(
             if not contracts:
                 cell.status = "skip"
                 cell.reason = (
-                    f"{dst.name} declares every mapped domain natively — "
-                    "no Migration Risk Contract is required on this route"
+                    f"{dst.name} carries every mapped domain without a signed "
+                    "contract — either it declares the domain natively, or its "
+                    "only carrier is value-preserving (SQLite TEXT)"
                 )
                 return cell
             cell.notes.append(
@@ -474,6 +477,20 @@ def run_blocking_cell(
             narrow_col = (
                 NARROW_COLUMN if NARROW_COLUMN in columns else NARROW_COLUMN_FALLBACK
             )
+            if narrow_col == NARROW_COLUMN_FALLBACK and (
+                dest_string_length_is_unenforced(dst.name)
+            ):
+                # This attack narrows a declared string length. SQLite parses
+                # and discards it, so VARCHAR(8) holds all 64 characters and
+                # there is nothing for the product to refuse: the cell would
+                # grade correct behaviour as a failure.
+                cell.status = "skip"
+                cell.reason = (
+                    f"{dst.name} does not enforce a declared string length, so "
+                    f"a narrowed {NARROW_COLUMN_FALLBACK} truncates nothing — "
+                    "this route has no narrower carrier to attack"
+                )
+                return cell
             dst.create_table(dst_table, columns, narrow=narrow_col)
         elif shape == "g13_extra_source_column":
             # The destination cannot take note_null and nobody mapped or

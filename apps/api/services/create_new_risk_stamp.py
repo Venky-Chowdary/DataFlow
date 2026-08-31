@@ -15,7 +15,15 @@ from __future__ import annotations
 # quarantines. They must stay visible on Map, but they are not a mapping-
 # identity question and must not drop G4 under the confidence floor.
 # A sampled value already outside the window is severity=block and locks.
-_INFORMATIONAL_WARN_KINDS = frozenset({"instant_range_cap"})
+# ``uuid_carrier_equivalent`` / ``fixed_width_not_enforced`` name a domain the
+# destination engine cannot declare in *any* carrier it can spell (SQLite's one
+# untyped TEXT affinity). Every value round-trips exactly, and no remap the
+# operator could choose enforces more — so they are stated, not held.
+_INFORMATIONAL_WARN_KINDS = frozenset({
+    "instant_range_cap",
+    "uuid_carrier_equivalent",
+    "fixed_width_not_enforced",
+})
 
 
 def create_new_risk_locks_review(risk: dict) -> bool:
