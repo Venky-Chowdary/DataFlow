@@ -104,7 +104,17 @@ class MongoContractStore(ContractStore):
                 upsert=True,
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            # The file mirror above already holds it, so this is a degradation,
+            # not a loss — but it is named, because a control plane whose store
+            # is silently one contract behind is how a stale contract gets
+            # enforced against a run.
+            logging.getLogger(__name__).warning(
+                "Contract %s could not be written to MongoDB (%s); serving it "
+                "from the file mirror",
+                contract.id,
+                exc,
+                exc_info=exc,
+            )
         return contract
 
     def get_contract(self, contract_id: str) -> DataContract | None:
@@ -152,7 +162,13 @@ class MongoContractStore(ContractStore):
                 upsert=True,
             )
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            logging.getLogger(__name__).warning(
+                "Breaker state for contract %s could not be written to MongoDB "
+                "(%s); serving it from the file mirror",
+                breaker.contract_id,
+                exc,
+                exc_info=exc,
+            )
 
     def get_breaker(self, contract_id: str) -> CircuitBreaker:
         db = self._get_db()
