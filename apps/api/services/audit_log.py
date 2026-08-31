@@ -321,14 +321,54 @@ def list_audit_events(
     return events
 
 
+def _event_hash_of_line(line: str) -> str | None:
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(ev, dict):
+        return None
+    h = ev.get("event_hash")
+    return str(h) if h else None
+
+
 def _trim_if_needed() -> None:
+    """Enforce retention, and leave a signed record of what retention removed.
+
+    Dropping the oldest lines leaves the first surviving record pointing at a
+    hash that is no longer in the store, which reads exactly like a deleted
+    record. The checkpoint is what lets chain verification say "retention
+    removed N records" instead of reporting a broken chain.
+    """
     if not STORE_PATH.exists():
         return
     lines = STORE_PATH.read_text(encoding="utf-8").splitlines()
     if len(lines) <= MAX_EVENTS:
         return
+    removed = lines[:-MAX_EVENTS]
     trimmed = lines[-MAX_EVENTS:]
+    last_removed = next(
+        (h for h in (_event_hash_of_line(ln) for ln in reversed(removed)) if h), None
+    )
+    first_kept = next(
+        (h for h in (_event_hash_of_line(ln) for ln in trimmed) if h), None
+    )
     STORE_PATH.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+    try:
+        from services.evidence_chain import record_truncation
+
+        record_truncation(
+            removed_count=len(removed),
+            last_removed_event_hash=last_removed,
+            first_kept_event_hash=first_kept,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Retention trimmed %s audit record(s) without a checkpoint: %s",
+            len(removed),
+            exc,
+            exc_info=exc,
+        )
 
 
 def workspace_id_from_request(request: Any) -> str:

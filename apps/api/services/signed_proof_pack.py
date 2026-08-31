@@ -610,11 +610,17 @@ def build_signed_proof_pack(
     expected_risks_from_mappings: list[dict[str, Any]] | None = None,
     job_success: bool = False,
     require_risk_completeness: bool | None = None,
+    anchor_in_chain: bool = False,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
     Always stamps ``assurance`` from Gate-8. Incomplete packs are still signed
     for audit chain integrity — they must not set ``migration_proven``.
+
+    ``anchor_in_chain`` files the pack's content digest into the append-only
+    evidence chain and embeds the record it occupies, which is what turns
+    ``prev_audit_hash`` from a pointer at the chain into a position in it. Off by
+    default so building a pack stays a pure function; the export path turns it on.
     """
     assurance = classify_post_write_assurance(reconciliation)
     risks = list(accepted_risks or risk_contracts or [])
@@ -708,7 +714,37 @@ def build_signed_proof_pack(
         },
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
     }
+    if anchor_in_chain:
+        from services.evidence_chain import anchor_evidence
+
+        # The chain commits to the digest of the body as it stands here; the
+        # anchor itself is then part of what gets signed, so neither the pack nor
+        # its chain record can be swapped for the other's content.
+        body["chain_anchor"] = anchor_evidence(
+            evidence_kind="signed_proof_pack",
+            evidence_sha256=sha256_hex(canonical_json(body)),
+            job_id=job_id,
+            actor=actor,
+            summary={
+                "claim_level": assurance.get("claim_level"),
+                "migration_proven": bool(assurance.get("migration_proven")),
+            },
+        )
     return sign_body(body, subject=job_id)
+
+
+def pack_body_digest_excluding_anchor(pack: dict[str, Any]) -> str:
+    """The digest the chain record for ``pack`` commits to.
+
+    Excludes the signature envelope and the anchor, because the anchor is what
+    carries this digest — including it would make the pack commit to itself.
+    """
+    body = {
+        k: v
+        for k, v in pack.items()
+        if k not in ("content_sha256", "signature", "chain_anchor")
+    }
+    return sha256_hex(canonical_json(body))
 
 
 def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -733,6 +769,16 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
         if pack.get("require_risk_completeness") is True:
             for reason in incomplete:
                 errors.append(str(reason))
+    anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
+    if anchor.get("anchored"):
+        # Offline check: does the pack still hold the content the chain record was
+        # filed for? Whether that record is still in the store is a separate
+        # question, answered by evidence_chain.find_anchor.
+        if str(anchor.get("evidence_sha256") or "") != pack_body_digest_excluding_anchor(pack):
+            errors.append(
+                "chain_anchor digest does not match this pack's content — the pack "
+                "was altered after it was sealed, or the anchor belongs to another pack"
+            )
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
 
 
@@ -806,6 +852,14 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                     or (pf.get("proof_bundle") or {}).get("source_coverage")
                     or {}
                 ),
+                # Why each source field was not carried, per field. Omitted
+                # names alone cannot distinguish a governed reduction from an
+                # unexplained one.
+                "field_reduction_ledger": (
+                    pf.get("field_reduction_ledger")
+                    or (pf.get("proof_bundle") or {}).get("field_reduction_ledger")
+                    or {}
+                ),
             }
             if pf
             else None
@@ -824,4 +878,5 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         job_success=job_success,
         require_risk_completeness=bool(job_success and expected_risks)
         or bool(job_success and not accepted and expected_risks),
+        anchor_in_chain=True,
     )

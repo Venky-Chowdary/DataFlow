@@ -30,6 +30,10 @@ import {
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
   isIntentionalOmit,
+  REDUCTION_REASONS,
+  applyReductionReason,
+  reductionEvidenceGap,
+  reductionReasonMeta,
   isSpecialtyLogicalType,
   isStructLogicalType,
   createNewRiskDetail,
@@ -908,9 +912,76 @@ export function ColumnReviewPanel({
                   <td className="df2-column-destination-cell">
                     <div className="df2-column-cell-content">
                       {omitted ? (
-                        <span className="df2-column-omit-target" title="Not written to destination">
-                          — not transferred —
-                        </span>
+                        <div className="df2-column-omit-block">
+                          <span className="df2-column-omit-target" title="Not written to destination">
+                            — not transferred —
+                          </span>
+                          <select
+                            className="df2-input df2-select df2-column-omit-reason"
+                            value={m.omitReason ?? ""}
+                            onChange={(e) => updateMapping(index, applyReductionReason(m, e.target.value))}
+                            aria-label={`Reduction reason for ${m.source}`}
+                            title={
+                              reductionReasonMeta(m.omitReason)?.detail
+                              || "Why this field is not carried — recorded in the Field Reduction Ledger"
+                            }
+                          >
+                            <option value="">— why is it dropped? —</option>
+                            {REDUCTION_REASONS.map((r) => (
+                              <option key={r.id} value={r.id}>{r.label}</option>
+                            ))}
+                          </select>
+                          {m.omitReason && (
+                            <input
+                              className="df2-input df2-column-omit-note"
+                              value={m.omitReasonText ?? ""}
+                              placeholder={
+                                reductionReasonMeta(m.omitReason)?.kind === "observed"
+                                  ? "Note (optional)"
+                                  : "Why — required"
+                              }
+                              onChange={(e) => updateMapping(index, { ...m, omitReasonText: e.target.value })}
+                              aria-label={`Reduction note for ${m.source}`}
+                            />
+                          )}
+                          {m.omitReason === "archive_only" && (
+                            <>
+                              <input
+                                className="df2-input df2-column-omit-archive"
+                                value={m.archiveReference ?? ""}
+                                placeholder="Archive that holds it — required"
+                                onChange={(e) => updateMapping(index, { ...m, archiveReference: e.target.value })}
+                                aria-label={`Archive reference for ${m.source}`}
+                              />
+                              <input
+                                className="df2-input df2-column-omit-retention"
+                                value={m.retentionUntil ?? ""}
+                                placeholder="Retained until (optional)"
+                                onChange={(e) => updateMapping(index, { ...m, retentionUntil: e.target.value })}
+                                aria-label={`Retention horizon for ${m.source}`}
+                              />
+                            </>
+                          )}
+                          {m.omitReason && (
+                            <input
+                              className="df2-input df2-column-omit-approver"
+                              value={m.omitApprovedBy ?? ""}
+                              placeholder="Accepted by (name, optional)"
+                              onChange={(e) => updateMapping(index, { ...m, omitApprovedBy: e.target.value })}
+                              aria-label={`Who accepted dropping ${m.source}`}
+                              title="Recorded in the ledger as stated — Datawrap does not authenticate this identity"
+                            />
+                          )}
+                          {(() => {
+                            const gap = reductionEvidenceGap(m);
+                            if (!gap) return null;
+                            return (
+                              <span className="df2-column-omit-gap" title="Validate (G16) reports this reduction as unevidenced">
+                                {gap}
+                              </span>
+                            );
+                          })()}
+                        </div>
                       ) : (
                         <>
                       <input

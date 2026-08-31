@@ -7,6 +7,8 @@ import {
   acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
+  applyReductionReason,
+  reductionEvidenceGap,
   applyDeclaredSourceZone,
   applyTransformChange,
   assumeTimezoneAwaitingZone,
@@ -896,6 +898,119 @@ describe("destination schema honesty", () => {
     assert.equal(payload[1].transform, "omit");
     assert.equal(payload[1].intentional_omit, true);
     assert.equal(payload[1].target, "");
+  });
+
+  it("carries the Map reduction reason to the G16 wire fields", () => {
+    const omitted = applyTransformChange(
+      { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+      "omit",
+    );
+    const withReason: EditableMapping = {
+      ...applyReductionReason(omitted, "archive_only"),
+      omitReasonText: "Kept for the 7-year retention obligation",
+      archiveReference: "s3://audit-archive/legacy_customer/2026",
+      retentionUntil: "2033-01-31",
+      omitApprovedBy: "R. Mehta",
+    };
+    const payload = buildPreflightMappings([], [
+      { source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" },
+      withReason,
+    ]);
+
+    // Recording the reason must not withdraw the omission itself.
+    assert.equal(payload[1].transform, "omit");
+    assert.equal(payload[1].intentional_omit, true);
+    assert.equal(payload[1].target, "");
+    assert.equal(payload[1].omit_reason, "archive_only");
+    assert.equal(payload[1].omit_reason_text, "Kept for the 7-year retention obligation");
+    assert.equal(payload[1].archive_reference, "s3://audit-archive/legacy_customer/2026");
+    assert.equal(payload[1].retention_until, "2033-01-31");
+    assert.equal(payload[1].omit_approved_by, "R. Mehta");
+    // A carried column never ships reduction evidence.
+    assert.equal(payload[0].omit_reason, undefined);
+  });
+
+  it("never ships a reduction reason for a column that is carried again", () => {
+    const omitted = applyReductionReason(
+      applyTransformChange(
+        { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+        "omit",
+      ),
+      "dropped_not_required",
+    );
+    const restored = applyTransformChange(
+      { ...omitted, omitReasonText: "New screen has no fax", omitApprovedBy: "R. Mehta" },
+      "none",
+    );
+
+    assert.equal(restored.omitReason, undefined);
+    assert.equal(restored.omitReasonText, undefined);
+    assert.equal(restored.omitApprovedBy, undefined);
+    assert.equal(buildPreflightMappings([], [restored])[0].omit_reason, undefined);
+  });
+
+  it("drops reason-scoped evidence when the reason is cleared or unknown", () => {
+    const omitted: EditableMapping = {
+      source: "fax",
+      target: "",
+      confidence: 1,
+      approved: true,
+      transform: "omit",
+      omitReason: "archive_only",
+      archiveReference: "s3://audit-archive/legacy",
+      retentionUntil: "2033-01-31",
+    };
+
+    const cleared = applyReductionReason(omitted, "");
+    assert.equal(cleared.omitReason, undefined);
+    assert.equal(cleared.archiveReference, undefined);
+    assert.equal(cleared.retentionUntil, undefined);
+
+    // An unknown code is not a reason — it must not silently keep the archive claim.
+    const bogus = applyReductionReason(omitted, "dropped_because_i_said_so");
+    assert.equal(bogus.omitReason, undefined);
+    assert.equal(bogus.archiveReference, undefined);
+
+    // Moving to a non-archive reason retires the archive claim with it.
+    const moved = applyReductionReason(omitted, "dropped_obsolete");
+    assert.equal(moved.omitReason, "dropped_obsolete");
+    assert.equal(moved.archiveReference, undefined);
+    assert.equal(moved.retentionUntil, undefined);
+  });
+
+  it("names the evidence G16 still needs, and only for omitted rows", () => {
+    const omitted = applyTransformChange(
+      { source: "fax", target: "fax", confidence: 0.99, approved: false, transform: "none" },
+      "omit",
+    );
+
+    assert.match(reductionEvidenceGap(omitted) || "", /No reduction reason/);
+    assert.match(
+      reductionEvidenceGap(applyReductionReason(omitted, "dropped_obsolete")) || "",
+      /needs a note/,
+    );
+    assert.match(
+      reductionEvidenceGap({
+        ...applyReductionReason(omitted, "archive_only"),
+        omitReasonText: "Kept in the audit archive",
+      }) || "",
+      /archive/i,
+    );
+    assert.equal(
+      reductionEvidenceGap({
+        ...applyReductionReason(omitted, "archive_only"),
+        omitReasonText: "Kept in the audit archive",
+        archiveReference: "s3://audit-archive/legacy",
+      }),
+      null,
+    );
+    // Observed codes stand on the sample the engine checks, not on a note.
+    assert.equal(reductionEvidenceGap(applyReductionReason(omitted, "dropped_empty")), null);
+    // A carried column has no reduction to evidence.
+    assert.equal(
+      reductionEvidenceGap({ source: "id", target: "id", confidence: 0.99, approved: true, transform: "none" }),
+      null,
+    );
   });
 
   it("consumes pipeline create_new_risks stamp before Validate", () => {

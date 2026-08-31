@@ -380,6 +380,12 @@ export async function runPreflight(payload: {
     type_narrowing?: boolean;
     risk_acknowledged?: boolean;
     intentional_omit?: boolean;
+    /** Field Reduction Ledger (G16) evidence for an omitted column. */
+    omit_reason?: string;
+    omit_reason_text?: string;
+    archive_reference?: string;
+    retention_until?: string;
+    omit_approved_by?: string;
     risk_contract?: Record<string, unknown>;
     struct_policy?: string;
     struct_derived?: boolean;
@@ -3136,6 +3142,30 @@ export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Bl
   const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
   return res.blob();
+}
+
+export type AuditChainFinding = {
+  kind: string;
+  index: number;
+  event_id: string;
+  detail: string;
+};
+
+export type AuditChainVerification = {
+  verified: boolean;
+  checked: number;
+  chain_head: string | null;
+  findings: AuditChainFinding[];
+  retention_checkpoints: Array<{ removed_count: number; at: string }>;
+  honesty: string;
+};
+
+/** Re-walk the hash chain server-side and report any record that fails. */
+export async function verifyAuditChain(limit = 5000): Promise<AuditChainVerification> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await apiFetch(`${API_BASE}/audit/verify?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not verify the audit chain"));
+  return res.json();
 }
 
 export type SsoType = "saml" | "oidc" | "azure_ad";

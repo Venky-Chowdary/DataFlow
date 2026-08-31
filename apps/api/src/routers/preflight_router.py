@@ -60,6 +60,14 @@ class MappingItem(BaseModel):
     type_narrowing: bool = False
     risk_acknowledged: bool = False
     intentional_omit: bool = False
+    # Field Reduction Ledger (G16) evidence for an omitted column. Dropping these
+    # on the wire would leave every UI-declared reduction unexplained.
+    omit_reason: str | None = None
+    omit_reason_text: str | None = None
+    archive_reference: str | None = None
+    retention_until: str | None = None
+    omit_approved_by: str | None = None
+    omit_approved_at: str | None = None
     # Migration Risk Contract draft/signed — Execute-approve authority.
     risk_contract: dict[str, Any] | None = None
 

@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { fetchAuditEvents, exportAuditLog, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -53,6 +53,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
+  const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
+  const [chainVerifying, setChainVerifying] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
   const [modelCapabilitiesLoaded, setModelCapabilitiesLoaded] = useState(false);
   const [modelError, setModelError] = useState("");
@@ -416,6 +419,30 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     () => auditEvents,
     [auditEvents],
   );
+
+  const runChainVerification = async () => {
+    setChainVerifying(true);
+    try {
+      const report = await verifyAuditChain();
+      setChainReport(report);
+      toast({
+        title: report.verified ? "Chain verified" : "Chain verification failed",
+        message: report.verified
+          ? `${report.checked} records re-walked — none altered or missing.`
+          : `${report.findings.length} record(s) do not hold up.`,
+        tone: report.verified ? "success" : "error",
+      });
+    } catch (err) {
+      setChainReport(null);
+      toast({
+        title: "Verification failed",
+        message: err instanceof Error ? err.message : "Could not verify the audit chain",
+        tone: "error",
+      });
+    } finally {
+      setChainVerifying(false);
+    }
+  };
 
   const downloadAuditExport = async (format: "csv" | "json") => {
     try {
@@ -1014,6 +1041,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
+                      onClick={() => void runChainVerification()}
+                      disabled={chainVerifying}
+                      title="Re-walk the HMAC chain and report any record that was altered or removed"
+                    >
+                      <DtIcon name="shield" size={14} /> {chainVerifying ? "Verifying…" : "Verify chain"}
+                    </button>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-secondary df2-btn-sm"
                       onClick={() => void downloadAuditExport("csv")}
                     >
                       <DtIcon name="download" size={14} /> Export CSV
@@ -1028,6 +1064,36 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </div>
                 </div>
                 <div className="df2-settings-section-body">
+                  {chainReport && (
+                    <div
+                      className={`df2-chain-verdict ${chainReport.verified ? "is-ok" : "is-broken"}`}
+                      role="status"
+                    >
+                      <strong>
+                        {chainReport.verified
+                          ? `Chain intact — ${chainReport.checked} records re-walked`
+                          : `Chain verification failed — ${chainReport.findings.length} record(s)`}
+                      </strong>
+                      {chainReport.findings.length > 0 && (
+                        <ul>
+                          {chainReport.findings.slice(0, 10).map((f) => (
+                            <li key={`${f.kind}-${f.index}`}>
+                              <code>{f.kind}</code> at record {f.index}
+                              {f.event_id ? ` (${f.event_id})` : ""} — {f.detail}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {chainReport.retention_checkpoints.length > 0 && (
+                        <p>
+                          Retention removed{" "}
+                          {chainReport.retention_checkpoints.reduce((n, c) => n + c.removed_count, 0)}{" "}
+                          older record(s), accounted for by signed checkpoints.
+                        </p>
+                      )}
+                      <p className="df2-chain-verdict-honesty">{chainReport.honesty}</p>
+                    </div>
+                  )}
                   <FilterTabs
                     ariaLabel="Filter audit logs"
                     value={logFilter}
