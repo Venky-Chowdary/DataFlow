@@ -38,6 +38,7 @@ HARD_GATE_IDS = {
     "g15_dest_exists_shape",
     "g16_field_reduction",
     "g18_cdc_snapshot_mode",
+    "g19_dest_schema_replacement",
     "g3f_population_fit",
 }
 
@@ -223,6 +224,36 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
+        ],
+    },
+    "g19_dest_schema_replacement": {
+        "title": "Destination schema replacement",
+        "category": "hard",
+        "why": (
+            "A full refresh drops the destination table and recreates it from "
+            "the source shape. Where the existing column declares a carrier the "
+            "source overflows — an INTEGER amount fed DECIMAL(20,9) — the "
+            "recreate answers a question the operator already answered "
+            "differently, and every other sync mode refuses that same pair. "
+            "Nothing in the run report says the declared destination type is "
+            "gone."
+        ),
+        "fix": (
+            "Decide which carrier is the contract. Keep the declared one: map "
+            "through a transform that fits it (round, scale, truncate with a "
+            "rule), or target a wider column. Replace it: sign a Migration Risk "
+            "Contract on that mapping, which records the replacement in the "
+            "proof pack instead of hiding it. Changing sync mode to append or "
+            "upsert also keeps the live column, and blocks for the narrowing."
+        ),
+        "examples": [
+            "amt_dec DECIMAL(20,9) → existing INTEGER column, overwrite mode: "
+            "the table is recreated NUMERIC(20,9) and the integer contract is lost.",
+            "Second overwrite tick on a table Datawrap created: the live type "
+            "already matches what it would create, so nothing is reported.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fix the carrier"},
         ],
     },
     "g18_cdc_snapshot_mode": {

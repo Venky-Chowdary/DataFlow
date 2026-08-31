@@ -709,6 +709,13 @@ def _destination_schema_probe(
         # refused a route for loss it cannot suffer (``TEXT → VARCHAR(64)`` on
         # a run whose own CREATE declares ``LONGTEXT``).
         overwrite_recreates_existing = is_overwrite_sync(sync_mode) and exists is True
+        # Kept for G19 alone: the carrier the operator declared, which this run
+        # is about to drop. No typing decision may read it — that is the bug
+        # clearing the types above fixes — but the operator is owed the fact
+        # that their declaration is being replaced.
+        extra["overwrite_replaced_column_types"] = (
+            dict(schema) if overwrite_recreates_existing else {}
+        )
         extra["schema_nullability"] = nullability
         # Who fills a required column when the mapping does not (G14).
         extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
@@ -745,6 +752,9 @@ def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]
         "destination_column_defaults": dict(meta.get("schema_defaults") or {}),
         "destination_identity_columns": list(meta.get("identity_columns") or []),
         "destination_generated_columns": list(meta.get("generated_columns") or []),
+        "destination_live_column_types": dict(
+            meta.get("overwrite_replaced_column_types") or {}
+        ),
     }
 
 

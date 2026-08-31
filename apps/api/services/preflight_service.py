@@ -835,6 +835,11 @@ def run_file_preflight(
     confidence_threshold: float = 0.85,
     validation_mode: str = "strict",
     destination_column_types: dict[str, str] | None = None,
+    #: Live destination DDL on a run that recreates the table. Callers that
+    #: already clear ``destination_column_types`` for an overwrite (Execute
+    #: does, so no typing decision reads a doomed carrier) pass the declared
+    #: types here for G19, which is the one gate that must see them.
+    destination_live_column_types: dict[str, str] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
     destination_column_defaults: dict[str, str] | None = None,
     destination_identity_columns: list[str] | None = None,
@@ -2216,6 +2221,34 @@ def run_file_preflight(
                 "id": reduction_gate["id"],
                 "message": reduction_gate["message"],
                 "details": reduction_gate["details"],
+            },
+        ]
+
+    # G19 — an overwrite recreates the destination, so the type standing there
+    # now is discarded for every verdict above. Where that discarded type is
+    # narrower than the source, the operator declared a carrier this run
+    # replaces; say so instead of writing through the replacement.
+    from services.dest_schema_replacement import build_dest_schema_replacement_gate
+
+    replacement_gate = build_dest_schema_replacement_gate(
+        mappings=list(mappings or []),
+        source_column_types=dict(column_types or {}),
+        destination_column_types=dict(
+            destination_live_column_types or destination_column_types or {}
+        ),
+        destination_table_exists=destination_table_exists,
+        dest_recreated=dest_recreated,
+        destination_db_type=destination_db_type,
+        source_db_type=_src_fmt,
+    )
+    contract_gates = [*contract_gates, replacement_gate]
+    if replacement_gate.get("status") == "block":
+        contract_blockers = [
+            *contract_blockers,
+            {
+                "id": replacement_gate["id"],
+                "message": replacement_gate["message"],
+                "details": replacement_gate["details"],
             },
         ]
     if isinstance(out.get("proof_bundle"), dict):
