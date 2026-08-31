@@ -992,7 +992,7 @@ def _sqlserver_prepare(table: str) -> str | None:
 
     conn = pymssql.connect(
         server="localhost", port=1433, user="sa",
-        password="Datawrap_CDC_2022!", database="dataflow",
+        password="DataFlow_CDC_2022!", database="dataflow",
     )
     try:
         with conn.cursor() as cur:
@@ -1012,7 +1012,7 @@ def _sqlserver_count(table: str) -> int:
 
     conn = pymssql.connect(
         server="localhost", port=1433, user="sa",
-        password="Datawrap_CDC_2022!", database="dataflow",
+        password="DataFlow_CDC_2022!", database="dataflow",
     )
     try:
         with conn.cursor() as cur:

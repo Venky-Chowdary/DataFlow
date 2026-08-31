@@ -217,6 +217,15 @@ def _collation_compatible_with_dest(db: str, collation: str) -> bool:
             return False
         if mysqlish:
             return False
+        # A SQL Server collation always states its sensitivities: a
+        # ``_CI_AS``/``_CS_AI`` pair, or a ``_BIN``/``_BIN2`` ordering, with the
+        # optional ``_SC``/``_WS``/``_KS``/``_UTF8`` qualifiers after it. MySQL
+        # spells the same locale ``latin1_swedish_ci`` — one sensitivity only —
+        # which passes a bare LATIN name test and then makes the CREATE fail
+        # (``Collation 'latin1_swedish_ci' is not supported``). The suffix is
+        # what separates the two vocabularies, so it is required.
+        if not re.search(r"_(?:C[IS]_A[IS]|BIN2?)(?:_(?:SC|WS|KS|UTF8))*$", upper):
+            return False
         return bool(
             re.search(r"LATIN|SQL_|JAPANESE|CHINESE|KOREAN|CYRILLIC|_C[IS]_A[IS]", upper)
         )

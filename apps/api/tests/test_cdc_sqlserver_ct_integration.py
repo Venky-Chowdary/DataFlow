@@ -34,7 +34,7 @@ def _sqlserver_cfg() -> dict:
         "port": int(getenv_brand("SQLSERVER_PORT", "1433") or 1433),
         "database": getenv_brand("SQLSERVER_DATABASE", "dataflow"),
         "username": getenv_brand("SQLSERVER_USER", "sa"),
-        "password": getenv_brand("SQLSERVER_PASSWORD", "Datawrap_CDC_2022!"),
+        "password": getenv_brand("SQLSERVER_PASSWORD", "DataFlow_CDC_2022!"),
         "connection_string": "",
         "ssl": False,
     }

@@ -2524,7 +2524,22 @@ def ddl_carrier_type(inferred: str | None) -> str:
         # then reads back as a CHAR(36)→TEXT pad-polarity collapse against the
         # declaration it still sees. Map, Validate and write must agree.
         stripped = strip_identity_qualifier(raw).strip() or raw
-        if "(" in stripped or re.search(r"\bCOLLATE\b", stripped, re.I):
+        # ``strip_identity_qualifier`` drops COLLATE along with the generator
+        # qualifiers, but a character set / collation is storage capacity: a
+        # MySQL ``VARCHAR(32) COLLATE utf8mb4_0900_ai_ci`` reported as bare
+        # ``VARCHAR(32)`` leaves nothing to prove the column holds Unicode, so
+        # a SQL Server create-new invents a code-page ``VARCHAR`` and refuses
+        # the first non-Latin scalar at the write.
+        qualifiers = re.search(
+            r"((?:\s+(?:CHARACTER\s+SET|CHARSET|COLLATE)\s+\S+)+)\s*$", raw, re.I
+        )
+        if qualifiers and not re.search(
+            r"\b(?:COLLATE|CHARACTER\s+SET|CHARSET)\b", stripped, re.I
+        ):
+            stripped = f"{stripped}{qualifiers.group(1).rstrip()}"
+        if "(" in stripped or re.search(
+            r"\b(?:COLLATE|CHARACTER\s+SET|CHARSET)\b", stripped, re.I
+        ):
             return stripped
         return "TEXT" if logical == LOGICAL_TEXT else "VARCHAR"
     return logical.upper() if logical else "VARCHAR"
@@ -4173,11 +4188,47 @@ _SQLSERVER_FAMILY: frozenset[str] = frozenset(
 )
 
 
+def source_column_holds_unicode(source_db: str | None, source_type: str) -> bool:
+    """True when this source *column* is measured wider than a code page.
+
+    The engine name alone cannot answer it: MySQL and Oracle carry a per-column
+    character set, so ``VARCHAR(64) COLLATE utf8mb4_0900_bin`` holds every BMP
+    scalar while ``VARCHAR(64) COLLATE latin1_swedish_ci`` on the same server
+    really is single-byte. The column's own declaration decides, and a charset
+    nobody measured decides nothing — an unmeasured Oracle ``VARCHAR2`` stays
+    conservative rather than inventing a widen.
+    """
+    if not (source_type or "").strip():
+        return False
+    from services.encoding_capacity import (
+        classify_capacity,
+        is_string_catalog_type,
+        parse_declared_charset,
+    )
+
+    if not is_string_catalog_type(strip_identity_qualifier(source_type)):
+        return False
+    if (
+        not source_text_is_unicode(source_db)
+        and not parse_declared_charset(source_type).strip()
+        and not is_national_string_carrier(source_type)
+    ):
+        # No CHARACTER SET, no COLLATE, no national carrier: the engine's
+        # default charset is an assumption, not a measurement, so it licenses
+        # no widen.
+        return False
+    cap = classify_capacity(source_db or "", source_type)
+    if cap.form in {"unknown", "binary"}:
+        return False
+    return cap.max_code_point > 0xFF
+
+
 def unicode_safe_target_carrier(
     carrier: str,
     *,
     dest_db: str = "",
     source_db: str = "",
+    source_type: str = "",
 ) -> str:
     """Promote a create-new SQL Server text carrier to its national twin.
 
@@ -4187,15 +4238,22 @@ def unicode_safe_target_carrier(
     emit Unicode, the sole non-lossy create-new carrier is ``NVARCHAR``/
     ``NCHAR`` — the same default Microsoft's own SSMA applies. This is
     preservation, not national invent: it never fires for a source whose text
-    is genuinely code-page bound (SQL Server, Oracle, MySQL), and never for a
-    ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
+    is genuinely code-page bound (a ``latin1`` MySQL column, an unmeasured
+    Oracle database character set, SQL Server's own ``VARCHAR``), and never for
+    a ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
+
+    The source engine answers for engines with no code-page text type at all;
+    engines that carry a per-column character set are answered by the column
+    (:func:`source_column_holds_unicode`).
     """
     text = (carrier or "").strip()
     if not text:
         return carrier
     if _normalize_dest_db(dest_db) not in _SQLSERVER_FAMILY:
         return carrier
-    if not source_text_is_unicode(source_db):
+    if not source_text_is_unicode(source_db) and not source_column_holds_unicode(
+        source_db, source_type
+    ):
         return carrier
     if is_national_string_carrier(text):
         return carrier
@@ -4306,7 +4364,7 @@ def national_charset_would_collapse(
 
 
 def national_charset_would_invent(
-    source_type: str, target_type: str, *, source_db: str = ""
+    source_type: str, target_type: str, *, source_db: str = "", dest_db: str = ""
 ) -> bool:
     """True when non-national CHAR/VARCHAR invents national NCHAR/NVARCHAR polarity.
 
@@ -4320,13 +4378,29 @@ def national_charset_would_invent(
     (code-page ``VARCHAR``) rewrote ``中`` to ``?`` on read-back. It stays an
     invent for a genuinely code-page source (SQL Server, Oracle, MySQL). When no
     source engine is known the conservative answer is unchanged.
+
+    The engine name is not the whole answer either. MySQL declares its character
+    set per column, so ``VARCHAR(32) CHARACTER SET utf8mb4`` already holds every
+    scalar while ``VARCHAR(32) CHARACTER SET latin1`` on the same server is
+    single-byte. When the source column is measured wider than a code page and
+    the national target stores at least as much, the promotion carries the
+    repertoire rather than inventing one — and a target that stores *less*
+    (MySQL's utf8mb3 ``NVARCHAR`` alias) stays reported.
     """
     if is_national_string_carrier(source_type):
         return False
-    if source_text_is_unicode(source_db or active_source_engine()):
+    src_engine = source_db or active_source_engine()
+    if source_text_is_unicode(src_engine):
         return False
     if not is_national_string_carrier(target_type):
         return False
+    if source_column_holds_unicode(src_engine, source_type):
+        from services.encoding_capacity import classify_capacity
+
+        src_cap = classify_capacity(src_engine, source_type)
+        tgt_cap = classify_capacity(dest_db, target_type)
+        if tgt_cap.max_code_point >= src_cap.max_code_point:
+            return False
     src_l = normalize_logical_type(source_type)
     if src_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
@@ -4717,6 +4791,11 @@ def is_fixed_width_char_carrier(inferred: str | None) -> bool:
     upper = (inferred or "").upper()
     if not upper:
         return False
+    # ``CHARACTER SET x`` / ``CHARSET x`` states the column's encoding, not the
+    # ANSI ``CHARACTER`` carrier: reading it as one made every MySQL
+    # ``LONGTEXT CHARACTER SET utf8mb4`` a blank-padded CHAR.
+    upper = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", upper)
+    upper = re.sub(r"\s+COLLATE\s+\S+", "", upper)
     if "VARCHAR" in upper or "VARYING" in upper:
         return False
     return bool(
@@ -6934,7 +7013,7 @@ def is_precision_collapse_coercion(
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if national_charset_would_invent(source_type, target_type):
+    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -7449,7 +7528,7 @@ def is_lossy_coercion(
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
-        if national_charset_would_invent(source_type, target_type):
+        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
@@ -7631,7 +7710,7 @@ def is_lossy_coercion(
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if national_charset_would_invent(source_type, target_type):
+    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -7782,7 +7861,7 @@ def is_lossy_coercion(
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
-        if national_charset_would_invent(source_type, target_type):
+        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True

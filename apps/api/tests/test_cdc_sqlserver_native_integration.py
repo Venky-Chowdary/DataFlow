@@ -33,7 +33,7 @@ CFG = {
     "port": 1433,
     "database": "dataflow",
     "username": "sa",
-    "password": "Datawrap_CDC_2022!",
+    "password": "DataFlow_CDC_2022!",
     "connection_string": "",
     "ssl": False,
 }

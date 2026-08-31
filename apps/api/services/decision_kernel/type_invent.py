@@ -212,6 +212,11 @@ def normalize_logical_type(inferred: str | None) -> str:
         return LOGICAL_VECTOR
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
+    # A per-column character set is storage capacity, not a type family:
+    # ``LONGTEXT CHARACTER SET utf8mb4`` is the same LOB carrier as ``LONGTEXT``.
+    # Leaving the clause in the lookup key missed every MySQL LOB and fell back
+    # to the bare-string default, which reported the column as ``VARCHAR``.
+    key = re.sub(r"\s+(?:character\s+set|charset)\s+\S+", "", key)
     key = key.replace("_", " ")
     # Schema-qualified Oracle/SQL types (MDSYS.SDO_GEOMETRY → sdo geometry).
     if "." in key and not key.startswith(("array<", "struct<", "map<", "record<", "list<")):
@@ -1082,7 +1087,7 @@ def create_new_mapping_target_type(
         src_type, dest_db_type, samples=samples, source_db=source_db
     )
     stamp = unicode_safe_target_carrier(
-        stamp, dest_db=dest_db_type, source_db=source_db
+        stamp, dest_db=dest_db_type, source_db=source_db, source_type=src_type
     )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
     # A file has no column width. Re-inheriting VARCHAR(16777216) from a
