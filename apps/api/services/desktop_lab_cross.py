@@ -163,7 +163,7 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             port=1433,
             database="dataflow",
             username="sa",
-            password="Datawrap_CDC_2022!",
+            password="DataFlow_CDC_2022!",
             schema="dbo",
             table=table,
         )

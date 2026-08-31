@@ -107,6 +107,28 @@ _DIRT_SCI = 7000        # scientific-notation decimal
 _DIRT_QUARANTINE = 11000  # non-numeric cell in the INTEGER column
 _DIRT_EMPTY = 5000      # empty string (must stay '', never NULL)
 _DIRT_TOKEN = 3000      # literal NULL / \N spellings
+_DIRT_RAGGED = 25000    # rows with too few / too many fields (delimited only)
+
+#: Smallest population that carries each kind of dirt at least once. Dirt is
+#: placed by row *index*, so a small ``--rows`` run writes a clean file: a cell
+#: whose whole claim is one kind of dirt would then read the engine's ordinary
+#: behaviour on clean data as a verdict on the contract — a false pass, or a
+#: false accusation. Such a cell skips, naming the population it would need.
+MIN_ROWS_FOR_DIRT: dict[str, int] = {
+    "embedded_delimiter": _DIRT_NOTE,
+    "long_string": _DIRT_LONG,
+    "scientific_decimal": _DIRT_SCI,
+    "quarantine_cell": _DIRT_QUARANTINE,
+    "empty_string": _DIRT_EMPTY,
+    "null_token": _DIRT_TOKEN,
+    "ragged_row": _DIRT_RAGGED,
+}
+
+
+def carries_dirt(kind: str, rows: int) -> bool:
+    """True when a population of *rows* rows carries at least one *kind* cell."""
+    return rows >= MIN_ROWS_FOR_DIRT[kind]
+
 
 _LONG_STRING = "L" * 10_000
 _EMBEDDED = 'He said "hi", then\nleft; a|b\tc'
@@ -446,9 +468,9 @@ def write_delimited(
                 row = row + [""]
             elif variant == "ragged":
                 i = int(rec["id"])
-                if i % 25000 == 0:
+                if i % _DIRT_RAGGED == 0:
                     row = row[:6]           # too few fields
-                elif i % 25000 == 12500:
+                elif i % _DIRT_RAGGED == _DIRT_RAGGED // 2:
                     row = row + ["extra1", "extra2"]  # too many fields
             writer.writerow(row)
         if variant == "trailing":

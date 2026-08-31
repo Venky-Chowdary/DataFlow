@@ -651,7 +651,7 @@ def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool
     from decimal import Decimal, InvalidOperation
 
     from services.numeric_fit import integer_storage_bounds
-    from services.transform_engine import apply_transform
+    from services.transform_engine import apply_transform, numeric_text_without_markers
     from services.type_system import (
         normalize_logical_type,
         parse_numeric_precision_scale,
@@ -676,7 +676,12 @@ def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool
         text = str(raw).strip()
         if not text:
             continue
-        digits_only = text[1:] if text[:1] in "+-" else text
+        # A leading zero is judged on the number itself, after the markers a
+        # numeric read removes (percent sign, currency, accounting negative).
+        # Judging the raw text called "0%" a zip code and diverted a percentage
+        # column into TEXT, where the writer then stored "12.5%" verbatim.
+        marked = numeric_text_without_markers(text) or text
+        digits_only = marked[1:] if marked[:1] in "+-" else marked
         if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
             # A leading zero is data (zip codes, account numbers) and no numeric
             # carrier keeps it — this is a text column, whatever it parses as.

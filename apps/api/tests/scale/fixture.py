@@ -380,9 +380,10 @@ COLUMNS: tuple[Column, ...] = (
             "postgresql": "UUID",
             "mysql": "CHAR(36) COLLATE utf8mb4_0900_bin",
             "sqlserver": "UNIQUEIDENTIFIER",
-            # Bounded ≥36 is the certified UUID wire; bare TEXT loses UUID
-            # polarity and the product blocks it without a risk contract.
-            "sqlite": "CHAR(36)",
+            # SQLite parses and discards the length of any text carrier, so TEXT
+            # is what the create-new invent stamps and what a real SQLite table
+            # declares — the route must carry the UUID here, not refuse it.
+            "sqlite": "TEXT",
             "oracle": "CHAR(36 CHAR)",
         },
         value=lambda i: str(uuid.uuid5(_JSON_NS, str(i))),
@@ -452,15 +453,12 @@ def dest_gap(engine: str, capability: str) -> str:
 #: ``services.migration_risk_contract`` is the authority that clears it). The
 #: route is measured twice: unsigned it must block, signed it must round-trip
 #: every value byte-exact.
-DOMAIN_CONTRACT_COLUMNS: dict[str, dict[str, str]] = {
-    "sqlite": {
-        "uid": (
-            "SQLite has no UUID domain: create-new stamps TEXT and preflight "
-            "blocks the UUID->TEXT polarity collapse until a Migration Risk "
-            "Contract is signed"
-        )
-    },
-}
+#:
+#: SQLite is deliberately not listed: it has exactly one untyped TEXT carrier,
+#: so ``VARCHAR(36)`` there enforces nothing ``TEXT`` does not. The UUID domain
+#: is reported as a carrier note (``uuid_carrier_equivalent``) and the route
+#: carries every value byte-exact without a contract.
+DOMAIN_CONTRACT_COLUMNS: dict[str, dict[str, str]] = {}
 
 
 def domain_contract_columns(destination: str, columns: Sequence[str]) -> dict[str, str]:

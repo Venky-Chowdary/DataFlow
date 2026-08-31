@@ -47,6 +47,19 @@ def test_scale_and_leading_zeros_are_not_silently_dropped() -> None:
     assert samples_fit_logical_type(["1.00", "3.14"], "DECIMAL(10,2)") is True
 
 
+def test_a_marker_does_not_decide_the_carrier() -> None:
+    # "0%" is one zero followed by a marker the numeric read removes, not a
+    # zip code: judging the raw text sent a percentage column into TEXT, where
+    # the writer stored "12.5%" verbatim instead of 12.5.
+    assert samples_fit_logical_type(["12.5%", "0%"], "DECIMAL(3,1)") is True
+    assert samples_fit_logical_type(["$0.50", "$12.75"], "DECIMAL(5,2)") is True
+    assert samples_fit_logical_type(["(0.50)", "1.25"], "DECIMAL(5,2)") is True
+    # And the marker never widens what the carrier can hold.
+    assert samples_fit_logical_type(["12.55%", "0%"], "DECIMAL(3,1)") is False
+    # A genuine leading-zero digit run is still text, marker or not.
+    assert samples_fit_logical_type(["012345%", "098765%"], "DECIMAL(10,2)") is False
+
+
 def _mapping(target_type: str) -> list[dict]:
     return [
         {

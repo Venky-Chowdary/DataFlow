@@ -16,6 +16,7 @@ from pathlib import Path
 from services.destination_requirements_gate import build_mapping_contract_gates
 from services.shape_contract import (
     GATE_ID,
+    SHAPE_CREATE_NEW,
     WRITE_BY_NAME,
     PositionalInsertError,
     classify_dest_exists_shape,
@@ -164,6 +165,53 @@ def test_g15_does_not_duplicate_g13_g14_blockers() -> None:
     assert GATE_ID not in blocker_ids
     assert "g13_source_coverage" in blocker_ids
     assert "g14_destination_requirements" in blocker_ids
+
+
+def test_overwrite_recreation_is_a_create_not_add_column() -> None:
+    """A full-refresh overwrite drops the table it lists, then creates it.
+
+    Reading its current columns as ADD COLUMN proposals describes a table this
+    run does not write into; the same names are a CREATE for this run.
+    """
+    maps = [
+        {"source": "id", "target": "id", "confidence": 0.99, "strategy": "create_new"},
+        {"source": "note", "target": "note", "confidence": 0.99, "strategy": "create_new"},
+    ]
+    live = classify_dest_exists_shape(
+        destination_table_exists=True,
+        source_columns=["id", "note"],
+        dest_columns=["id"],
+        mappings=maps,
+    )
+    assert live["counts"]["add_proposed"] == 1
+
+    recreated = classify_dest_exists_shape(
+        destination_table_exists=True,
+        source_columns=["id", "note"],
+        dest_columns=["id"],
+        mappings=maps,
+        dest_recreated=True,
+    )
+    assert recreated["shape"] == SHAPE_CREATE_NEW
+    assert recreated["unfilled_required"] == []
+
+
+def test_overwrite_recreation_reaches_g15_through_the_contract_gates() -> None:
+    _coverage, gates, _blockers = build_mapping_contract_gates(
+        source_columns=["id"],
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99, "strategy": "create_new"}
+        ],
+        destination_table_exists=True,
+        column_nullability={"id": False, "legacy_note": False},
+        column_defaults={},
+        identity_columns=[],
+        generated_columns=[],
+        dest_columns=["id", "legacy_note"],
+        dest_recreated=True,
+    )
+    shape_gate = {g["id"]: g for g in gates}[GATE_ID]
+    assert shape_gate["details"]["shape"] == SHAPE_CREATE_NEW
 
 
 def test_explain_gate_g15_uses_primary_action() -> None:

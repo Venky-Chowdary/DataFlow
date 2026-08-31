@@ -89,6 +89,11 @@ class Cell:
     runner: Callable[["Cell", int], "CellResult"] | None = None
     mode: str = QUARANTINE_MODE
     note: str = ""
+    #: Dirt this cell's verdict depends on (keys of
+    #: ``dirty_fixture.MIN_ROWS_FOR_DIRT``). Dirt is placed by row index, so a
+    #: population too small to carry it writes a clean file — and a clean file
+    #: cannot say anything about a refusal contract.
+    requires_dirt: tuple[str, ...] = ()
 
 
 @dataclass
@@ -633,7 +638,34 @@ def run_file_to_file(cell: Cell, rows: int) -> CellResult:
     return res
 
 
-def _finish_refusal(res: CellResult, result: Any, table: str, subject: str) -> CellResult:
+#: A refused cell is scored under its own token: a bare ``pass`` beside a
+#: transferred population reads as a migration that moved rows, and this one
+#: moved none by design. It still counts as a pass in the tally.
+REFUSED = "pass (refused)"
+
+
+def _refused_for_the_stated_reason(result: Any, expect: tuple[str, ...]) -> bool:
+    """True when the engine's own words name the refusal this cell provokes.
+
+    "Not successful and nothing landed" is also what a dead engine, a wrong
+    password or a harness typo look like, so a cell that asserts only that
+    grades an unrelated outage as proof of the contract.
+    """
+    text = " ".join(
+        str(getattr(result, attr, "") or "")
+        for attr in ("error", "message", "failure_reason")
+    ).lower()
+    return any(fragment.lower() in text for fragment in expect)
+
+
+def _finish_refusal(
+    res: CellResult,
+    result: Any,
+    table: str,
+    subject: str,
+    *,
+    expect: tuple[str, ...],
+) -> CellResult:
     """Score a cell whose correct outcome is "refused, destination untouched"."""
     res.engine_rows_claimed = int(getattr(result, "records_transferred", 0) or 0)
     landed = 0
@@ -643,15 +675,22 @@ def _finish_refusal(res: CellResult, result: Any, table: str, subject: str) -> C
         res.notes.append(f"destination probe: {type(exc).__name__}: {str(exc).splitlines()[0]}")
     res.dest_rows_independent = landed
     res.verification = f"independent COUNT(*) after refusal = {landed}"
+    error = str(getattr(result, "error", "") or "")
     if getattr(result, "success", False):
         res.status = "fail"
         res.notes.append(f"engine accepted {subject}")
     elif landed:
         res.status = "fail"
         res.notes.append(f"partial write: {landed} rows survived a refused job ({subject})")
+    elif not _refused_for_the_stated_reason(result, expect):
+        res.status = "fail"
+        res.notes.append(
+            f"refused, but not for {subject} — expected one of {list(expect)}; "
+            f"engine said: {error[:200]}"
+        )
     else:
-        res.status = "pass"
-        res.notes.append(f"refused: {str(getattr(result, 'error', ''))[:200]}")
+        res.status = REFUSED
+        res.notes.append(f"refused: {error[:200]}")
     return res
 
 
@@ -683,7 +722,22 @@ def run_unsupported_carrier(cell: Cell, rows: int) -> CellResult:
     res.run_id = run_id
     res.elapsed_seconds = round(elapsed, 2)
     return _finish_refusal(
-        res, result, table, f"a .{carrier} payload it has no reader for"
+        res,
+        result,
+        table,
+        f"a .{carrier} payload it has no reader for",
+        expect=(
+            "not supported",
+            "unsupported",
+            "cannot read",
+            "could not read",
+            "unreadable",
+            "not a",
+            "invalid",
+            "corrupt",
+            "no reader",
+            "not yet live",
+        ),
     )
 
 
@@ -713,7 +767,20 @@ def run_ragged_refusal(cell: Cell, rows: int) -> CellResult:
     result, run_id, elapsed = execute(request)
     res.run_id = run_id
     res.elapsed_seconds = round(elapsed, 2)
-    return _finish_refusal(res, result, table, "a ragged row against a fixed header")
+    return _finish_refusal(
+        res,
+        result,
+        table,
+        "a ragged row against a fixed header",
+        # The engine's own words for this refusal; anything else (a dead
+        # Postgres, a bad path) is not this contract being proven.
+        expect=(
+            "value-bearing cells",
+            "refuse silent column drop",
+            "header names",
+            "ragged",
+        ),
+    )
 
 
 def run_strict_refusal(cell: Cell, rows: int) -> CellResult:
@@ -762,17 +829,31 @@ def run_strict_refusal(cell: Cell, rows: int) -> CellResult:
         res.notes.append(f"destination probe: {type(exc).__name__}: {exc}")
     res.dest_rows_independent = landed
     res.verification = f"independent COUNT(*) after refusal = {landed}"
+    error = str(getattr(result, "error", "") or "")
+    strict_reasons = (
+        "strict",
+        "invalid integer",
+        "rejected",
+        "finding",
+        "quarantin",
+        "blocks partial write",
+        "cell",
+    )
     if getattr(result, "success", False):
         res.status = "fail"
         res.notes.append("strict mode accepted a population with an untypeable cell")
     elif landed:
         res.status = "fail"
         res.notes.append(f"partial write: {landed} rows survived a refused job")
-    else:
-        res.status = "pass"
+    elif not _refused_for_the_stated_reason(result, strict_reasons):
+        res.status = "fail"
         res.notes.append(
-            f"refused, destination empty: {str(getattr(result, 'error', ''))[:200]}"
+            "refused, but not for the untypeable cell — expected one of "
+            f"{list(strict_reasons)}; engine said: {error[:200]}"
         )
+    else:
+        res.status = REFUSED
+        res.notes.append(f"refused, destination empty: {error[:200]}")
     return res
 
 
@@ -1093,6 +1174,7 @@ def build_cells() -> list[Cell]:
                 source=variant,
                 destination="postgresql",
                 runner=run_ragged_refusal if ragged else run_file_to_db,
+                requires_dirt=("ragged_row",) if ragged else (),
                 note=(
                     "ragged rows must refuse the job, not shift values into the wrong columns"
                     if ragged
@@ -1191,6 +1273,7 @@ def build_cells() -> list[Cell]:
                 destination="postgresql" if route.endswith("postgres") else "mysql",
                 runner=run_strict_refusal,
                 mode=STRICT_MODE,
+                requires_dirt=("quarantine_cell",),
                 note="strict mode must refuse the job and leave no partial write",
             )
         )
@@ -1247,6 +1330,24 @@ def _gate(cell: Cell, reach: dict[str, bool]) -> str:
     return ""
 
 
+def _dirt_gate(cell: Cell, rows: int) -> str:
+    """Reason this population cannot decide this cell, or ``''``.
+
+    The dirt sits at fixed row indices, so a small ``--rows`` run writes a clean
+    file. Grading a refusal cell against a clean file reads the engine's normal
+    behaviour as a verdict — it accuses the product of accepting dirt that was
+    never in the file.
+    """
+    for kind in cell.requires_dirt:
+        if not fixture.carries_dirt(kind, rows):
+            need = fixture.MIN_ROWS_FOR_DIRT[kind]
+            return (
+                f"population of {rows} rows carries no {kind} — "
+                f"needs >= {need} rows"
+            )
+    return ""
+
+
 def _carrier_formats(cell: Cell) -> set[str]:
     """Underlying formats of a cell, resolving structural-variant names."""
     out: set[str] = set()
@@ -1284,7 +1385,7 @@ def run(cells: list[Cell], rows: int, *, results_path: Path = RESULTS_PATH) -> l
     results: list[CellResult] = []
     results_path.parent.mkdir(parents=True, exist_ok=True)
     for cell in cells:
-        reason = _gate(cell, reach)
+        reason = _gate(cell, reach) or _dirt_gate(cell, rows)
         if reason or cell.runner is None:
             result = _skip(cell, reason or "no runner")
         else:
@@ -1359,9 +1460,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     results = run(cells, args.rows, results_path=Path(args.results))
     passed = sum(1 for r in results if r.status == "pass")
+    refused = sum(1 for r in results if r.status == REFUSED)
     failed = sum(1 for r in results if r.status == "fail")
-    skipped = len(results) - passed - failed
-    print(f"\npass={passed} fail={failed} skip={skipped} rows={args.rows}")
+    skipped = len(results) - passed - refused - failed
+    print(
+        f"\npass={passed} pass-by-refusal={refused} fail={failed} "
+        f"skip={skipped} rows={args.rows}"
+    )
     return 1 if failed else 0
 
 

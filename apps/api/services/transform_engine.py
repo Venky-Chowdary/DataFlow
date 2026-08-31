@@ -769,6 +769,16 @@ def _normalize_numeric_text(value: str) -> str:
     return text.strip()
 
 
+def numeric_text_without_markers(value: str) -> str:
+    """The number a numeric read sees, with percent/currency/accounting markers gone.
+
+    Callers that judge the *shape* of a numeric sample (leading zeros, digit
+    runs) must judge it on this, not on the raw text, or a marker decides the
+    carrier.
+    """
+    return _normalize_numeric_text(value)
+
+
 def _digit_parts(parts: list[str]) -> bool:
     if not parts or not parts[0]:
         return False

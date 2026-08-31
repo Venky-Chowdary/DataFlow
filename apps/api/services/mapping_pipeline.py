@@ -140,6 +140,12 @@ def _demote_untyped_varchar_confidence(
 
 _VALUE_REWRITING_TRANSFORMS = frozenset({"trim", "trim_id", "upper", "lower", "uuid"})
 
+# One text family. ``normalize_logical_type`` answers VARCHAR → "string" and
+# TEXT → "text", which is the right distinction for width contracts and the
+# wrong one for "is this the same carrier": a VARCHAR source landing in the
+# TEXT column this run CREATEs for it is a byte copy, not a family change.
+_TEXT_CARRIER_LOGICALS = frozenset({"string", "text", "varchar", "char"})
+
 
 def _passthrough_identity_transform(
     transform: str,
@@ -165,9 +171,13 @@ def _passthrough_identity_transform(
     if not (create_new or strategy in {"identity_passthrough", "create_compatible_new"}):
         return transform
     try:
-        same_family = normalize_logical_type(src_type) == normalize_logical_type(tgt_type)
+        src_logical = normalize_logical_type(src_type)
+        tgt_logical = normalize_logical_type(tgt_type)
     except Exception:
         return transform
+    same_family = src_logical == tgt_logical or (
+        src_logical in _TEXT_CARRIER_LOGICALS and tgt_logical in _TEXT_CARRIER_LOGICALS
+    )
     return "none" if same_family else transform
 
 

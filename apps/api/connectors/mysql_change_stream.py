@@ -334,71 +334,101 @@ class MySqlChangeStreamCdc:
             lock_conn.autocommit(True)
 
             try:
-                with lock_conn.cursor() as cur:
-                    cur.execute("FLUSH TABLES WITH READ LOCK")
-                locked = True
-                global_lock = True
-            except Exception as exc:
-                _logger.warning(
-                    "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
-                )
-            if not locked:
-                table_refs = [quote_table_ref(t, dialect="mysql") for t in self.tables]
-                lock_clause = ", ".join(f"{ref} READ" for ref in table_refs)
                 try:
                     with lock_conn.cursor() as cur:
-                        cur.execute(f"LOCK TABLES {lock_clause}")
+                        cur.execute("FLUSH TABLES WITH READ LOCK")
                     locked = True
+                    global_lock = True
                 except Exception as exc:
                     _logger.warning(
-                        "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
+                        "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
                     )
+                if not locked:
+                    table_refs = [
+                        quote_table_ref(t, dialect="mysql") for t in self.tables
+                    ]
+                    lock_clause = ", ".join(f"{ref} READ" for ref in table_refs)
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute(f"LOCK TABLES {lock_clause}")
+                        locked = True
+                    except Exception as exc:
+                        _logger.warning(
+                            "Could not LOCK TABLES for consistent CDC snapshot: %s", exc
+                        )
 
-            if locked:
-                with lock_conn.cursor() as cur:
-                    # Freeze the read view while the lock still holds, so the dump
-                    # is consistent with the coordinates captured below even
-                    # after the lock is released.
-                    cur.execute(
-                        "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
-                    )
-                    cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-                    snapshot_txn = True
-                with lock_conn.cursor() as cur:
-                    # Capture GTID on the same locked session (Debezium-class
-                    # handoff). File/pos alone is weaker when binlogs rotate or
-                    # poll prefers auto_position — at-least-once upserts still apply.
-                    gtid = self._current_gtid_executed(cur)
-                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
-                        try:
-                            cur.execute(sql)
-                            row = cur.fetchone()
-                            if row:
-                                start_pos = {
-                                    "file": row[0],
-                                    "pos": int(row[1]),
-                                    "table": self.table,
-                                    "tables": list(self.tables),
-                                }
-                                if gtid:
-                                    start_pos["gtid"] = gtid
-                                break
-                        except Exception as exc:
-                            _logger.debug("CDC binlog status query failed: %s", exc)
-                    if gtid and not start_pos.get("gtid"):
-                        start_pos["gtid"] = gtid
-            if global_lock and snapshot_txn:
-                # Coordinates captured and read view pinned: let writers run.
-                with lock_conn.cursor() as cur:
-                    cur.execute("UNLOCK TABLES")
-                global_lock = False
-                locked = False
+                if locked:
+                    with lock_conn.cursor() as cur:
+                        # Freeze the read view while the lock still holds, so the dump
+                        # is consistent with the coordinates captured below even
+                        # after the lock is released.
+                        cur.execute(
+                            "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                        )
+                        cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+                        snapshot_txn = True
+                    if not global_lock:
+                        # MySQL releases LOCK TABLES locks when a transaction
+                        # begins, so the per-table fallback holds nothing from
+                        # here on. Say so, or the release below issues an
+                        # UNLOCK TABLES that would commit this read view away.
+                        locked = False
+                    with lock_conn.cursor() as cur:
+                        # Capture GTID on the same locked session (Debezium-class
+                        # handoff). File/pos alone is weaker when binlogs rotate or
+                        # poll prefers auto_position — at-least-once upserts still apply.
+                        gtid = self._current_gtid_executed(cur)
+                        for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                            try:
+                                cur.execute(sql)
+                                row = cur.fetchone()
+                                if row:
+                                    start_pos = {
+                                        "file": row[0],
+                                        "pos": int(row[1]),
+                                        "table": self.table,
+                                        "tables": list(self.tables),
+                                    }
+                                    if gtid:
+                                        start_pos["gtid"] = gtid
+                                    break
+                            except Exception as exc:
+                                _logger.debug("CDC binlog status query failed: %s", exc)
+                        if gtid and not start_pos.get("gtid"):
+                            start_pos["gtid"] = gtid
+            finally:
+                # The lock exists only to make the coordinates agree with the read
+                # view. Nothing after this point needs it, so it is released here on
+                # every path — including the ones where pinning the read view or
+                # reading the coordinates raised. A lock that outlives this block is
+                # held for the whole dump, which freezes every write on the instance
+                # and is exactly how a mysql -> mysql route whose destination shares
+                # the server times out against itself (1205).
+                if locked and lock_conn is not None:
+                    try:
+                        with lock_conn.cursor() as cur:
+                            cur.execute("UNLOCK TABLES")
+                    except Exception as exc:
+                        _logger.warning("UNLOCK TABLES failed: %s", exc)
+                    locked = False
+                    global_lock = False
         except Exception as exc:
             _logger.warning(
                 "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
             )
             locked = False
+            if lock_conn is not None:
+                # Dropping the reference is not a release: the server holds a
+                # session's locks until the socket closes, and whether that
+                # happens now is a garbage-collection detail. Close it here.
+                try:
+                    lock_conn.close()
+                except Exception as close_exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", close_exc)
+            snapshot_txn = False
             lock_conn = None
+
+        coords_from_lock = bool(start_pos.get("file"))
 
         from services.cdc_snapshot_resume import streaming_handoff_fields
 
@@ -421,6 +451,29 @@ class MySqlChangeStreamCdc:
         elif not start_pos.get("file"):
             # Fallback when binlog position cannot be captured while locked.
             start_pos = self._current_binlog_position() or start_pos
+
+        if snapshot_txn and not coords_from_lock and not resume_handoff.get("file"):
+            # A pinned read view whose coordinates had to be recaptured after the
+            # fact cannot be dumped: that position is *later* than the read view,
+            # so a change in between would be neither dumped nor replayed — a
+            # silent CDC gap. Give the read view up and dump live rows instead,
+            # which the replay from that later position does cover.
+            _logger.warning(
+                "MySQL CDC snapshot pinned a read view but captured no binlog "
+                "coordinates with it; dumping unpinned so the replay position "
+                "cannot sit ahead of the dump"
+            )
+            if lock_conn is not None:
+                try:
+                    lock_conn.rollback()
+                except Exception as exc:
+                    _logger.debug("snapshot transaction rollback failed: %s", exc)
+                try:
+                    lock_conn.close()
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL lock connection: %s", exc)
+            snapshot_txn = False
+            lock_conn = None
 
         # Resume mid-snapshot from last_pk (Debezium-class) or legacy offset.
         offset = 0

@@ -2801,6 +2801,19 @@ def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float)
     )
 
 
+def _sync_mode_recreates_destination(ctx: Any) -> bool:
+    """True when this run drops the destination and recreates it from the source.
+
+    The table listed now is then not the carrier the rows land in, so its
+    columns are a CREATE for this run rather than an ADD COLUMN on a live table.
+    """
+    try:
+        from services.sync_cursor import is_overwrite_sync
+    except ImportError:
+        return False
+    return is_overwrite_sync(str(getattr(ctx.plan, "sync_mode", "") or ""))
+
+
 def _live_dest_column_names(dest: Any) -> list[str]:
     """Dest-exists name list: live types first, mapping targets only as fallback.
 
@@ -2954,6 +2967,7 @@ def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
         column_defaults=getattr(dest, "column_defaults", None) or {},
         identity_columns=getattr(dest, "identity_columns", None) or [],
         generated_columns=getattr(dest, "generated_columns", None) or [],
+        dest_recreated=_sync_mode_recreates_destination(ctx),
     )
     return _host_gate_to_result(
         GateId.G15_DEST_EXISTS_SHAPE, build_shape_gate(contract), start

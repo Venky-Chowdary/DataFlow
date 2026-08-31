@@ -61,6 +61,13 @@ _STRING_RE = re.compile(
     re.I,
 )
 _BIN_RE = re.compile(r"(?:^|_)BIN(?:ARY)?(?:_|$)|^(?:C|POSIX)$", re.I)
+_ENUM_RE = re.compile(r"^(?:ENUM|SET)\s*\(", re.I)
+_MYSQL_NATIONAL_RE = re.compile(
+    r"^(?:NVARCHAR|NCHAR|NATIONAL\s+(?:VAR)?CHAR(?:ACTER)?)\b", re.I
+)
+_CHARSET_CLAUSE_RE = re.compile(
+    r"(?:CHARACTER\s+SET|CHARSET)\s+['\"`]?([A-Za-z0-9_]+)", re.I
+)
 
 
 @dataclass(frozen=True)
@@ -137,13 +144,70 @@ def _norm(dialect: str | None) -> str:
     return d
 
 
-def _is_string_carrier(declared: str | None) -> bool:
+def _base_type(declared: str | None) -> str:
+    """Type stamp without its COLLATE / CHARACTER SET tail."""
     text = (declared or "").strip()
     if not text:
+        return ""
+    return re.split(
+        r"\s+(?:COLLATE|CHARACTER\s+SET|CHARSET)\s+", text, maxsplit=1, flags=re.I
+    )[0].strip()
+
+
+def _is_string_carrier(declared: str | None) -> bool:
+    base = _base_type(declared)
+    if not base:
         return False
-    # Strip COLLATE / CHARSET so VARCHAR(32) COLLATE x still matches.
-    base = re.split(r"\s+(?:COLLATE|CHARACTER\s+SET|CHARSET)\s+", text, maxsplit=1, flags=re.I)[0]
-    return bool(_STRING_RE.match(base.strip()))
+    return bool(_STRING_RE.match(base))
+
+
+def _accepts_collation(dest_type: str) -> bool:
+    """True when the destination column can carry a COLLATE clause at all.
+
+    A collation lives on a character column. MySQL answers a clause on any
+    other carrier with a hard refusal, not a warning — ``JSON``/``LONGBLOB``
+    with a collation is ``1253 COLLATION … is not valid for CHARACTER SET
+    'binary'``, and a charset clause on a numeric or temporal column is a
+    ``1064`` syntax error. The equality decision is still recorded; only the
+    DDL fragment is withheld.
+    """
+    base = _base_type(dest_type)
+    if not base:
+        # Unmapped / unknown stamp: keep the historical behaviour rather than
+        # withholding a clause the destination may well accept.
+        return True
+    if _ENUM_RE.match(base):
+        return True
+    return bool(_STRING_RE.match(base))
+
+
+def _mysql_declared_charset(dest_type: str) -> str:
+    """Character set the MySQL stamp already fixes, if any.
+
+    ``NVARCHAR``/``NCHAR`` are not a national wire on MySQL: they are aliases
+    for ``CHARACTER SET utf8mb3`` (BMP-only, three bytes). Re-stating a charset
+    on them is ``1064``, and pairing them with a ``utf8mb4_*`` collation is
+    ``1253``, so the alias's own charset is the authority here.
+    """
+    base = _base_type(dest_type)
+    if _MYSQL_NATIONAL_RE.match(base):
+        return "utf8mb3"
+    m = _CHARSET_CLAUSE_RE.search(dest_type or "")
+    return (m.group(1) if m else "").strip().lower()
+
+
+def _collation_for_charset(charset: str, eq: EqualityClass) -> str:
+    """Collation in ``charset``'s own family preserving ``eq``'s polarity."""
+    cs = (charset or "").strip().lower()
+    if cs == "utf8":
+        cs = "utf8mb3"
+    if cs not in {"utf8mb3", "utf8mb4", "latin1", "ascii"}:
+        return ""
+    if eq.case == "sensitive":
+        return f"{cs}_bin"
+    if eq.case == "insensitive" and eq.accent == "insensitive":
+        return f"{cs}_unicode_ci" if cs.startswith("utf8") else f"{cs}_general_ci"
+    return ""
 
 
 def classify_equality(
@@ -307,6 +371,22 @@ def plan_collation_carry(
             )
             continue
 
+        if not _accepts_collation(dest_type):
+            plan.decisions.append(
+                CollationDecision(
+                    source_column=src_col,
+                    dest_column=dest_col,
+                    status="unsupported",
+                    reason=(
+                        f"Destination column is {_base_type(dest_type)}, not a "
+                        "character carrier; a collation cannot live there, so "
+                        "the source's equality rule is not carried."
+                    ),
+                    equality=eq,
+                )
+            )
+            continue
+
         existing = _existing_collation(dest_type)
         charset = ""
         collation = ""
@@ -355,6 +435,27 @@ def plan_collation_carry(
                 f"Collation equality is not certified for destination '{dest}'; "
                 "emitting an unproven COLLATE would be a claim, not a carry."
             )
+
+        if dest in {"mysql", "mariadb"} and not refusal:
+            declared = _mysql_declared_charset(dest_type)
+            if declared:
+                # The stamp already fixes the charset. A second CHARACTER SET
+                # is a syntax error, and a collation from another charset's
+                # family is refused outright, so the equality polarity is
+                # re-spelled in the family the column actually stores.
+                in_family = _collation_for_charset(declared, eq)
+                if not in_family and collation:
+                    refusal = (
+                        f"Destination column already stores {declared}; the "
+                        f"source equality class (case={eq.case} "
+                        f"accent={eq.accent}) has no collation in that "
+                        "character set's family, and one from another family "
+                        "is refused by the engine."
+                    )
+                    collation = ""
+                else:
+                    collation = in_family or collation
+                charset = ""
 
         if existing:
             # Invent already copied a same-engine name. Do not double-emit.

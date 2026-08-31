@@ -25,6 +25,7 @@ from typing import Any, Final
 from services.dest_dialect_facts import (  # noqa: F401  (re-exported)
     _collation_compatible_with_dest,
     _normalize_dest_db,
+    dest_string_length_is_unenforced,
 )
 from services.source_engine_scope import active_source_engine
 
@@ -2524,7 +2525,22 @@ def ddl_carrier_type(inferred: str | None) -> str:
         # then reads back as a CHAR(36)→TEXT pad-polarity collapse against the
         # declaration it still sees. Map, Validate and write must agree.
         stripped = strip_identity_qualifier(raw).strip() or raw
-        if "(" in stripped or re.search(r"\bCOLLATE\b", stripped, re.I):
+        # ``strip_identity_qualifier`` drops COLLATE along with the generator
+        # qualifiers, but a character set / collation is storage capacity: a
+        # MySQL ``VARCHAR(32) COLLATE utf8mb4_0900_ai_ci`` reported as bare
+        # ``VARCHAR(32)`` leaves nothing to prove the column holds Unicode, so
+        # a SQL Server create-new invents a code-page ``VARCHAR`` and refuses
+        # the first non-Latin scalar at the write.
+        qualifiers = re.search(
+            r"((?:\s+(?:CHARACTER\s+SET|CHARSET|COLLATE)\s+\S+)+)\s*$", raw, re.I
+        )
+        if qualifiers and not re.search(
+            r"\b(?:COLLATE|CHARACTER\s+SET|CHARSET)\b", stripped, re.I
+        ):
+            stripped = f"{stripped}{qualifiers.group(1).rstrip()}"
+        if "(" in stripped or re.search(
+            r"\b(?:COLLATE|CHARACTER\s+SET|CHARSET)\b", stripped, re.I
+        ):
             return stripped
         return "TEXT" if logical == LOGICAL_TEXT else "VARCHAR"
     return logical.upper() if logical else "VARCHAR"
@@ -2819,6 +2835,8 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return f"{'CHAR' if fixed else 'VARCHAR'}({w})"
     if db in {"mysql", "mariadb"}:
         # Preserve NATIONAL CHAR/VARCHAR — never invent non-national from NCHAR.
+        # The alias's utf8mb3 repertoire is widened only for a source whose
+        # national type is genuinely wider (see carry_national_unicode_charset).
         if national:
             return f"{'NCHAR' if fixed else 'NVARCHAR'}({min(width, cap)})"
         return f"{'CHAR' if fixed else 'VARCHAR'}({min(width, cap)})"
@@ -3638,8 +3656,19 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
 
 # Engines whose single temporal carrier stores a full instant, so the logical
 # "date" DDL token there still holds a time of day. BSON date is milliseconds
-# since epoch; there is no date-only BSON type to narrow into.
-_INSTANT_ONLY_TEMPORAL_ENGINES = frozenset({"mongodb", "cosmosdb", "documentdb", "firestore"})
+# since epoch; there is no date-only BSON type to narrow into. Elasticsearch /
+# OpenSearch spell that same carrier ``date`` (epoch millis by default), so the
+# token understates it exactly as BSON's does.
+_INSTANT_ONLY_TEMPORAL_ENGINES = frozenset(
+    {
+        "mongodb",
+        "cosmosdb",
+        "documentdb",
+        "firestore",
+        "elasticsearch",
+        "opensearch",
+    }
+)
 
 
 def temporal_carrier_holds_time(db_type: str) -> bool:
@@ -4160,11 +4189,47 @@ _SQLSERVER_FAMILY: frozenset[str] = frozenset(
 )
 
 
+def source_column_holds_unicode(source_db: str | None, source_type: str) -> bool:
+    """True when this source *column* is measured wider than a code page.
+
+    The engine name alone cannot answer it: MySQL and Oracle carry a per-column
+    character set, so ``VARCHAR(64) COLLATE utf8mb4_0900_bin`` holds every BMP
+    scalar while ``VARCHAR(64) COLLATE latin1_swedish_ci`` on the same server
+    really is single-byte. The column's own declaration decides, and a charset
+    nobody measured decides nothing — an unmeasured Oracle ``VARCHAR2`` stays
+    conservative rather than inventing a widen.
+    """
+    if not (source_type or "").strip():
+        return False
+    from services.encoding_capacity import (
+        classify_capacity,
+        is_string_catalog_type,
+        parse_declared_charset,
+    )
+
+    if not is_string_catalog_type(strip_identity_qualifier(source_type)):
+        return False
+    if (
+        not source_text_is_unicode(source_db)
+        and not parse_declared_charset(source_type).strip()
+        and not is_national_string_carrier(source_type)
+    ):
+        # No CHARACTER SET, no COLLATE, no national carrier: the engine's
+        # default charset is an assumption, not a measurement, so it licenses
+        # no widen.
+        return False
+    cap = classify_capacity(source_db or "", source_type)
+    if cap.form in {"unknown", "binary"}:
+        return False
+    return cap.max_code_point > 0xFF
+
+
 def unicode_safe_target_carrier(
     carrier: str,
     *,
     dest_db: str = "",
     source_db: str = "",
+    source_type: str = "",
 ) -> str:
     """Promote a create-new SQL Server text carrier to its national twin.
 
@@ -4174,15 +4239,22 @@ def unicode_safe_target_carrier(
     emit Unicode, the sole non-lossy create-new carrier is ``NVARCHAR``/
     ``NCHAR`` — the same default Microsoft's own SSMA applies. This is
     preservation, not national invent: it never fires for a source whose text
-    is genuinely code-page bound (SQL Server, Oracle, MySQL), and never for a
-    ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
+    is genuinely code-page bound (a ``latin1`` MySQL column, an unmeasured
+    Oracle database character set, SQL Server's own ``VARCHAR``), and never for
+    a ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
+
+    The source engine answers for engines with no code-page text type at all;
+    engines that carry a per-column character set are answered by the column
+    (:func:`source_column_holds_unicode`).
     """
     text = (carrier or "").strip()
     if not text:
         return carrier
     if _normalize_dest_db(dest_db) not in _SQLSERVER_FAMILY:
         return carrier
-    if not source_text_is_unicode(source_db):
+    if not source_text_is_unicode(source_db) and not source_column_holds_unicode(
+        source_db, source_type
+    ):
         return carrier
     if is_national_string_carrier(text):
         return carrier
@@ -4204,6 +4276,66 @@ def unicode_safe_target_carrier(
     return f"{'NCHAR' if is_fixed_width_char_carrier(text) else 'NVARCHAR'}({width})"
 
 
+def carry_national_unicode_charset(db: str, inferred: object, result: str) -> str:
+    """Widen a MySQL create-new wire fed by a wider national source.
+
+    MySQL's own national spelling is an alias for ``CHARACTER SET utf8mb3``
+    (three bytes, BMP only), and an unstamped ``TEXT``/``VARCHAR`` inherits
+    whatever character set the target database happens to default to —
+    ``latin1`` on an older server. A SQL Server ``NVARCHAR`` or Oracle
+    ``NVARCHAR2``/``NCLOB`` source holds astral scalars that either carrier
+    refuses at the write (1366 Incorrect string value), so the national
+    polarity is carried as *capacity*: ``utf8mb4`` stated on the column.
+
+    A MySQL-family source keeps its own spelling — its ``NVARCHAR`` really is
+    utf8mb3, and re-spelling it would report a widen the source never had.
+    """
+    if _normalize_dest_db(db) not in {"mysql", "mariadb"}:
+        return result
+    raw = strip_identity_qualifier(
+        inferred if isinstance(inferred, str) else str(inferred)
+    )
+    if not is_national_string_carrier(raw):
+        return result
+    src_engine = _normalize_dest_db(active_source_engine() or "")
+    if src_engine in {"mysql", "mariadb", ""}:
+        return result
+    if re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", result or "", re.I):
+        return result
+    parts = re.split(r"\s+COLLATE\s+", result or "", maxsplit=1, flags=re.I)
+    head = parts[0].strip()
+    collation = parts[1].strip() if len(parts) > 1 else ""
+    if not _is_mysql_character_wire(head):
+        return result
+    # NCHAR/NVARCHAR *is* the utf8mb3 alias — a charset clause on it is a
+    # syntax error, so the plain carrier takes the stated character set.
+    head = re.sub(r"^N(?=CHAR|VARCHAR)", "", head.strip(), flags=re.I)
+    tail = f" COLLATE {collation}" if collation else ""
+    return f"{head} CHARACTER SET utf8mb4{tail}"
+
+
+_MYSQL_CHARACTER_WIRE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:N?VARCHAR|N?CHAR|CHARACTER(?:\s+VARYING)?|TINYTEXT|TEXT|MEDIUMTEXT"
+    r"|LONGTEXT|ENUM|SET)\b",
+    re.I,
+)
+
+
+def _is_mysql_character_wire(stamp: str) -> bool:
+    """True for MySQL types that accept a CHARACTER SET clause."""
+    return bool(_MYSQL_CHARACTER_WIRE_RE.match((stamp or "").strip()))
+
+
+def _target_holds_full_unicode(dest_db: str, target_type: str) -> bool:
+    """True when the target stamp's own character set stores every scalar."""
+    if not re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", target_type or "", re.I):
+        return False
+    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+
+    cap = classify_capacity(dest_db, target_type)
+    return cap.form == "utf8" and cap.max_code_point >= UNICODE_MAX
+
+
 def national_charset_would_collapse(
     source_type: str,
     target_type: str,
@@ -4218,6 +4350,12 @@ def national_charset_would_collapse(
     """
     if not is_national_string_carrier(source_type):
         return False
+    if dest_db and _target_holds_full_unicode(dest_db, target_type):
+        # A stamp that declares its own full-Unicode character set keeps every
+        # scalar the national source held, whatever the type is *named*:
+        # MySQL ``VARCHAR(64) CHARACTER SET utf8mb4`` is wider than the
+        # ``NVARCHAR(64)`` alias, which is utf8mb3 (BMP only).
+        return False
     if is_national_string_carrier(target_type):
         return False
     if destination_is_unicode_only(dest_db):
@@ -4227,7 +4365,7 @@ def national_charset_would_collapse(
 
 
 def national_charset_would_invent(
-    source_type: str, target_type: str, *, source_db: str = ""
+    source_type: str, target_type: str, *, source_db: str = "", dest_db: str = ""
 ) -> bool:
     """True when non-national CHAR/VARCHAR invents national NCHAR/NVARCHAR polarity.
 
@@ -4241,13 +4379,29 @@ def national_charset_would_invent(
     (code-page ``VARCHAR``) rewrote ``中`` to ``?`` on read-back. It stays an
     invent for a genuinely code-page source (SQL Server, Oracle, MySQL). When no
     source engine is known the conservative answer is unchanged.
+
+    The engine name is not the whole answer either. MySQL declares its character
+    set per column, so ``VARCHAR(32) CHARACTER SET utf8mb4`` already holds every
+    scalar while ``VARCHAR(32) CHARACTER SET latin1`` on the same server is
+    single-byte. When the source column is measured wider than a code page and
+    the national target stores at least as much, the promotion carries the
+    repertoire rather than inventing one — and a target that stores *less*
+    (MySQL's utf8mb3 ``NVARCHAR`` alias) stays reported.
     """
     if is_national_string_carrier(source_type):
         return False
-    if source_text_is_unicode(source_db or active_source_engine()):
+    src_engine = source_db or active_source_engine()
+    if source_text_is_unicode(src_engine):
         return False
     if not is_national_string_carrier(target_type):
         return False
+    if source_column_holds_unicode(src_engine, source_type):
+        from services.encoding_capacity import classify_capacity
+
+        src_cap = classify_capacity(src_engine, source_type)
+        tgt_cap = classify_capacity(dest_db, target_type)
+        if tgt_cap.max_code_point >= src_cap.max_code_point:
+            return False
     src_l = normalize_logical_type(source_type)
     if src_l not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
@@ -4479,16 +4633,56 @@ def is_oracle_long_text_carrier(inferred: str | None) -> bool:
     return upper == "LONG"
 
 
-def oracle_long_numeric_invent(source_type: str, target_type: str) -> bool:
+#: Engines whose bare ``LONG`` token is the deprecated Oracle text LOB. Every
+#: other engine that spells a 64-bit integer ``long`` — Spark/Hive/Iceberg,
+#: Parquet/Avro/ORC, Elasticsearch, and BSON ``long`` — means INT64.
+_ORACLE_LONG_TEXT_SOURCES: frozenset[str] = frozenset({"oracle", "oracledb", "oracle_db"})
+
+
+def source_long_is_int64(source_db: str | None) -> bool:
+    """True when this source engine's bare ``long`` is INT64, not Oracle's LOB.
+
+    Empty means "unknown", never "not Oracle": the caller keeps its
+    conservative answer rather than reading a text LOB as a number.
+    """
+    raw = (source_db or "").strip().lower().replace("-", "_")
+    if not raw:
+        return False
+    return raw not in _ORACLE_LONG_TEXT_SOURCES
+
+
+def source_long_is_text_lob(source_db: str | None) -> bool:
+    """True only when the source engine is the one that spells a text LOB ``LONG``.
+
+    The mirror of :func:`source_long_is_int64` for the other decision — which
+    carrier to invent — and deliberately not its negation: an unknown source
+    answers ``False`` to both, so neither a numeric nor a text carrier is
+    invented on a guess.
+    """
+    raw = (source_db or "").strip().lower().replace("-", "_")
+    return raw in _ORACLE_LONG_TEXT_SOURCES
+
+
+def oracle_long_numeric_invent(
+    source_type: str, target_type: str, *, source_db: str = ""
+) -> bool:
     """True when Oracle LONG text would be stamped/mapped as NUMBER/integer.
 
     Exact ``LONG`` is Oracle's deprecated text LOB. Mapping to BIGINT/NUMBER
     invents numeric polarity — Accept risk. Lakehouse INT64 should use INT64 /
     BIGINT tokens, not bare LONG, when the source is not Oracle.
+
+    The token alone cannot decide that: ``long`` is also the Spark/Hive/Iceberg,
+    Avro/Parquet, Elasticsearch and BSON spelling of INT64, where ``BIGINT`` is
+    the *identity* carrier — and the one ``ddl_type`` itself stamps off Oracle.
+    So the bound source engine decides, and only an unknown engine keeps the
+    conservative refusal.
     """
     if not is_oracle_long_text_carrier(source_type):
         return False
     if is_oracle_long_text_carrier(target_type):
+        return False
+    if source_long_is_int64(source_db or active_source_engine()):
         return False
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
     if tgt_u.startswith(
@@ -4598,6 +4792,11 @@ def is_fixed_width_char_carrier(inferred: str | None) -> bool:
     upper = (inferred or "").upper()
     if not upper:
         return False
+    # ``CHARACTER SET x`` / ``CHARSET x`` states the column's encoding, not the
+    # ANSI ``CHARACTER`` carrier: reading it as one made every MySQL
+    # ``LONGTEXT CHARACTER SET utf8mb4`` a blank-padded CHAR.
+    upper = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", upper)
+    upper = re.sub(r"\s+COLLATE\s+\S+", "", upper)
     if "VARCHAR" in upper or "VARYING" in upper:
         return False
     return bool(
@@ -4613,6 +4812,10 @@ def fixed_width_pad_polarity_loss(
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        # A dynamically typed engine has no fixed-width carrier to lose: SQLite
+        # never blank-pads, so CHAR(36) there is the same TEXT the invent picks.
+        if dest_string_length_is_unenforced(dest_db):
+            return False
         src_fixed = is_fixed_width_char_carrier(source_type)
         tgt_fixed = is_fixed_width_char_carrier(target_type)
         # Only when at least one side is clearly fixed-width (CHAR/BPCHAR).
@@ -5603,19 +5806,43 @@ def objectid_would_collapse(source_type: str, target_type: str) -> bool:
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_BINARY}
 
 
-def uuid_would_collapse(source_type: str, target_type: str) -> bool:
+def uuid_carrier_is_dialect_equivalent(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when the destination has no text carrier narrower than this one.
+
+    On SQLite every string carrier is the same untyped TEXT affinity, so
+    ``UUID → TEXT`` is the widest wire the dialect can spell, not a narrowing:
+    the 36-char value round-trips byte-exact and ``VARCHAR(36)`` would enforce
+    nothing extra. The lost UUID *domain* is still reported as a warn-level
+    carrier note; it is the fail-closed collapse that does not apply.
+    """
+    if not dest_string_length_is_unenforced(dest_db):
+        return False
+    if normalize_logical_type(source_type) != LOGICAL_UUID:
+        return False
+    return normalize_logical_type(target_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def uuid_would_collapse(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when UUID polarity collapses to opaque string/text.
 
     Top-level UUID→bare VARCHAR/TEXT/STRING is common on Snowflake/Databricks
     and must surface in preflight — never silent green. Dialect-native
     ``CHAR(36)`` / ``VARCHAR(36)`` carriers (MySQL create-new) preserve the
-    value *and* the 36-char contract, so they are not a collapse.
+    value *and* the 36-char contract, so they are not a collapse. Nor is the
+    single untyped text carrier of a dynamically typed engine (SQLite), where
+    no spellable DDL enforces more.
     """
     if normalize_logical_type(source_type) != LOGICAL_UUID:
         return False
     if normalize_logical_type(target_type) == LOGICAL_UUID:
         return False
     if uuid_capacity_string_carrier(target_type):
+        return False
+    if uuid_carrier_is_dialect_equivalent(source_type, target_type, dest_db=dest_db):
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
@@ -6815,7 +7042,7 @@ def is_precision_collapse_coercion(
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if national_charset_would_invent(source_type, target_type):
+    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -6888,7 +7115,7 @@ def is_precision_collapse_coercion(
         and specialty_wire_preserves_value("OBJECTID", target_type)
     ):
         return False
-    if uuid_would_collapse(source_type, target_type):
+    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if objectid_would_collapse(source_type, target_type):
         return True
@@ -7165,6 +7392,20 @@ def assess_create_new_type_risk(
                 f"and create-new stamped bounded {tgt}. Use CLOB/TEXT/MAX or Accept · Risk Contract."
             ),
         })
+    if (
+        dest_string_length_is_unenforced(db)
+        and is_fixed_width_char_carrier(src)
+        and normalize_logical_type(tgt) in {LOGICAL_STRING, LOGICAL_TEXT}
+    ):
+        risks.append({
+            "kind": "fixed_width_not_enforced",
+            "severity": "warn",
+            "message": (
+                f"Source {src} declares a fixed width; {db or 'this engine'} stores "
+                "every text carrier as untyped TEXT, so the value lands exactly as "
+                "read but no padding or length is enforced at the destination."
+            ),
+        })
     if src_w and tgt_w and tgt_w < src_w:
         risks.append({
             "kind": "varchar_narrow",
@@ -7208,7 +7449,7 @@ def assess_create_new_type_risk(
                     "1000..9999 range, or accept that out-of-range rows quarantine."
                 ),
             })
-    if uuid_would_collapse(src, tgt):
+    if uuid_would_collapse(src, tgt, dest_db=db):
         risks.append({
             "kind": "uuid_domain",
             "severity": "warn",
@@ -7216,6 +7457,19 @@ def assess_create_new_type_risk(
                 f"Create-new stores UUID as {tgt}"
                 + (f" on {db}" if db else "")
                 + " — UUID domain is not enforced at destination."
+            ),
+        })
+    elif uuid_carrier_is_dialect_equivalent(src, tgt, dest_db=db):
+        # The dialect has one untyped text carrier, so this is the widest wire it
+        # can spell — stated as a note, never a refusal the operator cannot act on.
+        risks.append({
+            "kind": "uuid_carrier_equivalent",
+            "severity": "warn",
+            "message": (
+                f"Create-new stores UUID as {tgt}"
+                + (f" on {db}" if db else "")
+                + " — every text carrier on this engine is the same untyped TEXT, "
+                "so values round-trip exactly but the UUID domain is not enforced."
             ),
         })
     elif (
@@ -7330,7 +7584,7 @@ def is_lossy_coercion(
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
-        if national_charset_would_invent(source_type, target_type):
+        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
@@ -7395,7 +7649,7 @@ def is_lossy_coercion(
             return True
         if sql_variant_would_collapse(source_type, target_type):
             return True
-        if uuid_would_collapse(source_type, target_type):
+        if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if objectid_would_collapse(source_type, target_type):
             return True
@@ -7512,7 +7766,7 @@ def is_lossy_coercion(
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if national_charset_would_invent(source_type, target_type):
+    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -7565,7 +7819,7 @@ def is_lossy_coercion(
         return True
     if sql_variant_would_collapse(source_type, target_type):
         return True
-    if uuid_would_collapse(source_type, target_type):
+    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if objectid_would_collapse(source_type, target_type):
         return True
@@ -7663,7 +7917,7 @@ def is_lossy_coercion(
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
-        if national_charset_would_invent(source_type, target_type):
+        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True

@@ -29,6 +29,14 @@ _SAFE_SFORCE_IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 # cannot walk a large object — keyset (Id seek) is the only unbounded path.
 SOQL_MAX_OFFSET = 2000
 
+# The OFFSET cap is not a cap on how many rows a query may return: queryMore
+# (``nextRecordsUrl``) walks a result set of any size. Clamping the SOQL LIMIT
+# to the OFFSET cap silently truncated every object past 2000 records to its
+# first 2000 — the read looked successful and the rest of the object was gone.
+# A LIMIT clause is emitted only while it is below the SOQL row ceiling; above
+# it the query is unbounded and the caller's limit bounds the walk.
+SOQL_MAX_QUERY_LIMIT = 50_000
+
 
 def _validate_api_name(name: str, label: str) -> str:
     if not _SAFE_SFORCE_IDENT.match(name or ""):
@@ -276,8 +284,8 @@ def read_object(
                 total_size = published if total_size is None else max(total_size, published)
             return list(data.get("records") or [])
 
-        if not seek_column:
-            query += f" LIMIT {min(limit, 2000)}"  # nosec B608
+        if not seek_column and int(limit) <= SOQL_MAX_QUERY_LIMIT:
+            query += f" LIMIT {int(limit)}"  # nosec B608
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
         data = load_http_json(r)

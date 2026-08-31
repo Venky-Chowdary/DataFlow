@@ -684,6 +684,10 @@ export function createNewRiskChipLabel(m: EditableMapping): string | null {
   if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
   if (kinds.has("precision_collapse")) return "precision";
   if (kinds.has("uuid_domain")) return "UUID domain";
+  // SQLite-class engines: one untyped TEXT carrier, so the domain cannot be
+  // declared at all — a note about the destination, not a mapping choice.
+  if (kinds.has("uuid_carrier_equivalent")) return "UUID domain (carrier note)";
+  if (kinds.has("fixed_width_not_enforced")) return "width not enforced";
   if (kinds.has("objectid_domain")) return "ObjectId domain";
   if (kinds.has("lossy_coercion")) return "create-new risk";
   return "create-new risk";

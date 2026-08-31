@@ -40,7 +40,7 @@ CFG = {
     or "sa",
     "password": getenv_brand("AG_PASSWORD")
     or getenv_brand("MSSQL_PASSWORD")
-    or "Datawrap_CDC_2022!",
+    or "DataFlow_CDC_2022!",
     "multi_subnet_failover": _AG_LIVE,
 }
 

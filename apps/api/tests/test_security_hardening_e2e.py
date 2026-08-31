@@ -365,7 +365,13 @@ def test_mysql_writer_insert_sql_never_embeds_injection_payload() -> None:
             return []
 
         def fetchone(self):
-            return (0,)
+            # ``SELECT 1 ... LIMIT 1`` answers a row or nothing; a row means the
+            # table exists, and the writer then refuses an empty DDL read rather
+            # than binding Map's carriers. This route creates the table.
+            return None
+
+        def close(self):
+            return None
 
     class _Conn:
         def cursor(self):
@@ -406,6 +412,7 @@ def test_mysql_writer_insert_sql_never_embeds_injection_payload() -> None:
 
     assert result.ok is True or result.rows_written >= 0
     joined = "\n".join(captured.get("sql") or [])
+    assert "CREATE TABLE" in joined and "INSERT INTO" in joined
     assert "DROP TABLE" not in joined
     assert '";' not in joined
     assert f"`{SAFE_TABLE}`" in joined or SAFE_TABLE in joined

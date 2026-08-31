@@ -66,6 +66,7 @@ from services.type_system import (
     _with_collation_clause,
     arrow_dtype_to_carrier,
     avro_logical_token_to_carrier,
+    carry_national_unicode_charset,
     ddl_carrier_type,
     destination_is_file_export,
     float_mantissa_bits,
@@ -78,6 +79,8 @@ from services.type_system import (
     parse_numeric_precision_scale,
     parse_string_carrier_width,
     parse_temporal_fractional_precision,
+    source_long_is_int64,
+    source_long_is_text_lob,
     specialty_carrier_base,
     specialty_wire_preserves_value,
     strip_identity_qualifier,
@@ -209,6 +212,11 @@ def normalize_logical_type(inferred: str | None) -> str:
         return LOGICAL_VECTOR
 
     key = re.sub(r"\([^)]*\)", "", raw).strip().lower()
+    # A per-column character set is storage capacity, not a type family:
+    # ``LONGTEXT CHARACTER SET utf8mb4`` is the same LOB carrier as ``LONGTEXT``.
+    # Leaving the clause in the lookup key missed every MySQL LOB and fell back
+    # to the bare-string default, which reported the column as ``VARCHAR``.
+    key = re.sub(r"\s+(?:character\s+set|charset)\s+\S+", "", key)
     key = key.replace("_", " ")
     # Schema-qualified Oracle/SQL types (MDSYS.SDO_GEOMETRY → sdo geometry).
     if "." in key and not key.startswith(("array<", "struct<", "map<", "record<", "list<")):
@@ -406,7 +414,16 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     # with soft-pass (INTEGER→TEXT allow-list greenwash). LONG→BIGINT is gated
     # by oracle_long_numeric_invent (Accept risk).
     if base_early == "LONG":
-        if db == "oracle":
+        # The token's meaning belongs to the *source* engine: only Oracle spells a
+        # text LOB ``LONG``. A BSON/Spark/Iceberg INT64 landing in CLOB would
+        # invent text polarity for a number, and an Oracle text LOB landing in
+        # BIGINT would invent a numeric domain for text, so each side is decided
+        # by the engine that wrote the token, not by the destination alone.
+        source_engine = active_source_engine()
+        if source_long_is_text_lob(source_engine):
+            # Whatever this destination calls its large-text carrier.
+            return ddl_type(db, "CLOB")
+        if db == "oracle" and not source_long_is_int64(source_engine):
             return "CLOB"
         int_ddl = _integer_ddl_for_dest(db, "BIGINT")
         if int_ddl:
@@ -882,9 +899,13 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
             return "NCLOB" if national else "CLOB"
         string_ddl = _string_ddl_for_dest(db, inferred)
         if string_ddl:
-            return _with_collation_clause(db, inferred, string_ddl, logical)
+            return carry_national_unicode_charset(
+                db, inferred, _with_collation_clause(db, inferred, string_ddl, logical)
+            )
     result = DDL_TYPES.get(db, {}).get(logical, DEFAULT_DDL.get(db, "TEXT"))
-    return _with_collation_clause(db, inferred, result, logical)
+    return carry_national_unicode_charset(
+        db, inferred, _with_collation_clause(db, inferred, result, logical)
+    )
 
 
 
@@ -1066,7 +1087,7 @@ def create_new_mapping_target_type(
         src_type, dest_db_type, samples=samples, source_db=source_db
     )
     stamp = unicode_safe_target_carrier(
-        stamp, dest_db=dest_db_type, source_db=source_db
+        stamp, dest_db=dest_db_type, source_db=source_db, source_type=src_type
     )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
     # A file has no column width. Re-inheriting VARCHAR(16777216) from a

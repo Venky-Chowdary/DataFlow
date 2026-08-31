@@ -652,6 +652,48 @@ def canonical_checksum_from_iter(
 #: Hits per Elasticsearch read-back page while paging a whole index.
 _ES_RECONCILE_PAGE: Final[int] = 10_000
 
+#: Rows a hosted-API read-back will pull when the caller asked for the whole
+#: population (``limit=0``). These connectors page internally up to the limit
+#: they are given, so the number is a ceiling on the read-back, not a page.
+_SAAS_RECONCILE_MAX_ROWS: Final[int] = 100_000
+
+
+def _saas_readback_limit(limit: int) -> int:
+    """Rows to request for a hosted read-back, and never a silent 500.
+
+    ``limit=0`` means "the whole destination population". Asking these
+    connectors for 500 rows and hashing them against the source's whole-table
+    digest reports a mismatch for every object holding more than 500 records
+    even when every row landed intact — and returns 500 as the destination
+    count for a population nobody counted. One extra row is requested so a
+    population larger than the ceiling is *detectable* rather than silently
+    truncated.
+    """
+    scoped = max(int(limit or 0), 0)
+    return scoped if scoped else _SAAS_RECONCILE_MAX_ROWS + 1
+
+
+def _saas_readback_truncated(driver: str, limit: int, rows: int) -> bool:
+    """True when the read-back could not see the whole population.
+
+    A truncated read-back has no verdict to give: its digest covers a prefix of
+    the destination, so reporting it as the destination checksum would either
+    fail a correct load or pass a partial one. Gate-8 is told "unproven"
+    instead.
+    """
+    if int(limit or 0):
+        return False
+    if rows <= _SAAS_RECONCILE_MAX_ROWS:
+        return False
+    logger.warning(
+        "%s read-back holds more than %d rows — refusing a prefix digest as "
+        "destination proof; scope the reconcile with an explicit limit or key set",
+        driver,
+        _SAAS_RECONCILE_MAX_ROWS,
+    )
+    return True
+
+
 # Digest every checksum path produces for a population with no rows. Both
 # sides fold zero fingerprints into SHA-256, so this value is a proof of
 # emptiness rather than the absence of a digest.
@@ -2113,10 +2155,12 @@ def verify_hubspot_object(
         batch = read_object(
             cfg=cfg,
             object=object_name,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
         headers = list(batch.headers or target_columns or [])
         rows = list(batch.rows or [])
+        if _saas_readback_truncated("HubSpot", limit, len(rows)):
+            return -1, ""
         # Convert matrix rows to dicts when ReadBatch stores tuples.
         dict_rows: list[Any] = []
         for row in rows:
@@ -2171,8 +2215,10 @@ def verify_salesforce_object(
         batch = read_object(
             cfg=cfg,
             object=object_name,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
+        if _saas_readback_truncated("Salesforce", limit, len(batch.rows or [])):
+            return -1, ""
         headers = list(batch.headers or target_columns or [])
         dict_rows: list[Any] = []
         for row in batch.rows or []:
@@ -2230,8 +2276,10 @@ def verify_airtable_table(
         batch = read_object(
             cfg=cfg,
             object=table_name,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
+        if _saas_readback_truncated("Airtable", limit, len(batch.rows or [])):
+            return -1, ""
         dict_rows: list[Any] = []
         for row in batch.rows or []:
             if isinstance(row, dict):
@@ -2273,8 +2321,10 @@ def _verify_saas_read_object(
         batch = read_object(
             cfg=cfg,
             object=object_name,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
+        if _saas_readback_truncated(driver, limit, len(batch.rows or [])):
+            return -1, ""
         headers = list(batch.headers or target_columns or [])
         dict_rows: list[Any] = []
         for row in batch.rows or []:
@@ -2475,10 +2525,12 @@ def verify_kafka_topic(
             cfg=cfg,
             topic=topic,
             columns=target_columns,
-            limit=max(int(limit or 500), 1),
+            limit=_saas_readback_limit(limit),
         )
         headers = list(batch.headers or target_columns or [])
         rows = list(batch.rows or [])
+        if _saas_readback_truncated("Kafka", limit, len(rows)):
+            return -1, ""
         dict_rows: list[Any] = []
         for row in rows:
             if isinstance(row, dict):

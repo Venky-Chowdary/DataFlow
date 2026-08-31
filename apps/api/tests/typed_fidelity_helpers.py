@@ -98,6 +98,17 @@ def mongo_endpoint(collection: str) -> EndpointConfig:
     )
 
 
+def elasticsearch_endpoint(index: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="elasticsearch",
+        host="localhost",
+        port=9200,
+        database=index,
+        table=index,
+    )
+
+
 def snowflake_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",
@@ -244,9 +255,13 @@ def sqlserver_endpoint(table: str) -> EndpointConfig:
         port=1433,
         database="dataflow",
         username="sa",
-        password="Datawrap_CDC_2022!",
+        password="DataFlow_CDC_2022!",
         schema="dbo",
         table=table,
+        # ODBC Driver 18 encrypts and verifies the chain by default; the compose
+        # server presents a self-signed certificate, so the trust has to be
+        # declared here exactly as an operator would declare it.
+        extra={"trust_server_certificate": True},
     )
 
 
@@ -832,7 +847,7 @@ def drop_sqlserver_table(table: str) -> None:
         server="localhost",
         port=1433,
         user="sa",
-        password="Datawrap_CDC_2022!",
+        password="DataFlow_CDC_2022!",
         database="dataflow",
     )
     try:
@@ -853,7 +868,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
             server="localhost",
             port=1433,
             user="sa",
-            password="Datawrap_CDC_2022!",
+            password="DataFlow_CDC_2022!",
             database="dataflow",
         )
         try:
@@ -883,7 +898,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
 
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
-            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=Datawrap_CDC_2022!;"
+            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=DataFlow_CDC_2022!;"
             "TrustServerCertificate=yes;"
         )
         try:

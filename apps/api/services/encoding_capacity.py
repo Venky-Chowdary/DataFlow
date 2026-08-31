@@ -72,6 +72,10 @@ _CHARSET_RE = re.compile(
     re.I,
 )
 _COLLATE_RE = re.compile(r"COLLATE\s+['\"]?([A-Za-z0-9_]+)", re.I)
+# MySQL/MariaDB national spelling — an alias for CHARACTER SET utf8mb3.
+_MYSQL_NATIONAL_RE = re.compile(
+    r"^(?:NVARCHAR|NCHAR|NATIONAL\s+(?:VAR)?CHAR(?:ACTER)?)\b", re.I
+)
 
 _MYSQL_FAMILY = frozenset({"mysql", "mariadb", "tidb", "aurora_mysql", "singlestore"})
 _PG_FAMILY = frozenset(
@@ -305,6 +309,20 @@ def classify_capacity(
         )
     if token in {"utf16", "al16utf16", "utf16le", "utf16be"}:
         return EncodingCapacity(form="utf16", name=declared or "UTF-16")
+
+    if eng in _MYSQL_FAMILY and _MYSQL_NATIONAL_RE.match(
+        " ".join((type_str or "").split())
+    ):
+        # MySQL's national spelling is an alias, not a wire: NVARCHAR/NCHAR are
+        # CHARACTER SET utf8mb3 (three bytes, BMP only), so an astral scalar a
+        # SQL Server NVARCHAR source holds is refused outright (1366 Incorrect
+        # string value). Reading the name as national classified it as UTF-16
+        # and promised capacity the column does not have.
+        return EncodingCapacity(
+            form="utf8mb3",
+            name="utf8mb3",
+            max_code_point=BMP_MAX,
+        )
 
     if any(tok in upper_type for tok in ("NVARCHAR", "NCHAR", "NTEXT", "NVARCHAR2", "NCLOB")):
         return EncodingCapacity(form="utf16", name="national")

@@ -25,6 +25,7 @@ from services.unicode_form import (
     NFD_CAFE_UTF8_HEX,
     SHARP_S,
     SS_EXPANSION,
+    classify_uca,
     dest_is_nfc_sql,
     dest_utf8_hex_sql,
     unique_second_outcome,
@@ -238,9 +239,31 @@ def test_mariadb_collation_unique_nfc_nfd_and_sharp_s():
                     NFD_CAFE,
                 )
                 assert u520 == "SECOND_REJECT", u520
-            # This host's MariaDB has no 0900/1400 — do not invent a claim.
-            assert "utf8mb4_0900_ai_ci" not in present
-            assert "utf8mb4_uca1400_ai_ci" not in present
+            # 0900 / 1400 exist on some hosts and not others (MySQL 8 has
+            # 0900; MariaDB 10.11 has neither; MariaDB 11.4 has 1400). The
+            # claim under test is the model's, not the host's inventory: where
+            # the host offers the collation, its measured NFC/NFD uniqueness
+            # must equal what classify_uca says about that weight table.
+            for label, collation in (
+                ("0900", "utf8mb4_0900_ai_ci"),
+                ("1400", "utf8mb4_uca1400_ai_ci"),
+            ):
+                if collation not in present:
+                    continue
+                measured = _mysql_unique_probe(
+                    cur,
+                    f"p8_form_{label}_{suffix}",
+                    collation,
+                    NFC_CAFE,
+                    NFD_CAFE,
+                )
+                profile = classify_uca("mysql", collation)
+                expected = (
+                    "SECOND_REJECT"
+                    if profile.canonical_equivalence
+                    else "BOTH_LAND"
+                )
+                assert measured == expected, (collation, measured, profile.to_dict())
 
             cur.execute(f"DROP TABLE IF EXISTS `p8_form_hex_{suffix}`")
             cur.execute(

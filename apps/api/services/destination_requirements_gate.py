@@ -76,9 +76,15 @@ def build_destination_requirements_gate(
     generated_columns: list[str] | None,
     mappings: list[dict[str, Any]] | None,
     dest_columns: list[str] | None = None,
+    dest_recreated: bool = False,
 ) -> dict[str, Any] | None:
-    """Return the G14 gate, or ``None`` when there is no existing table to check."""
-    if destination_table_exists is not True:
+    """Return the G14 gate, or ``None`` when there is no existing table to check.
+
+    An overwrite/full-refresh run (``dest_recreated``) drops the listed table
+    first, so its NOT NULL columns are not the contract this run writes into —
+    the recreated table is, and its required columns come from the mappings.
+    """
+    if destination_table_exists is not True or dest_recreated:
         return None
 
     if not (column_nullability or {}):
@@ -187,8 +193,13 @@ def build_mapping_contract_gates(
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
     dest_columns: list[str] | None = None,
+    dest_recreated: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Source coverage (G13), dest requirements (G14), dest-exists shape (G15).
+
+    ``dest_recreated`` (overwrite/full-refresh) means the listed table is
+    dropped and recreated from the source shape, so G15 reads its columns as a
+    CREATE rather than ADD COLUMN proposals on a live table.
 
     Returns ``(source_coverage, gates, blockers)``. G15 does not add blockers.
     """
@@ -203,6 +214,7 @@ def build_mapping_contract_gates(
         generated_columns=generated_columns,
         mappings=list(mappings or []),
         dest_columns=list(dest_columns or []),
+        dest_recreated=dest_recreated,
     )
     from services.shape_contract import build_shape_gate, classify_dest_exists_shape
 
@@ -215,6 +227,7 @@ def build_mapping_contract_gates(
         column_defaults=column_defaults,
         identity_columns=identity_columns,
         generated_columns=generated_columns,
+        dest_recreated=dest_recreated,
     )
     coverage = {**coverage, "shape_contract": shape}
     shape_gate = build_shape_gate(shape)

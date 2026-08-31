@@ -902,6 +902,16 @@ def run_file_preflight(
     except Exception:
         sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
 
+    # An overwrite drops the destination and recreates it from the source shape,
+    # so the table standing there now is not the carrier the rows land in. Every
+    # type verdict below reads the DDL this run will create, or a route whose own
+    # CREATE declares ``LONGTEXT`` is refused for a ``TEXT → VARCHAR(64)``
+    # collapse against a table it is about to drop. Append/upsert/CDC/mirror keep
+    # the live contract — there the existing column really is authoritative.
+    from services.sync_cursor import is_overwrite_sync
+
+    dest_recreated = is_overwrite_sync(sync_mode)
+
     # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
     # search index — report ``None`` rather than inventing a total, which is the
     # honest answer and used to crash this comparison before a single gate ran.
@@ -1148,10 +1158,12 @@ def run_file_preflight(
                 ),
                 None,
             )
+        if dest_recreated:
+            live = None
         # Existing table: only live introspect counts as dest_types for Validate.
         # Map target_type fallback greens empties as VARCHAR while write binds
         # physical DATE/INT — refuse that false-green invent.
-        if destination_table_exists is True and dest_declares_ddl:
+        if destination_table_exists is True and dest_declares_ddl and not dest_recreated:
             if not live:
                 continue
             inferred = str(live).upper()
@@ -1250,8 +1262,12 @@ def run_file_preflight(
     # - unknown existence: keep type hints for G6 lossy/width checks, but drift
     #   still treats the dest as non-live (no fingerprint / orphan locks)
     # - existing table: full live contract
+    # - overwrite: the table is dropped and recreated from the source shape, so
+    #   the carrier standing there now is not the one the rows land in. Judging
+    #   against it refused a run for loss that cannot happen (``TEXT →
+    #   VARCHAR(64)`` on a route whose own DDL creates ``LONGTEXT``).
     hinted_dest_types = dict(destination_column_types or {})
-    if schemaless or dest_table_exists is False:
+    if schemaless or dest_table_exists is False or dest_recreated:
         drift_dest_types: dict[str, str] = {}
         ddl_dest_types: dict[str, str] = {}
     elif dest_table_exists is True:
@@ -1306,6 +1322,7 @@ def run_file_preflight(
         cursor_fields=cursor_fields,
         schema_policy=schema_policy,
         table_exists=dest_table_exists,
+        dest_recreated=dest_recreated,
     )
     # Do NOT fold drift into ddl_issues / ddl_compatible. G6 must mean real DDL
     # (missing columns, width, types). Drift is a separate contract gate below.
@@ -2174,6 +2191,7 @@ def run_file_preflight(
         # Types keys are the live dest column list. Nullability keys are a
         # tautology for the partial-catalog check — do not substitute them.
         dest_columns=list((destination_column_types or {}).keys()),
+        dest_recreated=dest_recreated,
     )
     out["source_coverage"] = src_coverage
 

@@ -52,6 +52,11 @@ ACCESS_TOKEN = "df-test-access-token"  # nosec B105 — local fixture credential
 SOQL_MAX_OFFSET = 2000
 #: Records per composite/sobjects call.
 COMPOSITE_MAX_RECORDS = 200
+#: Records per query page. Salesforce returns a result set in batches and hands
+#: the rest over ``nextRecordsUrl``; answering a 2,300-record query in one page
+#: would leave the reader's queryMore loop unexercised, which is exactly where a
+#: silent truncation hides.
+QUERY_BATCH_SIZE = 2000
 
 
 def _field(
@@ -412,13 +417,44 @@ class _Handler(BaseHTTPRequestHandler):
             except SoqlError as exc:
                 self._error(400, exc.code, str(exc))
                 return
-            self._json(
-                200,
-                {"totalSize": len(records), "done": True, "records": records},
-            )
+            self._json(200, self._query_page(records, 0))
+            return
+
+        more = re.match(rf"^{re.escape(prefix)}/query/([A-Za-z0-9_-]+)-(\d+)$", path)
+        if more:
+            locator, served = more.group(1), int(more.group(2))
+            records = self.server.locators.get(locator)  # type: ignore[attr-defined]
+            if records is None:
+                self._error(400, "INVALID_QUERY_LOCATOR", "invalid query locator")
+                return
+            self._json(200, self._query_page(records, served, locator=locator))
             return
 
         self._error(404, "NOT_FOUND", f"The requested resource does not exist: {path}")
+
+    def _query_page(
+        self,
+        records: list[dict[str, Any]],
+        served: int,
+        *,
+        locator: str = "",
+    ) -> dict[str, Any]:
+        """One query batch, with the continuation URL when rows remain."""
+        page = records[served : served + QUERY_BATCH_SIZE]
+        done = served + len(page) >= len(records)
+        payload: dict[str, Any] = {
+            "totalSize": len(records),
+            "done": done,
+            "records": page,
+        }
+        if not done:
+            token = locator or uuid.uuid4().hex[:12]
+            self.server.locators[token] = records  # type: ignore[attr-defined]
+            prefix = f"/services/data/{API_VERSION}"
+            payload["nextRecordsUrl"] = f"{prefix}/query/{token}-{served + len(page)}"
+        elif locator:
+            self.server.locators.pop(locator, None)  # type: ignore[attr-defined]
+        return payload
 
     def do_POST(self) -> None:  # noqa: N802
         self._write(update=False)
@@ -634,6 +670,8 @@ def start_salesforce_server(
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     httpd.store = store  # type: ignore[attr-defined]
     httpd.token = ACCESS_TOKEN  # type: ignore[attr-defined]
+    # Query locators outlive the request that opened them, as in the org.
+    httpd.locators = {}  # type: ignore[attr-defined]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     host, port = httpd.server_address[0], httpd.server_address[1]

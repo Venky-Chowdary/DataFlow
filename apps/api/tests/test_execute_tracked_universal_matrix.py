@@ -343,7 +343,7 @@ def _build_db_endpoint(
             port=1433,
             database="dataflow",
             username="sa",
-            password="Datawrap_CDC_2022!",
+            password="DataFlow_CDC_2022!",
             schema="dbo",
             table="payments_sqlserver",
         ),

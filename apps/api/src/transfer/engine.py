@@ -695,8 +695,6 @@ def _destination_schema_probe(
             info.get("foreign_keys") or info.get("destination_foreign_keys") or []
         )
         # Create-new overwrite has no dest contract — clear stale types.
-        # Dest-exists overwrite keeps live types/nullability so G14/G15 write
-        # by dest column name and never invent create-new on a listed table.
         if is_overwrite_sync(sync_mode) and exists is not True:
             extra["schema_nullability"] = {}
             extra["schema_defaults"] = {}
@@ -704,13 +702,20 @@ def _destination_schema_probe(
             extra["generated_columns"] = []
             destination.extra = extra
             return {}, exists
+        # Dest-exists overwrite keeps nullability/defaults so G14/G15 write by
+        # dest column name and never invent create-new on a listed table, but
+        # its *types* are stale too: the table is dropped and recreated from
+        # the source shape, so stamping the doomed carrier onto the mappings
+        # refused a route for loss it cannot suffer (``TEXT → VARCHAR(64)`` on
+        # a run whose own CREATE declares ``LONGTEXT``).
+        overwrite_recreates_existing = is_overwrite_sync(sync_mode) and exists is True
         extra["schema_nullability"] = nullability
         # Who fills a required column when the mapping does not (G14).
         extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
         extra["identity_columns"] = list(info.get("identity_columns") or [])
         extra["generated_columns"] = list(info.get("generated_columns") or [])
         destination.extra = extra
-        return schema, exists
+        return ({} if overwrite_recreates_existing else schema), exists
     except Exception as exc:
         logger.warning(
             "Destination schema probe failed for %s: %s",
@@ -1131,6 +1136,11 @@ def _apply_schema_auto_propagate(
     """Validate≡Execute schema auto-propagate — pause on hard-break, extend maps."""
     from services.schema_drift import apply_propagate_mappings, detect_schema_drift
 
+    contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
+    dest_recreated = should_drop_destination_for_sync(
+        request_sync_mode=getattr(request, "sync_mode", None),
+        contract_sync_mode=contract.sync_mode if contract else None,
+    )
     drift = detect_schema_drift(
         source_columns=columns,
         source_schema=schema,
@@ -1139,6 +1149,7 @@ def _apply_schema_auto_propagate(
         mappings=mappings,
         destination_db_type=(getattr(request.destination, "format", "") or "").lower(),
         schema_policy=getattr(request, "schema_policy", None) or "manual_review",
+        dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
     if evolution.get("should_pause"):

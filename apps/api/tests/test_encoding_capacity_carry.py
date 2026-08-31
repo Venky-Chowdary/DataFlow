@@ -197,11 +197,17 @@ def test_quarantine_recomposes_surrogate_leak_onto_utf8mb4():
     assert out == [(1, EMOJI)]
 
 
-def test_create_new_mysql_does_not_emit_utf8mb3_so_encoding_is_carried():
-    """Create-new promotes BMP utf8 to utf8mb4. Capacity is Unicode; encoding carried.
+def test_create_new_mysql_utf8mb3_stamp_is_refused_not_silently_promoted():
+    """A stamped utf8mb3 target is graded on what it can store, not on intent.
 
-    Map stamping CHARACTER SET utf8mb3 must not win — that would be DMS inventing
-    a dest that cannot store supplementary characters the source TEXT holds.
+    This case previously reported ``carried`` on the strength of a utf8mb4
+    charset the collation plan wanted. It could not deliver it: MySQL takes one
+    ``CHARACTER SET`` clause per column, so appending ``CHARACTER SET utf8mb4``
+    to a type that already says ``utf8mb3`` is a syntax error and the CREATE
+    fails outright — and if it did run as stamped, a supplementary scalar from
+    the source TEXT would die at the write with 1366. The honest answer is a
+    refusal the operator can act on (restamp the column), which is also what
+    keeps the emitted DDL executable.
     """
     catalog = SourceSchemaCatalog(
         dialect="postgresql",
@@ -218,9 +224,13 @@ def test_create_new_mysql_does_not_emit_utf8mb3_so_encoding_is_carried():
     )
     items = [i for i in plan.report.items if i.aspect == "encoding"]
     assert items
-    assert any(i.status == "carried" for i in items)
-    charset_items = [i for i in plan.report.items if i.aspect == "charset"]
-    assert any("utf8mb4" in (i.dest_ddl or i.reason or "") for i in charset_items)
+    assert not any(i.status == "carried" for i in items)
+    txt = [i for i in items if i.name in {"txt", "txt -> txt"}]
+    assert txt and txt[0].status == "unsupported"
+    assert "utf8mb3" in (txt[0].reason or "")
+    # No second charset clause may be planned for a column that already has one.
+    fragments = " ".join(plan.column_suffixes.get("txt") or []).upper()
+    assert "CHARACTER SET" not in fragments, fragments
 
 
 def test_create_new_mysql_utf8mb4_encoding_is_carried():
