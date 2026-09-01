@@ -418,7 +418,9 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     if mapping.get("user_override") or mapping.get("userOverride"):
         return True
     origin = str(mapping.get("target_type_origin") or "").strip().lower()
-    return origin != "destination_catalog"
+    # A sampled-profile origin is not a ceiling: the type was inferred from a
+    # page of values, and the next wider page must be allowed to widen it (D1).
+    return origin not in {"destination_catalog", "sampled_profile"}
 
 
 def effective_dest_types_under_backfill(

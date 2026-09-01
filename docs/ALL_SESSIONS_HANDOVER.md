@@ -116,7 +116,7 @@ Mongo contract/breaker persistence rejected `Decimal`. 12 cells classified.
 
 ---
 
-## 4. Open defects — state as of 2026-08-30
+## 4. Open defects — state as of 2026-09-01
 
 The wave's original list is now mostly closed; `docs/OPEN_DEFECT_REGISTER.md` is
 the authoritative per-defect record with the live evidence behind each closure.
@@ -135,19 +135,10 @@ the PR that carries it):
 | destination recreate silently redefining a declared carrier — new gate G19 (D19) | [#127](https://github.com/Venky-Chowdary/DataFlow/pull/127) |
 | Iceberg on Windows drive-letter warehouses, and the writer reporting the warehouse directory as the schema (D18) | [#129](https://github.com/Venky-Chowdary/DataFlow/pull/129) |
 | CI mypy baseline (6 errors, not 4) and the ES `id → id` 0.63 confidence anomaly (D16) | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) |
+| sampled dest shape compared as a declared catalog, so run 2 refused run 1 (D1) | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) |
 
-**Still open:**
+**Still open (not defects — never measured / environment-blocked):**
 
-- **D1 — a schemaless destination's shape is inferred from a value sample and
-  then compared as a declared target type.** Reproduced live on 2026-08-30
-  against the compose MinIO: a Postgres `amount decimal(12,2)` lands correctly
-  and the product's own destination introspection reads it back as
-  `DECIMAL(2,2)`. Document stores (`mongodb`, `dynamodb`) are already exempt via
-  `dest_decimal_single_capacity_digits`; object stores, SFTP, Redis and
-  Elasticsearch are not. The fix must carry *provenance* (sampled vs declared)
-  out of the probe rather than weaken any comparison — an operator-declared
-  narrowing on an object store is still enforced at the write, so suppressing
-  the verdict would fail open. See `docs/OPEN_DEFECT_REGISTER.md` §1 D1.
 - Scheduler DST + workspace-ownership cells not re-measured after the access fix.
 - Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
@@ -189,10 +180,9 @@ Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N4 (gate G20, population code-crosswalk coverage) is this PR, not yet merged;
-N2 is independently on [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133);
-D1 is independently on [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132);
-N5 is not started. Next after N4 merges: N5. Do not fold D1 or N2 into N4.
+D1 (sampled dest carrier provenance) is closed with a live Postgres→MinIO
+independent reread ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132));
+N2, N4 and N5 are not started.
 
 ---
 
@@ -207,4 +197,5 @@ N5 is not started. Next after N4 merges: N5. Do not fold D1 or N2 into N4.
    is a defect, not a merge artifact.
 3. Re-run the track harnesses on the merged tree — a cell that passed on a track
    branch is not proof on the integration branch.
-4. Close §4, then re-run; only then extend §6.
+4. §4 defects from this sequence are closed. Next is N2 (AI egress manifest),
+   then the never-measured items in §2 / §6.

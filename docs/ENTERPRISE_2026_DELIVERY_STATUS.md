@@ -151,16 +151,9 @@ proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
 | D20 | [#128](https://github.com/Venky-Chowdary/DataFlow/pull/128) | MySQL CDC without the `RELOAD` grant read binlog coordinates *after* the fallback table locks were released by `START TRANSACTION` — a commit in that window was in neither the snapshot nor the stream. Silent data loss; the new test fails on the merged connector and passes after |
 | D18 | [#129](https://github.com/Venky-Chowdary/DataFlow/pull/129) | Iceberg refused Windows drive-letter warehouses, and — worse, only visible once the catalog worked — the writer reported the warehouse *directory* as the schema, so reconciliation re-read an empty path and graded a correct write as total data loss |
 | D16 | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) | The Elasticsearch reader reported no types, so an index read back as `string` placeholders and Map demoted an exact `id → id` identity to 0.63 on a route that is not lossy. An index *declares* its fields; the reader now reports the mapping (0.99 measured live). CI mypy baseline also cleaned |
+| D1 | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) | A schemaless dest shape inferred from a sample was compared as declared DDL, so run 2 refused run 1. Authority now leaves the probe: sampled profiles widen; declared catalogs stay enforced; `NoSuchKey` stays unread. Live Postgres→MinIO 2026-09-01: probe still measured `DECIMAL(4,1)`, Map `preserve` @ 0.99 origin `sampled_profile`, run 2 transferred 2 rows, independent boto3 reread matched |
 
-Still open from this sequence: **D1** — a schemaless destination's shape is
-inferred from a bounded value sample and then compared as if the destination had
-declared it, so run 2 of a route can refuse what run 1 correctly wrote.
-Reproduced live against the compose MinIO on 2026-08-30 (`decimal(12,2)` read
-back as `DECIMAL(2,2)`). Document stores are already exempt; object stores,
-SFTP, Redis and Elasticsearch are not. The fix has to carry provenance
-(sampled vs declared) out of the probe rather than weaken any comparison —
-object-store writers enforce probed widths at write time, so simply suppressing
-the verdict would fail open and quarantine rows while Map showed green.
+This sequence is closed. N2 / N4 / N5 remain not started (§3).
 
 ---
 
@@ -200,16 +193,13 @@ the verdict would fail open and quarantine rows while Map showed green.
 
 ## 7. How to continue
 
-1. Merge **N4** (this PR, G20) into `feature/Venkat-Analysis` after review.
-   Do not fold D1 or N2 into it.
-2. **D1** stays on [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)
-   (sampled destination-shape provenance). Still the last open defect in the
-   current sequence; it is not closed by G20.
-3. **N2** stays on [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)
-   (metadata-only mapper + AI egress manifest).
-4. Next feature after N4 merges: **N5** (control-total + referential-integrity
-   proof gates), on a new `feature/` branch from Venkat-Analysis — not from N4
-   until N4 is merged.
-5. Every item lands as its own PR with a live-engine proof and an independent
+1. **N2** — AI egress manifest + enforced metadata-only mode. It unblocks
+   security review, and N3 has already given it somewhere durable to write.
+2. Then N4 and N5, in that order — N5's control totals are more valuable once
+   crosswalk coverage is provable.
+3. Then the never-measured items: scheduler DST/workspace cells, governance
+   ops in the audit certificate, the remaining connector-matrix cells, SFTP
+   Excel sync modes.
+4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).
