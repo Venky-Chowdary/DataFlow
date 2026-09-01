@@ -119,6 +119,8 @@ _CREATE_NEW_SKIP_PREFLIGHT = frozenset({
     "iceberg",
     "bigquery",
     "elasticsearch",
+    "sqlserver",
+    "snowflake",
 })
 
 AZURITE_KEY = (
@@ -171,16 +173,24 @@ def _pair_timeout_sec() -> float:
 
 
 def _call_with_timeout(fn, timeout_sec: float, *args, **kwargs):
-    """Run ``fn`` in a worker; raise TimeoutError if it does not return."""
+    """Run ``fn`` in a worker; raise TimeoutError if it does not return.
+
+    ``shutdown(wait=False)`` is required: ODBC/Google retries can block the
+    worker past the timeout, and a context-manager executor would then wait
+    for that hang before the cartesian could skip and continue.
+    """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FuturesTimeout
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xmat")
+    try:
         fut = pool.submit(fn, *args, **kwargs)
         try:
             return fut.result(timeout=timeout_sec)
         except FuturesTimeout as exc:
             raise TimeoutError(f"exceeded {timeout_sec:.0f}s") from exc
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _reachable(host: str, port: int, timeout: float = 0.8) -> bool:
