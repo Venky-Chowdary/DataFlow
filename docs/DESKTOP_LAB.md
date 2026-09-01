@@ -150,3 +150,18 @@ Two fleet notes learned by running it:
 
 Measured results live in `docs/SCALE_MATRIX_NOSQL.md`, dated and attributed to
 this host — never quote them without that attribution.
+
+## Measured on this host — 2026-09-01
+
+Not 60+ unique connectors. Not 650+ tiles.
+
+| Proof | Passed | Failed | Skipped | Of | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Core unique-engine cartesian (PG, MySQL, Mongo, SQLite, MinIO S3) | 25 | 0 | 0 | 25 | dest COUNT=2 every pair |
+| Extended unique-engine cartesian (15 engines) | 121 | 35 | 69 | 225 | Oracle/Iceberg ports closed; SQL Server TLS; DynamoDB DDL identity; fakesnow/BQ uniqueness probe; Redis/ES G13 |
+| Desktop lab catalog slots | 88 | 0 | 0 | 88 | unique engines duplex 18 |
+| Saved schedules Run Now | 1 | 0 | 0 | 1 | Lab PG→MySQL; independent MySQL COUNT=5 |
+| PRODUCTION_SKU pytest | 52 | 9 | 25 | 86 | emulator dest-existence / SQL Server TLS / pgvector / DynamoDB |
+
+Reachable backends: PostgreSQL, MySQL, MongoDB, SQL Server, Redis, Elasticsearch, MinIO, fake-GCS, Azurite, DynamoDB Local, BigQuery emulator, fakesnow. Closed: Oracle `:1521`, Iceberg REST `:8181`.
+

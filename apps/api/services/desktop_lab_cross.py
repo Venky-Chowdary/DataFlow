@@ -651,18 +651,21 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
                     rec["integrity"] = "dest_count_pair_payload_sampled_on_engine"
             routes.append(rec)
             if len(routes) % 7 == 0 or rec["status"] != "skipped":
-                progress_path.write_text(
-                    json.dumps(
-                        {
-                            "done": len(routes),
-                            "last": rec,
-                            "passed": sum(1 for r in routes if r["status"] == "passed"),
-                            "failed": sum(1 for r in routes if r["status"] == "failed"),
-                            "skipped": sum(1 for r in routes if r["status"] == "skipped"),
-                        },
-                        indent=2,
+                try:
+                    progress_path.write_text(
+                        json.dumps(
+                            {
+                                "done": len(routes),
+                                "last": rec,
+                                "passed": sum(1 for r in routes if r["status"] == "passed"),
+                                "failed": sum(1 for r in routes if r["status"] == "failed"),
+                                "skipped": sum(1 for r in routes if r["status"] == "skipped"),
+                            },
+                            indent=2,
+                        )
                     )
-                )
+                except OSError:
+                    pass
 
     passed = [r for r in routes if r["status"] == "passed"]
     failed = [r for r in routes if r["status"] == "failed"]

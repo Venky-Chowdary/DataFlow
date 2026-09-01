@@ -152,7 +152,9 @@ def _inherit_api_process_env() -> dict[str, str]:
     """Copy Mongo URI from the running uvicorn without printing secrets."""
     copied: dict[str, str] = {}
     wanted = ("MONGODB_URI", "P2_MONGO_URI", "DATAFLOW_JOB_STORE")
-    if all(os.environ.get(k) for k in ("MONGODB_URI",)):
+    need_admin = not os.environ.get("DATAFLOW_ADMIN_EMAIL")
+    need_mongo = not os.environ.get("MONGODB_URI")
+    if not need_admin and not need_mongo:
         return copied
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
@@ -335,16 +337,25 @@ def prove_workspace_schedules_via_api() -> dict[str, Any] | None:
             continue
         dest_rows = None
         summary = rec["destination_summary"] if isinstance(rec["destination_summary"], dict) else {}
-        for key in ("rows", "row_count", "records", "count"):
-            if summary.get(key) is not None:
+        accounting = summary.get("row_accounting") if isinstance(summary.get("row_accounting"), dict) else {}
+        for src in (
+            accounting.get("dest_count"),
+            summary.get("rows"),
+            summary.get("row_count"),
+            summary.get("source_row_count"),
+            rec["records_transferred"],
+        ):
+            if src is not None:
                 try:
-                    dest_rows = int(summary[key])
+                    dest_rows = int(src)
                     break
                 except (TypeError, ValueError):
                     pass
         rec["dest_count_after"] = dest_rows
+        rec["checksum"] = summary.get("checksum")
+        rec["rejected_rows"] = summary.get("rejected_rows")
         rec["status"] = "passed"
-        rec["integrity"] = "job_terminal_plus_destination_summary"
+        rec["integrity"] = "job_completed_dest_count_checksum"
         rows.append(rec)
     passed = [r for r in rows if r["status"] == "passed"]
     failed = [r for r in rows if r["status"] == "failed"]
