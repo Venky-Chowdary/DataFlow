@@ -22,7 +22,40 @@ types are LOAD-DATA-safe. Python does not materialize a row on that path.
 source snapshot. Transforms, jsonb/bytea/timestamptz, upsert/CDC, and
 non-empty append stay on the row path (quarantine intact).
 
-## Reproduced on this workspace (2026-09-01)
+## Reproduced on this workspace (2026-09-01, FIFO + 4 heap shards)
+
+Same named fixture. `load_method=copy_text_pg_to_mysql_load_data`,
+`copy_workers=4`. COPY and LOAD DATA overlap on a FIFO; workers share
+`pg_export_snapshot()`.
+
+| Item | Value |
+|------|-------|
+| Host | Linux container, Python 3.12 |
+| Source | PostgreSQL **5432** (`bench_emp_1000000`) |
+| Destination | MySQL **3306**, create-new `bench_1m`, `full_refresh_append` |
+| Job store | **mongo** (27017 open) |
+| Rows | **1,000,000** |
+| Elapsed | **2.580 s** |
+| rows/s | **387,619** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| Conservation | **OK** |
+| Proof | dest COUNT equals source snapshot count |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_proof.json` |
+
+Spot-check `EMP0000001` / `EMP0500000` / `EMP1000000`: source cells equal dest cells.
+
+Same-host progression on this fixture:
+
+| Path | Elapsed | rows/s | dest COUNT(*) |
+|------|--------:|-------:|--------------:|
+| Row `executemany` (2026-08-25) | 170.3 s | 5,871 | 1,000,000 |
+| COPY+LOAD DATA tempfile | 6.151 s | 162,578 | 1,000,000 |
+| **FIFO + 4 ctid shards** | **2.580 s** | **387,619** | **1,000,000** |
+
+Not an SLA. Not a 200M claim.
+
+## Prior tempfile COPY+LOAD DATA (same day, still valid history)
 
 Same named fixture as 2026-08-25 (10 columns, PK `employee_id`).
 `load_method=copy_text_pg_to_mysql_load_data`. Server `local_infile=ON`.
