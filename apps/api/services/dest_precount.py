@@ -4134,6 +4134,9 @@ def _qdrant_delete_keys(
             f"Qdrant leftover DELETE failed: {resp.status_code} {resp.text[:300]}"
         )
     return len(ids)
+
+
+def _dynamodb_key_list(
     cfg: dict[str, Any],
     *,
     table_name: str,
