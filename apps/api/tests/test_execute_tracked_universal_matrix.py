@@ -353,6 +353,7 @@ def _build_db_endpoint(
             database=str(warehouse),
             table=f"t_{role}_{suffix}",
             schema="default",
+            extra={"catalog_type": "filesystem"},
         )
     if driver == "redshift":
         return EndpointConfig(
@@ -452,6 +453,32 @@ def _build_db_endpoint(
             host="127.0.0.1",
             port=8080,
             table="PaymentsWeaviate",
+        ),
+        # Pinecone Local index emulator (desktop-extended). Dim 32 matches
+        # pytest ``DATAFLOW_EMBEDDING_MODEL=hash/32``. Not a customer tenant.
+        "pinecone": EndpointConfig(
+            kind="database",
+            format="pinecone",
+            host="http://127.0.0.1:5081",
+            port=5081,
+            password="pclocal",
+            api_key="pclocal",
+            connection_string="http://127.0.0.1:5081",
+            table="sku_ns",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
+        ),
+        # Milvus standalone REST (desktop-extended). Port 19530 is the
+        # documented REST v2 + gRPC mux. Not a Zilliz Cloud cluster.
+        "milvus": EndpointConfig(
+            kind="database",
+            format="milvus",
+            host="127.0.0.1",
+            port=19530,
+            username="root",
+            password="Milvus",
+            connection_string="http://127.0.0.1:19530",
+            table="payments_milvus",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
         ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
