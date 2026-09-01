@@ -4523,6 +4523,7 @@ def sample_compare_rows(
     through the same write-path bind helpers as MySQL/Postgres/Snowflake writers
     (``fingerprint_for_reconcile``) so Gate-8 does not false-fail on bool/JSON wire.
     """
+    from services.code_crosswalk import apply_code_crosswalk, declared_crosswalk
     if not source_records or not target_rows or not mappings:
         return {"passed": True, "compared": 0, "mismatches": [], "skipped": True}
 
@@ -4841,15 +4842,27 @@ def sample_compare_rows(
             # Sparse CDC / STOP_COLUMN / coerce_null: source DF_MISSING means
             # omit-from-SET — skip compare (do not fingerprint as NULL).
             # Destination DF_MISSING is a leak and must still mismatch.
-            from services.value_serializer import is_missing_sentinel
-
             raw_src = src.get(src_col) if isinstance(src, dict) else None
             if is_missing_sentinel(raw_src):
                 continue
             raw_tgt = tgt.get(physical_tgt)
-            src_val = _fingerprint(
-                raw_src, transform=transform, tgt_col=tgt_col
-            )
+
+            # Same order as writer_common: transform, then the declared
+            # crosswalk. Comparing the source token to the rewritten dest cell
+            # as identity is a false Gate-8 failure of a correct conversion.
+            if declared_crosswalk(m) is not None:
+                converted, err = apply_transform(raw_src, transform or "none")
+                if not err:
+                    converted, xwalk_err = apply_code_crosswalk(converted, m)
+                    if xwalk_err:
+                        converted = None
+                src_val = _fingerprint(
+                    converted, transform=None, tgt_col=tgt_col
+                )
+            else:
+                src_val = _fingerprint(
+                    raw_src, transform=transform, tgt_col=tgt_col
+                )
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.
             tgt_val = _fingerprint(

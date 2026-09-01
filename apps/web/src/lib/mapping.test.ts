@@ -23,6 +23,7 @@ import {
   editableFromPipelineMappings,
   engineStampedRiskChip,
   engineTransformToUi,
+  formatCodeCrosswalk,
   formatColumnProfileStrip,
   inferLogicalFromSample,
   isSafeNormalizeMapping,
@@ -33,6 +34,7 @@ import {
   mappingsFromAnalysis,
   mergeSignedRiskContracts,
   mergeStampedTargetTypes,
+  parseCodeCrosswalk,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -928,6 +930,46 @@ describe("destination schema honesty", () => {
     assert.equal(payload[1].omit_approved_by, "R. Mehta");
     // A carried column never ships reduction evidence.
     assert.equal(payload[0].omit_reason, undefined);
+  });
+
+  it("carries a declared code crosswalk on the G20 wire field", () => {
+    const payload = buildPreflightMappings([], [
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        codeCrosswalk: { A: "active", B: "blocked" },
+        codeCrosswalkSystem: "legacy_status→v2",
+      },
+    ]);
+    assert.deepEqual(payload[0].code_crosswalk, { A: "active", B: "blocked" });
+    assert.equal(payload[0].code_crosswalk_system, "legacy_status→v2");
+  });
+
+  it("does not ship a code crosswalk on an omitted column", () => {
+    const omitted = applyTransformChange(
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.99,
+        approved: false,
+        transform: "none",
+        codeCrosswalk: { A: "active" },
+      },
+      "omit",
+    );
+    const payload = buildPreflightMappings([], [omitted]);
+    assert.equal(payload[0].code_crosswalk, undefined);
+  });
+
+  it("parses OLD=NEW / OLD->NEW / OLD→NEW and ignores comments", () => {
+    const parsed = parseCodeCrosswalk("# comment\nA=active\nB -> blocked\nC→closed\n");
+    assert.deepEqual(parsed, { A: "active", B: "blocked", C: "closed" });
+    assert.equal(formatCodeCrosswalk(parsed), "A=active\nB=blocked\nC=closed");
+    assert.equal(parseCodeCrosswalk(""), undefined);
+    assert.deepEqual(parseCodeCrosswalk("A=A"), { A: "A" });
   });
 
   it("never ships a reduction reason for a column that is carried again", () => {

@@ -34,6 +34,8 @@ import {
   applyReductionReason,
   reductionEvidenceGap,
   reductionReasonMeta,
+  formatCodeCrosswalk,
+  parseCodeCrosswalk,
   isSpecialtyLogicalType,
   isStructLogicalType,
   createNewRiskDetail,
@@ -1028,6 +1030,24 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
+                      {!omitted && (m.semanticRole === "string_enum" || m.codeCrosswalk || /enum/i.test(String(m.destType || "")) || /enum/i.test(String(m.inferredType || ""))) && (
+                        <label className="df2-column-omit-block" title="G20: every distinct source code in the population must have a target. One unmapped code blocks. A=A is explicit identity — nothing passes through by default.">
+                          <span className="df2-column-omit-target">Code crosswalk</span>
+                          <textarea
+                            className="df2-input"
+                            rows={3}
+                            placeholder={"OLD=NEW\nA=active\n# comments allowed"}
+                            value={formatCodeCrosswalk(m.codeCrosswalk)}
+                            aria-label={`Code crosswalk for ${m.source}`}
+                            onChange={(e) =>
+                              updateMapping(index, {
+                                ...m,
+                                codeCrosswalk: parseCodeCrosswalk(e.target.value),
+                              })
+                            }
+                          />
+                        </label>
+                      )}
                         </>
                       )}
                       {!omitted && (isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (

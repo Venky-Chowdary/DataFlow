@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -15,7 +16,7 @@ def _norm(name: str) -> str:
 _OMIT_TRANSFORMS = frozenset({"omit", "intentional_omit", "drop", "exclude"})
 
 
-def is_intentional_omit(mapping: dict[str, Any] | None) -> bool:
+def is_intentional_omit(mapping: Mapping[str, Any] | None) -> bool:
     """True when the operator explicitly excluded this source from the write map."""
     if not mapping:
         return False

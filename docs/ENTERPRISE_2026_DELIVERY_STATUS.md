@@ -62,7 +62,7 @@ PR [#125](https://github.com/Venky-Chowdary/DataFlow/pull/125).
   defects and one state-loss defect (returning to Map erased the recorded
   reduction) were found *by* that browser run and fixed in the same PR.
 
-### N2 · AI egress manifest + metadata-only mapper — **this PR (not yet merged)**
+### N2 · AI egress manifest + metadata-only mapper — **Delivered**
 
 Canonical owner `apps/api/services/ai_egress.py`. Choke point:
 `Provider.generate` / `generate_agent` in `apps/api/src/ai/llm/provider.py`.
@@ -97,6 +97,39 @@ Canonical owner `apps/api/services/ai_egress.py`. Choke point:
   + evidence chain). Independent JSONL reread of `action=ai.egress` (not
   `last_manifest()`). No cloud LLM key — live OpenAI/Anthropic not claimed.
 
+### N4 · Population-level code-system crosswalk coverage (gate **G20**) — **Delivered**
+
+Owner: `apps/api/services/code_crosswalk.py`. Merged
+[#134](https://github.com/Venky-Chowdary/DataFlow/pull/134).
+
+* **What it is.** When a mapping **declares** a `code_crosswalk` (opt-in — the
+  gate does not invent coded fields from names), every distinct non-empty
+  source value in the *population* must have a target. Coverage is proven by a
+  SQL `GROUP BY` (or a replayable file scan), not by the Validate sample. A
+  covered sample is a block (`g20_code_crosswalk.unproven`). One unmapped code
+  is a block (`.unmapped`). There is no implicit identity: `A→A` is an explicit
+  entry. The write path applies the same map and refuses unmapped codes into
+  quarantine / fail — never silent passthrough. A signed continue-policy Risk
+  Contract does **not** demote G20 (unlike G19).
+* **User surface.** Map shows a code-crosswalk textarea on enum / `string_enum`
+  rows (and any row that already has a map). Validate lists G20. The signed
+  proof pack carries `preflight_summary.code_crosswalk` (`code_crosswalk_coverage_v1`).
+  CTA: "Open Map to complete the crosswalk".
+* **Honesty.** Empty `{}` is a declaration that covers nothing. Missing/null is
+  undeclared → skip. Browser-local preflight skips G20 (a browser sample is
+  not population proof). Hitting 100,000 distinct values is unproven, fail closed.
+* **Proof.** `tests/test_code_crosswalk.py` + `tests/test_code_crosswalk_live.py`:
+  **26 passed** (24 unit/sqlite including SQL `GROUP BY` seeing the rare code a
+  sample missed, write-path quarantine, MappingItem round-trip, Gate-8 sample
+  compare through the same map; **2 live PostgreSQL** — unmapped `Z` blocks with
+  independent dest `COUNT(*)=0` and source `Z` still present; covered map
+  rewrites `A/B/C/Z` to `active/blocked/closed/archived` with dest reread and
+  no identity `Z`). Broader related selection
+  (`test_e2e_pipeline` / `test_reconciliation` / `test_signed_proof_pack` /
+  `test_field_reduction_ledger`) **122 passed**. Web G20-related suites
+  **83 passed, 0 failed**. CI mypy Decision Kernel **17 files clean**. A
+  passing unit test is not live closure; the two Postgres cases are.
+
 ### N3 · Durable, tamper-evident evidence chain — **Delivered**
 
 PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
@@ -128,10 +161,9 @@ Named precisely so nobody reads §2 as "the tier is done".
 
 | # | Capability | What it must do | Why it is not optional |
 |---|------------|-----------------|------------------------|
-| N4 | **Population-level code crosswalk coverage gate** | Prove that every distinct source code value has a target mapping across the *population*, not a sample; unmapped values fail closed | Legacy reference-data conversion is where field-reducing migrations silently corrupt meaning |
 | N5 | **Control-total + referential-integrity proof gates** | Gate-8 extensions: independently recomputed control totals (sums of monetary columns, not just counts) and destination-side referential-integrity checks | A row count proves nothing about a ledger balance; this is what a bank examiner asks for |
 
-Dependency: N5 writes attestations onto N3's chain. N2 now does too (this PR).
+N2 and N4 have left this table. Dependency: N5 writes attestations onto N3's chain.
 
 ---
 
@@ -149,7 +181,7 @@ proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
 | D1 | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) | A schemaless dest shape inferred from a sample was compared as declared DDL, so run 2 refused run 1. Authority now leaves the probe: sampled profiles widen; declared catalogs stay enforced; `NoSuchKey` stays unread. Live Postgres→MinIO 2026-09-01: probe still measured `DECIMAL(4,1)`, Map `preserve` @ 0.99 origin `sampled_profile`, run 2 transferred 2 rows, independent boto3 reread matched |
 
 This sequence is closed. N2 is merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)).
-N4 and N5 remain not started until their PRs land.
+N4 is merged ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)). N5 remains.
 
 ---
 
@@ -189,9 +221,8 @@ N4 and N5 remain not started until their PRs land.
 
 ## 7. How to continue
 
-1. **N4** — population-level code-system crosswalk coverage (G20).
-2. Then **N5** — control totals and destination referential integrity.
-3. Then the never-measured items: scheduler DST/workspace cells, governance
+1. **N5** — control totals and destination referential integrity (G21/G22).
+2. Then the never-measured items: scheduler DST/workspace cells, governance
    ops in the audit certificate, the remaining connector-matrix cells, SFTP
    Excel sync modes.
 4. Every item lands as its own PR with a live-engine proof and an independent

@@ -788,6 +788,7 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
     """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
     from services.audit_log import latest_event_hash
+    from services.code_crosswalk import proof_pack_code_crosswalk
 
     prev = None
     try:
@@ -862,6 +863,10 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                     pf.get("field_reduction_ledger")
                     or (pf.get("proof_bundle") or {}).get("field_reduction_ledger")
                     or {}
+                ),
+                "code_crosswalk": proof_pack_code_crosswalk(
+                    pf.get("code_crosswalk")
+                    or (pf.get("proof_bundle") or {}).get("code_crosswalk")
                 ),
             }
             if pf

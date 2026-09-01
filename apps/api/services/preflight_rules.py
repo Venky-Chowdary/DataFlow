@@ -39,6 +39,7 @@ HARD_GATE_IDS = {
     "g16_field_reduction",
     "g18_cdc_snapshot_mode",
     "g19_dest_schema_replacement",
+    "g20_code_crosswalk",
     "g3f_population_fit",
 }
 
@@ -254,6 +255,33 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fix the carrier"},
+        ],
+    },
+    "g20_code_crosswalk": {
+        "title": "Code crosswalk coverage",
+        "category": "hard",
+        "why": (
+            "A coded field (status, ICD, GL account, country) is remapped by an "
+            "operator-declared source→target table. A sample of 25 rows can make "
+            "that table look complete while a rare code in the population has no "
+            "target. Passing it through, nulling it, or dropping the row silently "
+            "corrupts meaning. One unmapped code is a failed conversion."
+        ),
+        "fix": (
+            "Open Map and add every missing source code to the column's code "
+            "crosswalk. There is no implicit identity: a code that should keep "
+            "its spelling must be listed as A→A. Re-run Validate against the "
+            "population — a covered sample is not proof."
+        ),
+        "examples": [
+            "Legacy status 'Z' appears on 12 of 1M rows; the sample only showed "
+            "A/B/C so the crosswalk never listed Z — G20 blocks rather than "
+            "writing Z into the new status column.",
+            "No mapping declared a code_crosswalk: the gate skips. It does not "
+            "invent coded fields from column names.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to complete the crosswalk"},
         ],
     },
     "g18_cdc_snapshot_mode": {

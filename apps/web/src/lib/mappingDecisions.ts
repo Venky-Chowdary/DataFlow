@@ -58,19 +58,28 @@ export function carryOperatorDecisions(
   if (!prior?.length || !next.length) return next;
   const decided = new Map<string, EditableMapping>();
   const omitted = new Map<string, EditableMapping>();
+  const crosswalks = new Map<string, { table: Record<string, string>; system?: string }>();
   for (const p of prior) {
     if (isIntentionalOmit(p)) omitted.set(p.source, p);
+    if (p.codeCrosswalk && Object.keys(p.codeCrosswalk).length && !isIntentionalOmit(p)) {
+      crosswalks.set(p.source, { table: p.codeCrosswalk, system: p.codeCrosswalkSystem });
+    }
     if (!p.approved && !p.riskAcknowledged) continue;
     decided.set(mappingDecisionFingerprint(p), p);
   }
-  if (!decided.size && !omitted.size) return next;
+  if (!decided.size && !omitted.size && !crosswalks.size) return next;
   return next.map((m) => {
     const dropped = omitted.get(m.source);
     if (dropped) return carryReduction(m, dropped);
     const hit = decided.get(mappingDecisionFingerprint(m));
-    if (!hit) return m;
+    const priorWalk = crosswalks.get(m.source);
+    let nextRow = m;
+    if (priorWalk && !isIntentionalOmit(m)) {
+      nextRow = { ...nextRow, codeCrosswalk: priorWalk.table, codeCrosswalkSystem: priorWalk.system };
+    }
+    if (!hit) return nextRow;
     return {
-      ...m,
+      ...nextRow,
       approved: hit.approved,
       requiresReview: hit.requiresReview,
       riskAcknowledged: hit.riskAcknowledged,
