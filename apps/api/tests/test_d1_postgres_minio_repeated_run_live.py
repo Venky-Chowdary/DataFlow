@@ -188,3 +188,42 @@ def test_d1_postgres_minio_repeated_run_live() -> None:
     assert len(landed2) == 2
     amounts2 = sorted(Decimal(str(row["amount"])) for row in landed2)
     assert amounts2 == [Decimal("12.50"), Decimal("100.00")]
+
+    evidence = {
+        "date": "2026-09-01",
+        "pytest_nodeid": "tests/test_d1_postgres_minio_repeated_run_live.py::test_d1_postgres_minio_repeated_run_live",
+        "route": "postgresql → s3/minio",
+        "source_table": src_table,
+        "bucket": bucket,
+        "key": key,
+        "run1": {
+            "success": bool(first.success),
+            "records_transferred": first.records_transferred,
+            "rejected_rows": int(accounting.get("rejected_rows") or 0),
+            "error": first.error,
+        },
+        "independent_reread_run1": landed,
+        "dest_probe": {
+            "table_exists": probe.get("table_exists"),
+            "schema": schema,
+            "schema_authority": authority,
+        },
+        "map_amount": {
+            "fidelity": amount_row.get("fidelity"),
+            "type_narrowing": amount_row.get("type_narrowing"),
+            "confidence": amount_row.get("confidence"),
+            "target_type": amount_row.get("target_type"),
+            "target_type_origin": amount_row.get("target_type_origin"),
+            "source_type": amount_row.get("source_type"),
+        },
+        "run2": {
+            "success": bool(second.success),
+            "records_transferred": second.records_transferred,
+            "rejected_rows": int(accounting2.get("rejected_rows") or 0),
+            "error": second.error,
+        },
+        "independent_reread_amounts": [str(a) for a in amounts2],
+    }
+    out = Path("/opt/cursor/artifacts/d1_postgres_minio_live_evidence.json")
+    if out.parent.is_dir():
+        out.write_text(json.dumps(evidence, indent=2, default=str) + "\n")
