@@ -359,24 +359,17 @@ class MySqlChangeStreamCdc:
 
                 if locked:
                     with lock_conn.cursor() as cur:
-                        # Freeze the read view while the lock still holds, so the dump
-                        # is consistent with the coordinates captured below even
-                        # after the lock is released.
-                        cur.execute(
-                            "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
-                        )
-                        cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-                        snapshot_txn = True
-                    if not global_lock:
-                        # MySQL releases LOCK TABLES locks when a transaction
-                        # begins, so the per-table fallback holds nothing from
-                        # here on. Say so, or the release below issues an
-                        # UNLOCK TABLES that would commit this read view away.
-                        locked = False
-                    with lock_conn.cursor() as cur:
-                        # Capture GTID on the same locked session (Debezium-class
-                        # handoff). File/pos alone is weaker when binlogs rotate or
-                        # poll prefers auto_position — at-least-once upserts still apply.
+                        # Coordinates are read before the read view is pinned,
+                        # while the lock still holds. `START TRANSACTION` itself
+                        # releases per-table LOCK TABLES locks, so capturing the
+                        # position after it leaves a window in which a commit is
+                        # behind the replay position and ahead of the read view —
+                        # neither dumped nor streamed. Read first and the same
+                        # commit is replayed, and at worst dumped twice, which
+                        # the at-least-once upsert absorbs.
+                        # GTID travels with the position (Debezium-class handoff):
+                        # file/pos alone is weaker when binlogs rotate or poll
+                        # prefers auto_position.
                         gtid = self._current_gtid_executed(cur)
                         for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
                             try:
@@ -396,6 +389,21 @@ class MySqlChangeStreamCdc:
                                 _logger.debug("CDC binlog status query failed: %s", exc)
                         if gtid and not start_pos.get("gtid"):
                             start_pos["gtid"] = gtid
+                    with lock_conn.cursor() as cur:
+                        # Freeze the read view while the lock still holds, so the
+                        # dump is consistent with the coordinates captured above
+                        # even after the lock is released.
+                        cur.execute(
+                            "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                        )
+                        cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+                        snapshot_txn = True
+                    if not global_lock:
+                        # MySQL releases LOCK TABLES locks when a transaction
+                        # begins, so the per-table fallback holds nothing from
+                        # here on. Say so, or the release below issues an
+                        # UNLOCK TABLES that would commit this read view away.
+                        locked = False
             finally:
                 # The lock exists only to make the coordinates agree with the read
                 # view. Nothing after this point needs it, so it is released here on
