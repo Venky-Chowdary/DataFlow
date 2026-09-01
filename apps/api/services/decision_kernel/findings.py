@@ -320,7 +320,7 @@ def _decimal_overflow_widen(
             continue
         if fits_decimal(ex, precision, scale, dest_db=dest_db):
             continue
-        widened = decimal_widen_carrier(
+        widened: str = decimal_widen_carrier(
             ex, dest_db=dest_db, current_type=target_type
         )
         if widened:
@@ -340,7 +340,7 @@ def _integer_overflow_widen(
     for ex in examples:
         if not (ex or "").strip():
             continue
-        widened = integer_overflow_suggested_type(
+        widened: str = integer_overflow_suggested_type(
             ex, target_type, dest_db=dest_db
         )
         if widened:

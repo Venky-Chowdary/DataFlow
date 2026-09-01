@@ -84,6 +84,31 @@ def _cell(value: Any) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
+def index_native_types(client: Any, index: str, fields: list[str]) -> dict[str, str]:
+    """Declared carrier per field, from the index mapping.
+
+    An index *declares* its fields, so its types are a catalog and not a guess.
+    A reader that reports none leaves every field the bare ``string``
+    placeholder ``_schema_from_batch`` falls back to, and a ``long`` identity
+    column then reads back as text: Map sees an exact-name pair whose declared
+    destination carrier cannot hold the source integer and demotes ``id → id``
+    for review, although nothing about the route is lossy.
+
+    Field types that cannot be read as a single carrier (object/nested
+    containers) are left out rather than flattened into an invented one; those
+    fields keep the placeholder.
+    """
+    from connectors.elasticsearch_writer import _fetch_es_physical_types
+
+    wanted = [str(f) for f in (fields or []) if f]
+    carriers, exc = _fetch_es_physical_types(client, index, wanted)
+    if exc is not None:
+        return {}
+    # ``_fetch_es_physical_types`` also answers case variants for the writer's
+    # own lookups; a schema carries the field's own spelling and nothing else.
+    return {name: carriers[name] for name in wanted if name in carriers}
+
+
 def read_index_batch(
     *,
     cfg: dict[str, Any],
@@ -155,7 +180,20 @@ def read_index_batch(
                     row.append(_cell(r[h]))
             rows.append(row)
         next_after = hits[-1].get("sort") if hits else None
-        batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
+        meta: dict[str, Any] = {}
+        if not search_after:
+            # First page only: the schema is stamped from it, and the mapping
+            # does not change under a scroll.
+            native = index_native_types(client, index, headers)
+            if native:
+                meta["native_types"] = native
+        batch = ReadBatch(
+            headers=headers,
+            rows=rows,
+            offset=0,
+            total_rows=total,
+            meta=meta or None,
+        )
         return batch, next_after
     finally:
         client.close()
