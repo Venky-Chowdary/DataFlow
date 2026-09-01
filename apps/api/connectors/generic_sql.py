@@ -601,6 +601,23 @@ def connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Top-level handshake keywords, including those nested under ``extra``.
+
+    Dest COUNT, uniqueness, and engine pooling all key off top-level TLS /
+    SID / driver fields. Leaving ``trust_server_certificate`` inside
+    ``endpoint.extra`` made the writer and dest COUNT open a different
+    handshake than Validate (ODBC Driver 18 verify-or-fail vs operator trust).
+    """
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    opts = connection_options({**extra, **dict(cfg)})
+    if not opts:
+        return dict(cfg)
+    merged = dict(cfg)
+    merged.update(opts)
+    return merged
+
+
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
@@ -772,7 +789,9 @@ def _engine(cfg: dict[str, Any]) -> Any:
     """
     from services.engine_pool import get_pooled_engine
 
-    return get_pooled_engine(cfg, _build_engine)
+    # Flatten nested extra TLS/SID/driver keywords *before* the pool key, or
+    # a verify-or-fail engine is reused after the operator declared trust.
+    return get_pooled_engine(with_connection_options(cfg), _build_engine)
 
 
 def _build_engine(cfg: dict[str, Any]) -> Any:
@@ -4762,6 +4781,7 @@ def write_mapped_rows(
         connection_string,
         ssl,
         type=type,
+        **connection_options(_kwargs),
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)

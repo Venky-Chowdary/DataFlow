@@ -7,6 +7,7 @@ from connectors.generic_sql import (
     _mssql_odbc_driver,
     _normalize_sqlalchemy_url_string,
     adapt_mssql_sql,
+    with_connection_options,
 )
 
 
@@ -158,3 +159,53 @@ def test_build_url_sqlserver_trust_server_certificate():
     query = dict(getattr(url, "query", {}) or {})
     assert query.get("TrustServerCertificate") == "Yes"
     assert str(query.get("Encrypt") or "").lower() == "yes"
+
+
+def test_with_connection_options_flattens_nested_extra_tls():
+    cfg = with_connection_options(
+        {
+            "type": "sqlserver",
+            "host": "127.0.0.1",
+            "extra": {"trust_server_certificate": True, "encrypt": "yes"},
+        }
+    )
+    assert cfg["trust_server_certificate"] is True
+    assert cfg["encrypt"] == "yes"
+    query = dict(getattr(_build_url(cfg), "query", {}) or {})
+    assert query.get("TrustServerCertificate") == "Yes"
+
+
+def test_write_mapped_rows_sqlserver_tls_reaches_engine(monkeypatch):
+    """Seed/write must dial the same Driver 18 handshake as Validate."""
+    import connectors.generic_sql as gs
+
+    seen: dict = {}
+
+    def _capture(cfg):
+        seen.update(cfg)
+        raise RuntimeError("stop-after-tls-cfg")
+
+    monkeypatch.setattr(gs, "_engine", _capture)
+    try:
+        gs.write_mapped_rows(
+            host="127.0.0.1",
+            port=1433,
+            database="dataflow",
+            username="sa",
+            password="x",
+            schema="dbo",
+            connection_string="",
+            ssl=False,
+            table_name="payments",
+            headers=["id"],
+            data_rows=[["1"]],
+            mappings=[{"source": "id", "target": "id"}],
+            column_types={"id": "INTEGER"},
+            type="sqlserver",
+            trust_server_certificate=True,
+            encrypt="yes",
+        )
+    except RuntimeError as exc:
+        assert "stop-after-tls-cfg" in str(exc)
+    assert seen.get("trust_server_certificate") is True
+    assert seen.get("encrypt") == "yes"

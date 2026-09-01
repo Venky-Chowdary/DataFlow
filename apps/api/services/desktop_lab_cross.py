@@ -429,7 +429,10 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
 
 
 def _cfg(ep: EndpointConfig) -> dict[str, Any]:
-    return {
+    from connectors.generic_sql import connection_options
+
+    extra = dict(ep.extra or {})
+    cfg: dict[str, Any] = {
         "type": ep.format,
         "host": ep.host,
         "port": ep.port,
@@ -441,8 +444,10 @@ def _cfg(ep: EndpointConfig) -> dict[str, Any]:
         "warehouse": ep.warehouse,
         "path_style": ep.path_style,
         "endpoint_url": ep.endpoint_url or ep.connection_string,
-        "extra": dict(ep.extra or {}),
+        "extra": extra,
     }
+    cfg.update(connection_options({**extra, **cfg}))
+    return cfg
 
 
 def _dest_count(ep: EndpointConfig) -> int | None:

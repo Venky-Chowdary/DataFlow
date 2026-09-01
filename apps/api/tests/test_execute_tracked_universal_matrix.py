@@ -84,20 +84,28 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
     # Port open ≠ authenticated. Half-dead QEMU mssql on ARM listens then
     # rejects login — fail-skip instead of failing the matrix.
     if driver in {"sqlserver", "mssql", "azure_sql"}:
+        # Same handshake as Validate/Execute (pyodbc + operator TLS extra).
+        # Bare pymssql ignored ``trust_server_certificate`` and skipped dest
+        # SQL Server while source seed failed Driver 18 cert verify.
         try:
-            import pymssql
+            from connectors.generic_sql import connection_options
+            from connectors.sqlserver import test_sqlserver
 
-            conn = pymssql.connect(
-                server=host,
+            extra = dict(endpoint.extra or {})
+            ok, _msg = test_sqlserver(
+                host=host,
                 port=int(port),
-                user=endpoint.username or "sa",
-                password=endpoint.password or "",
                 database=endpoint.database or "master",
-                login_timeout=3,
-                timeout=3,
+                username=endpoint.username or "sa",
+                password=endpoint.password or "",
+                schema=endpoint.schema or "dbo",
+                connection_string=endpoint.connection_string or "",
+                ssl=bool(endpoint.ssl),
+                type="sqlserver",
+                connect_timeout=3,
+                **connection_options(extra),
             )
-            conn.close()
-            return True
+            return bool(ok)
         except Exception:
             return False
     if driver in {"postgresql", "postgres", "timescaledb", "citus"}:

@@ -59,6 +59,22 @@ def test_writer_extra_kwargs_threads_snowflake_key_pair():
     assert extra["role"] == "SYSADMIN"
 
 
+def test_writer_extra_kwargs_threads_sqlserver_tls():
+    extra = writer_extra_kwargs(
+        "sqlserver",
+        cfg={"trust_server_certificate": True, "encrypt": "yes"},
+    )
+    assert extra["trust_server_certificate"] is True
+    assert extra["encrypt"] == "yes"
+
+
+def test_writer_extra_kwargs_threads_sqlserver_tls_from_endpoint_extra():
+    dest = type("_Dest", (), {"extra": {"trust_server_certificate": True, "encrypt": "yes"}})()
+    extra = writer_extra_kwargs("sqlserver", cfg={}, dest=dest)
+    assert extra["trust_server_certificate"] is True
+    assert extra["encrypt"] == "yes"
+
+
 def test_writer_extra_kwargs_threads_sftp_key():
     extra = writer_extra_kwargs(
         "sftp",
