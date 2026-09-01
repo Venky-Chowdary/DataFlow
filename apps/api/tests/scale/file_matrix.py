@@ -16,7 +16,9 @@ Every cell:
 2. runs the transfer through ``UniversalTransferEngine.execute_tracked`` — the
    product's own path, never a bypass,
 3. re-opens the destination with an *independent* driver/client, counts rows and
-   hashes the mapped projection with the fixture's canonicalizer,
+   hashes the mapped projection with the fixture's canonicalizer (fixed-width
+   hashes the *layout-projected* record — a 40-character ``note`` cannot carry
+   the fixture's 10 KiB dirt),
 4. records the engine's claim next to the independent number, and marks the cell
    ``pass`` only when they agree with the expected population.
 
@@ -315,6 +317,14 @@ def _request(*, dialect: str = "", mode: str = QUARANTINE_MODE, **kwargs: Any):
     return TransferRequest(**kwargs)
 
 
+def _source_format(cell: Cell) -> str:
+    """Underlying source format, resolving structural-variant aliases."""
+    if cell.source in fixture.FORMATS:
+        return cell.source
+    spec = fixture.STRUCTURAL_VARIANTS.get(cell.source)
+    return str(spec["format"]) if spec else cell.source
+
+
 def _latin1_fixture(kind: str) -> bool:
     """True when this fixture was written latin-1-safe (its text differs)."""
     spec = fixture.STRUCTURAL_VARIANTS.get(kind)
@@ -330,7 +340,9 @@ def _latin1_fixture(kind: str) -> bool:
 
 def _base_result(cell: Cell, rows: int) -> CellResult:
     expected_checksum, expected_rows = fixture.expected_checksum(
-        rows, latin1_safe=_latin1_fixture(cell.source)
+        rows,
+        latin1_safe=_latin1_fixture(cell.source),
+        source_format=_source_format(cell),
     )
     return CellResult(
         name=cell.name,
@@ -583,7 +595,7 @@ def run_file_to_file(cell: Cell, rows: int) -> CellResult:
     path = fixture_path(src_kind, rows)
     # A file export runs the same typed quarantine matrix as a SQL writer, so the
     # row whose INTEGER cell reads ``N/A`` is held out here too.
-    expected, expected_rows = fixture.expected_checksum(rows)
+    expected, expected_rows = fixture.expected_checksum(rows, source_format=src_kind)
     res.checksum_expected, res.rows_expected = expected, expected_rows
     spec = next((s for s in fixture.FORMATS.values() if s.export_format == dst_format), None)
     suffix = spec.suffix if spec else f".{dst_format}"
@@ -1043,7 +1055,7 @@ def run_objstore_to_objstore(cell: Cell, rows: int) -> CellResult:
     )
     dst_key = f"{_OBJ_PREFIX}/dest/{cell.name}_{rows}{suffix}"
     _objstore_clear(cell.store, dst_key)
-    expected, expected_rows = fixture.expected_checksum(rows)
+    expected, expected_rows = fixture.expected_checksum(rows, source_format=src_kind)
     res.checksum_expected, res.rows_expected = expected, expected_rows
     request = _request(
         source=_objstore_endpoint(cell.store, src_key),

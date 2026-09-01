@@ -243,10 +243,9 @@ This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 
 ## 7. How to continue
 
-1. YAML/fixed-width **100K** cells (sources are live; dest YAML export still
-   refused).
-2. Scheduler DST/workspace cells, governance ops in the audit certificate,
+1. Scheduler DST/workspace cells, governance ops in the audit certificate,
    remaining connector-matrix cells, SFTP Excel sync modes.
+2. YAML dest export is still refused; MySQL yaml/fwf 100K twins were not run.
 3. Local fleet / 10k–1M throughput work.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything

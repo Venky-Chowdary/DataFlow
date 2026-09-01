@@ -186,8 +186,10 @@ N2–N5 are merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133),
 [#134](https://github.com/Venky-Chowdary/DataFlow/pull/134),
 [#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). YAML and
 fixed-width are transfer-live **file sources**
-([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)). YAML dest export
-is still refused; 100K of these formats follows.
+([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); their 100K
+Postgres cells passed dest COUNT=99,991, DLQ=9, independent checksum
+([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)). MySQL twins
+were not run; YAML dest export is still refused.
 
 ---
 

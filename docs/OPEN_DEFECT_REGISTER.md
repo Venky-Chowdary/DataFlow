@@ -71,13 +71,18 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
 7. Full-fleet NoSQL sweep on the fixed revision (last complete sweep: 73 pass /
    24 fail / 24 skip at 200 rows, on a *pre-fix* revision).
 8. ~~`fixed_width` and `yaml` as live file drivers~~ **Closed as sources
-   (this PR).** Ingest is transfer-live: YAML is a sequence of flat mappings
-   with scalars kept as text (no YAML 1.1 `yes`→bool); fixed-width requires a
-   declared layout (`#layout:` header, sidecar `.layout.json`, or
-   `read_options.fixed_width_layout`) and refuses a guessed width. Proven:
-   sqlite dest COUNT=2 and live Postgres dest COUNT=2 with independent amount
-   reread (`1000.00`, `2000.50`). YAML **export** is still refused (not a dest).
-   100K scale cells for these formats remain unmeasured.
+   ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)) and as 100K
+   Postgres sources (this PR).** Ingest is transfer-live: YAML is a sequence
+   of flat mappings with scalars kept as text (no YAML 1.1 `yes`→bool);
+   fixed-width requires a declared layout (`#layout:` header, sidecar
+   `.layout.json`, or `read_options.fixed_width_layout`) and refuses a guessed
+   width. The file-matrix expected checksum for `fixed_width` hashes the
+   layout-projected record (40-char `note`; 32-char `created_at`). Proven:
+   2-row sqlite + live Postgres dest COUNT; 12,100-row sqlite COUNT +
+   checksum + DLQ=1; **100K live Postgres dest COUNT=99,991, DLQ=9,
+   independent checksum match** for both yaml and fixed_width
+   (`test_yaml_fwf_100k_postgres`, 2 passed in 193.55s). YAML **export** is
+   still refused. 100K MySQL twins were not run (`mysql_up()` false).
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
 10. CDC is **at-least-once** everywhere except the named crash-injection routes.
