@@ -2685,37 +2685,61 @@ def verify_duckdb_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
     written_ids: list[str] | None = None,
     pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a DuckDB target by reading the local file.
+    """Reconcile a DuckDB target through the same SQLAlchemy dialect as the writer.
 
+    Native ``duckdb.connect`` treats ``duckdb:///abs`` as a filename, and a second
+    native connection fails while the writer dialect still holds the file with a
+    different config. Independent read-back uses the pooled engine instead.
     ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
     """
     try:
-        import duckdb
+        import sqlalchemy as sa
 
-        path = connection_string or database
+        from connectors.generic_sql import get_sqlalchemy_engine
+        from connectors.sql_identifiers import quote_table_ref
+        from connectors.sqlite_common import duckdb_file_path
+
+        path = duckdb_file_path(database, connection_string)
         if not path:
             return -1, ""
-        from connectors.sql_identifiers import quote_table_ref
-
+        if path.lower().startswith(("md:", "motherduck:")):
+            return -1, ""
+        if path == ":memory:":
+            return -1, ""
+        conn_s = (connection_string or "").strip()
+        cfg: dict[str, Any] = {"type": "duckdb", "database": path}
+        if conn_s.lower().startswith("duckdb:"):
+            cfg["connection_string"] = conn_s
+        engine = get_sqlalchemy_engine(cfg)
         table_ref = quote_table_ref(table_name, dialect="duckdb")
-        conn = duckdb.connect(str(path))
-        count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]  # nosec B608
-        ids, pk = keyed_readback_scope(written_ids, pk_column)
-        if ids:
-            where = keyed_readback_where(
-                pk, ids, dialect="duckdb", placeholders=["?"] * len(ids)
+        with engine.connect() as conn:
+            count = int(
+                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
+                or 0
             )
-            cur = conn.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
-        else:
-            cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-        names = [d[0] for d in cur.description] if cur.description else []
-        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
-        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
-        conn.close()
-        return int(count), checksum
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="duckdb")
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
+            columns, projected = project_readback(
+                names, target_columns, (tuple(row) for row in result)
+            )
+            checksum = canonical_checksum_from_iter(
+                projected,
+                columns,
+                limit=limit,
+                dest_db_type="duckdb",
+                dest_types=dest_types,
+            )
+        return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""

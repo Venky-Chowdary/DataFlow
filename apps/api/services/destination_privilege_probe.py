@@ -1465,14 +1465,10 @@ def _probe_duckdb(
     the authority. MotherDuck is a hosted service reached through the same
     driver, and no local path can speak for it, so it stays unavailable.
     """
-    raw = (connection_string or database or host or "").strip()
+    from connectors.sqlite_common import duckdb_file_path
+
+    raw = duckdb_file_path(database, connection_string, host)
     lowered = raw.lower()
-    for prefix in ("duckdb:///", "duckdb://", "duckdb:"):
-        if lowered.startswith(prefix):
-            raw = raw[len(prefix) :]
-            lowered = raw.lower()
-            break
-    raw = raw.lstrip("/") if lowered.startswith("//") else raw
 
     if lowered.startswith("md:") or lowered.startswith("motherduck:"):
         return PrivilegeProbeResult(

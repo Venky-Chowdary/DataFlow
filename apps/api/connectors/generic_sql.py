@@ -3621,6 +3621,16 @@ def read_table_scan_batch(
             if (cfg.get("type") or "").lower() == "risingwave":
                 with contextlib.suppress(Exception):
                     conn.execute(sa.text("FLUSH"))
+            # COUNT before opening the streaming SELECT. DuckDB (and other
+            # engines with one active result per connection) drop the scan
+            # cursor if COUNT(*) runs on the same conn after execute — the
+            # first fetchmany then returns a short page and the load truncates.
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                total = _count_table_raw(
+                    conn, table, schema_name, dialect=dialect
+                )
             try:
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
@@ -3652,12 +3662,6 @@ def read_table_scan_batch(
                 )
                 selected_cols = []
                 serialize = False
-            if known_total_rows is not None:
-                total = known_total_rows
-            else:
-                total = _count_table_raw(
-                    conn, table, schema_name, dialect=dialect
-                )
         except Exception:
             try:
                 conn.close()

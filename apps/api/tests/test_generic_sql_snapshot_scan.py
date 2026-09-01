@@ -54,6 +54,18 @@ def test_generic_sql_scan_never_offsets():
     table_obj.c = {"id": col}
     table_obj.primary_key = None
 
+    call_order: list[str] = []
+
+    def _count(*_a, **_k):
+        call_order.append("count")
+        return 2
+
+    def _execute(*_a, **_k):
+        call_order.append("execute")
+        return result
+
+    conn.execute.side_effect = _execute
+
     state: dict = {}
     with (
         patch("connectors.generic_sql.SQLALCHEMY_AVAILABLE", True),
@@ -66,7 +78,7 @@ def test_generic_sql_scan_never_offsets():
             "connectors.generic_sql._serialize_source_row",
             side_effect=lambda row, cols, dialect: list(row),
         ),
-        patch("connectors.generic_sql._count_table_raw", return_value=2),
+        patch("connectors.generic_sql._count_table_raw", side_effect=_count),
     ):
         first = read_table_scan_batch(
             host="h",
@@ -103,6 +115,7 @@ def test_generic_sql_scan_never_offsets():
 
     assert first.rows == [["1", "A"], ["2", "B"]]
     assert second.rows == []
+    assert call_order == ["count", "execute"]
     conn.execute.assert_called_once()
     stmt = conn.execute.call_args[0][0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
@@ -224,3 +237,66 @@ def test_sqlite_two_row_snapshot_without_pk_stops_after_empty_page(tmp_path):
     finally:
         conn.close()
     assert n == 2
+
+
+def test_duckdb_file_path_strips_sqlalchemy_url(tmp_path):
+    from connectors.sqlite_common import duckdb_file_path
+
+    abs_path = tmp_path / "lab.duckdb"
+    assert duckdb_file_path(str(abs_path), "") == str(abs_path)
+    assert duckdb_file_path("", f"duckdb:///{abs_path}") == str(abs_path)
+    assert duckdb_file_path("", "duckdb:///:memory:") == ":memory:"
+    assert duckdb_file_path("", "md:my_db") == "md:my_db"
+
+
+def test_duckdb_generic_sql_url_scan_pages_every_row(tmp_path):
+    """Desktop lab binds DuckDB as generic_sql + duckdb:///abs.
+
+    COUNT(*) on the same connection after a streaming SELECT used to clobber
+    DuckDB's single active result: page 1 returned 1 of 2 rows, page 2 empty.
+    """
+    duckdb = pytest.importorskip("duckdb")
+    pytest.importorskip("sqlalchemy")
+    from services.reconciliation import verify_duckdb_table
+
+    path = tmp_path / "scan.duckdb"
+    table = "orders"
+    conn = duckdb.connect(str(path))
+    conn.execute(f'CREATE TABLE "{table}" (id INTEGER PRIMARY KEY, note VARCHAR)')
+    conn.executemany(f'INSERT INTO "{table}" VALUES (?, ?)', [(1, "a"), (2, "b")])
+    conn.close()
+
+    url = f"duckdb:///{path}"
+    state: dict = {}
+    kwargs = dict(
+        host="",
+        port=0,
+        database=str(path),
+        username="",
+        password="",
+        schema="",
+        connection_string=url,
+        ssl=False,
+        table=table,
+        type="duckdb",
+        columns=["id", "note"],
+        limit=1,
+        scan_state=state,
+    )
+    first = read_table_scan_batch(**kwargs, offset=0)
+    second = read_table_scan_batch(**kwargs, offset=len(first.rows))
+    landed = list(first.rows) + list(second.rows)
+    assert len(landed) == 2, (first.rows, second.rows)
+    ids = sorted(int(row[0]) for row in landed)
+    assert ids == [1, 2]
+
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    close_table_scan(state)
+    count, checksum = verify_duckdb_table(
+        connection_string=url,
+        database="",
+        table_name=table,
+    )
+    assert count == 2
+    assert checksum
