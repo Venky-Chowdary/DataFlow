@@ -8,10 +8,10 @@ workspaces wave: `a1cc1f91` via
 [#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
 **Latest on `feature/Venkat-Analysis`:** D1 [#132], N2 [#133], N4 / G20 [#134],
-N5 / G21+G22 [#135], YAML/fixed-width live sources [#136], and YAML/fwf 100K
-Postgres [#137] are merged. 100K dest COUNT=99,991, DLQ=9, checksum match
-(193.55s). YAML dest export is still refused; MySQL twins were not run.
-Next: scheduler DST, governance ops on the certificate, remaining matrix
+N5 / G21+G22 [#135], YAML/fixed-width live sources [#136], YAML/fwf 100K
+Postgres [#137], and scheduler DST + workspace ownership [#138] are merged.
+100K dest COUNT=99,991, DLQ=9. YAML dest export is still refused; MySQL twins
+were not run. Next: governance ops on the certificate, remaining matrix
 cells, SFTP Excel, and local fleet / 10k–1M throughput. See
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 

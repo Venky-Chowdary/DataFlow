@@ -139,7 +139,12 @@ the PR that carries it):
 
 **Still open (not defects — never measured / environment-blocked):**
 
-- Scheduler DST + workspace-ownership cells not re-measured after the access fix.
+- ~~Scheduler DST + workspace-ownership cells not re-measured after the access fix.~~
+  **Closed ([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)).**
+  `tests/test_scheduler_dst_workspace_remeasure.py`: cadence cells including
+  DST boundary pass; sibling `X-Workspace-Id` GET is 404 and the list excludes
+  the foreign schedule; non-member read/create 403/404. The 100K beat was not
+  re-run.
 - Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
 - SFTP daily Excel sync modes started, not finished.
@@ -188,7 +193,9 @@ N2–N5 are merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133),
 fixed-width are transfer-live **file sources**
 ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); their 100K
 Postgres cells passed dest COUNT=99,991, DLQ=9, independent checksum
-([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)). MySQL twins
+([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)). Scheduler DST +
+workspace-ownership cells re-measured
+([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). MySQL twins
 were not run; YAML dest export is still refused.
 
 ---

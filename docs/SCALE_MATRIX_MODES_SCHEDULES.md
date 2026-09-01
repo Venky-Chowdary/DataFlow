@@ -153,13 +153,13 @@ scheduled run, proof artifact produced for the scheduled run, failure surfacing,
 retry/backoff, no duplicate execution when two **separate processes** race the
 same schedule, and refusal to overlap when the previous run is still in flight.
 
-Failing at that point, both since changed and **not yet re-measured**:
-- *DST boundary* — the independent `zoneinfo` expectation and the product
-  disagreed around a spring-forward wall time that does not exist. The harness
-  now checks the three cases separately (ordinary offset change, nonexistent
-  spring-forward local time, repeated fall-back hour with `fold=0`) instead of
-  asserting one number.
-- *Workspace ownership* — the real defect in item 6 above; fixed in the guard.
+Failing at that point, both since changed and **re-measured on this PR**
+(`tests/test_scheduler_dst_workspace_remeasure.py`, 4 passed):
+- *DST boundary* — offset re-derived per firing (EST vs EDT noon),
+  spring-forward 02:30 skipped to the next real 02:30, fall-back 01:30 fired
+  once at `fold=0`. Product `compute_next_run` matches independent `zoneinfo`.
+- *Workspace ownership* — same actor, two workspaces: sibling `X-Workspace-Id`
+  GET is 404 and the list omits the schedule; non-member read/create is 403/404.
 
 ## Not proven yet
 
@@ -170,5 +170,6 @@ Failing at that point, both since changed and **not yet re-measured**:
   late-arriving updates, NULL-in-key, SCD2 closure/no-churn, mirror delete
   propagation, reverse ETL) is committed and runnable but its 100K numbers are
   not in this document yet, so no claim is made for it here.
-- Scheduler DST and workspace cells after the fixes.
+- Scheduler DST and workspace cells after the fixes — **re-measured** (this PR);
+  the 100K beat was not re-run.
 - SQL Server: not exercised in this track.
