@@ -167,8 +167,10 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             results = []
             for i, rec in enumerate(records):
                 rec = dict(rec)
-                rec["Id"] = rec.get("Id") or rec.get("id") or f"001STUB{i:03d}AAA"
-                rec["id"] = rec.get("id") or rec["Id"]
+                rec.pop("attributes", None)
+                if not rec.get("Id") and not rec.get("id"):
+                    rec["Id"] = f"001STUB{i:03d}AAA"
+                    rec["id"] = rec["Id"]
                 stored = _upsert_row("Account", rec)
                 results.append({"id": stored.get("Id") or stored.get("id"), "success": True, "errors": []})
             self._json(200, results)
