@@ -246,3 +246,47 @@ work was halted. Every one of the 12 failures in that partial run is a
 all 12 landed 0 destination rows (refused, not partially written). The complete
 225-cell grid has **not** been re-measured after these fixes; the numbers in the main
 table above are the last complete measurement.
+
+## Addendum — 2026-09-01 dest-native CS collation (200 rows)
+
+`create_new_mapping_target_type` now stamps dest-native equality-class collations
+(`Latin1_General_BIN` / `utf8mb4_bin`) instead of copying a source collation *name*
+the destination engine does not know. G6 treats `COLLATE utf8mb4_*` as measured
+Unicode (MySQL introspection omits `CHARACTER SET`). UUID `CHAR(36)` with those
+clauses is still the 36-char wire.
+
+Live 4-engine grid (`--rows 200`, prefix `ta5`, 2026-09-01):
+
+**pass = 140 · fail = 0 · skip = 20** out of **160 cells**
+(16 routes × 10 shapes). Oracle was not listening on `:1521` — **0 Oracle cells
+were run**; the harness also records `skipped_engines.oracle` (summary `skip=21`
+= 20 cells + 1 engine). This is **not** 225/225 and **not** 100K.
+
+| route | pass | fail | skip |
+| --- | --- | --- | --- |
+| mysql→mysql | 9 | 0 | 1 |
+| mysql→postgresql | 9 | 0 | 1 |
+| mysql→sqlite | 8 | 0 | 2 |
+| mysql→sqlserver | 9 | 0 | 1 |
+| postgresql→mysql | 9 | 0 | 1 |
+| postgresql→postgresql | 9 | 0 | 1 |
+| postgresql→sqlite | 8 | 0 | 2 |
+| postgresql→sqlserver | 9 | 0 | 1 |
+| sqlite→mysql | 9 | 0 | 1 |
+| sqlite→postgresql | 9 | 0 | 1 |
+| sqlite→sqlite | 8 | 0 | 2 |
+| sqlite→sqlserver | 9 | 0 | 1 |
+| sqlserver→mysql | 9 | 0 | 1 |
+| sqlserver→postgresql | 9 | 0 | 1 |
+| sqlserver→sqlite | 8 | 0 | 2 |
+| sqlserver→sqlserver | 9 | 0 | 1 |
+
+16 `domain_contract_unsigned` skips: destination already declares every mapped
+domain, so no signed contract is required to prove unsigned refusal.
+4 `dest_exists_narrower` skips (`* → sqlite`): SQLite does not enforce declared
+string length, so a narrowed `name_txt` truncates nothing.
+
+Evidence: independent dest `COUNT(*)` + checksum in the `ta5` JSON artifact.
+mysql↔sqlserver focused re-run after the invent fix: **36 pass / 0 fail / 4 skip**.
+
+Not claimed: 100K, SFTP daily Excel, MySQL yaml/fwf 100K twins, fleet 10k–1M.
