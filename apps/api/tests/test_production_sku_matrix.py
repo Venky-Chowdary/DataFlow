@@ -69,7 +69,6 @@ _STUB_SOURCE_OMITS = {
         {"source": "email", "target": "", "confidence": 1.0, "intentional_omit": True},
     ),
     "salesforce": (
-        {"source": "Id", "target": "", "confidence": 1.0, "intentional_omit": True},
         {"source": "Name", "target": "", "confidence": 1.0, "intentional_omit": True},
         {"source": "email", "target": "", "confidence": 1.0, "intentional_omit": True},
     ),

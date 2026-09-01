@@ -90,3 +90,25 @@ def test_hubspot_stub_upserts_by_request_id() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_salesforce_describe_has_single_long_id() -> None:
+    """Tabular SKU identity is one long PK — not a duplicate SOAP Id VARCHAR(18)."""
+    server, url = start_saas_stub()
+    try:
+        import requests
+
+        desc = requests.get(
+            f"{url}/services/data/v58.0/sobjects/Account/describe",
+            timeout=5,
+        )
+        assert desc.status_code == 200
+        fields = desc.json()["fields"]
+        id_fields = [f for f in fields if str(f.get("name", "")).lower() == "id"]
+        assert len(id_fields) == 1
+        assert id_fields[0]["type"] == "long"
+        names = [f["name"] for f in fields]
+        assert "Id" not in names
+    finally:
+        server.shutdown()
+        server.server_close()

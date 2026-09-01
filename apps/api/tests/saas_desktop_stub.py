@@ -34,7 +34,9 @@ def _field_describe(col: str) -> dict[str, Any]:
     """Typed Describe for the tabular SKU fixture — not a customer org.
 
     ``amount`` is currency(18,2) so G19 does not treat live DECIMAL as TEXT.
-    Business ``id`` is int; Salesforce ``Id`` stays the 18-char Id carrier.
+    Business ``id`` is a single ``long`` (BIGINT). A duplicate SOAP ``Id``
+    VARCHAR(18) is forbidden — Validate would stamp BIGINT while Execute
+    bound the 18-char carrier.
     """
     name = col
     lower = col.lower()
