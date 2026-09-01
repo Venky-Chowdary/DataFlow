@@ -1491,12 +1491,23 @@ def _auto_map(
                 probe_exists,
                 dest_format=str(getattr(request.destination, "format", "") or ""),
             )
-            if dest_exists is True and target_schema:
-                from services.mapping_constraints import retain_dest_exists_write_mappings
-
-                mappings = retain_dest_exists_write_mappings(
-                    mappings, list(target_schema)
+            if dest_exists is True:
+                from services.mapping_constraints import (
+                    dest_exists_write_column_names,
+                    retain_dest_exists_write_mappings,
                 )
+
+                # Overwrite dest-exists returns empty types for typing, but
+                # extra source must still stay unaccounted (G13) using the
+                # replaced column names stamped on destination.extra.
+                dest_cols = dest_exists_write_column_names(
+                    target_schema=target_schema,
+                    dest_extra=getattr(request.destination, "extra", None) or {},
+                )
+                if dest_cols:
+                    mappings = retain_dest_exists_write_mappings(
+                        mappings, dest_cols
+                    )
         else:
             target_schema, probe_exists = _destination_schema_probe(
                 request.destination,

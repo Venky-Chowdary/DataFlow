@@ -162,6 +162,37 @@ def classify_source_coverage(
     }
 
 
+def dest_exists_write_column_names(
+    *,
+    target_schema: dict[str, Any] | None = None,
+    dest_extra: dict[str, Any] | None = None,
+) -> list[str]:
+    """Dest column names for dest-exists overwrite retain (G13).
+
+    Overwrite dest-exists clears live *types* so recreate is not typed against
+    the doomed carrier (``_destination_schema_probe`` returns ``{}``). Column
+    *names* still live on ``overwrite_replaced_column_types`` /
+    ``schema_nullability`` so extra source stays unaccounted instead of becoming
+    an invented dest column.
+    """
+    extra = dest_extra or {}
+    for src in (
+        target_schema,
+        extra.get("overwrite_replaced_column_types"),
+        extra.get("schema_types"),
+        extra.get("schema_nullability"),
+    ):
+        if isinstance(src, dict) and src:
+            names = [str(k).strip() for k in src.keys() if str(k).strip()]
+            if names:
+                return names
+        if isinstance(src, (list, tuple)):
+            names = [str(x).strip() for x in src if str(x).strip()]
+            if names:
+                return names
+    return []
+
+
 def retain_dest_exists_write_mappings(
     mappings: list[dict] | None,
     dest_columns: list[str] | None,

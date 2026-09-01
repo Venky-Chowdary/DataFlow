@@ -6,6 +6,7 @@ from typing import Any
 
 from services.mapping_constraints import (
     classify_source_coverage,
+    dest_exists_write_column_names,
     detect_duplicate_targets,
     enforce_destination_constraints,
     retain_dest_exists_write_mappings,
@@ -181,6 +182,56 @@ def test_dest_exists_overwrite_leaves_extra_source_unaccounted():
     coverage = classify_source_coverage(
         ["id", "amount", "code", "extra_unmapped"], kept
     )
+    assert coverage["unaccounted"] == ["extra_unmapped"]
+
+
+def test_dest_exists_write_column_names_reads_replaced_types_when_schema_cleared():
+    """Overwrite dest-exists probe returns {} types; names still live on extra."""
+    assert dest_exists_write_column_names(target_schema={}) == []
+    names = dest_exists_write_column_names(
+        target_schema={},
+        dest_extra={
+            "overwrite_replaced_column_types": {
+                "id": "INT",
+                "amt_dec": "NUMERIC(12,4)",
+            },
+            "schema_nullability": {"id": False, "amt_dec": False, "ghost": True},
+        },
+    )
+    assert names == ["id", "amt_dec"]
+
+
+def test_auto_map_overwrite_dest_exists_leaves_extra_unaccounted(monkeypatch):
+    """Live probe empties dest types on overwrite; extra source must still be G13."""
+    from src.transfer import engine as eng
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    def fake_probe(destination, sync_mode=""):
+        destination.extra = {
+            **(destination.extra or {}),
+            "overwrite_replaced_column_types": {
+                "id": "INT",
+                "amt_dec": "NUMERIC(12,4)",
+                "code": "TEXT",
+            },
+        }
+        return {}, True
+
+    monkeypatch.setattr(eng, "_destination_schema_probe", fake_probe)
+    req = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="src"),
+        destination=EndpointConfig(
+            kind="database", format="postgresql", table="dst", extra={}
+        ),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+    )
+    columns = ["id", "amt_dec", "code", "extra_unmapped"]
+    schema = {c: "string" for c in columns}
+    sample = [{"id": 1, "amt_dec": "1000.00", "code": "USD", "extra_unmapped": "x"}]
+    maps = eng._auto_map(req, columns, schema, sample_rows=sample)
+    assert [m.get("source") for m in maps] == ["id", "amt_dec", "code"]
+    coverage = classify_source_coverage(columns, maps)
     assert coverage["unaccounted"] == ["extra_unmapped"]
 
 
