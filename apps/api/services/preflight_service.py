@@ -117,14 +117,17 @@ class FilePreflightContext(PreflightContext):
         Accept risk (G3 probe severity + G9 coercion_safety).
         """
         live = dest_types.get(m.target)
+        if live is None:
+            from services.column_case import lookup_column
+
+            live = lookup_column(dest_types, m.target)
         stamped = live or getattr(m, "target_type", None)
-        src_type = next(
-            (
-                c.inferred_type
-                for c in self.plan.source.columns
-                if c.name == m.source
-            ),
-            None,
+        src_type = None
+        from services.column_case import column_type_or_none
+
+        src_type = column_type_or_none(
+            {c.name: c.inferred_type for c in self.plan.source.columns},
+            m.source,
         )
         if (
             not live
@@ -209,11 +212,18 @@ class FilePreflightContext(PreflightContext):
         except Exception as exc:
             logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
             errors: list[str] = []
+            from services.column_case import lookup_row_value
+
+            known = {c.name for c in self.plan.source.columns}
             for i, row in enumerate(self.sample_rows[:sample_size]):
                 for m in self.plan.mappings:
-                    if m.source not in row and m.source in {
-                        c.name for c in self.plan.source.columns
-                    }:
+                    present = lookup_row_value(row, m.source, None) is not None or (
+                        isinstance(row, dict) and m.source in row
+                    )
+                    known_hit = m.source in known or any(
+                        str(n).casefold() == str(m.source).casefold() for n in known
+                    )
+                    if not present and known_hit:
                         errors.append(f"Row {i}: missing source column '{m.source}'")
                         if len(errors) >= 10:
                             return False, errors

@@ -164,8 +164,10 @@ def _sql_duplicates(
 
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
+    # Quote PK columns the same way as the table: Oracle folds unquoted `id` to
+    # ID while create-new SQLAlchemy tables keep lowercase `"id"`.
     tbl = sa.table(table, schema=schema)
-    pk_cols = [sa.column(c) for c in pk_columns]
+    pk_cols = [sa.column(sa.sql.quoted_name(str(c), True)) for c in pk_columns]
     cnt = sa.func.count().label("_cnt")
     stmt = (
         sa.select(*pk_cols, cnt)

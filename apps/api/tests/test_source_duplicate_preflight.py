@@ -40,6 +40,26 @@ def sqlite_dupes_connector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> t
     return str(saved.id), "jobs"
 
 
+def test_oracle_duplicate_probe_quotes_lowercase_pk_columns() -> None:
+    """Oracle folds unquoted id→ID; create-new quoted tables keep lowercase \"id\"."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import oracle
+
+    tbl = sa.table(sa.sql.quoted_name("s1", True), schema=sa.sql.quoted_name("DATAFLOW", True))
+    pk_cols = [sa.column(sa.sql.quoted_name("id", True))]
+    cnt = sa.func.count().label("_cnt")
+    stmt = (
+        sa.select(*pk_cols, cnt)
+        .select_from(tbl)
+        .group_by(*pk_cols)
+        .having(cnt > 1)
+        .limit(5)
+    )
+    sql = str(stmt.compile(dialect=oracle.dialect(), compile_kwargs={"literal_binds": True}))
+    assert '"id"' in sql
+    assert "GROUP BY id" not in sql.replace('"id"', "")
+
+
 def test_qualified_sql_table_from_clause_is_not_double_prefixed() -> None:
     """``public.case_a_src`` + schema=public must compile to public.case_a_src."""
     import sqlalchemy as sa

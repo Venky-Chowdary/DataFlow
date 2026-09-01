@@ -62,6 +62,9 @@ def _oracle_sku_password() -> str:
     from services.desktop_lab_cross import _oracle_password
 
     return _oracle_password()
+
+
+RECORDS = [{"id": "1", "amount": "1000.00"}, {"id": "2", "amount": "2000.50"}]
 COLUMNS = ["id", "amount"]
 SCHEMA = {"id": "INTEGER", "amount": "DECIMAL"}
 MAPPINGS = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]

@@ -405,22 +405,19 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             table=table,
         )
     if engine == "iceberg":
-        if not _reachable("127.0.0.1", 8181):
-            return "Iceberg REST not reachable on 127.0.0.1:8181"
+        # Filesystem CoW is the measured dest on this desktop. Iceberg REST
+        # on :8181 is up, but Docker bind-mounts of /tmp are not the agent
+        # filesystem (DinD), so REST FileIO cannot share warehouse files with
+        # pyiceberg. REST leftover MERGE stays in test_iceberg_rest_*.
+        path = root / f"iceberg_{table}"
+        path.mkdir(parents=True, exist_ok=True)
         return EndpointConfig(
             kind="database",
             format="iceberg",
-            host="127.0.0.1",
-            port=8181,
-            database="default",
-            schema="default",
-            connection_string="http://127.0.0.1:8181",
-            warehouse="file:///tmp/iceberg-rest-wh",
+            database=str(path),
             table=table,
-            extra={
-                "catalog_type": "rest",
-                "warehouse": "file:///tmp/iceberg-rest-wh",
-            },
+            schema="default",
+            warehouse=str(path),
         )
     if engine == "elasticsearch":
         if not _reachable("127.0.0.1", 9200):

@@ -52,6 +52,7 @@ from services.type_system import (
     is_nested_shape_collapse,
     is_unlimited_string_carrier,
 )
+from services.column_case import column_type_or_none, lookup_row_value
 from services.value_serializer import (
     DF_MISSING_SENTINEL,
     SQL_NULL_SENTINEL,
@@ -98,7 +99,7 @@ def samples_coerce_mapping(
     transform = resolve_transform(item, column_types=source_types, dest_types=target_types)
     checked = 0
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
-        raw = cell_to_string(row.get(src, ""))
+        raw = cell_to_string(lookup_row_value(row, src, ""))
         if not str(raw).strip():
             # Empty into typed sinks must not sample-clear (Map VARCHAR×INT cliff).
             from services.decision_kernel import normalize_logical_type
@@ -145,7 +146,7 @@ def _target_type_for(
     return resolve_mapping_target_type(
         mapping,
         target_types=dest_types,
-        source_type=str(source_types.get(src) or ""),
+        source_type=str(column_type_or_none(source_types, src) or source_types.get(src) or ""),
         dest_db_type=dest_db_type,
     )
 
@@ -350,7 +351,8 @@ def analyze_coercion(
         # never recorded, so every verdict has to read the column the same way
         # the write path will.
         src_type = _effective_source_type(
-            source_types.get(src, "VARCHAR"), m.get("transform")
+            column_type_or_none(source_types, src) or source_types.get(src, "VARCHAR"),
+            m.get("transform"),
         )
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         if not str(tgt_type or "").strip():
@@ -536,7 +538,7 @@ def analyze_coercion(
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
         for idx, row in enumerate(rows):
-            raw_cell = row.get(src, DF_MISSING_SENTINEL)
+            raw_cell = lookup_row_value(row, src, DF_MISSING_SENTINEL)
             # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
             # are real NULLs at write — never cast failures or silent-loss blocks.
             # Never use ``raw_cell in {…}`` for arbitrary cells — list/dict values

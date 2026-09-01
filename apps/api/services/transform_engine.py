@@ -2067,8 +2067,8 @@ def dry_run_sample(
         return False, ["No sample rows available for dry-run validation"]
 
     errors: list[str] = []
-    source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.column_case import header_index
     from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
 
@@ -2084,7 +2084,7 @@ def dry_run_sample(
     }
 
     for m in mappings:
-        idx = source_idx.get(m["source"])
+        idx = header_index(headers, m["source"])
         if idx is None:
             errors.append(f"Source column missing: {m['source']}")
             continue
@@ -2127,12 +2127,12 @@ def preview_quarantine_cells(
     Operators use this so Validate feels trustworthy vs silent Airbyte/Fivetran loads.
     """
     column_types = column_types or {}
-    source_idx = {h: i for i, h in enumerate(headers)}
     cells: list[dict] = []
     quarantine_count = 0
     coerce_count = 0
     ok_count = 0
 
+    from services.column_case import header_index
     from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
 
@@ -2142,7 +2142,7 @@ def preview_quarantine_cells(
     for m in mappings:
         src = m.get("source") or ""
         tgt = m.get("target") or src
-        idx = source_idx.get(src)
+        idx = header_index(headers, src)
         if idx is None:
             continue
         transform = resolve_transform(m, column_types=column_types)
