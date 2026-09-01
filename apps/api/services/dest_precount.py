@@ -742,6 +742,14 @@ def destination_key_hits(
         except Exception as exc:
             logger.warning("DynamoDB dest key census failed: %s", exc)
             return None
+    if db_type in {"elasticsearch", "opensearch"}:
+        try:
+            return _elasticsearch_key_hits(
+                cfg, index=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("Elasticsearch dest key census failed: %s", exc)
+            return None
     try:
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -1068,6 +1076,14 @@ def destination_key_list(
             rows = _mongodb_key_list(
                 cfg, schema=schema, table_name=table, cols=cols
             )
+        elif db_type == "redis":
+            rows = _redis_key_list(cfg, prefix=table, cols=cols)
+        elif db_type in {"elasticsearch", "opensearch"}:
+            rows = _elasticsearch_key_list(
+                cfg, index=table, cols=cols, dest_n=dest_n
+            )
+        elif db_type == "dynamodb":
+            rows = _dynamodb_key_list(cfg, table_name=table, cols=cols)
         else:
             from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -3675,6 +3691,289 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         return int(client.count(index=index).get("count") or 0)
     finally:
         client.close()
+
+
+def _redis_key_list(
+    cfg: dict[str, Any],
+    *,
+    prefix: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """PK tuples from JSON docs under ``prefix:*``. Non-JSON keys stay unlisted."""
+    from connectors.redis_reader import (
+        _redis_client,
+        load_redis_json_doc,
+        resolve_key_pattern,
+        scan_all_keys,
+    )
+
+    if not prefix or not cols:
+        return None
+    client = _redis_client(cfg)
+    redis_keys = scan_all_keys(client, resolve_key_pattern(prefix))
+    rows: list[tuple[Any, ...]] = []
+    for key in redis_keys:
+        doc = load_redis_json_doc(client.get(key))
+        if not isinstance(doc, dict):
+            return None
+        tup = tuple(doc.get(col) for col in cols)
+        if any(part is None for part in tup):
+            return None
+        rows.append(tup)
+    return rows
+
+
+def _redis_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    prefix: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """DEL leftover identities at the same ``prefix:identity`` the writer uses."""
+    from connectors.redis_reader import _redis_client, redis_key_for
+    from services.row_conservation import parse_delete_keys
+    from services.value_serializer import present_cell_text
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    if not leftover or not prefix:
+        return 0
+    client = _redis_client(dict(cfg))
+    to_del: list[str] = []
+    for tup in leftover:
+        identity = "|".join(present_cell_text(part) or "" for part in tup)
+        to_del.append(redis_key_for(prefix, identity))
+    if not to_del:
+        return 0
+    return int(client.delete(*to_del) or 0)
+
+
+def _elasticsearch_doc_id(tup: tuple[Any, ...]) -> str:
+    from services.value_serializer import present_cell_text
+
+    parts = [present_cell_text(part) or "" for part in tup]
+    return "|".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
+
+
+def _elasticsearch_key_list(
+    cfg: dict[str, Any],
+    *,
+    index: str,
+    cols: list[str],
+    dest_n: int,
+) -> list[tuple[Any, ...]] | None:
+    """PK tuples from the index ``_source`` (or ``_id`` when that is the PK)."""
+    from connectors.elasticsearch_reader import _client
+
+    if not index or not cols:
+        return None
+    client = _client(cfg)
+    try:
+        if not client.indices.exists(index=index):
+            return []
+        client.indices.refresh(index=index)
+        size = max(int(dest_n or 0), 0)
+        if size <= 0:
+            return []
+        resp = client.search(
+            index=index,
+            body={
+                "query": {"match_all": {}},
+                "_source": cols,
+                "size": size,
+            },
+        )
+        hits = (resp.get("hits") or {}).get("hits") or []
+        rows: list[tuple[Any, ...]] = []
+        for hit in hits:
+            src = dict(hit.get("_source") or {})
+            if "_id" not in src:
+                src["_id"] = hit.get("_id")
+            tup = tuple(src.get(col, hit.get("_id") if col.lower() in {"id", "_id"} else None) for col in cols)
+            if any(part is None for part in tup):
+                return None
+            rows.append(tup)
+        return rows
+    finally:
+        client.close()
+
+
+def _elasticsearch_key_hits(
+    cfg: dict[str, Any],
+    *,
+    index: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many leftover identities the index already holds (``mget`` by ``_id``)."""
+    from connectors.elasticsearch_reader import _client
+
+    if not index or not cols:
+        return None
+    client = _client(cfg)
+    try:
+        if not client.indices.exists(index=index):
+            return 0
+        ids = [_elasticsearch_doc_id(tup) for tup in keys if _elasticsearch_doc_id(tup)]
+        if not ids:
+            return 0
+        resp = client.mget(index=index, ids=ids)
+        return sum(1 for doc in (resp.get("docs") or []) if doc.get("found"))
+    finally:
+        client.close()
+
+
+def _elasticsearch_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    index: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """Delete leftover documents by the same ``_id`` the writer upserts."""
+    from elasticsearch.helpers import bulk
+
+    from connectors.elasticsearch_reader import _client
+    from services.row_conservation import parse_delete_keys
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    if not leftover or not index:
+        return 0
+    client = _client(dict(cfg))
+    try:
+        if not client.indices.exists(index=index):
+            return 0
+        actions = [
+            {"_op_type": "delete", "_index": index, "_id": _elasticsearch_doc_id(tup)}
+            for tup in leftover
+            if _elasticsearch_doc_id(tup)
+        ]
+        if not actions:
+            return 0
+        deleted, errors = bulk(client, actions, raise_on_error=False, refresh=True)
+        if errors:
+            raise RuntimeError(f"elasticsearch leftover DELETE failed: {errors[:3]}")
+        return int(deleted or 0)
+    finally:
+        client.close()
+
+
+def _dynamodb_key_list(
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """HASH/RANGE tuples from ``Scan`` — KeySchema only, never a non-identity attr."""
+    from botocore.exceptions import ClientError
+
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_reader import _item_to_record, describe_key_schema
+
+    table = (table_name or "").strip()
+    if not table or not cols:
+        return None
+    try:
+        schema = describe_key_schema(cfg, table)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return []
+        raise
+    key_names = [str(item.get("name") or "") for item in schema]
+    if sorted(name.lower() for name in key_names) != sorted(col.lower() for col in cols):
+        return None
+    name_by_lower = {name.lower(): name for name in key_names}
+    ordered = [name_by_lower[col.lower()] for col in cols]
+    client = boto3_client("dynamodb", cfg)
+    expr_names = {f"#k{i}": name for i, name in enumerate(ordered)}
+    projection = ",".join(expr_names)
+    rows: list[tuple[Any, ...]] = []
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "TableName": table,
+            "ProjectionExpression": projection,
+            "ExpressionAttributeNames": expr_names,
+            "ConsistentRead": True,
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        try:
+            resp = client.scan(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                return []
+            raise
+        for item in resp.get("Items") or []:
+            rec = _item_to_record(item)
+            tup = tuple(rec.get(name) for name in ordered)
+            if any(part is None for part in tup):
+                return None
+            rows.append(tup)
+        start_key = resp.get("LastEvaluatedKey") or None
+        if not start_key:
+            return rows
+
+
+def _dynamodb_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """DeleteItem leftover HASH/RANGE keys using the writer's AttributeValue encode."""
+    from botocore.exceptions import ClientError
+
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_reader import describe_key_schema
+    from connectors.dynamodb_writer import _coerce_dynamo_cell, _to_attr
+    from services.row_conservation import parse_delete_keys
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    table = (table_name or "").strip()
+    if not leftover or not table or not cols:
+        return 0
+    try:
+        schema = describe_key_schema(dict(cfg), table)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return 0
+        raise
+    key_names = [str(item.get("name") or "") for item in schema]
+    if sorted(name.lower() for name in key_names) != sorted(col.lower() for col in cols):
+        return 0
+    declared = {
+        str(item.get("name") or "").lower(): str(item.get("attr_type") or "VARCHAR")
+        for item in schema
+    }
+    key_letters = {
+        name: {"VARCHAR": "S", "DECIMAL": "N", "BINARY": "B"}.get(declared_type, "S")
+        for name, declared_type in declared.items()
+    }
+    client = boto3_client("dynamodb", dict(cfg))
+    deleted = 0
+    for tup in leftover:
+        item = {
+            name: _to_attr(
+                _coerce_dynamo_cell(
+                    value,
+                    col=name,
+                    logical_type=declared.get(name.lower(), "VARCHAR"),
+                    key_types={name: key_letters.get(name.lower(), "S")},
+                ),
+                declared.get(name.lower(), "VARCHAR"),
+            )
+            for name, value in zip(cols, tup)
+        }
+        try:
+            client.delete_item(TableName=table, Key=item)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                continue
+            raise
+        deleted += 1
+    return deleted
 
 
 def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:

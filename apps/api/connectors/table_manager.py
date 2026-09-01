@@ -370,7 +370,8 @@ def delete_by_primary_keys(
 ) -> int:
     """Delete rows from a destination by primary key values.
 
-    Supports SQL engines (PostgreSQL, MySQL, SQLite, generic_sql) and MongoDB.
+    Supports SQL engines (PostgreSQL, MySQL, SQLite, generic_sql), MongoDB,
+    Redis, Elasticsearch, DynamoDB, Iceberg, and object-store leftovers.
 
     ``primary_key_column`` may be a single column or a list / comma-joined
     composite. Composite keys arrive already joined with the unit separator
@@ -479,6 +480,24 @@ def delete_by_primary_keys(
             ) from exc
     if not work_keys:
         return 0
+    if dt == "redis":
+        from services.dest_precount import _redis_delete_keys
+
+        return _redis_delete_keys(
+            cfg, prefix=table_name, cols=pk_cols, keys=work_keys
+        )
+    if dt in {"elasticsearch", "opensearch"}:
+        from services.dest_precount import _elasticsearch_delete_keys
+
+        return _elasticsearch_delete_keys(
+            cfg, index=table_name, cols=pk_cols, keys=work_keys
+        )
+    if dt == "dynamodb":
+        from services.dest_precount import _dynamodb_delete_keys
+
+        return _dynamodb_delete_keys(
+            cfg, table_name=table_name, cols=pk_cols, keys=work_keys
+        )
     if len(pk_cols) > 1:
         return _delete_composite(dt, cfg, table_name, pk_cols, work_keys, schema)
     if dt in ("postgresql", "redshift"):
