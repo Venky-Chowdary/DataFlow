@@ -1555,6 +1555,7 @@ def _auto_map(
                             request.source.kind or "",
                             request.source.format or "",
                         ),
+                        job_id=job_id,
                     )
                     auto = result.get("mappings")
                     if (
@@ -1648,6 +1649,7 @@ def _auto_map(
                             request.source.kind or "",
                             request.source.format or "",
                         ),
+                        job_id=job_id,
                     )
                     auto = result.get("mappings")
                     if (

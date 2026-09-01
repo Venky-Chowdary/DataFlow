@@ -62,6 +62,41 @@ PR [#125](https://github.com/Venky-Chowdary/DataFlow/pull/125).
   defects and one state-loss defect (returning to Map erased the recorded
   reduction) were found *by* that browser run and fixed in the same PR.
 
+### N2 · AI egress manifest + metadata-only mapper — **this PR (not yet merged)**
+
+Canonical owner `apps/api/services/ai_egress.py`. Choke point:
+`Provider.generate` / `generate_agent` in `apps/api/src/ai/llm/provider.py`.
+
+* **What it is.** A per-job, hash-chained record of exactly what left the
+  customer boundary toward any model, plus an **enforced** mapper mode in which
+  the model sees column names, declared types, and aggregate profiles
+  (`n` / `non_empty` / `max_len` / `looks_numeric`) — never cell values. A
+  prompt that already interpolated samples is stripped before any provider
+  sees it; residual cells after strip replace the whole user prompt with a
+  refusal stub (fail closed). Each outbound `generate` / `generate_agent`
+  appends one `action=ai.egress` event committing to `payload_sha256` of the
+  bytes actually handed to the provider. **Cell values are never stored.**
+  Cloud providers (`openai`, `anthropic`) set
+  `crossed_customer_boundary=true`; local / Ollama are recorded as not
+  crossing. ITEM 1 is unchanged: the LLM still suggests only.
+* **Default.** **On.** `DATAWRAP_AI_METADATA_ONLY` /
+  `DATAFLOW_AI_METADATA_ONLY` unset = metadata-only. Opt out with `false`.
+  This is the opposite of `FIELD_REDUCTION_STRICT` (which stays off): security
+  review asked what left the boundary, and an unset flag that quietly sends
+  cells is a promise, not a gate.
+* **User surface.** Mapping API `engine.llm.metadata_only` +
+  `engine.llm.ai_egress`; signed proof pack field `ai_egress`; chain action
+  `ai.egress`. Studio Map before a job exists records `map:unscoped`; plan
+  mapping binds `plan_id`; `/map` accepts optional `job_id`. No Map chrome
+  was added — the auditor-visible proof is the pack and the chain.
+* **Honesty.** No cloud LLM key on this box, so live OpenAI/Anthropic egress
+  is not claimed. Independent reread is a file-backed audit JSONL, not
+  `last_manifest()`.
+* **Proof.** 52 targeted tests passed on this branch
+  (`test_ai_egress_n2` 10 + `test_llm_mapping` 14 + ITEM-1 + signed proof pack
+  + evidence chain). Independent JSONL reread of `action=ai.egress` (not
+  `last_manifest()`). No cloud LLM key — live OpenAI/Anthropic not claimed.
+
 ### N3 · Durable, tamper-evident evidence chain — **Delivered**
 
 PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
@@ -77,8 +112,7 @@ PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
   removed.
 * **Why it matters commercially.** It is the difference between "a JSON
   Datawrap generated about itself" and "evidence a third party can verify".
-  It is also the prerequisite for N2 and N5, which have nowhere durable to write
-  attestations without it.
+  N2 writes `ai.egress` attestations here. N5 still depends on this store.
 * **Regulatory driver.** GDPR Art. 30, SOX, BCBS 239, DORA — retained,
   verifiable records rather than a live dashboard.
 * **Proof.** Targeted suites green, web `tsc -b` clean. One Mongo CDC failure
@@ -94,12 +128,10 @@ Named precisely so nobody reads §2 as "the tier is done".
 
 | # | Capability | What it must do | Why it is not optional |
 |---|------------|-----------------|------------------------|
-| N2 | **AI egress manifest + metadata-only mode** | A per-job manifest of exactly what left the customer boundary toward any model, plus an enforced mode in which the mapper sees schema, statistics and profiles — never cell values | This is the answer to the security-review objection ("your product will breach my data if it sends it to an LLM"). Without an enforced mode and a manifest, the answer is a promise |
 | N4 | **Population-level code crosswalk coverage gate** | Prove that every distinct source code value has a target mapping across the *population*, not a sample; unmapped values fail closed | Legacy reference-data conversion is where field-reducing migrations silently corrupt meaning |
 | N5 | **Control-total + referential-integrity proof gates** | Gate-8 extensions: independently recomputed control totals (sums of monetary columns, not just counts) and destination-side referential-integrity checks | A row count proves nothing about a ledger balance; this is what a bank examiner asks for |
 
-Dependency: N2 and N5 both write attestations, so both depend on N3 — which is
-why N3 was built first.
+Dependency: N5 writes attestations onto N3's chain. N2 now does too (this PR).
 
 ---
 
@@ -116,7 +148,8 @@ proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
 | D16 | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) | The Elasticsearch reader reported no types, so an index read back as `string` placeholders and Map demoted an exact `id → id` identity to 0.63 on a route that is not lossy. An index *declares* its fields; the reader now reports the mapping (0.99 measured live). CI mypy baseline also cleaned |
 | D1 | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) | A schemaless dest shape inferred from a sample was compared as declared DDL, so run 2 refused run 1. Authority now leaves the probe: sampled profiles widen; declared catalogs stay enforced; `NoSuchKey` stays unread. Live Postgres→MinIO 2026-09-01: probe still measured `DECIMAL(4,1)`, Map `preserve` @ 0.99 origin `sampled_profile`, run 2 transferred 2 rows, independent boto3 reread matched |
 
-This sequence is closed. N2 / N4 / N5 remain not started (§3).
+This sequence is closed. N2 is merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)).
+N4 and N5 remain not started until their PRs land.
 
 ---
 
@@ -156,13 +189,12 @@ This sequence is closed. N2 / N4 / N5 remain not started (§3).
 
 ## 7. How to continue
 
-1. **N2** — AI egress manifest + enforced metadata-only mode. It unblocks
-   security review, and N3 has already given it somewhere durable to write.
-2. Then N4 and N5, in that order — N5's control totals are more valuable once
-   crosswalk coverage is provable.
+1. **N4** — population-level code-system crosswalk coverage (G20).
+2. Then **N5** — control totals and destination referential integrity.
 3. Then the never-measured items: scheduler DST/workspace cells, governance
    ops in the audit certificate, the remaining connector-matrix cells, SFTP
    Excel sync modes.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
-   (`docs/OPEN_DEFECT_REGISTER.md` §5).
+   (`docs/OPEN_DEFECT_REGISTER.md` §5). No cloud LLM key is present here, so
+   N2 does not claim a live OpenAI/Anthropic round-trip.

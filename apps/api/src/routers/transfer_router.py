@@ -303,6 +303,10 @@ class MapColumnsRequest(BaseModel):
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
+    # Optional job / plan id so N2 AI-egress events are job-scoped in the chain.
+    # Studio Map before a job exists leaves this empty; the manifest records
+    # resource ``map:unscoped`` rather than inventing a job.
+    job_id: str = ""
 
 
 @router.get("/capabilities")
@@ -486,6 +490,7 @@ async def map_columns_route(body: MapColumnsRequest):
                 body.source_kind, body.file_format or ""
             ),
             prior_mappings=list(body.prior_mappings or []),
+            job_id=str(body.job_id or "").strip(),
         )
     nested_fields: list[dict[str, str]] = []
     try:

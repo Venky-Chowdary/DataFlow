@@ -171,6 +171,10 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
         if not self.is_available():
             return LLMResponse(content="", success=False, provider=self.name)
 
+        from services.ai_egress import prepare_generate
+
+        prompt, system = prepare_generate(prompt, system, provider=self.name)
+
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -205,6 +209,10 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
         """OpenAI chat.completions turn with optional native function/tool calling."""
         if not self.is_available():
             return {"success": False, "error": "OpenAI not available"}
+
+        from services.ai_egress import prepare_messages
+
+        messages, system = prepare_messages(list(messages or []), system, provider=self.name)
 
         try:
             openai_tools = None
@@ -311,6 +319,10 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
         if not self.is_available():
             return LLMResponse(content="", success=False, provider=self.name)
 
+        from services.ai_egress import prepare_generate
+
+        prompt, system = prepare_generate(prompt, system, provider=self.name)
+
         try:
             response = self._client.messages.create(
                 model=self.model,
@@ -341,6 +353,10 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
         """Anthropic-style agent turn with optional tool use."""
         if not self.is_available():
             return {"success": False, "error": "Anthropic not available"}
+
+        from services.ai_egress import prepare_messages
+
+        messages, system = prepare_messages(list(messages or []), system, provider=self.name)
 
         try:
             kwargs: dict = {
@@ -409,6 +425,10 @@ class DataTransferOllamaProvider(DataTransferLLMProvider):
         if not self.is_available():
             return LLMResponse(content="", success=False, provider=self.name)
 
+        from services.ai_egress import prepare_generate
+
+        prompt, system = prepare_generate(prompt, system, provider=self.name)
+
         try:
             import httpx
             resp = httpx.post(
@@ -443,6 +463,10 @@ class DataTransferLocalProvider(DataTransferLLMProvider):
 
     def generate(self, prompt: str, system: str = "", max_tokens: int = 1024) -> LLMResponse:
         """Generate structured response using local knowledge."""
+        from services.ai_egress import prepare_generate
+
+        prompt, system = prepare_generate(prompt, system, provider=self.name)
+        _ = system  # local knowledge reads the user prompt only
         from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
         from ..knowledge.synonyms import resolve_canonical
 

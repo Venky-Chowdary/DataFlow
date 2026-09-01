@@ -574,6 +574,7 @@ def run_mapping_pipeline(
     source_types_authoritative: bool = False,
     prior_mappings: list[dict] | None = None,
     target_type_authority: dict[str, str] | None = None,
+    job_id: str = "",
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -760,12 +761,19 @@ def run_mapping_pipeline(
             for s in source_schemas
             if s.get("samples")
         }
+    llm_types = {
+        str(s.get("name") or ""): str(s.get("inferred_type") or s.get("native_type") or "")
+        for s in (source_schemas or [])
+        if s.get("name")
+    }
     pruned, llm_meta = refine_mappings_with_llm(
         pruned,
         source_columns,
         target_columns,
         source_samples=llm_samples,
+        source_types=llm_types,
         enabled=use_llm,
+        job_id=job_id,
     )
 
     # Module 13 — re-apply operator-locked priors before constraints / proof.
@@ -1377,6 +1385,8 @@ def run_mapping_pipeline(
             "policy": llm_meta.get("llm_policy"),
             "provider": llm_meta.get("llm_provider"),
             "error": llm_meta.get("llm_error"),
+            "metadata_only": bool(llm_meta.get("ai_metadata_only")),
+            "ai_egress": llm_meta.get("ai_egress"),
         },
         "mapping_engine_contract": override_report or {
             "contract_version": "mapping_engine_contract.v1",
