@@ -58,6 +58,7 @@ REPORTED_SUMMARY_KEYS = (
     "rejected_details_total",
     "target_rows_before",
     "load_method",
+    "copy_workers",
 )
 
 

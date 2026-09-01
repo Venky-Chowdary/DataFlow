@@ -26,7 +26,10 @@ from connectors.mysql_load_data import (  # noqa: E402
 from connectors.mysql_writer import write_mapped_rows  # noqa: E402
 from services.copy_pg_mysql import (  # noqa: E402
     _mysql_create_sql,
+    ctid_predicate,
+    heap_page_ranges,
     mapping_is_plain_carry,
+    pg_mysql_copy_workers,
     pg_type_is_load_safe,
 )
 
@@ -142,6 +145,22 @@ def test_copy_pg_mysql_declines_lossy_transform_and_jsonb():
     )
     assert sql.startswith("CREATE TABLE `orders`")
     assert "PRIMARY KEY (`id`)" in sql
+
+
+def test_heap_page_ranges_are_disjoint_and_cover():
+    ranges = heap_page_ranges(100, 4)
+    assert ranges[0][0] == 0
+    assert ranges[-1][1] is None
+    for i in range(len(ranges) - 1):
+        lo, hi = ranges[i]
+        assert hi is not None
+        assert lo < hi
+        assert hi == ranges[i + 1][0]
+    assert heap_page_ranges(0, 8) == [(0, None)]
+    assert ctid_predicate(0, None) == ""
+    assert "ctid >=" in ctid_predicate(25, None)
+    assert "AND" in ctid_predicate(10, 20)
+    assert pg_mysql_copy_workers(10) == 1
 
 
 def test_warning_rows_block_commit_notes_do_not():

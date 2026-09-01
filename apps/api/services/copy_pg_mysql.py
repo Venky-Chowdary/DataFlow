@@ -6,7 +6,11 @@ cannot use that wire. This path streams ``COPY (SELECT …) TO STDOUT`` text
 
 Python never materializes a row. Dest ``COUNT(*)`` in the same operator
 proof must equal the source snapshot count. Warning/Error from LOAD DATA
-rolls the destination back (truncate) and raises — never silent coerce.
+rolls the destination back and raises — never silent coerce.
+
+Large tables overlap COPY and LOAD DATA on a FIFO (no full tempfile) and
+may split the heap by ``ctid`` page range across workers that share one
+``pg_export_snapshot()``. A missed or overlapping page fails dest COUNT.
 
 Declines (row path keeps quarantine): transforms that change values, jsonb,
 bytea, timestamptz, arrays, non-empty append, missing local_infile.
@@ -17,8 +21,10 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 from typing import Any
 
+from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote, _table_ref
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
@@ -53,6 +59,10 @@ _SAFE_PG_BASES = frozenset({
     "BOOL",
 })
 
+_PIPE_CHUNK = 1 << 20
+_MAX_WORKERS = 32
+_AUTO_PARALLEL_ROWS = 50_000
+
 
 def _pg_base(declared: str) -> str:
     from connectors.sql_temporal import sql_base_type
@@ -84,6 +94,52 @@ def pg_type_is_load_safe(declared: str) -> bool:
     if "TIME ZONE" in raw and "WITHOUT" not in raw:
         return False
     return base in _SAFE_PG_BASES or raw.split("(")[0].strip() in _SAFE_PG_BASES
+
+
+def pg_mysql_copy_workers(source_count: int) -> int:
+    """Operator cap. ``auto`` (default) uses up to 4 workers at ≥50k rows."""
+    raw = (getenv_brand("PG_MYSQL_COPY_WORKERS", "auto") or "auto").strip().lower()
+    if raw in {"auto", ""}:
+        if int(source_count or 0) >= _AUTO_PARALLEL_ROWS:
+            return min(4, os.cpu_count() or 4)
+        return 1
+    try:
+        return max(1, min(int(raw), _MAX_WORKERS))
+    except ValueError:
+        return 1
+
+
+def heap_page_ranges(relpages: int, workers: int) -> list[tuple[int, int | None]]:
+    """Disjoint ``[lo, hi)`` heap page ranges. Last shard is unbounded (``hi=None``)."""
+    pages = max(int(relpages or 0), 0)
+    n = max(1, min(int(workers or 1), _MAX_WORKERS))
+    if pages <= 1:
+        return [(0, None)]
+    n = min(n, pages)
+    size = max(pages // n, 1)
+    ranges: list[tuple[int, int | None]] = []
+    lo = 0
+    for i in range(n):
+        if i == n - 1:
+            ranges.append((lo, None))
+            break
+        hi = lo + size
+        ranges.append((lo, hi))
+        lo = hi
+    return ranges
+
+
+def ctid_predicate(lo_page: int, hi_page: int | None) -> str:
+    """Heap-page filter. Empty string means the whole table (one worker)."""
+    if lo_page <= 0 and hi_page is None:
+        return ""
+    if hi_page is None:
+        return f"ctid >= '({int(lo_page)},1)'::tid"
+    if lo_page <= 0:
+        return f"ctid < '({int(hi_page)},1)'::tid"
+    return (
+        f"ctid >= '({int(lo_page)},1)'::tid AND ctid < '({int(hi_page)},1)'::tid"
+    )
 
 
 def _pg_copy_select_expr(column: str, declared: str) -> str:
@@ -118,6 +174,165 @@ def _mysql_create_sql(
     return f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)})"
 
 
+def _copy_select_sql(select_list: str, source_ref: str, predicate: str) -> str:
+    where = f" WHERE {predicate}" if predicate else ""
+    return (
+        f"COPY (SELECT {select_list} FROM {source_ref}{where}) "  # nosec B608
+        "TO STDOUT WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+    )
+
+
+def _fifo_copy_into_mysql(
+    src_cur: Any,
+    dst_cur: Any,
+    *,
+    copy_sql: str,
+    table_q: str,
+    columns: list[str],
+) -> None:
+    """Overlap PG COPY writes with MySQL LOCAL INFILE reads. No full tempfile."""
+    from connectors.mysql_load_data import (
+        blocking_load_data_warnings,
+        build_load_data_sql,
+        quote_load_data_path,
+    )
+
+    tmp = tempfile.mkdtemp(prefix="df_pg_mysql_")
+    path = os.path.join(tmp, "stream.tsv")
+    os.mkfifo(path, 0o600)
+    load_sql = build_load_data_sql(
+        table_q=table_q,
+        columns=columns,
+        infile_sql=quote_load_data_path(path),
+    )
+    failure: list[BaseException] = []
+
+    def _pump() -> None:
+        try:
+            with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
+                src_cur.copy_expert(copy_sql, writer)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
+            failure.append(exc)
+
+    pump = threading.Thread(target=_pump, name="pg-mysql-copy-fifo", daemon=True)
+    pump.start()
+    try:
+        dst_cur.execute(load_sql)
+        dst_cur.execute("SHOW WARNINGS")
+        blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
+        if blocked:
+            raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
+    except BaseException:
+        pump.join(timeout=30)
+        raise
+    finally:
+        pump.join(timeout=120)
+        try:
+            os.unlink(path)
+        except OSError:
+            logger.debug("fifo unlink skipped", exc_info=True)
+        try:
+            os.rmdir(tmp)
+        except OSError:
+            logger.debug("fifo dir rmdir skipped", exc_info=True)
+    if failure:
+        raise failure[0]
+
+
+def _pg_connect(cfg: dict[str, Any]) -> Any:
+    from connectors.postgresql_conn import get_connection as pg_connect
+
+    return pg_connect(
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port") or 5432),
+        database=cfg.get("database") or cfg.get("dbname") or "",
+        username=cfg.get("username") or cfg.get("user") or "",
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl", False)),
+    )
+
+
+def _mysql_connect(cfg: dict[str, Any]) -> Any:
+    from connectors.mysql_conn import get_connection as mysql_connect
+
+    conn = mysql_connect(
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port") or 3306),
+        database=cfg.get("database", ""),
+        username=cfg.get("username") or cfg.get("user") or "",
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl", False)),
+        purpose="write",
+    )
+    conn.autocommit = False
+    return conn
+
+
+def _heap_relpages(cur: Any, schema: str, table: str) -> int:
+    cur.execute(
+        """
+        SELECT c.relpages
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s
+        """,
+        (schema or "public", table),
+    )
+    row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _run_shard(
+    *,
+    source_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    snapshot_id: str,
+    copy_sql: str,
+    table_q: str,
+    columns: list[str],
+) -> None:
+    from connectors.mysql_load_data import mysql_load_data_session_ready
+
+    src = _pg_connect(source_cfg)
+    dst = _mysql_connect(dest_cfg)
+    try:
+        src.autocommit = False
+        with src.cursor() as src_cur, dst.cursor() as dst_cur:
+            src_cur.execute(
+                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+            )
+            src_cur.execute("SET TRANSACTION SNAPSHOT %s", (snapshot_id,))
+            ready, why = mysql_load_data_session_ready(dst_cur, dst)
+            if not ready:
+                raise FastPathUnavailable(why)
+            _fifo_copy_into_mysql(
+                src_cur,
+                dst_cur,
+                copy_sql=copy_sql,
+                table_q=table_q,
+                columns=columns,
+            )
+            dst.commit()
+            src.commit()
+    except Exception:
+        try:
+            dst.rollback()
+        except Exception:
+            logger.debug("shard mysql rollback skipped", exc_info=True)
+        raise
+    finally:
+        try:
+            src.close()
+        except Exception:
+            logger.debug("shard pg close skipped", exc_info=True)
+        try:
+            dst.close()
+        except Exception:
+            logger.debug("shard mysql close skipped", exc_info=True)
+
+
 def copy_postgres_to_mysql(
     *,
     source_cfg: dict[str, Any],
@@ -133,14 +348,7 @@ def copy_postgres_to_mysql(
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
 
-    from connectors.mysql_conn import get_connection as mysql_connect
-    from connectors.mysql_load_data import (
-        blocking_load_data_warnings,
-        build_load_data_sql,
-        mysql_load_data_session_ready,
-        quote_load_data_path,
-    )
-    from connectors.postgresql_conn import get_connection as pg_connect
+    from connectors.mysql_load_data import mysql_load_data_session_ready
     from connectors.write_resilience import is_public_proxy_host
     from services.copy_fast_path import source_column_types, source_table_shape
 
@@ -152,29 +360,12 @@ def copy_postgres_to_mysql(
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
     source_ref = _table_ref(source_schema, source_table)
+    table_q = _mysql_ident(dest_table)
 
-    source_conn = pg_connect(
-        host=source_cfg.get("host", ""),
-        port=int(source_cfg.get("port") or 5432),
-        database=source_cfg.get("database") or source_cfg.get("dbname") or "",
-        username=source_cfg.get("username") or source_cfg.get("user") or "",
-        password=source_cfg.get("password", ""),
-        connection_string=source_cfg.get("connection_string", ""),
-        ssl=bool(source_cfg.get("ssl", False)),
-    )
-    dest_conn = mysql_connect(
-        host=dest_cfg.get("host", ""),
-        port=int(dest_cfg.get("port") or 3306),
-        database=dest_cfg.get("database", ""),
-        username=dest_cfg.get("username") or dest_cfg.get("user") or "",
-        password=dest_cfg.get("password", ""),
-        connection_string=dest_cfg.get("connection_string", ""),
-        ssl=bool(dest_cfg.get("ssl", False)),
-        purpose="write",
-    )
-    dest_conn.autocommit = False
-    fd, path = tempfile.mkstemp(prefix="df_pg_mysql_", suffix=".tsv")
-    os.close(fd)
+    source_conn = _pg_connect(source_cfg)
+    dest_conn = _mysql_connect(dest_cfg)
+    created_here = False
+    existed_before = False
     try:
         source_conn.autocommit = False
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
@@ -200,13 +391,13 @@ def copy_postgres_to_mysql(
             if not ready:
                 raise FastPathUnavailable(why)
 
-            table_q = _mysql_ident(dest_table)
             dst_cur.execute(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_schema = DATABASE() AND table_name = %s LIMIT 1",
                 (dest_table,),
             )
             exists = dst_cur.fetchone() is not None
+            existed_before = bool(exists)
             if replace_destination and exists:
                 dst_cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
                 exists = False
@@ -225,40 +416,60 @@ def copy_postgres_to_mysql(
                 ]
                 create_sql = _mysql_create_sql(dest_table, pairs, mysql_ddls, pk)
                 dst_cur.execute(create_sql)  # nosec B608
+                created_here = True
+                dest_conn.commit()
 
             src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
-
+            src_cur.execute("SELECT pg_export_snapshot()")
+            snapshot_id = str(src_cur.fetchone()[0])
+            relpages = _heap_relpages(src_cur, source_schema, source_table)
+            workers = pg_mysql_copy_workers(source_count)
+            ranges = heap_page_ranges(relpages, workers)
             select_list = ", ".join(
                 _pg_copy_select_expr(col, live_l[col.lower()]) for col in source_cols
             )
-            copy_sql = (
-                f"COPY (SELECT {select_list} FROM {source_ref}) "  # nosec B608
-                "TO STDOUT WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
-            )
-            with open(path, "wb") as handle:
-                src_cur.copy_expert(copy_sql, handle)
 
-            load_sql = build_load_data_sql(
-                table_q=table_q,
-                columns=target_cols,
-                infile_sql=quote_load_data_path(path),
-            )
-            try:
-                dst_cur.execute(load_sql)
-            except Exception as exc:
-                dest_conn.rollback()
-                raise FastPathUnavailable(f"LOAD DATA failed: {exc}") from exc
-            dst_cur.execute("SHOW WARNINGS")
-            blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
-            if blocked:
-                dest_conn.rollback()
-                raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
+            if len(ranges) == 1:
+                _fifo_copy_into_mysql(
+                    src_cur,
+                    dst_cur,
+                    copy_sql=_copy_select_sql(
+                        select_list, source_ref, ctid_predicate(*ranges[0])
+                    ),
+                    table_q=table_q,
+                    columns=target_cols,
+                )
+                dest_conn.commit()
+            else:
+                errors: list[BaseException] = []
+                threads: list[threading.Thread] = []
+                for lo_hi in ranges:
+                    t = threading.Thread(
+                        target=_shard_thread,
+                        kwargs={
+                            "source_cfg": source_cfg,
+                            "dest_cfg": dest_cfg,
+                            "snapshot_id": snapshot_id,
+                            "copy_sql": _copy_select_sql(
+                                select_list, source_ref, ctid_predicate(*lo_hi)
+                            ),
+                            "table_q": table_q,
+                            "columns": target_cols,
+                            "errors": errors,
+                        },
+                        daemon=True,
+                    )
+                    threads.append(t)
+                    t.start()
+                for t in threads:
+                    t.join()
+                if errors:
+                    raise errors[0]
 
             dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
             if dest_count != source_count:
-                dest_conn.rollback()
                 raise ValueError(
                     "PG→MySQL COPY refused: dest COUNT(*) "
                     f"{dest_count} != source snapshot {source_count}"
@@ -272,13 +483,29 @@ def copy_postgres_to_mysql(
                 source_checksum=proof,
                 target_rows=dest_count,
                 target_checksum=proof,
+                source_snapshot={
+                    "pg_snapshot": snapshot_id,
+                    "copy_workers": len(ranges),
+                },
                 proof_scope="dest_count_equals_source_snapshot_count",
             )
+    except Exception:
+        if created_here:
+            try:
+                with dest_conn.cursor() as cur:
+                    cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug("dest drop after copy failure skipped", exc_info=True)
+        elif existed_before:
+            try:
+                with dest_conn.cursor() as cur:
+                    cur.execute(f"TRUNCATE TABLE {table_q}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug("dest truncate after copy failure skipped", exc_info=True)
+        raise
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("pg→mysql tempfile unlink skipped", exc_info=True)
         try:
             source_conn.close()
         except Exception:
@@ -287,3 +514,26 @@ def copy_postgres_to_mysql(
             dest_conn.close()
         except Exception:
             logger.debug("mysql dest close skipped", exc_info=True)
+
+
+def _shard_thread(
+    *,
+    source_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    snapshot_id: str,
+    copy_sql: str,
+    table_q: str,
+    columns: list[str],
+    errors: list[BaseException],
+) -> None:
+    try:
+        _run_shard(
+            source_cfg=source_cfg,
+            dest_cfg=dest_cfg,
+            snapshot_id=snapshot_id,
+            copy_sql=copy_sql,
+            table_q=table_q,
+            columns=columns,
+        )
+    except BaseException as exc:  # noqa: BLE001 — collected; coordinator fails closed
+        errors.append(exc)

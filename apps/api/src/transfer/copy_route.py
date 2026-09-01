@@ -264,10 +264,14 @@ def _try_pg_mysql_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": "full_refresh_append" if not replace_destination else "full_refresh_overwrite",
         "proof_scope": result.proof_scope,
+        "source_snapshot": dict(result.source_snapshot or {}),
+        "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
     }
+    workers = int((result.source_snapshot or {}).get("copy_workers") or 1)
     ddl_log = [
         f"COPY {source_table} → MySQL {dest_table} "
-        f"({result.source_rows:,} rows, text COPY + STRICT LOAD DATA)",
+        f"({result.source_rows:,} rows, text COPY + STRICT LOAD DATA, "
+        f"{workers} worker(s))",
         "Proof: destination COUNT(*) equals source snapshot count.",
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
