@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class _Readable(Protocol):
+    """A GET body or file handle the ImportError JSON fallback can drain."""
+
+    def read(self, size: int = -1) -> bytes | str: ...
 
 
 # Prefer stable, documented wrappers when several array-of-objects keys exist.
@@ -432,26 +439,43 @@ def _count_json_records_stax(source: Any, parse: Any) -> int | None:
     return None if found is None else found[0]
 
 
-def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+def _json_count_open(content: bytes | str | Path | _Readable) -> tuple[Any, Any]:
     from services.dest_precount import artifact_byte_source
 
     return artifact_byte_source(content)
 
 
-def _json_count_as_text(content: bytes | str | Path) -> str | None:
+def _json_count_as_text(content: bytes | str | Path | _Readable) -> str | None:
+    """``json.loads`` fallback when ijson is absent.
+
+    Path / bytes / str stay as they were. A readable GET stream (S3
+    ``StreamingBody``, MinIO, GCS) is the bytes we already opened — treating
+    that handle as unreadable made Gate-8 dest sample fail a well-formed JSON
+    array the writer just landed (D1 live Postgres → MinIO). Gzip *paths*
+    stay unmeasured: the ImportError fallback must not slurp a compressed
+    file it cannot name as JSON.
+    """
     try:
         if isinstance(content, Path):
+            if str(content).lower().endswith(".gz"):
+                return None
             return content.read_text(encoding="utf-8")
         if isinstance(content, bytes):
             return content.decode("utf-8")
         if isinstance(content, str):
             return content
-    except (OSError, UnicodeDecodeError):
+        if isinstance(content, _Readable):
+            raw = content.read()
+            if isinstance(raw, bytes):
+                return raw.decode("utf-8")
+            if isinstance(raw, str):
+                return raw
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
         return None
     return None
 
 
-def count_json_records(content: bytes | str | Path) -> int | None:
+def count_json_records(content: bytes | str | Path | _Readable) -> int | None:
     """Dest-engine record COUNT of tabular JSON. Never ingest fallbacks.
 
     Population is the unique array-of-object the ingest parser already
@@ -557,7 +581,7 @@ def _iter_json_dicts_dom(text: str) -> Any:
         raise UnmeasuredArtifact("json_checksum_count_mismatch")
 
 
-def iter_json_dicts(content: bytes | str | Path) -> Any:
+def iter_json_dicts(content: bytes | str | Path | _Readable) -> Any:
     """Same unique-path population as ``count_json_records``, as dicts for Gate-8.
 
     Pass 1 is the COUNT ijson unique-path walk. Pass 2 emits objects at

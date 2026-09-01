@@ -10,7 +10,7 @@ from services.object_streaming import (
     read_rows_from_spill,
 )
 
-from connectors.object_store_common import ReadBatch, inferred_native_types
+from connectors.object_store_common import ReadBatch, sampled_native_types_meta
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 
 
@@ -58,7 +58,7 @@ def read_object(
         # owes the engine the same declared types. Without this the identical
         # file lands bigint/numeric/date over an upload and three text columns
         # over SFTP — the object-store defect, one transport later.
-        meta={"native_types": inferred_native_types(headers, rows)},
+        meta=sampled_native_types_meta(headers, rows),
     )
 
 

@@ -320,7 +320,7 @@ def read_object_from_store(
         rows=rows,
         offset=offset,
         total_rows=total,
-        meta={"native_types": inferred_native_types(headers, rows)},
+        meta=sampled_native_types_meta(headers, rows),
     )
 
 
@@ -357,6 +357,19 @@ def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str
         return {}
 
 
+def sampled_native_types_meta(
+    headers: list[str], rows: list[list[Any]]
+) -> dict[str, Any]:
+    """ReadBatch.meta: inferred types tagged as a sampled profile, not a catalog."""
+    from services.dest_schema_authority import CARRIER_SAMPLED
+
+    types = inferred_native_types(headers, rows)
+    return {
+        "native_types": types,
+        "native_types_authority": {name: CARRIER_SAMPLED for name in types},
+    }
+
+
 def resolve_object_store_write_dest_types(
     target_cols: list[str],
     mappings: list[dict],
@@ -379,8 +392,9 @@ def resolve_object_store_write_dest_types(
     Returns ``(dest_types, None)`` or ``(partial, error)``.
     """
     from connectors.writer_common import resolve_studio_or_map_dest_types
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
 
-    return resolve_studio_or_map_dest_types(
+    dest_types, err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
@@ -388,6 +402,18 @@ def resolve_object_store_write_dest_types(
         studio_types=destination_column_types,
         product="Object-store",
     )
+    if err:
+        return dest_types, err
+    # Studio/probed object-store types are a sampled profile (D1). Enforcing
+    # DECIMAL(2,2) measured from the first page would quarantine the source's
+    # declared DECIMAL(12,2) after Map went green. Declared operator ceilings
+    # still hold.
+    widened = apply_sampled_profile_to_dest_types(
+        dest_types,
+        mappings,
+        dest_db="s3",
+    )
+    return type(dest_types)(widened), None
 
 
 @dataclass

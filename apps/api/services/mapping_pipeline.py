@@ -573,6 +573,7 @@ def run_mapping_pipeline(
     destination_table_exists: bool | None = None,
     source_types_authoritative: bool = False,
     prior_mappings: list[dict] | None = None,
+    target_type_authority: dict[str, str] | None = None,
 ) -> dict:
     from services.semantic_analyzer import analyze_schema
 
@@ -595,6 +596,25 @@ def run_mapping_pipeline(
             for s in (target_schemas or [])
         }
     )
+    from services.dest_schema_authority import (
+        CARRIER_DECLARED,
+        CARRIER_SAMPLED,
+        ORIGIN_CATALOG,
+        ORIGIN_SAMPLED,
+        column_carrier_authority,
+        default_column_authority,
+        widen_sampled_dest_carrier,
+    )
+
+    authority_by_col = {
+        str(k): str(v)
+        for k, v in dict(target_type_authority or {}).items()
+        if k and str(v or "").strip()
+    }
+    if not authority_by_col and destination_db_type:
+        engine_default = default_column_authority(destination_db_type)
+        for name in declared_target_types:
+            authority_by_col[name] = engine_default
     source_schemas = _canonicalize_schema_rows(source_schemas)
     target_schemas = _canonicalize_schema_rows(target_schemas)
     enrichments = enrich_columns(source_columns, source_schemas)
@@ -804,9 +824,30 @@ def run_mapping_pipeline(
             or bool(m.get("create_new"))
         )
         operator_stamp = bool(m.get("user_override") or m.get("userOverride"))
-        catalog_stamp = (
-            bool(tgt_type) and not operator_stamp and destination_table_exists is not False
+        col_auth = column_carrier_authority(
+            destination_db_type,
+            str(m.get("target") or ""),
+            authority_map=authority_by_col,
         )
+        catalog_stamp = (
+            bool(tgt_type)
+            and not operator_stamp
+            and destination_table_exists is not False
+            and col_auth == CARRIER_DECLARED
+        )
+        sampled_stamp = (
+            bool(tgt_type)
+            and not operator_stamp
+            and destination_table_exists is True
+            and col_auth == CARRIER_SAMPLED
+        )
+        if sampled_stamp and src_type and tgt_type:
+            tgt_type = widen_sampled_dest_carrier(
+                src_type, str(tgt_type), destination_db_type or ""
+            )
+            tgt_name = str(m.get("target") or "")
+            if tgt_name:
+                declared_target_types[tgt_name] = str(tgt_type)
         # Partial Studio: never invent dest types from source — Map/Validate must
         # stay pending until live schema loads (false-green preserve cliff).
         pending_dest = strategy == "pending_dest_schema"
@@ -818,6 +859,8 @@ def run_mapping_pipeline(
 
         if pending_dest:
             tgt_type = ""
+            catalog_stamp = False
+            sampled_stamp = False
         elif not tgt_type:
             src_l = str(src_type).lower()
             if intentional_create and "unsigned" in src_l and (
@@ -1005,8 +1048,10 @@ def run_mapping_pipeline(
                 "source_type": _reported_source_carrier(declared_src_type, src_type),
                 "target_type": tgt_type or "",
                 **(
-                    {"target_type_origin": "destination_catalog"}
+                    {"target_type_origin": ORIGIN_CATALOG}
                     if catalog_stamp
+                    else {"target_type_origin": ORIGIN_SAMPLED}
+                    if sampled_stamp
                     else {}
                 ),
                 "reasoning": reasoning,
@@ -1089,7 +1134,7 @@ def run_mapping_pipeline(
     coercion_issues = validate_mapping_coercions(
         enriched_mappings,
         source_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
-        target_types={s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])},
+        target_types=dict(declared_target_types),
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         dest_db_type=destination_db_type,
@@ -1101,7 +1146,9 @@ def run_mapping_pipeline(
     from services.transform_resolver import attach_transforms_to_mappings
 
     column_type_map = {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])}
-    dest_type_map = {s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])}
+    dest_type_map = dict(declared_target_types) or {
+        s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])
+    }
     enriched_mappings = attach_transforms_to_mappings(
         enriched_mappings,
         column_types=column_type_map,
