@@ -2311,10 +2311,17 @@ def destination_carriers_are_inferred(db_type: str | None) -> bool:
     stamp (``long``) in relational tokens, which also breaks Map→DDL identity
     ("Validate passes, Run fails"). Names from such a probe are still fact —
     the destination really holds those fields — only the *types* are a sample.
+
+    Elasticsearch is excluded: an index *declares* its fields (D16). Object
+    stores are not in this set — they are covered by
+    ``destination_schema_is_sampled`` so a CSV source is not reclassified.
     """
     from connectors.header_union import SCHEMALESS_SOURCE_TYPES
 
-    return _normalize_dest_db(db_type) in SCHEMALESS_SOURCE_TYPES
+    db = _normalize_dest_db(db_type)
+    if db in {"elasticsearch", "opensearch", "elastic"}:
+        return False
+    return db in SCHEMALESS_SOURCE_TYPES
 
 
 def unbound_sampled_numeric_carrier(inferred: str | None) -> str:

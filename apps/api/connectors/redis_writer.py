@@ -127,6 +127,13 @@ def _redis_rematerialize_if_physical_differs(
     )
     if live_dest_types is None:
         return None
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+    from services.transform_resolver import LiveDestTypes
+
+    widened = apply_sampled_profile_to_dest_types(
+        live_dest_types, mappings, dest_db="redis"
+    )
+    live_dest_types = LiveDestTypes(widened)
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
         != str(live_dest_types.get(c) or "").strip().upper()

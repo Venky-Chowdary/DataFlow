@@ -700,6 +700,8 @@ def _destination_schema_probe(
             extra["schema_defaults"] = {}
             extra["identity_columns"] = []
             extra["generated_columns"] = []
+            extra["schema_carrier_authority"] = {}
+            extra.pop("schema_types", None)
             destination.extra = extra
             return {}, exists
         # Dest-exists overwrite keeps nullability/defaults so G14/G15 write by
@@ -717,6 +719,13 @@ def _destination_schema_probe(
             dict(schema) if overwrite_recreates_existing else {}
         )
         extra["schema_nullability"] = nullability
+        # Sampled vs declared — D1: a page-measured DECIMAL(2,2) is a profile,
+        # not a catalog. Writers and Map both read this stamp.
+        extra["schema_carrier_authority"] = dict(info.get("schema_authority") or {})
+        if overwrite_recreates_existing:
+            extra.pop("schema_types", None)
+        else:
+            extra["schema_types"] = dict(schema)
         # Who fills a required column when the mapping does not (G14).
         extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
         extra["identity_columns"] = list(info.get("identity_columns") or [])
@@ -741,8 +750,37 @@ def _destination_schema_probe(
             "primary_key_columns": [],
             "unique_keys": [],
             "foreign_keys": [],
+            "schema_carrier_authority": {},
+            "schema_types": {},
         }
         return {}, None
+
+
+def _apply_sampled_dest_profile(
+    destination: EndpointConfig,
+    mappings: list[dict[str, Any]],
+    dest_schema_types: dict[str, str],
+) -> dict[str, str]:
+    """Widen a sampled dest profile so writers and preflight share one shape.
+
+    Object-store / Redis rereads measure DECIMAL(2,2) from the first page.
+    Treating that as DDL made run 2 refuse (and quarantine) the source's
+    declared DECIMAL(12,2). Declared catalogs (SQL, Elasticsearch mappings)
+    are left untouched.
+    """
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+
+    extra = dict(getattr(destination, "extra", None) or {})
+    authority = extra.get("schema_carrier_authority")
+    widened = apply_sampled_profile_to_dest_types(
+        dest_schema_types,
+        mappings,
+        dest_db=str(getattr(destination, "format", "") or ""),
+        authority_map=authority if isinstance(authority, dict) else None,
+    )
+    extra["schema_types"] = dict(widened)
+    destination.extra = extra
+    return widened
 
 
 def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]:
@@ -2427,6 +2465,9 @@ class UniversalTransferEngine:
                 sample_rows=records[:100] if isinstance(records, list) else None,
                 dest_table_exists=dest_table_exists_flag,
             )
+            dest_schema_types = _apply_sampled_dest_profile(
+                request.destination, mappings, dest_schema_types
+            )
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = resolve_effective_sync_mode(
@@ -3736,6 +3777,9 @@ class UniversalTransferEngine:
                 sample_rows=sample_rows[:100] if sample_rows else None,
                 dest_table_exists=dest_table_exists_flag,
             )
+            dest_schema_types = _apply_sampled_dest_profile(
+                request.destination, mappings, dest_schema_types
+            )
             reuse_fit = reuse_approved_validate_population_fit(request)
             mongo.update_job_status(
                 job_id,
@@ -4555,6 +4599,9 @@ class UniversalTransferEngine:
                 dest_types=dest_schema_types,
                 sample_rows=sample_rows[:100] if sample_rows else None,
                 dest_table_exists=dest_table_exists_flag,
+            )
+            dest_schema_types = _apply_sampled_dest_profile(
+                request.destination, mappings, dest_schema_types
             )
             reuse_fit = reuse_approved_validate_population_fit(request)
             mongo.update_job_status(

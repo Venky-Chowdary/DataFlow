@@ -186,7 +186,9 @@ def read_index_batch(
             # does not change under a scroll.
             native = index_native_types(client, index, headers)
             if native:
-                meta["native_types"] = native
+                from services.dest_schema_authority import declared_native_types_meta
+
+                meta.update(declared_native_types_meta(native))
         batch = ReadBatch(
             headers=headers,
             rows=rows,

@@ -679,6 +679,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     schema[col] = "VARCHAR"
             out["columns"] = columns
             out["schema"] = schema
+            from services.dest_schema_authority import CARRIER_SAMPLED
+
+            out["schema_authority"] = {col: CARRIER_SAMPLED for col in schema}
             out["schema_intelligence"] = {
                 k: {
                     "logical_type": v.get("logical_type"),
@@ -734,7 +737,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
-            out["schema"] = _schema_from_batch(batch)
+            _stamp_batch_schema(out, batch, "redis")
             out["row_estimate"] = (batch.total_rows or 0)
             # Redis namespaces are logical key prefixes — an empty SCAN is not
             # proof the destination is missing (would falsely flip Map create-new).
@@ -753,9 +756,24 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             bucket = cfg["database"]
             key = endpoint.table or endpoint.collection or ""
             if bucket and key:
-                batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
+                try:
+                    batch = read_object(
+                        cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit
+                    )
+                except Exception as exc:
+                    # NoSuchKey / 404 is unread, never an invented compatible schema (D1).
+                    out["columns"] = []
+                    out["schema"] = {}
+                    out["schema_authority"] = {}
+                    out["sample_error"] = str(exc)
+                    if out.get("table_exists") not in (True, False):
+                        out["table_exists"] = None
+                    out["message"] = (
+                        f"{out.get('message', '')} · object probe: {exc}"
+                    ).strip(" ·")
+                    return
                 out["columns"] = batch.headers
-                out["schema"] = _schema_from_batch(batch)
+                _stamp_batch_schema(out, batch, "s3")
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -770,14 +788,19 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 try:
                     batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 except Exception as exc:
-                    if _is_absent_object_error(str(exc)):
-                        out["table_exists"] = False
-                        out["schema"] = {}
-                        out["columns"] = []
-                        return
-                    raise
+                    # Absent-object errors stay unknown, not create-new: inventing
+                    # a compatible schema from NoSuchKey was the D1 false-green.
+                    out["table_exists"] = None
+                    out["schema"] = {}
+                    out["schema_authority"] = {}
+                    out["columns"] = []
+                    out["sample_error"] = str(exc)
+                    out["message"] = (
+                        f"{out.get('message', '')} · object probe: {exc}"
+                    ).strip(" ·")
+                    return
                 out["columns"] = batch.headers
-                out["schema"] = _schema_from_batch(batch)
+                _stamp_batch_schema(out, batch, "gcs")
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -789,11 +812,25 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             directory = str(cfg.get("database") or "") or "/"
             key = endpoint.table or endpoint.collection or ""
             if key:
-                batch = read_object(
-                    cfg=cfg, bucket=directory, key=key, offset=0, limit=sample_limit
-                )
+                try:
+                    batch = read_object(
+                        cfg=cfg, bucket=directory, key=key, offset=0, limit=sample_limit
+                    )
+                except Exception as exc:
+                    # Missing / unreadable remote file is unread, never an
+                    # invented compatible schema (D1, same as S3/GCS NoSuchKey).
+                    out["columns"] = []
+                    out["schema"] = {}
+                    out["schema_authority"] = {}
+                    out["sample_error"] = str(exc)
+                    if out.get("table_exists") not in (True, False):
+                        out["table_exists"] = None
+                    out["message"] = (
+                        f"{out.get('message', '')} · object probe: {exc}"
+                    ).strip(" ·")
+                    return
                 out["columns"] = batch.headers
-                out["schema"] = _schema_from_batch(batch)
+                _stamp_batch_schema(out, batch, "sftp")
                 out["row_estimate"] = batch.total_rows or 0
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -840,7 +877,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     if batch.headers:
                         out["columns"] = out.get("columns") or batch.headers
                         if not out.get("schema"):
-                            out["schema"] = _schema_from_batch(batch)
+                            _stamp_batch_schema(out, batch, "dynamodb")
                         out["table_exists"] = True
                         if not out.get("row_estimate"):
                             out["row_estimate"] = batch.total_rows or len(batch.rows)
@@ -886,7 +923,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
-                out["schema"] = _schema_from_batch(batch)
+                _stamp_batch_schema(out, batch, "elasticsearch")
                 out["row_estimate"] = (batch.total_rows or 0)
                 # Empty indexes still exist — row count must not drive create-new.
                 if exists is True or (batch.headers and exists is not False):
@@ -1158,13 +1195,41 @@ def _schema_from_batch(batch: Any) -> dict[str, str]:
 
     Readers that can type their rows report it through ``meta['native_types']``.
     Where a reader cannot, the placeholder stands and nothing changes.
+
+    Types present in ``native_types`` keep their spelling; headers the catalog
+    left dynamic keep the placeholder rather than acquire an invented carrier
+    (D16). Authority (sampled vs declared) is a separate stamp — see
+    ``_authority_from_batch``.
     """
     headers = list(getattr(batch, "headers", None) or [])
     meta = getattr(batch, "meta", None)
     native = meta.get("native_types") if isinstance(meta, dict) else None
     if isinstance(native, dict) and native:
-        return {c: str(native.get(c) or "string") for c in headers}
+        out: dict[str, str] = {}
+        for col in headers:
+            raw = native.get(col)
+            if raw is not None and str(raw).strip():
+                out[col] = str(raw)
+            else:
+                out[col] = "string"
+        return out
     return {c: "string" for c in headers}
+
+
+def _authority_from_batch(batch: Any, db_type: str = "") -> dict[str, str]:
+    """Per-column sampled/declared/unknown stamp carried out of the probe."""
+    from services.dest_schema_authority import authority_from_batch_meta
+
+    headers = list(getattr(batch, "headers", None) or [])
+    meta = getattr(batch, "meta", None)
+    payload = meta if isinstance(meta, dict) else {}
+    return authority_from_batch_meta(headers, payload, db_type)
+
+
+def _stamp_batch_schema(out: dict, batch: Any, db_type: str) -> None:
+    """Attach types *and* provenance so a sampled shape cannot pose as DDL."""
+    out["schema"] = _schema_from_batch(batch)
+    out["schema_authority"] = _authority_from_batch(batch, db_type)
 
 
 def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:
