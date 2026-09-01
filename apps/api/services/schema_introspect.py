@@ -4596,10 +4596,13 @@ def _kafka_value_to_logical(value: Any) -> str:
         try:
             from services.schema_inference import infer_column
 
-            inferred = str(infer_column([value], field_name="")["logical_type"])
-            return "TEXT" if inferred == "VARCHAR" else inferred
+            inferred = str(infer_column([value], field_name="")["logical_type"] or "")
+            # A JSON string is not a LOB. Collapsing VARCHAR → TEXT made
+            # Validate fingerprint TEXT (pass-through) while Execute
+            # rematerialized LOGICAL_TEXT → MySQL LONGTEXT / Oracle CLOB.
+            return inferred or "VARCHAR"
         except Exception:
-            return "TEXT"
+            return "VARCHAR"
     return "TEXT"
 
 
