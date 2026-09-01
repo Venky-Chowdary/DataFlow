@@ -402,18 +402,20 @@ def coerce_xml_wire(value: Any) -> Any:
         )
     try:
         from defusedxml import ElementTree as ET
-
+    except ImportError:  # pragma: no cover - venv missing the requirements pin
+        import xml.etree.ElementTree as ET  # nosec B405 — well-formedness only
+    try:
+        ET.fromstring(text)  # nosec B314 — defusedxml when installed
+    except ET.ParseError:
         try:
-            ET.fromstring(text)  # nosec B314 — defusedxml, not stdlib ElementTree
-        except ET.ParseError:
             # Content fragment (multiple top-level nodes) — PG xmloption=content.
-            ET.fromstring(  # nosec B314 — defusedxml, not stdlib ElementTree
+            ET.fromstring(  # nosec B314
                 f"<df_xml_root>{text}</df_xml_root>"
             )
-    except Exception as exc:
-        raise ValueError(
-            "xml wire failed parse — refuse invent into XML"
-        ) from exc
+        except Exception as exc:
+            raise ValueError(
+                "xml wire failed parse — refuse invent into XML"
+            ) from exc
     return text
 
 
