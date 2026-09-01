@@ -175,7 +175,8 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             results = []
             for i, item in enumerate(inputs):
                 props = dict(item.get("properties") or {})
-                props["id"] = props.get("id") or f"hs_{i}"
+                rid = str(item.get("id") or props.get("id") or f"hs_{i}")
+                props["id"] = rid
                 stored = _upsert_row("contacts", props)
                 results.append({"id": stored["id"], "properties": stored})
             self._json(200, {"results": results, "errors": [], "status": "COMPLETE"})

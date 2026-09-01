@@ -513,6 +513,9 @@ def write_mapped_rows(
         ext_field = str(conflict_columns[0]).strip()
     elif "Id" in target_cols:
         ext_field = "Id"
+    elif "id" in target_cols:
+        # Business / External Id mapped as ``id`` (SKU + most reverse-ETL maps).
+        ext_field = "id"
     elif "ExternalId" in target_cols:
         ext_field = "ExternalId"
     # Upsert/update by Id needs Id present even though it is not createable.

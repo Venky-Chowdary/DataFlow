@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from connectors.saas_common import token
-from tests.saas_desktop_stub import STORE, start_saas_stub
+from tests.saas_desktop_stub import STORE, _row_identity, start_saas_stub
 
 
 def test_token_accepts_password_only_private_app() -> None:
@@ -61,6 +61,32 @@ def test_rest_api_uniqueness_scan_uses_batch_reader() -> None:
         )
         assert result.status == "ran", result.message
         assert result.findings == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_hubspot_stub_upserts_by_request_id() -> None:
+    """Writer pops ``id`` out of properties into the batch ``id`` field."""
+    server, url = start_saas_stub()
+    try:
+        import requests
+        from tests.saas_desktop_stub import seed_tabular_fixture
+
+        seed_tabular_fixture()
+        assert len(STORE.rows["contacts"]) == 2
+        posted = requests.post(
+            f"{url}/crm/v3/objects/contacts/batch/upsert",
+            json={"inputs": [
+                {"idProperty": "id", "id": "1", "properties": {"amount": "9.00"}},
+                {"idProperty": "id", "id": "2", "properties": {"amount": "8.00"}},
+            ]},
+            timeout=5,
+        )
+        assert posted.status_code == 200
+        assert len(STORE.rows["contacts"]) == 2
+        by_id = {_row_identity(r): r for r in STORE.rows["contacts"]}
+        assert by_id["1"]["amount"] == "9.00"
     finally:
         server.shutdown()
         server.server_close()
