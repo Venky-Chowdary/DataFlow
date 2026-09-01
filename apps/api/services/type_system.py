@@ -4335,15 +4335,26 @@ def _is_mysql_character_wire(stamp: str) -> bool:
 
 
 def _target_holds_full_unicode(dest_db: str, target_type: str) -> bool:
-    """True when the target stamp's own character set stores every scalar."""
-    if not re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", target_type or "", re.I):
-        return False
-    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+    """True when the target stamp's own character set stores every scalar.
 
+    MySQL introspection reports ``VARCHAR(64) COLLATE utf8mb4_bin`` and omits
+    ``CHARACTER SET`` — the collation prefix *is* the measured charset. Engine
+    default utf8mb4 on a bare ``VARCHAR`` is not a measurement and must not
+    green a latin1-default server.
+    """
+    from services.encoding_capacity import (
+        UNICODE_MAX,
+        classify_capacity,
+        parse_declared_charset,
+    )
+
+    declared = parse_declared_charset(target_type).strip()
+    if not declared:
+        return False
     cap = classify_capacity(dest_db, target_type)
     form: str = cap.form
     max_code_point: int = cap.max_code_point
-    return form == "utf8" and max_code_point >= UNICODE_MAX
+    return form in {"utf8", "utf16"} and max_code_point >= UNICODE_MAX
 
 
 def national_charset_would_collapse(

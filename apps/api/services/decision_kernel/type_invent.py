@@ -13,7 +13,7 @@ from functools import lru_cache
 from typing import Final
 
 from services.decision_kernel.logical_type import LogicalType, NativeType
-from services.source_engine_scope import active_source_engine
+from services.source_engine_scope import active_source_engine, bind_source_engine
 
 # Shared carriers/tables owned by ``type_system``. Imported by name so a rename
 # there fails at import here, not as a NameError mid-load: ``type_system``
@@ -1080,7 +1080,28 @@ def create_new_mapping_target_type(
 
     ``source_db`` is the source engine id. It only widens the stamp: a source
     that can emit any code point must not land on a SQL Server code-page
-    ``VARCHAR`` that silently rewrites it to ``?``."""
+    ``VARCHAR`` that silently rewrites it to ``?``. Bind it for the invent
+    window so helpers that read ``active_source_engine()`` (national charset
+    carry) see the same engine the caller passed.
+    """
+    engine = (source_db or "").strip()
+    if engine:
+        with bind_source_engine(engine):
+            return _stamp_create_new_mapping_target_type(
+                src_type, dest_db_type, samples=samples, source_db=engine
+            )
+    return _stamp_create_new_mapping_target_type(
+        src_type, dest_db_type, samples=samples, source_db=source_db
+    )
+
+
+def _stamp_create_new_mapping_target_type(
+    src_type: str,
+    dest_db_type: str = "",
+    *,
+    samples: list | None = None,
+    source_db: str = "",
+) -> str:
     from services.type_system import unicode_safe_target_carrier
 
     stamp = _create_new_mapping_target_type(
@@ -1098,7 +1119,18 @@ def create_new_mapping_target_type(
     inherited = inherit_measured_string_width(
         stamp, src_type, dest_db=dest_db_type
     )
-    return inherited or stamp
+    stamped = inherited or stamp
+    # Dest-native equality spelling (utf8mb4_bin / Latin1_General_BIN), not a
+    # cross-engine name-copy. Must run *after* width inherit: inherit drops
+    # COLLATE on non-MySQL destinations.
+    from services.collation_carry import apply_dest_native_collation
+
+    return apply_dest_native_collation(
+        stamped,
+        dest_dialect=dest_db_type,
+        source_dialect=source_db or active_source_engine(),
+        source_type=src_type,
+    )
 
 
 def refuse_create_new_numeric_collapse(

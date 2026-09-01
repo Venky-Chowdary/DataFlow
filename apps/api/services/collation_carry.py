@@ -28,6 +28,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Literal, Protocol
 
 from services.type_system import (
@@ -49,6 +50,7 @@ class DBAPICursor(Protocol):
 __all__ = [
     "CollationDecision",
     "EqualityClass",
+    "apply_dest_native_collation",
     "classify_equality",
     "plan_collation_carry",
     "destination_column_collations",
@@ -578,6 +580,63 @@ def plan_collation_carry(
         if prefixes:
             plan.column_prefixes[dest_col] = prefixes
     return plan
+
+
+def apply_dest_native_collation(
+    ddl: str,
+    *,
+    dest_dialect: str,
+    source_dialect: str = "",
+    source_type: str = "",
+) -> str:
+    """Stamp dest-native COLLATE / CHARACTER SET onto create-new string DDL.
+
+    ``_with_collation_clause`` copies a source collation *name* only when the
+    destination engine already knows that name. MySQL ``utf8mb4_0900_bin`` is
+    not a SQL Server collation, so invent omitted COLLATE and the destination
+    defaulted to ``CI_AS`` — G6 then correctly refused a CS→CI uniqueness
+    collapse. The equality planner already knows the dest-native spelling
+    (SQL Server ``Latin1_General_BIN``, MySQL ``utf8mb4_bin``); apply it here
+    so Map, CREATE, dest-exists-compatible, and the append sink share one stamp.
+
+    Unknown source engine + no declared COLLATE: leave the stamp alone (do not
+    invent a dest default). A stamp that already collates is left unchanged.
+    """
+    text = (ddl or "").strip()
+    if not text:
+        return ddl
+    dest = _norm(dest_dialect)
+    if dest not in {"mysql", "mariadb", "postgresql", "sqlserver", "sqlite"}:
+        return ddl
+    if re.search(r"\bCOLLATE\b", text, re.I):
+        return ddl
+    if not _accepts_collation(text):
+        return ddl
+    src = _norm(source_dialect)
+    declared = (parse_collation(source_type) or "").strip()
+    if not src and not declared:
+        return ddl
+    charset_m = _CHARSET_CLAUSE_RE.search(source_type or "")
+    catalog = SimpleNamespace(
+        dialect=src,
+        columns=["__col"],
+        column_types={"__col": source_type or ""},
+        collations={"__col": declared} if declared else {},
+        charsets={"__col": charset_m.group(1)} if charset_m else {},
+        primary_key=[],
+        unique_keys=[],
+    )
+    plan = plan_collation_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=lambda c: c,
+        dest_type_for_column=lambda _c: text,
+        unique_or_pk=set(),
+    )
+    prefixes = plan.column_prefixes.get("__col") or []
+    if not prefixes:
+        return ddl
+    return f"{text} {' '.join(prefixes)}"
 
 
 _COLLATION_QUERY: dict[str, str] = {

@@ -10,6 +10,8 @@ three plus the refusals that must survive.
 
 from __future__ import annotations
 
+import re
+
 import sqlalchemy as sa
 from sqlalchemy.dialects import mssql, oracle, postgresql
 
@@ -27,28 +29,33 @@ UNICODE_SOURCES = ["postgresql", "mongodb", "snowflake", "bigquery"]
 CODEPAGE_SOURCES = ["mssql", "oracle", "mysql"]
 
 
+def _carrier_base(stamp: str) -> str:
+    """Type token without dest-native COLLATE / CHARACTER SET equality spelling."""
+    return re.split(
+        r"\s+(?:COLLATE|CHARACTER\s+SET|CHARSET)\s+", stamp, maxsplit=1, flags=re.I
+    )[0].strip()
+
+
 class TestCreateNewStampsNationalCarrier:
     def test_pg_varchar_to_sqlserver_becomes_nvarchar_same_width(self):
-        assert (
-            create_new_mapping_target_type(
-                "VARCHAR(64)", "sqlserver", source_db="postgresql"
-            )
-            == "NVARCHAR(64)"
+        got = create_new_mapping_target_type(
+            "VARCHAR(64)", "sqlserver", source_db="postgresql"
         )
+        assert _carrier_base(got) == "NVARCHAR(64)"
+        # PostgreSQL default equality is CS; SQL Server default is CI_AS.
+        assert "Latin1_General_BIN" in got
 
     def test_pg_text_to_sqlserver_becomes_nvarchar_max(self):
-        assert (
-            create_new_mapping_target_type("TEXT", "sqlserver", source_db="postgresql")
-            == "NVARCHAR(MAX)"
+        got = create_new_mapping_target_type(
+            "TEXT", "sqlserver", source_db="postgresql"
         )
+        assert _carrier_base(got) == "NVARCHAR(MAX)"
 
     def test_pg_char_to_sqlserver_keeps_fixed_width_national(self):
-        assert (
-            create_new_mapping_target_type(
-                "CHAR(8)", "sqlserver", source_db="postgresql"
-            )
-            == "NCHAR(8)"
+        got = create_new_mapping_target_type(
+            "CHAR(8)", "sqlserver", source_db="postgresql"
         )
+        assert _carrier_base(got) == "NCHAR(8)"
 
     def test_unicode_only_destination_keeps_plain_varchar(self):
         # PostgreSQL has no national type — VARCHAR already holds every code point.

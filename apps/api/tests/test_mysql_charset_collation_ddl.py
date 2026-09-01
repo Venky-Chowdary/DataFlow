@@ -221,10 +221,22 @@ def test_utf8mb4_target_is_not_graded_a_national_collapse() -> None:
         "VARCHAR(32) CHARACTER SET utf8mb4",
         dest_db="mysql",
     )
+    # MySQL information_schema reports COLLATE and omits CHARACTER SET.
+    assert not national_charset_would_collapse(
+        "NVARCHAR(32) COLLATE Latin1_General_100_BIN2",
+        "VARCHAR(32) COLLATE utf8mb4_bin",
+        dest_db="mysql",
+    )
     # An unstamped latin1-defaulting carrier is still a collapse.
     assert national_charset_would_collapse(
         "NVARCHAR(32)",
         "VARCHAR(32) CHARACTER SET latin1",
+        dest_db="mysql",
+    )
+    # Bare VARCHAR is the server default — not a measured utf8mb4 capacity.
+    assert national_charset_would_collapse(
+        "NVARCHAR(32)",
+        "VARCHAR(32)",
         dest_db="mysql",
     )
 
