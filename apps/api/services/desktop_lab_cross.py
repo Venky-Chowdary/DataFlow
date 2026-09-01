@@ -11,6 +11,10 @@ Honesty
   consume. Leftover MERGE on Kafka is log compaction, not a PK anti-join.
 * DuckDB is a unique engine: embedded file SQL (not SQLite affinity, not
   MotherDuck). Leftover MERGE there is a PK anti-join.
+* Qdrant is a unique engine: duplex payload scroll + upsert. Desktop bind
+  uses hash/32 embeddings (not a customer cluster, not a semantic model).
+  Leftover MERGE is a payload-identity PK anti-join + point delete.
+  Weaviate / Pinecone / Milvus stay dest-only until they read the fixture.
 * Elasticsearch is an extended unique engine when ``:9200`` answers.
 * CDC default remains at-least-once upsert.
 * Emulators (MinIO, fake-gcs, Azurite, goccy BQ, fakesnow, DynamoDB Local)
@@ -111,6 +115,23 @@ def _pair_mappings(src: EndpointConfig) -> list[dict[str, Any]]:
                 "intentional_omit": True,
             }
         )
+    if src.format == "qdrant":
+        for src_name in (
+            "content",
+            "source_id",
+            "chunk_index",
+            "embedding",
+            "vector",
+            "qdrant_id",
+        ):
+            maps.append(
+                {
+                    "source": src_name,
+                    "target": "",
+                    "confidence": 0.0,
+                    "intentional_omit": True,
+                }
+            )
     return maps
 
 # Create-new object/warehouse dests 404 on schema probe; Google/boto retries
@@ -126,6 +147,7 @@ _CREATE_NEW_SKIP_PREFLIGHT = frozenset({
     "elasticsearch",
     "sqlserver",
     "snowflake",
+    "qdrant",
 })
 
 AZURITE_KEY = (
@@ -154,6 +176,7 @@ EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
     "elasticsearch",
     "kafka",
     "duckdb",
+    "qdrant",
 )
 LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
 
@@ -467,6 +490,21 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             table=table,
             extra={"embedded_not_motherduck": True},
         )
+    if engine == "qdrant":
+        if not _reachable("127.0.0.1", 6333):
+            return "Qdrant not reachable on 127.0.0.1:6333"
+        return EndpointConfig(
+            kind="database",
+            format="qdrant",
+            host="127.0.0.1",
+            port=6333,
+            table=table,
+            extra={
+                "embedding_model": "hash/32",
+                "skip_chunking": True,
+                "local_emulator_not_customer_tenant": True,
+            },
+        )
     return f"no live bind for unique engine {engine}"
 
 
@@ -755,6 +793,7 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
             "elasticsearch_is_extended_when_9200_up": True,
             "duckdb_is_embedded_not_motherduck": True,
+            "qdrant_is_local_hash_embed_not_customer_cluster": True,
             "map_ssot": "services.semantic_mapper.map_columns",
             "object_store_create_new_skips_preflight_probe": True,
             "payload_reconcile": "once per dest engine; every pair dest COUNT",

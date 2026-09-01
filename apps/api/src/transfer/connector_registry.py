@@ -224,8 +224,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "qdrant": ConnectorModules(
         probe=("connectors.qdrant_writer", "test_qdrant"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.qdrant_reader",
+        reader_fn="read_points_batch",
         writer="connectors.qdrant_writer",
     ),
     "weaviate": ConnectorModules(

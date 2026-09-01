@@ -120,6 +120,31 @@ def test_couchbase_unions_keys_and_preserves_missing():
     assert rows[0][b_idx] == DF_MISSING_SENTINEL
 
 
+def test_qdrant_reader_emits_payload_not_vectors():
+    from connectors.qdrant_reader import QDRANT_OMIT_PAYLOAD_KEYS, _payload_row
+
+    row = _payload_row(
+        {
+            "id": 1,
+            "vector": [0.1, 0.2],
+            "payload": {
+                "id": 1,
+                "amount": "1000.00",
+                "code": "USD",
+                "content": "{\"id\":1}",
+                "source_id": "1",
+                "chunk_index": 0,
+                "embedding": [0.1, 0.2],
+            },
+        }
+    )
+    assert row["id"] == 1
+    assert row["amount"] == "1000.00"
+    assert row["code"] == "USD"
+    for omitted in QDRANT_OMIT_PAYLOAD_KEYS:
+        assert omitted not in row
+
+
 def test_qdrant_numeric_string_id_is_unsigned_int():
     from connectors.qdrant_writer import build_qdrant_points, qdrant_point_id
 

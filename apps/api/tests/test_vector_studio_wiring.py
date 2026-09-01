@@ -24,9 +24,12 @@ def test_catalog_lists_vector_destinations_live():
         c["id"]: c
         for c in search_catalog(transfer_only=True, limit=2000).get("connectors", [])
     }
-    for cid in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
+    for cid in ("pgvector", "weaviate", "pinecone", "milvus"):
         assert ready[cid].get("transfer_ready") is True
         assert ready[cid].get("capabilities", {}).get("dest_only") is True
+    assert ready["qdrant"].get("transfer_ready") is True
+    assert ready["qdrant"].get("capabilities", {}).get("read") is True
+    assert ready["qdrant"].get("capabilities", {}).get("dest_only") is not True
 
 
 def test_capabilities_destination_databases_include_vectors():

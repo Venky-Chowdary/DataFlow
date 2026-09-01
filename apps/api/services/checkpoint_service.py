@@ -70,6 +70,7 @@ class Checkpoint:
     es_search_after: list | None = None
     redis_scan_state: Any = None
     kafka_cursor: dict | None = None
+    qdrant_offset: Any = None
     # Last destination checksum for cross-check on resume
     checksum: str = ""
     # Write mode and conflict columns used for idempotent writes
@@ -158,6 +159,7 @@ class Checkpoint:
                 else self.redis_scan_state
             ),
             "kafka_cursor": self.kafka_cursor,
+            "qdrant_offset": self.qdrant_offset,
             "checksum": self.checksum,
             "write_mode": self.write_mode,
             "conflict_columns": self.conflict_columns,
@@ -344,6 +346,7 @@ def evaluate_resume_safety(
         or int(cp.file_offset or 0) > 0
         or bool(cp.dynamodb_cursor)
         or bool(cp.kafka_cursor)
+        or cp.qdrant_offset is not None
         or cp.es_search_after is not None
     )
     if not has_progress:

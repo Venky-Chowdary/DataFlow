@@ -26,7 +26,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
         "certified": False,
     },
     "pgvector": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
-    "qdrant": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "qdrant": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},

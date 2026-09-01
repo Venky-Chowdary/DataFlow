@@ -16,6 +16,7 @@ anti-join on the embedded file):
 ``LIVE_UNIQUE_ENGINES`` whose leftover identity is a PK anti-join.
 Closed ports skip. Kafka is a unique engine on this desktop (Redpanda)
 but leftover MERGE there is log compaction, not this fixture.
+Qdrant leftover MERGE is a payload-identity PK anti-join.
 Emulators are not a customer tenant. CDC remains at-least-once upsert.
 """
 

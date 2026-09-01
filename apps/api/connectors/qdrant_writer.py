@@ -57,6 +57,23 @@ def _headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def qdrant_rest(cfg: Mapping[str, Any]) -> tuple[Any, str, dict[str, str]]:
+    """Session, base URL, and headers for one Qdrant REST call."""
+    session = _requests_session()
+    api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    connection_string = str(cfg.get("connection_string") or "").strip()
+    base_url = (
+        connection_string.rstrip("/")
+        if connection_string
+        else _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 6333),
+            bool(cfg.get("ssl", False)),
+        )
+    )
+    return session, base_url, _headers(api_key)
+
+
 def _qdrant_live_vector_size(collection_info: dict[str, Any]) -> int | None:
     """Extract configured vector size from GET /collections/{name} JSON."""
     result = collection_info.get("result") if isinstance(collection_info, dict) else None

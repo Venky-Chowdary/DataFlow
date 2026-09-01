@@ -1712,6 +1712,7 @@ def _stream_database_transfer_impl(
     running_cursor = checkpoint.cursor_value if checkpoint.cursor_value is not None else watermark
     es_search_after = checkpoint.es_search_after or (ddb_cursor if src_type == "elasticsearch" else None)
     redis_scan_state = checkpoint.redis_scan_state or (ddb_cursor if src_type == "redis" else None)
+    qdrant_offset = checkpoint.qdrant_offset if src_type == "qdrant" else None
     # Preserve probe continuation tokens when checkpoint has none (fresh job).
     probe_continuation = ddb_cursor
     # Keyset (seek) pagination — Phase F2.
@@ -1996,7 +1997,7 @@ def _stream_database_transfer_impl(
         return result
 
     def _fetch_source_batch(last_batch):
-        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor, qdrant_offset
         if bulk_export_iter is not None:
             try:
                 return next(bulk_export_iter)
@@ -2046,7 +2047,7 @@ def _stream_database_transfer_impl(
                     "generic_sql",
                 )
                 and (incremental or use_keyset)
-            ) or src_type in ("elasticsearch", "redis", "kafka"):
+            ) or src_type in ("elasticsearch", "redis", "kafka", "qdrant"):
                 return None
         if src_type == "dynamodb":
             if not ddb_cursor:
@@ -2078,6 +2079,23 @@ def _stream_database_transfer_impl(
                     batch_limit,
                     database=src_db,
                     kafka_cursor=kafka_cursor,
+                    known_total_rows=total_rows,
+                )
+            )
+            return batch
+        if src_type == "qdrant":
+            if qdrant_offset is None and last_batch is not None:
+                return None
+            batch, qdrant_offset = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    qdrant_offset=qdrant_offset,
                     known_total_rows=total_rows,
                 )
             )
@@ -2183,6 +2201,23 @@ def _stream_database_transfer_impl(
                     database=src_db,
                     known_total_rows=total_rows,
                     es_search_after=es_search_after,
+                )
+            )
+            return batch
+        elif src_type == "qdrant":
+            if qdrant_offset is None and last_batch is not None:
+                return None
+            batch, qdrant_offset = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    qdrant_offset=qdrant_offset,
                 )
             )
             return batch
@@ -2911,6 +2946,7 @@ def _stream_database_transfer_impl(
         checkpoint.redis_scan_state = redis_scan_state
         checkpoint.dynamodb_cursor = ddb_cursor
         checkpoint.kafka_cursor = kafka_cursor
+        checkpoint.qdrant_offset = qdrant_offset
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         if dest_summary.get(PRECOUNT_KEY) is not None:

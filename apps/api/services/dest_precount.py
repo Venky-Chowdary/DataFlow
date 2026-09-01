@@ -761,6 +761,12 @@ def destination_key_hits(
         except Exception as exc:
             logger.warning("Elasticsearch dest key census failed: %s", exc)
             return None
+    if db_type == "qdrant":
+        try:
+            return _qdrant_key_hits(cfg, collection=table, cols=cols, keys=unique)
+        except Exception as exc:
+            logger.warning("Qdrant dest key census failed: %s", exc)
+            return None
     try:
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -1092,6 +1098,10 @@ def destination_key_list(
         elif db_type in {"elasticsearch", "opensearch"}:
             rows = _elasticsearch_key_list(
                 cfg, index=table, cols=cols, dest_n=dest_n
+            )
+        elif db_type == "qdrant":
+            rows = _qdrant_key_list(
+                cfg, collection=table, cols=cols, dest_n=dest_n
             )
         elif db_type == "dynamodb":
             rows = _dynamodb_key_list(cfg, table_name=table, cols=cols)
@@ -3934,7 +3944,196 @@ def _elasticsearch_delete_keys(
         client.close()
 
 
-def _dynamodb_key_list(
+def _qdrant_identity_from_payload(
+    payload: dict[str, Any] | None,
+    col: str,
+    point_id: Any,
+) -> Any:
+    """Business identity from payload. Point id is last-resort for ``id``."""
+    name = str(col or "").strip()
+    if not name:
+        return None
+    if isinstance(payload, dict):
+        if name in payload and payload[name] is not None:
+            return payload[name]
+        lower = {str(k).lower(): v for k, v in payload.items()}
+        if name.lower() in lower and lower[name.lower()] is not None:
+            return lower[name.lower()]
+        if name.lower() == "id" and payload.get("source_id") is not None:
+            return payload.get("source_id")
+    if name.lower() in {"id", "source_id"}:
+        return point_id
+    return None
+
+
+def _qdrant_key_list(
+    cfg: dict[str, Any],
+    *,
+    collection: str,
+    cols: list[str],
+    dest_n: int,
+) -> list[tuple[Any, ...]] | None:
+    """Payload identity tuples. Never ``points_count`` as a PK list."""
+    import json
+
+    from connectors.qdrant_writer import qdrant_rest
+    from services.value_serializer import json_default, load_http_json
+
+    name = str(collection or "").strip()
+    if not name or not cols:
+        return None
+    session, base_url, headers = qdrant_rest(cfg)
+    exists = session.get(
+        f"{base_url}/collections/{name}", headers=headers, timeout=10
+    )
+    if exists.status_code == 404:
+        return []
+    if exists.status_code != 200:
+        return None
+    rows: list[tuple[Any, ...]] = []
+    offset: Any = None
+    scanned = 0
+    cap = max(int(dest_n or 0), 0) + 8
+    while True:
+        body: dict[str, Any] = {
+            "limit": 256,
+            "with_payload": True,
+            "with_vector": False,
+        }
+        if offset is not None:
+            body["offset"] = offset
+        resp = session.post(
+            f"{base_url}/collections/{name}/points/scroll",
+            data=json.dumps(body, default=json_default),
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return None
+        payload = load_http_json(resp) if resp.content else {}
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            return None
+        points = result.get("points") or []
+        if not isinstance(points, list):
+            return None
+        for point in points:
+            scanned += 1
+            if scanned > cap:
+                return None
+            row_payload = point.get("payload") if isinstance(point, dict) else None
+            pid = point.get("id") if isinstance(point, dict) else None
+            tup = tuple(
+                _qdrant_identity_from_payload(
+                    row_payload if isinstance(row_payload, dict) else None,
+                    col,
+                    pid,
+                )
+                for col in cols
+            )
+            if any(part is None for part in tup):
+                return None
+            rows.append(tup)
+        nxt = result.get("next_page_offset")
+        if nxt is None:
+            return rows
+        offset = nxt
+
+
+def _qdrant_key_hits(
+    cfg: dict[str, Any],
+    *,
+    collection: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many leftover identities already have a point (retrieve by point id)."""
+    import json
+
+    from connectors.qdrant_writer import qdrant_point_id, qdrant_rest
+    from services.value_serializer import json_default, load_http_json, present_cell_text
+
+    name = str(collection or "").strip()
+    if not name or not cols:
+        return None
+    ids: list[Any] = []
+    for tup in keys:
+        parts = [present_cell_text(part) or "" for part in tup]
+        raw = "|".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
+        if not raw:
+            continue
+        ids.append(qdrant_point_id(raw))
+    if not ids:
+        return 0
+    session, base_url, headers = qdrant_rest(cfg)
+    exists = session.get(
+        f"{base_url}/collections/{name}", headers=headers, timeout=10
+    )
+    if exists.status_code == 404:
+        return 0
+    if exists.status_code != 200:
+        return None
+    resp = session.post(
+        f"{base_url}/collections/{name}/points/retrieve",
+        data=json.dumps(
+            {"ids": ids, "with_payload": False, "with_vector": False},
+            default=json_default,
+        ),
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        return None
+    payload = load_http_json(resp) if resp.content else {}
+    result = payload.get("result") if isinstance(payload, dict) else payload
+    if isinstance(result, list):
+        return sum(1 for point in result if isinstance(point, dict) and point.get("id") is not None)
+    return None
+
+
+def _qdrant_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    collection: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """Delete leftover points by the same unsigned-int / UUID5 id the writer uses."""
+    import json
+
+    from connectors.qdrant_writer import qdrant_point_id, qdrant_rest
+    from services.row_conservation import parse_delete_keys
+    from services.value_serializer import json_default, present_cell_text
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    name = str(collection or "").strip()
+    if not leftover or not name:
+        return 0
+    ids: list[Any] = []
+    for tup in leftover:
+        parts = [present_cell_text(part) or "" for part in tup]
+        raw = "|".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
+        if raw:
+            ids.append(qdrant_point_id(raw))
+    if not ids:
+        return 0
+    session, base_url, headers = qdrant_rest(dict(cfg))
+    exists = session.get(
+        f"{base_url}/collections/{name}", headers=headers, timeout=10
+    )
+    if exists.status_code == 404:
+        return 0
+    resp = session.post(
+        f"{base_url}/collections/{name}/points/delete",
+        data=json.dumps({"points": ids, "wait": True}, default=json_default),
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code not in {200, 201}:
+        raise RuntimeError(
+            f"Qdrant leftover DELETE failed: {resp.status_code} {resp.text[:300]}"
+        )
+    return len(ids)
     cfg: dict[str, Any],
     *,
     table_name: str,

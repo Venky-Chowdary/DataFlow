@@ -60,7 +60,7 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 # Kafka uniqueness is a topic payload scan (watermarks bound the log), not
 # SQL GROUP BY.
 READER_PAGED_SOURCE_TYPES = frozenset(
-    {"redis", "elasticsearch", "opensearch", "kafka"}
+    {"redis", "elasticsearch", "opensearch", "kafka", "qdrant"}
 )
 
 # Warehouse emulators (fakesnow is DuckDB; goccy BQ has no INFORMATION_SCHEMA
