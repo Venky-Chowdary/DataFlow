@@ -70,10 +70,14 @@ _SQL_INSPECT_FALLBACK_TYPES = frozenset({"snowflake", "bigquery"})
 # push down. The transfer reader already pages the current snapshot, so
 # uniqueness is the same payload scan as Redis / object stores.
 ICEBERG_SOURCE_TYPES = frozenset({"iceberg", "apache_iceberg"})
+REST_API_SOURCE_TYPES = frozenset({"rest_api", "rest"})
 
 #: Sources whose population the payload scan can page through.
 PAYLOAD_SCANNED_SOURCE_TYPES = (
-    OBJECT_PAYLOAD_SOURCE_TYPES | READER_PAGED_SOURCE_TYPES | ICEBERG_SOURCE_TYPES
+    OBJECT_PAYLOAD_SOURCE_TYPES
+    | READER_PAGED_SOURCE_TYPES
+    | ICEBERG_SOURCE_TYPES
+    | REST_API_SOURCE_TYPES
 )
 
 PROBED_SOURCE_TYPES = (

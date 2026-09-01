@@ -612,7 +612,7 @@ def _read_batch_impl(
             offset=offset,
             columns=columns,
         )
-    if src_type in ("salesforce", "hubspot", "stripe"):
+    if src_type in ("salesforce", "hubspot", "stripe", "rest_api", "rest"):
         from .connector_dispatch import read_via_registry
 
         if src_type == "salesforce" and cursor_column:

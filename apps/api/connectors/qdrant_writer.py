@@ -186,6 +186,30 @@ def _ensure_collection(
         raise RuntimeError(f"Qdrant create collection failed: {resp.status_code} {resp.text}")
 
 
+def qdrant_point_id(raw: str) -> str | int:
+    """Qdrant REST accepts an unsigned int or a UUID — never a numeric string.
+
+    ``cell_to_string(1)`` yields ``\"1\"``, which Qdrant rejects as
+    ``value 1 is not a valid point ID``. Integers that fit unsigned 64-bit stay
+    ints (idempotent with the source PK). Anything else is a deterministic UUID5
+    — same contract as Weaviate ``_object_uuid``, never uuid4().
+    """
+    import uuid as uuid_mod
+
+    text = (raw or "").strip()
+    if text.isdigit() and 1 <= len(text) <= 20:
+        n = int(text)
+        if 0 <= n <= (2**64 - 1):
+            return n
+    try:
+        return str(uuid_mod.UUID(text))
+    except ValueError:
+        pass
+    if len(text) == 32 and all(c in "0123456789abcdef" for c in text.lower()):
+        return str(uuid_mod.UUID(hex=text))
+    return str(uuid_mod.uuid5(uuid_mod.NAMESPACE_URL, f"dataflow:qdrant:{text}"))
+
+
 def build_qdrant_points(
     vector_rows: list[dict[str, Any]],
     *,
@@ -237,10 +261,13 @@ def build_qdrant_points(
         from services.cdc_identity import is_present_cdc_row_key
 
         raw_id = row.get("id")
-        point_id: str | None = (
+        raw_id_text = (
             cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
         )
-        if not point_id:
+        point_id: str | int | None = None
+        if raw_id_text:
+            point_id = qdrant_point_id(raw_id_text)
+        if point_id is None:
             material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
             if material is None:
                 rejected.append({
@@ -622,6 +649,21 @@ def write_mapped_rows(
         )
 
     if not vector_rows:
+        from connectors.writer_common import refuse_empty_vectorization
+
+        empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
+        if empty_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=empty_err,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+            )
         return WriteResult(
             ok=True,
             rows_written=0,

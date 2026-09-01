@@ -130,7 +130,19 @@ def test_fidelity_only_pairs_are_not_replacements() -> None:
     )
 
 
-def test_bigint_source_into_int32_column_is_a_replacement() -> None:
+def test_crm_overwrite_does_not_recreate_schema() -> None:
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+    assert dest_schema_is_recreated_on_overwrite("salesforce") is False
+    assert dest_schema_is_recreated_on_overwrite("hubspot") is False
+    assert dest_schema_is_recreated_on_overwrite("postgresql") is True
+    gate = _gate(
+        destination_db_type="salesforce",
+        destination_column_types={"amount": "DECIMAL(18,2)"},
+        source_column_types={"amt_dec": "DECIMAL(6,2)"},
+        dest_recreated=False,
+    )
+    assert gate["status"] == "skip"
     assert carrier_would_truncate("BIGINT", "INTEGER", dest_db="postgresql")
 
 

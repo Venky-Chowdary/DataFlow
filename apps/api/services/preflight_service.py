@@ -925,9 +925,12 @@ def run_file_preflight(
     # CREATE declares ``LONGTEXT`` is refused for a ``TEXT → VARCHAR(64)``
     # collapse against a table it is about to drop. Append/upsert/CDC/mirror keep
     # the live contract — there the existing column really is authoritative.
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
 
-    dest_recreated = is_overwrite_sync(sync_mode)
+    dest_recreated = is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(
+        destination_db_type
+    )
 
     # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
     # search index — report ``None`` rather than inventing a total, which is the

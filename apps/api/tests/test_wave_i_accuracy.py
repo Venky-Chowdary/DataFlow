@@ -120,6 +120,23 @@ def test_couchbase_unions_keys_and_preserves_missing():
     assert rows[0][b_idx] == DF_MISSING_SENTINEL
 
 
+def test_qdrant_numeric_string_id_is_unsigned_int():
+    from connectors.qdrant_writer import build_qdrant_points, qdrant_point_id
+
+    assert qdrant_point_id("1") == 1
+    assert qdrant_point_id("2") == 2
+    uuid_id = qdrant_point_id("acct-1")
+    assert isinstance(uuid_id, str) and len(uuid_id) == 36
+    assert qdrant_point_id("acct-1") == uuid_id
+
+    points, rejected = build_qdrant_points(
+        [{"id": "1", "source_id": "1", "chunk_index": 0, "content": "hello", "embedding": [0.1, 0.2, 0.3]}],
+        dimension=3,
+    )
+    assert rejected == []
+    assert points[0]["id"] == 1
+
+
 def test_qdrant_points_refuse_zero_and_stable_id():
     from connectors.qdrant_writer import build_qdrant_points
 

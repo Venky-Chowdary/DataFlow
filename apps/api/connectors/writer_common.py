@@ -2077,6 +2077,25 @@ def flush_normalized_child_batches(
     return {"ok": True, "rows_written": written, "tables": tables, "errors": errors}
 
 
+def refuse_empty_vectorization(
+    *,
+    records: list[Any] | None,
+    data_rows: list[Any] | None,
+) -> str | None:
+    """Empty embed after a mapped payload is silent data loss — fail closed.
+
+    A genuinely empty source may ack 0 rows. Vectorize returning nothing when
+    the writer already held records or data_rows is a 0-row ``success=True``
+    that Validate never approved.
+    """
+    if records or data_rows:
+        return (
+            "Vectorization produced no embeddable rows from a non-empty mapped "
+            "payload — refuse silent 0-row success"
+        )
+    return None
+
+
 def prepare_records_for_vector_write(
     *,
     headers: list[str],
