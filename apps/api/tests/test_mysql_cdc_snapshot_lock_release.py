@@ -52,6 +52,12 @@ class FakeCursor:
             if self.conn.fail_start_txn:
                 raise RuntimeError("cannot start transaction")
             self.conn.in_txn = True
+        elif upper.startswith("SHOW MASTER STATUS") or upper.startswith(
+            "SHOW BINARY LOG STATUS"
+        ):
+            self.conn.locks_held_at_coords = self.conn.locks_held
+            if self.conn.fail_coords:
+                raise RuntimeError("coordinates unavailable")
         elif upper.startswith("SHOW ") and self.conn.fail_coords:
             raise RuntimeError("coordinates unavailable")
 
@@ -81,6 +87,7 @@ class FakeConnection:
     ) -> None:
         self.sql: list[str] = []
         self.locks_held = False
+        self.locks_held_at_coords: bool | None = None
         self.in_txn = False
         self.closed = False
         self.rolled_back = False
@@ -220,6 +227,33 @@ def test_table_lock_fallback_does_not_unlock_its_own_read_view(
     assert "UNLOCK TABLES" not in seen["sql"]
     assert seen["lock_conn_passed"] is True
     assert seen["start_pos"]["file"] == "mysql-bin.000004"
+
+
+def test_table_lock_fallback_reads_coordinates_before_the_locks_go(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # START TRANSACTION releases LOCK TABLES locks. Reading the coordinates
+    # after it would leave a window where a commit sits behind the replay
+    # position and ahead of the read view — dumped by neither.
+    conn = FakeConnection(fail_global_lock=True)
+    seen = _run_snapshot(monkeypatch, conn)
+
+    assert conn.locks_held_at_coords is True
+    assert seen["sql"].index("SHOW MASTER STATUS") < seen["sql"].index(
+        "START TRANSACTION WITH CONSISTENT SNAPSHOT"
+    )
+
+
+def test_global_lock_reads_coordinates_before_pinning_the_read_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = FakeConnection()
+    seen = _run_snapshot(monkeypatch, conn)
+
+    assert conn.locks_held_at_coords is True
+    assert seen["sql"].index("SHOW MASTER STATUS") < seen["sql"].index(
+        "START TRANSACTION WITH CONSISTENT SNAPSHOT"
+    )
 
 
 def test_no_lock_privilege_at_all_still_dumps_unpinned(
