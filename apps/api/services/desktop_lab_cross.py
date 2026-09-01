@@ -9,6 +9,8 @@ Honesty
   desktop. Skip, never invent green.
 * Kafka (Redpanda on :9092) is a unique engine: duplex JSON produce +
   consume. Leftover MERGE on Kafka is log compaction, not a PK anti-join.
+* DuckDB is a unique engine: embedded file SQL (not SQLite affinity, not
+  MotherDuck). Leftover MERGE there is a PK anti-join.
 * Elasticsearch is an extended unique engine when ``:9200`` answers.
 * CDC default remains at-least-once upsert.
 * Emulators (MinIO, fake-gcs, Azurite, goccy BQ, fakesnow, DynamoDB Local)
@@ -151,6 +153,7 @@ EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
     "iceberg",
     "elasticsearch",
     "kafka",
+    "duckdb",
 )
 LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
 
@@ -450,6 +453,20 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
                 "local_emulator_not_customer_tenant": True,
             },
         )
+    if engine == "duckdb":
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            return "duckdb package not installed"
+        path = root / f"{table}.duckdb"
+        return EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=str(path),
+            connection_string=f"duckdb:///{path}",
+            table=table,
+            extra={"embedded_not_motherduck": True},
+        )
     return f"no live bind for unique engine {engine}"
 
 
@@ -737,6 +754,7 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "cdc_default": "at-least-once upsert",
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
             "elasticsearch_is_extended_when_9200_up": True,
+            "duckdb_is_embedded_not_motherduck": True,
             "map_ssot": "services.semantic_mapper.map_columns",
             "object_store_create_new_skips_preflight_probe": True,
             "payload_reconcile": "once per dest engine; every pair dest COUNT",

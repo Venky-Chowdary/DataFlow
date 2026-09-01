@@ -28,8 +28,10 @@ def test_cross_matrix_lists_unique_engines_not_saas_twins(monkeypatch):
     assert "s3" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" in LIVE_UNIQUE_ENGINES
     assert "kafka" in LIVE_UNIQUE_ENGINES
+    assert "duckdb" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" not in CORE_UNIQUE_ENGINES
     assert "kafka" not in CORE_UNIQUE_ENGINES
+    assert "duckdb" not in CORE_UNIQUE_ENGINES
     assert "salesforce" not in LIVE_UNIQUE_ENGINES
     assert "hubspot" not in LIVE_UNIQUE_ENGINES
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
@@ -145,11 +147,12 @@ def test_kafka_uniqueness_is_a_payload_scan_not_sql_group_by():
     assert "kafka" not in SQLISH_SOURCE_TYPES
 
 
-def test_extended_run_lists_sixteen_unique_engines(monkeypatch):
+def test_extended_run_lists_seventeen_unique_engines(monkeypatch):
     monkeypatch.setenv("DATAFLOW_CROSS_EXTENDED", "1")
     engines = engines_for_run()
     assert "kafka" in engines
-    assert len(engines) == 16
+    assert "duckdb" in engines
+    assert len(engines) == 17
     assert len(engines) == len(set(engines))
 
 
@@ -180,6 +183,47 @@ def test_kafka_uniqueness_and_sql_dest_when_reachable(tmp_path):
     assert not isinstance(kafka_dst, str), kafka_dst
     kafka_out = _transfer_pair(bound, kafka_dst)
     assert kafka_out["status"] == "passed", kafka_out
+
+
+def test_duckdb_bind_is_embedded_file_not_sqlite(tmp_path):
+    duckdb = pytest.importorskip("duckdb")
+    del duckdb
+    bound = bind_live_engine("duckdb", "t", tmp_path)
+    assert not isinstance(bound, str), bound
+    assert bound.format == "duckdb"
+    assert str(bound.database).endswith(".duckdb")
+    assert str(bound.connection_string).startswith("duckdb:///")
+    assert bound.extra.get("embedded_not_motherduck") is True
+
+
+def test_duckdb_uniqueness_and_sqlite_dest_when_reachable(tmp_path):
+    """DuckDB is SQLISH GROUP BY uniqueness, then a real dest COUNT."""
+    pytest.importorskip("duckdb")
+    from services.desktop_lab_cross import _cfg, _seed, _sid, _transfer_pair
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    bound, row = _seed("duckdb", tmp_path)
+    if row["status"] == "skipped":
+        pytest.skip(row["error"] or "duckdb not available")
+    assert row["status"] == "passed", row
+    assert row.get("dest_count") == 2
+    probe = probe_source_duplicate_keys_result(
+        source_config=_cfg(bound),
+        source_table=bound.table,
+        primary_key="id",
+    )
+    assert probe.status == "ran", probe.message
+    assert probe.findings == []
+
+    sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+    assert not isinstance(sqlite_dst, str), sqlite_dst
+    sqlite_out = _transfer_pair(bound, sqlite_dst)
+    assert sqlite_out["status"] == "passed", sqlite_out
+
+    duck_dst = bind_live_engine("duckdb", _sid("d"), tmp_path)
+    assert not isinstance(duck_dst, str), duck_dst
+    duck_out = _transfer_pair(bound, duck_dst)
+    assert duck_out["status"] == "passed", duck_out
 
 
 def test_pair_timeout_is_skip_never_pass(monkeypatch):
