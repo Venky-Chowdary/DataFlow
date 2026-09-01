@@ -7,6 +7,13 @@ there, and no CI workflow triggers on it). Latest wave head:
 workspaces wave: `a1cc1f91` via
 [#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
+**Latest (this branch):** Track D scheduler DST + workspace-ownership cells
+re-measured on `feature/scheduler-dst-workspace`. Cadence (including the
+three DST cases) and sibling-header tenancy pass. Do not fold D1 [#132],
+N2 [#133], N4 [#134], N5 [#135], yaml-live [#136], or yaml-fwf-100k [#137]
+into this tree. Next: remaining never-measured items (Track A 225-cell
+grid, CDC 100K idle/crash, governance ops, fleet / 10k–1M).
+
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the

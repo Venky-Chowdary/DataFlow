@@ -63,8 +63,16 @@ D1 is the only item from this sequence still open; §1 carries its live repro.
    PostgreSQL→MySQL append, 221.5 s / 4,515 rows/s).
 2. Track A's 225-cell grid never completed — the re-run halted at 122 cells.
 3. `postgresql→mongodb` CDC at 100K: timestamp risk-acknowledgement not re-measured.
-4. Scheduler DST cell and workspace-ownership cell not re-measured after the
-   `workspace_access` fix (the harness expectation also changed).
+4. ~~Scheduler DST cell and workspace-ownership cell not re-measured after the
+   `workspace_access` fix~~ **Closed (this PR).** Track D cadence cells
+   (interval, tz cron, DST boundary: offset re-derived, spring-forward 02:30
+   skipped, fall-back 01:30 `fold=0`) pass against independent `zoneinfo`
+   arithmetic. Same actor in two workspaces: `X-Workspace-Id` of the sibling
+   404s an id-addressed GET and omits the schedule from the list; a non-member
+   read/create is 403/404. Proven:
+   `tests/test_scheduler_dst_workspace_remeasure.py` (4 passed) plus the
+   existing isolation suite (3 passed). The 100K scheduler *beat* was not
+   re-run.
 5. `mongodb→mysql` CDC idle re-run; the 100K crash-injection pass.
 6. BigQuery-emulator cells beyond the two-run identity probe.
 7. Full-fleet NoSQL sweep on the fixed revision (last complete sweep: 73 pass /

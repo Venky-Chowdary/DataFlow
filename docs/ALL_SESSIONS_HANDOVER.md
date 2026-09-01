@@ -148,7 +148,11 @@ the PR that carries it):
   out of the probe rather than weaken any comparison — an operator-declared
   narrowing on an object store is still enforced at the write, so suppressing
   the verdict would fail open. See `docs/OPEN_DEFECT_REGISTER.md` §1 D1.
-- Scheduler DST + workspace-ownership cells not re-measured after the access fix.
+- ~~Scheduler DST + workspace-ownership cells not re-measured after the access fix.~~
+  **Closed (this PR).** `tests/test_scheduler_dst_workspace_remeasure.py`:
+  cadence cells including DST boundary pass; sibling `X-Workspace-Id` GET is
+  404 and the list excludes the foreign schedule; non-member read/create
+  403/404. The 100K beat was not re-run.
 - Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
 - SFTP daily Excel sync modes started, not finished.
@@ -189,7 +193,9 @@ Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N2, N4 and N5 are not started.
+N2, N4 and N5 are not started on this integration branch (they live on their
+own PRs). **This PR** re-measures Track D scheduler DST + workspace-ownership
+cells (`tests/test_scheduler_dst_workspace_remeasure.py`, 4 passed).
 
 ---
 

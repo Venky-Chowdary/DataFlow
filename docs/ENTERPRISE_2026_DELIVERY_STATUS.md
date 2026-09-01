@@ -173,3 +173,5 @@ the verdict would fail open and quarantine rows while Map showed green.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).
+5. **This PR** re-measures scheduler DST + workspace-ownership (register §2
+   item 4). Do not fold D1/N2/N4/N5/yaml into it.
