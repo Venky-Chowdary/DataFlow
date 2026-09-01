@@ -79,15 +79,14 @@ def _row_identity(rec: dict[str, Any]) -> str:
 
 
 def _upsert_row(store_key: str, rec: dict[str, Any]) -> dict[str, Any]:
-    """Identity upsert — overwrite must not append leftover dest rows."""
+    """Identity replace — overwrite must not keep leftover extra dest keys."""
     rows = STORE.rows.setdefault(store_key, [])
     rid = _row_identity(rec)
     if rid:
         for i, existing in enumerate(rows):
             if _row_identity(existing) == rid:
-                merged = {**existing, **rec}
-                rows[i] = merged
-                return merged
+                rows[i] = rec
+                return rec
     rows.append(rec)
     return rec
 
@@ -143,7 +142,11 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             self._json(200, {"results": [_hubspot_property(col) for col in _SAAS_FIELDS]})
             return
         if path.startswith("/crm/v3/objects/"):
-            self._json(200, {"results": STORE.rows.get("contacts") or []})
+            wrapped = [
+                {"id": _row_identity(r), "properties": dict(r)}
+                for r in (STORE.rows.get("contacts") or [])
+            ]
+            self._json(200, {"results": wrapped})
             return
         if path in {"/v1/account", "/v1/accounts"}:
             self._json(200, {"id": "acct_stub", "object": "account"})
