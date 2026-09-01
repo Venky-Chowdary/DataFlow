@@ -189,7 +189,12 @@ Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N2, N4 and N5 are not started.
+N2 ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)), N4
+([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)) and D1
+([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)) are open on their
+own branches and are not in this tree. **N5** (control totals G21 + dest RI
+G22) is this PR. After N5 merges, continue with never-measured items / fleet
+throughput — do not fold D1/N2/N4.
 
 ---
 

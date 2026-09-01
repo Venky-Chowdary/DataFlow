@@ -387,6 +387,8 @@ export async function runPreflight(payload: {
     retention_until?: string;
     omit_approved_by?: string;
     risk_contract?: Record<string, unknown>;
+    /** G21 — independent SUM of this monetary column after write. */
+    control_total?: boolean;
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;

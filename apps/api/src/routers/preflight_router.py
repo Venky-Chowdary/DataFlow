@@ -70,6 +70,9 @@ class MappingItem(BaseModel):
     omit_approved_at: str | None = None
     # Migration Risk Contract draft/signed — Execute-approve authority.
     risk_contract: dict[str, Any] | None = None
+    # G21 — opt-in independent SUM of this monetary column after write.
+    # Must survive Validate → Execute; extra=ignore would drop it.
+    control_total: bool | None = None
 
 
 class PreflightRequest(BaseModel):

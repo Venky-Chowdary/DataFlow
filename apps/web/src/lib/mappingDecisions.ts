@@ -63,18 +63,30 @@ export function carryOperatorDecisions(
     if (!p.approved && !p.riskAcknowledged) continue;
     decided.set(mappingDecisionFingerprint(p), p);
   }
-  if (!decided.size && !omitted.size) return next;
+  if (!decided.size && !omitted.size && !prior.some((p) => typeof p.controlTotal === "boolean")) {
+    return next;
+  }
+  const controlTotals = new Map<string, boolean>();
+  for (const p of prior) {
+    if (typeof p.controlTotal === "boolean") controlTotals.set(p.source, p.controlTotal);
+  }
   return next.map((m) => {
     const dropped = omitted.get(m.source);
     if (dropped) return carryReduction(m, dropped);
     const hit = decided.get(mappingDecisionFingerprint(m));
-    if (!hit) return m;
+    const controlTotal = controlTotals.has(m.source) ? controlTotals.get(m.source) : m.controlTotal;
+    if (!hit && controlTotal === m.controlTotal) return m;
     return {
       ...m,
-      approved: hit.approved,
-      requiresReview: hit.requiresReview,
-      riskAcknowledged: hit.riskAcknowledged,
-      riskContract: hit.riskContract,
+      ...(hit
+        ? {
+            approved: hit.approved,
+            requiresReview: hit.requiresReview,
+            riskAcknowledged: hit.riskAcknowledged,
+            riskContract: hit.riskContract,
+          }
+        : {}),
+      controlTotal,
     };
   });
 }

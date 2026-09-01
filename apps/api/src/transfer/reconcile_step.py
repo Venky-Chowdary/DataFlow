@@ -876,16 +876,59 @@ def _referential_integrity_evidence(
     """Orphan proof for every source relationship the destination does not enforce."""
     foreign_keys = _source_foreign_keys(schema_state)
     if not foreign_keys:
-        return {}
+        return {
+            "verified": False,
+            "asked": False,
+            "reason": "source declares no foreign keys",
+            "relations": [],
+            "orphan_rows": 0,
+        }
 
     from services.destination_ri_probe import verify_destination_referential_integrity
 
-    return verify_destination_referential_integrity(
+    evidence = verify_destination_referential_integrity(
         db_type,
         cfg,
         schema=schema,
         table=table,
         foreign_keys=foreign_keys,
+    )
+    evidence["asked"] = True
+    return evidence
+
+
+def _apply_n5_gate8_extensions(
+    stamped: dict[str, Any],
+    n5_ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail-closed control totals (G21) and dest RI (G22) on the Gate-8 report."""
+    from services.control_totals import apply_control_totals_to_reconcile
+    from services.destination_ri_probe import apply_dest_ri_to_reconcile
+
+    mappings = list(n5_ctx.get("mappings") or [])
+    out = apply_control_totals_to_reconcile(
+        stamped,
+        mappings=mappings,
+        source_db_type=str(n5_ctx.get("source_db_type") or ""),
+        source_cfg=n5_ctx.get("source_cfg") if isinstance(n5_ctx.get("source_cfg"), dict) else None,
+        source_schema=str(n5_ctx.get("source_schema") or ""),
+        source_table=str(n5_ctx.get("source_table") or ""),
+        dest_db_type=str(n5_ctx.get("dest_db_type") or ""),
+        dest_cfg=n5_ctx.get("dest_cfg") if isinstance(n5_ctx.get("dest_cfg"), dict) else None,
+        dest_schema=str(n5_ctx.get("dest_schema") or ""),
+        dest_table=str(n5_ctx.get("dest_table") or ""),
+        rejected_rows=int(n5_ctx.get("rejected_rows") or 0),
+    )
+    phys = out.get("physical_state") if isinstance(out.get("physical_state"), dict) else {}
+    ri = phys.get("referential_integrity") if isinstance(phys, dict) else None
+    asked = False
+    if isinstance(ri, dict):
+        asked = bool(ri.get("asked")) or bool(ri.get("relations"))
+    asked = asked or bool(n5_ctx.get("source_has_fks"))
+    return apply_dest_ri_to_reconcile(
+        out,
+        evidence=ri if isinstance(ri, dict) else None,
+        has_relationships=asked,
     )
 
 
@@ -1213,6 +1256,12 @@ def run_reconciliation(
     vector_stamp_ctx: dict[str, Any] = {}
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
+    # G21/G22 — filled after source/dest engines resolve. Early file-export
+    # returns still see mappings so a declared control total cannot skip silently.
+    n5_ctx: dict[str, Any] = {
+        "mappings": list(mappings or []),
+        "rejected_rows": int((dest_summary or {}).get("rejected_rows", 0) or 0),
+    }
     # Late-bound with the resolved destination engine and physical types: which
     # columns Gate-8 could only prove at the carrier's granularity.
     carrier_ctx: dict[str, Any] = {}
@@ -1299,6 +1348,7 @@ def run_reconciliation(
             )
         if physical_state:
             stamped["physical_state"] = dict(physical_state)
+        stamped = _apply_n5_gate8_extensions(stamped, n5_ctx)
         rounded = list(carrier_ctx.get("rounded_columns") or [])
         if rounded:
             # Both digests were taken at the destination carrier's granularity,
@@ -1484,6 +1534,27 @@ def run_reconciliation(
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     dest_types = _dest_types_from_mappings(mapping_dicts)
+    n5_ctx["mappings"] = list(mapping_dicts)
+    n5_ctx["dest_db_type"] = db_type
+    n5_ctx["dest_cfg"] = dict(cfg)
+    n5_ctx["dest_schema"] = str(schema or "")
+    n5_ctx["dest_table"] = str(table_name or "")
+    n5_ctx["rejected_rows"] = rejected_rows
+    if source_endpoint is not None and source_endpoint.kind == "database":
+        src_cfg = resolve_connector_config(source_endpoint)
+        src_type = resolve_driver_type(
+            str(src_cfg.get("type") or source_endpoint.format or "")
+        ).lower()
+        from services.dialect_profiles import schema_from_cfg as _n5_schema_from_cfg
+
+        n5_ctx["source_cfg"] = dict(src_cfg)
+        n5_ctx["source_db_type"] = src_type
+        n5_ctx["source_schema"] = str(
+            _n5_schema_from_cfg(src_type, src_cfg) or source_endpoint.schema or ""
+        )
+        n5_ctx["source_table"] = str(
+            source_endpoint.table or src_cfg.get("table") or ""
+        )
     # Prefer physical types stamped by the writer when present.
     physical = dest_summary.get("column_types") or dest_summary.get("target_types")
     if isinstance(physical, dict):
@@ -1665,6 +1736,7 @@ def run_reconciliation(
         )
         if schema_state:
             physical_state["schema_objects"] = schema_state
+            n5_ctx["source_has_fks"] = bool(_source_foreign_keys(schema_state))
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "physical schema comparison skipped: %s", exc, exc_info=exc
@@ -1683,8 +1755,10 @@ def run_reconciliation(
             table=str(table_name or ""),
             schema_state=schema_state,
         )
-        if ri_state:
-            physical_state["referential_integrity"] = ri_state
+        physical_state["referential_integrity"] = ri_state
+        n5_ctx["source_has_fks"] = bool(
+            ri_state.get("asked") or ri_state.get("relations")
+        )
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "destination referential integrity probe skipped: %s", exc, exc_info=exc

@@ -295,6 +295,14 @@ def classify_post_write_assurance(
     elif recon.get("checksum_match") is True:
         checksum_match = True
 
+    from services.destination_ri_probe import referential_integrity_proven as _ri_proven
+
+    phys = recon.get("physical_state") if isinstance(recon.get("physical_state"), dict) else {}
+    ri_evidence = recon.get("referential_integrity")
+    if not isinstance(ri_evidence, dict):
+        ri_evidence = phys.get("referential_integrity") if isinstance(phys, dict) else None
+    ri_proven = _ri_proven(ri_evidence if isinstance(ri_evidence, dict) else None)
+
     veto = fidelity_veto(recon)
     if veto is not None:
         return veto.as_claim(checksum_match)
@@ -321,7 +329,7 @@ def classify_post_write_assurance(
             "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": checksum_match,
             "note": "Gate-8 failed or incomplete — migration not proven.",
         }
@@ -336,7 +344,7 @@ def classify_post_write_assurance(
             "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
                 "Writer acknowledgement is not independent post-write verification — "
@@ -350,7 +358,7 @@ def classify_post_write_assurance(
             "post_write_verified": True,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
                 "Append/upsert dest-before delta verified — whole-table digests "
@@ -366,7 +374,7 @@ def classify_post_write_assurance(
             "post_write_verified": True,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
                 "CDC dest COUNT vs live source-table COUNT. Leftover MERGE is a "
@@ -386,7 +394,7 @@ def classify_post_write_assurance(
             "post_write_verified": True,
             "migration_proven": False,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": checksum_match,
             "note": (
                 "Post-write sample assurance only — not population / full-checksum "
@@ -395,16 +403,21 @@ def classify_post_write_assurance(
         }
 
     if coverage == "full_checksum" or (passed and checksum_match and not preview):
+        ri_note = (
+            " Destination referential integrity proven (enforced FK or anti-join scan)."
+            if ri_proven
+            else " Does not prove referential integrity or population orphan absence."
+        )
         return {
             "claim_level": "full_checksum",
             "post_write_verified": True,
             "migration_proven": True,
             "population_proof": False,
-            "referential_integrity_proven": False,
+            "referential_integrity_proven": ri_proven,
             "checksum_match": True,
             "note": (
-                "Post-write row-count + checksum match for selected transfer. "
-                "Does not prove referential integrity or population orphan absence."
+                "Post-write row-count + checksum match for selected transfer."
+                + ri_note
             ),
         }
 
@@ -413,7 +426,7 @@ def classify_post_write_assurance(
         "post_write_verified": False,
         "migration_proven": False,
         "population_proof": False,
-        "referential_integrity_proven": False,
+        "referential_integrity_proven": ri_proven,
         "checksum_match": checksum_match,
         "note": "Unrecognized Gate-8 posture — refuse migration proven claim.",
     }
@@ -713,6 +726,13 @@ def build_signed_proof_pack(
             ),
         },
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
+        "control_totals": (
+            (reconciliation or {}).get("control_totals")
+            if isinstance(reconciliation, dict)
+            else {}
+        )
+        or (preflight_summary or {}).get("control_totals")
+        or {},
     }
     if anchor_in_chain:
         from services.evidence_chain import anchor_evidence
@@ -858,6 +878,11 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                 "field_reduction_ledger": (
                     pf.get("field_reduction_ledger")
                     or (pf.get("proof_bundle") or {}).get("field_reduction_ledger")
+                    or {}
+                ),
+                "control_totals": (
+                    pf.get("control_totals")
+                    or (pf.get("proof_bundle") or {}).get("control_totals")
                     or {}
                 ),
             }

@@ -262,6 +262,14 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     kind: "cdc_snapshot_mode", coverage: "n/a",
     note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
   });
+  skip("g21_control_totals", "Browser-only — population control totals are a post-write Gate-8 SUM, not a sample SUM.", {
+    kind: "control_totals", coverage: "n/a",
+    note: "Independent source/dest SUM runs after Execute",
+  });
+  skip("g22_dest_referential_integrity", "Browser-only — destination RI is a post-write Gate-8 anti-join, not a sample orphan probe.", {
+    kind: "dest_referential_integrity", coverage: "n/a",
+    note: "Dest enforced FK or anti-join scan runs after Execute",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;

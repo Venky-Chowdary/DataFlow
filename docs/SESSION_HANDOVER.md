@@ -12,6 +12,13 @@ anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the
 product is deployment-ready; §7 lists exactly what is missing for that claim.
 
+**Latest (this branch):** **N5** — Gate-8 control totals (**G21**) and dest-side
+referential integrity (**G22**) on `feature/n5-control-totals-ri`. Independent
+`SUM` of declared monetary columns (exact `Decimal`, separate connections) and
+dest FK/anti-join fail-closed after write. Validate skips both (post-write
+proofs). Do not fold D1 [#132], N2 [#133], or N4 [#134] into this tree. Next
+after merge: never-measured items / local fleet throughput.
+
 ---
 
 ## 1. How to run it

@@ -40,6 +40,8 @@ HARD_GATE_IDS = {
     "g18_cdc_snapshot_mode",
     "g19_dest_schema_replacement",
     "g3f_population_fit",
+    "g21_control_totals",
+    "g22_dest_referential_integrity",
 }
 
 SOFT_GATE_IDS = {
@@ -254,6 +256,52 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fix the carrier"},
+        ],
+    },
+    "g21_control_totals": {
+        "title": "Control totals",
+        "category": "hard",
+        "why": (
+            "A matching row count does not prove a ledger balance. Declared "
+            "monetary columns must have an independent source SUM equal to the "
+            "destination SUM after the write. A sample SUM, an in-memory walk of "
+            "loaded rows, and a 0.01 tolerance are not that proof."
+        ),
+        "fix": (
+            "Open Map and confirm the control-total checkbox on the monetary "
+            "column. Identity mappings only — a currency parse is not a source "
+            "SUM. Fix the write (quarantine, transform, or missing rows) until "
+            "the independent destination SUM matches. A signed risk contract "
+            "does not waive a ledger mismatch."
+        ),
+        "examples": [
+            "COUNT(*) matches and SUM(amount) is 0.01 short — Gate-8 fails.",
+            "Quarantined rows without a quarantined-amount SUM — unproven, fail closed.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to declare control totals"},
+        ],
+    },
+    "g22_dest_referential_integrity": {
+        "title": "Destination referential integrity",
+        "category": "hard",
+        "why": (
+            "A child row can land while its parent never did. Schema FK coverage "
+            "(constraint_fk) and a source sample orphan probe do not prove the "
+            "destination. After write, every source relationship must be dest "
+            "enforced or anti-join scanned with zero orphans."
+        ),
+        "fix": (
+            "Load parent rows first, or quarantine orphan children. Destination "
+            "RI cannot be fixed in Map. Re-Validate after the parent population "
+            "exists, then Execute. An unavailable dest scan is unproven — fail closed."
+        ),
+        "examples": [
+            "Dest child COUNT=3, dest anti-join finds parent_id 99 missing — Gate-8 fails.",
+            "Load-speed dest with no FK: dest scan is required; catalog coverage is not enough.",
+        ],
+        "suggested_actions": [
+            {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
         ],
     },
     "g18_cdc_snapshot_mode": {

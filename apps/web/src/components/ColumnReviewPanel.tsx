@@ -30,6 +30,7 @@ import {
   isEnumToBooleanConflict,
   isExistingEnumBooleanConflict,
   isIntentionalOmit,
+  isControlTotalCandidate,
   REDUCTION_REASONS,
   applyReductionReason,
   reductionEvidenceGap,
@@ -1029,6 +1030,20 @@ export function ColumnReviewPanel({
                         ))}
                       </select>
                         </>
+                      )}
+                      {!omitted && isControlTotalCandidate(m) && (
+                        <label
+                          className="df2-column-control-total"
+                          title="After write, independently SUM this column on source and destination. A row count is not a ledger balance. Identity mappings only."
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(m.controlTotal)}
+                            onChange={(e) => updateMapping(index, { ...m, controlTotal: e.target.checked })}
+                            aria-label={`Control total for ${m.source}`}
+                          />
+                          Control total
+                        </label>
                       )}
                       {!omitted && (isStructLogicalType(m.inferredType) || isStructLogicalType(m.destType) || (m.structPolicy && !isArrayLogicalType(m.inferredType) && !isArrayLogicalType(m.destType))) && !m.structDerived && (
                         <select

@@ -179,4 +179,15 @@ describe("holdOutRowsAndContinue", () => {
       "regeneration must not reopen the quarantine loop",
     );
   });
+
+  it("carries a control-total declaration across regeneration", () => {
+    const prior: EditableMapping[] = [
+      { ...clean(), source: "amount", target: "amount", controlTotal: true },
+    ];
+    const regenerated: EditableMapping[] = [
+      { ...clean(), source: "amount", target: "amount" },
+    ];
+    const carried = carryOperatorDecisions(regenerated, prior);
+    assert.equal(carried[0].controlTotal, true);
+  });
 });

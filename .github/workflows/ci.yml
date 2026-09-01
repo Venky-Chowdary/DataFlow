@@ -832,6 +832,7 @@ jobs:
           services/auth_rate_limit.py
           services/auto_create_lifecycle.py
           services/staging_reaper.py
+          services/control_totals.py
           src/services/auth_service.py
           connectors/elasticsearch_writer.py
           connectors/sqlite_writer.py

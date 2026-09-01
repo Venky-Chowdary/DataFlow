@@ -15,7 +15,7 @@ called ready when it is not:
 * **In progress** — reproduced/designed, not merged.
 * **Not started** — no code exists. Saying so is the point of this file.
 
-Integration branch: `feature/Venkat-Analysis`. Last updated 2026-08-30.
+Integration branch: `feature/Venkat-Analysis`. Last updated 2026-09-01.
 
 ---
 
@@ -77,7 +77,7 @@ PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
   removed.
 * **Why it matters commercially.** It is the difference between "a JSON
   Datawrap generated about itself" and "evidence a third party can verify".
-  It is also the prerequisite for N2 and N5, which have nowhere durable to write
+  it is also the prerequisite for N2 and N5, which have nowhere durable to write
   attestations without it.
 * **Regulatory driver.** GDPR Art. 30, SOX, BCBS 239, DORA — retained,
   verifiable records rather than a live dashboard.
@@ -85,6 +85,28 @@ PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
   seen during the run was reproduced on the base commit in a clean worktree with
   the identical error (local Mongo has no change-stream pre-images), so it is
   pre-existing, not caused by this change.
+
+### N5 · Control-total + dest-side referential-integrity proof (gates **G21**, **G22**) — **this PR (not yet merged)**
+
+Branch `feature/n5-control-totals-ri`.
+
+* **What it is.** Gate-8 extensions a bank examiner asks for. **G21** independently
+  recomputes `SUM` of operator-declared monetary columns on source and
+  destination (separate connections, exact `Decimal`, no 0.01 slop). **G22**
+  fails the job when dest-side FK enforcement or anti-join scan finds orphans
+  or cannot run. A matching row count is not a ledger balance and is not dest RI.
+* **Opt-in honesty.** G21 does not invent money columns from names (`amount`)
+  and does not auto-SUM every `MONEY` carrier. A mapping is in G21 only when
+  `control_total: true`. Map defaults the checkbox on for `MONEY` /
+  `CURRENCY` / `SMALLMONEY` so the declaration is one click, not a hidden
+  SUM. Identity mappings only. Quarantine without a quarantined-amount SUM is
+  unproven, fail closed. A signed risk contract does **not** demote G21.
+* **User surface.** Map checkbox on monetary rows. Validate states G21/G22
+  every run and skips — population SUM and dest RI are post-write proofs. A
+  browser sample SUM is not that proof.
+* **Proof pack.** `referential_integrity_proven` is true only on dest
+  enforced/scanned clean relations. Empty relationships stay false ("nothing
+  to prove"). Control totals travel as column names + SUMs, never full rows.
 
 ---
 
@@ -94,9 +116,8 @@ Named precisely so nobody reads §2 as "the tier is done".
 
 | # | Capability | What it must do | Why it is not optional |
 |---|------------|-----------------|------------------------|
-| N2 | **AI egress manifest + metadata-only mode** | A per-job manifest of exactly what left the customer boundary toward any model, plus an enforced mode in which the mapper sees schema, statistics and profiles — never cell values | This is the answer to the security-review objection ("your product will breach my data if it sends it to an LLM"). Without an enforced mode and a manifest, the answer is a promise |
-| N4 | **Population-level code crosswalk coverage gate** | Prove that every distinct source code value has a target mapping across the *population*, not a sample; unmapped values fail closed | Legacy reference-data conversion is where field-reducing migrations silently corrupt meaning |
-| N5 | **Control-total + referential-integrity proof gates** | Gate-8 extensions: independently recomputed control totals (sums of monetary columns, not just counts) and destination-side referential-integrity checks | A row count proves nothing about a ledger balance; this is what a bank examiner asks for |
+| N2 | **AI egress manifest + metadata-only mode** | A per-job manifest of exactly what left the customer boundary toward any model, plus an enforced mode in which the mapper sees schema, statistics and profiles — never cell values | Open PR [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133) on `feature/n2-ai-egress-manifest` — not in this tree |
+| N4 | **Population-level code crosswalk coverage gate** | Prove that every distinct source code value has a target mapping across the *population*, not a sample; unmapped values fail closed | Open PR [#134](https://github.com/Venky-Chowdary/DataFlow/pull/134) on `feature/n4-code-crosswalk-coverage` — not in this tree |
 
 Dependency: N2 and N5 both write attestations, so both depend on N3 — which is
 why N3 was built first.
@@ -163,13 +184,12 @@ the verdict would fail open and quarantine rows while Map showed green.
 
 ## 7. How to continue
 
-1. Finish **D1** (provenance for sampled destination shapes) — it is the last
-   open defect in the current sequence and it directly undermines the
-   proof-of-movement claim on object-store and schemaless routes.
-2. Then **N2**, because it is the capability that unblocks security review, and
-   N3 has already given it somewhere durable to write.
-3. Then N4 and N5, in that order — N5's control totals are more valuable once
-   crosswalk coverage is provable.
+1. Merge **N5** (this PR) into `feature/Venkat-Analysis` after review.
+2. N2 ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)) and N4
+   ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)) are already
+   open on their own branches — do not fold them into later PRs.
+3. Then the never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6 and
+   the local fleet / 10k–1M throughput work. Do not reopen D1/N2/N4 here.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).
