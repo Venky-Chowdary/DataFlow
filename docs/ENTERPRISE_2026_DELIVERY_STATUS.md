@@ -169,11 +169,10 @@ the verdict would fail open and quarantine rows while Map showed green.
    ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)) are already
    open on their own branches — do not fold them into later PRs.
 2. YAML/fixed-width sources are live on [#136](https://github.com/Venky-Chowdary/DataFlow/pull/136).
-   **This PR** makes their 100K cells measurable (layout-projected fwf
-   checksum; 12,100-row sqlite COUNT + checksum + DLQ). YAML export and
-   100K Postgres stay unmeasured — do not quote 12k as 100K.
-3. Run `DATAFLOW_SCALE_YAML_FWF_100K=1` for the 100K Postgres cells, then
-   the remaining never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6
+   **This PR** closes their 100K Postgres cells (dest COUNT=99,991, DLQ=9,
+   independent checksum, 2 passed in 193.55s). YAML export is still refused.
+   MySQL twins were not run (`mysql_up()` false).
+3. Remaining never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6
    and the local fleet / 10k–1M throughput work.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything

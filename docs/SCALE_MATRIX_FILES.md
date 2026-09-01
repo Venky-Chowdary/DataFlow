@@ -531,8 +531,8 @@ proves the destination stayed empty:
 | AWS S3 (all routes) | no AWS credentials in this environment |
 | Google Cloud Storage (all routes) | no GCP service-account credentials in this environment |
 | Azure Data Lake Storage Gen2 (all routes) | no Azure tenant credentials in this environment |
-| `file/fixed_width → database/*` | source is live ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); expected checksum is layout-projected (40-char `note`, 32-char `created_at`). 12,100-row sqlite proven on this PR. **100K still unmeasured** |
-| `file/yaml → database/*` | source is live ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); 12,100-row sqlite proven on this PR. **100K still unmeasured** |
+| `file/fixed_width → postgresql` | **pass** (this PR): 100,000 source rows, independent dest COUNT=99,991, DLQ=9, layout-projected checksum match. `test_yaml_fwf_100k_postgres[fixed_width]`. MySQL twin not run (`mysql_up()` false) |
+| `file/yaml → postgresql` | **pass** (this PR): 100,000 source rows, independent dest COUNT=99,991, DLQ=9, checksum match. `test_yaml_fwf_100k_postgres[yaml]`. MySQL twin not run (`mysql_up()` false) |
 
 MinIO, fake-gcs-server and Azurite are **emulators**. They prove the S3/GCS/Blob code
 paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
@@ -556,7 +556,9 @@ paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
   refusal cells at 100K. Their harness definitions exist and run with one command; no
   result is claimed for them.
 - MySQL as a *file destination* (`mysql → file`) was never exercised.
-- `fixed_width` and `yaml` are transfer-live **sources** ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)).
-  This PR proves 12,100-row sqlite dest COUNT + checksum + DLQ and owns the
-  layout-projected fwf checksum so a 100K cell can pass honestly. They are
-  not 100K-proven. YAML is not a destination export.
+- `fixed_width` and `yaml` 100K → **Postgres** passed on this PR
+  (`test_yaml_fwf_100k_postgres`, 2 passed in 193.55s, dest COUNT=99,991,
+  DLQ=9). YAML is not a destination export. 100K MySQL twins were not run
+  (`mysql_up()` false). The generated table above still shows the earlier
+  *skip (no live driver)* rows from the halted Track B run — those are
+  historical, not this revision.

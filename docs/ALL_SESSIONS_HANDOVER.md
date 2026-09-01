@@ -195,10 +195,10 @@ N2 ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)), N4
 ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)) are open on their
 own branches and are not in this tree. YAML/fixed-width sources are live
 on [#136](https://github.com/Venky-Chowdary/DataFlow/pull/136). **This PR**
-makes their 100K cells measurable (layout-projected fwf checksum; 12,100-row
-sqlite dest COUNT + checksum + DLQ). 100K Postgres remains unmeasured.
-Then remaining never-measured / fleet throughput — do not fold
-D1/N2/N4/N5/#136.
+closes their 100K Postgres cells: dest COUNT=99,991, DLQ=9, independent
+checksum match, 2 passed in 193.55s (layout-projected fwf checksum).
+MySQL twins were not run; YAML export is still refused. Then remaining
+never-measured / fleet throughput — do not fold D1/N2/N4/N5/#136.
 
 ---
 

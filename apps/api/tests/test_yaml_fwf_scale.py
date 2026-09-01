@@ -5,6 +5,11 @@ the next proof bar: the dirty fixture at a population that carries quarantine
 and 10 KiB notes, through the product engine, with an independent destination
 reread. 12,100 rows is always-on (sqlite). 100K Postgres is env-gated —
 reduced-row runs are never presented as 100K evidence.
+
+Measured on this branch (DATAFLOW_SCALE_YAML_FWF_100K=1, live Postgres):
+``test_yaml_fwf_100k_postgres[yaml]`` and ``[fixed_width]`` both PASSED in
+193.55s. Independent dest COUNT = 99,991, DLQ = 9. MySQL twins were not run
+(``mysql_up()`` is false here). YAML export is still refused.
 """
 
 from __future__ import annotations
