@@ -62,7 +62,14 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
 
 1. 100K on every route; 1M on every sync mode (1M measured on exactly one route:
    PostgreSQL→MySQL append, 221.5 s / 4,515 rows/s).
-2. Track A's 225-cell grid never completed — the re-run halted at 122 cells.
+2. ~~Track A's 225-cell grid never completed — the re-run halted at 122 cells.~~
+   **Closed for the live 4-engine 200-row grid (this PR).** 16 routes × 10
+   shapes = 160 cells: **140 pass / 0 fail / 20 skip** (prefix `ta5`,
+   2026-09-01). Oracle `:1521` down — 0 Oracle cells; not 225/225. Skips are
+   honest: 16 `domain_contract_unsigned` (dest already declares the domain) and
+   4 `* → sqlite` `dest_exists_narrower` (SQLite does not enforce string
+   length). Evidence `docs/SCALE_MATRIX_SQL.md` addendum + harness JSON.
+   **100K on this grid is still not measured.**
 3. `postgresql→mongodb` CDC at 100K: timestamp risk-acknowledgement not re-measured.
 4. ~~Scheduler DST cell and workspace-ownership cell not re-measured after the
    `workspace_access` fix~~ **Closed (this PR).** Track D cadence cells

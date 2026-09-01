@@ -131,7 +131,10 @@ def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
     """True when mapping invents/drops width-insensitive equality (WS omit).
 
     SQL Server: ``_WS`` is width-sensitive; omitting ``_WS`` folds fullwidth/
-    halfwidth — unique keys can collide without Accept risk.
+    halfwidth — unique keys can collide without Accept risk. The token is
+    Windows-collation-only; a MySQL ``*_ai_ci`` name has no WS polarity, so
+    comparing it to SQL Server's default (omit ``_WS``) invented a fold the
+    source never declared.
     """
     from services.type_system import (
         LOGICAL_STRING,
@@ -153,7 +156,7 @@ def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
         return False
     src_name = (parse_collation(source_type) or "").upper()
     tgt_name = (parse_collation(target_type) or "").upper()
-    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+    if not _is_windows_style_collation(src_name) or not _is_windows_style_collation(
         tgt_name
     ):
         return False
@@ -163,7 +166,11 @@ def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
 
 
 def kana_fold_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents/drops kana-insensitive equality (KS omit)."""
+    """True when mapping invents/drops kana-insensitive equality (KS omit).
+
+    ``_KS`` is a SQL Server Windows-collation token. Cross-engine names have
+    none — do not grade MySQL/PG equality as a kana fold against CI_AS.
+    """
     from services.type_system import (
         LOGICAL_STRING,
         LOGICAL_TEXT,
@@ -184,7 +191,7 @@ def kana_fold_polarity_invent(source_type: str, target_type: str) -> bool:
         return False
     src_name = (parse_collation(source_type) or "").upper()
     tgt_name = (parse_collation(target_type) or "").upper()
-    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
+    if not _is_windows_style_collation(src_name) or not _is_windows_style_collation(
         tgt_name
     ):
         return False

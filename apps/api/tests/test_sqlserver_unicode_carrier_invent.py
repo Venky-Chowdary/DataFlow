@@ -8,6 +8,8 @@ and an unmeasured declaration decides nothing.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from services.dest_dialect_facts import _collation_compatible_with_dest
@@ -18,6 +20,12 @@ from services.type_system import (
     is_precision_collapse_coercion,
     source_column_holds_unicode,
 )
+
+
+def _carrier_without_collation(stamp: str) -> str:
+    return re.split(r"\s+(?:COLLATE|CHARACTER\s+SET|CHARSET)\s+", stamp, maxsplit=1, flags=re.I)[
+        0
+    ].strip()
 
 
 @pytest.mark.parametrize(
@@ -65,7 +73,7 @@ def test_source_column_unicode_capacity(
 )
 def test_create_new_sqlserver_carrier(source_db: str, source_type: str, expected: str) -> None:
     got = create_new_mapping_target_type(source_type, "sqlserver", source_db=source_db)
-    assert got.upper() == expected
+    assert _carrier_without_collation(got).upper() == expected
 
 
 def test_unbounded_unicode_source_lands_national_max() -> None:

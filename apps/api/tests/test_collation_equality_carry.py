@@ -149,3 +149,32 @@ def test_create_new_plan_prepends_collate_before_not_null():
     assert frags.index("CHARACTER SET utf8mb4") < frags.index("NOT NULL")
     statuses = {i.status for i in plan.report.items if i.aspect == "collation"}
     assert "carried" in statuses
+
+
+def test_invent_mysql_bin_lands_sqlserver_bin_not_dest_default_ci():
+    """Cross-engine name-copy would drop COLLATE; dest default CI_AS is a collapse."""
+    from services.decision_kernel.type_invent import create_new_mapping_target_type
+    from services.type_system import is_lossy_coercion
+
+    src = "VARCHAR(64) COLLATE utf8mb4_0900_bin"
+    got = create_new_mapping_target_type(src, "sqlserver", source_db="mysql")
+    assert got.upper().startswith("NVARCHAR(64)")
+    assert "LATIN1_GENERAL_BIN" in got.upper()
+    assert not is_lossy_coercion(src, got, dest_db="sqlserver")
+
+
+def test_invent_sqlserver_bin2_lands_mysql_utf8mb4_bin():
+    from services.decision_kernel.type_invent import create_new_mapping_target_type
+    from services.type_system import is_lossy_coercion, national_charset_would_collapse
+
+    src = "NVARCHAR(64) COLLATE Latin1_General_100_BIN2"
+    got = create_new_mapping_target_type(src, "mysql", source_db="sqlserver")
+    lowered = got.lower()
+    assert "character set utf8mb4" in lowered
+    assert "utf8mb4_bin" in lowered
+    assert not national_charset_would_collapse(src, got, dest_db="mysql")
+    assert not is_lossy_coercion(src, got, dest_db="mysql")
+    # Introspection reports COLLATE without CHARACTER SET — still full Unicode.
+    introspected = "VARCHAR(64) COLLATE utf8mb4_bin"
+    assert not national_charset_would_collapse(src, introspected, dest_db="mysql")
+    assert not is_lossy_coercion(src, introspected, dest_db="mysql")

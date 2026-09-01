@@ -4335,15 +4335,26 @@ def _is_mysql_character_wire(stamp: str) -> bool:
 
 
 def _target_holds_full_unicode(dest_db: str, target_type: str) -> bool:
-    """True when the target stamp's own character set stores every scalar."""
-    if not re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", target_type or "", re.I):
-        return False
-    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+    """True when the target stamp's own character set stores every scalar.
 
+    MySQL introspection reports ``VARCHAR(64) COLLATE utf8mb4_bin`` and omits
+    ``CHARACTER SET`` — the collation prefix *is* the measured charset. Engine
+    default utf8mb4 on a bare ``VARCHAR`` is not a measurement and must not
+    green a latin1-default server.
+    """
+    from services.encoding_capacity import (
+        UNICODE_MAX,
+        classify_capacity,
+        parse_declared_charset,
+    )
+
+    declared = parse_declared_charset(target_type).strip()
+    if not declared:
+        return False
     cap = classify_capacity(dest_db, target_type)
     form: str = cap.form
     max_code_point: int = cap.max_code_point
-    return form == "utf8" and max_code_point >= UNICODE_MAX
+    return form in {"utf8", "utf16"} and max_code_point >= UNICODE_MAX
 
 
 def national_charset_would_collapse(
@@ -5766,9 +5777,20 @@ def _uuid_carrier_width(upper: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _uuid_wire_token(target_type: str | None) -> str:
+    """UUID wire spelling without identity, COLLATE, or CHARACTER SET tails.
+
+    Create-new may stamp ``CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin``
+    so a CS source UUID does not land in MySQL's default CI equality. The 36-char
+    contract is the head token; charset/collation are equality, not width.
+    """
+    raw = strip_identity_qualifier(target_type).strip()
+    return re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", raw, flags=re.I).strip()
+
+
 def uuid_exact_wire_carrier(target_type: str | None) -> bool:
     """True only for exact 36-char UUID string wires (not VARCHAR(50)+)."""
-    raw = strip_identity_qualifier(target_type).strip()
+    raw = _uuid_wire_token(target_type)
     if not raw:
         return False
     upper = raw.upper()
@@ -5791,7 +5813,7 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
     """
     if uuid_exact_wire_carrier(target_type):
         return True
-    raw = strip_identity_qualifier(target_type).strip()
+    raw = _uuid_wire_token(target_type)
     if not raw:
         return False
     width = _uuid_carrier_width(raw.upper())
@@ -5824,14 +5846,23 @@ def uuid_carrier_is_dialect_equivalent(
     On SQLite every string carrier is the same untyped TEXT affinity, so
     ``UUID → TEXT`` is the widest wire the dialect can spell, not a narrowing:
     the 36-char value round-trips byte-exact and ``VARCHAR(36)`` would enforce
-    nothing extra. The lost UUID *domain* is still reported as a warn-level
-    carrier note; it is the fail-closed collapse that does not apply.
+    nothing extra. The reverse — a MySQL ``CHAR(36)`` UUID wire into a SQLite
+    column whose declared type token is ``UUID`` — is the same affinity.
+    The lost UUID *domain* is still reported as a warn-level carrier note; it
+    is the fail-closed collapse that does not apply.
     """
     if not dest_string_length_is_unenforced(dest_db):
         return False
-    if normalize_logical_type(source_type) != LOGICAL_UUID:
-        return False
-    return normalize_logical_type(target_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l == LOGICAL_UUID and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return True
+    # CHAR(36) / VARCHAR(36) UUID wire → SQLite ``UUID`` type name.
+    if tgt_l == LOGICAL_UUID and src_l != LOGICAL_UUID and uuid_exact_wire_carrier(
+        source_type
+    ):
+        return True
+    return False
 
 
 def uuid_would_collapse(
@@ -7712,6 +7743,11 @@ def is_lossy_coercion(
     # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
     if src == LOGICAL_JSON and is_dialect_native_document_wire(
         target_type, dest_db=dest_db
+    ):
+        return False
+    # SQLite TEXT affinity: UUID / CHAR(36) UUID wire / TEXT are one carrier.
+    if uuid_carrier_is_dialect_equivalent(
+        source_type, target_type, dest_db=dest_db
     ):
         return False
     # Existing-table string/text → dialect-native JSON/JSONB is a load (parse at

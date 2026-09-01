@@ -76,6 +76,31 @@ def test_bounded_uuid_wire_still_passes_everywhere():
     for dest_db in ("sqlite", *_OTHER_DIALECTS):
         assert uuid_would_collapse("UUID", "VARCHAR(36)", dest_db=dest_db) is False
         assert is_lossy_coercion("UUID", "CHAR(36)", dest_db=dest_db) is False
+        # Dest-native CS collation on the 36-char wire is still that wire.
+        assert (
+            uuid_would_collapse(
+                "UUID",
+                "CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin",
+                dest_db=dest_db,
+            )
+            is False
+        )
+        assert (
+            is_lossy_coercion(
+                "UUID",
+                "CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin",
+                dest_db=dest_db,
+            )
+            is False
+        )
+
+
+def test_sqlite_mysql_uuid_wire_is_not_a_domain_invent():
+    """MySQL CHAR(36) UUID wire → SQLite UUID type name is one TEXT affinity."""
+    src = "CHAR(36) COLLATE utf8mb4_0900_bin"
+    assert uuid_carrier_is_dialect_equivalent(src, "UUID", dest_db="sqlite") is True
+    assert is_lossy_coercion(src, "UUID", dest_db="sqlite") is False
+    assert is_lossy_coercion(src, "UUID", dest_db="postgresql") is True
 
 
 def test_genuinely_narrower_sqlite_route_still_blocks():
