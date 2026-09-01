@@ -7,16 +7,18 @@ there, and no CI workflow triggers on it). Latest wave head:
 workspaces wave: `a1cc1f91` via
 [#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
+**Latest on `feature/Venkat-Analysis`:** D1 [#132], N2 [#133], N4 / G20 [#134],
+N5 / G21+G22 [#135], and YAML/fixed-width live sources [#136] are merged.
+YAML keeps scalar text (no `yes`→bool); fixed-width refuses a guessed layout.
+YAML dest export is still refused. Next: 100K of these formats, scheduler DST,
+governance ops on the certificate, remaining matrix cells, SFTP Excel, and
+local fleet / 10k–1M throughput. See
+`docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
+
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the
 product is deployment-ready; §7 lists exactly what is missing for that claim.
-
-**Latest on `feature/Venkat-Analysis`:** D1 [#132], N2 [#133], N4 / G20 [#134],
-and N5 / G21+G22 [#135] are merged. Next: never-measured items (scheduler DST,
-governance ops on the certificate, remaining matrix cells, SFTP Excel) and
-local fleet / 10k–1M throughput. See
-`docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 
 ---
 

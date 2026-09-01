@@ -24,7 +24,12 @@ from src.transfer.connector_capabilities import (  # noqa: E402
     resolve_driver_type,
 )
 from src.transfer.connector_registry import CONNECTOR_MODULES  # noqa: E402
-from src.transfer.registry import validate_transfer  # noqa: E402
+from src.transfer.registry import (  # noqa: E402
+    LIVE_DEST_FILE_FORMATS,
+    LIVE_TABULAR_SOURCE_FORMATS,
+    _FILE_FORMATS,
+    validate_transfer,
+)
 
 # Every resolve_driver_type result must land in the registry or file caps.
 _KNOWN_DRIVERS = frozenset(CONNECTOR_MODULES) | frozenset(_DRIVER_CAPS) | frozenset(_FILE_CAPS) | {
@@ -57,9 +62,7 @@ def test_all_live_catalog_ids_have_default_port(live_catalog_ids: list[str]):
 
 
 def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: list[str]):
-    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
+    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in _FILE_FORMATS]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     dest_ids = [cid for cid in db_ids if dest_ready(get_capabilities(resolve_driver_type(cid)))]
     for src in source_ids:
@@ -69,12 +72,14 @@ def test_all_live_db_catalog_ids_have_valid_db_to_db_route(live_catalog_ids: lis
 
 
 def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[str]):
-    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
-    dest_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    ) and dest_ready(get_capabilities(resolve_driver_type(cid)))]
+    source_formats = set(LIVE_TABULAR_SOURCE_FORMATS)
+    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in source_formats]
+    dest_ids = [
+        cid
+        for cid in live_catalog_ids
+        if resolve_driver_type(cid) not in _FILE_FORMATS
+        and dest_ready(get_capabilities(resolve_driver_type(cid)))
+    ]
     for fid in file_ids:
         for did in dest_ids:
             ok, msg = validate_transfer("file", fid, "database", did)
@@ -82,12 +87,9 @@ def test_all_live_file_catalog_ids_have_valid_db_route(live_catalog_ids: list[st
 
 
 def test_all_live_db_catalog_ids_have_valid_db_to_file_route(live_catalog_ids: list[str]):
-    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
-    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in (
-        "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml"
-    )]
+    dest_formats = set(LIVE_DEST_FILE_FORMATS)
+    file_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) in dest_formats]
+    db_ids = [cid for cid in live_catalog_ids if resolve_driver_type(cid) not in _FILE_FORMATS]
     source_ids = [cid for cid in db_ids if get_capabilities(resolve_driver_type(cid)).get("read")]
     for sid in source_ids:
         for fid in file_ids:

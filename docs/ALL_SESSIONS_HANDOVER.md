@@ -182,11 +182,12 @@ migration (2026)`; delivery state, evidence and the remaining tiers are in
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
 D1 (sampled dest carrier provenance) is closed with a live Postgres→MinIO
 independent reread ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132));
-N2 (AI egress manifest + metadata-only mapper) is merged
-([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)); N4 / G20 is merged
-([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)); N5 / G21+G22 is
-merged ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). Next:
-never-measured items and local fleet throughput.
+N2–N5 are merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133),
+[#134](https://github.com/Venky-Chowdary/DataFlow/pull/134),
+[#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). YAML and
+fixed-width are transfer-live **file sources**
+([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)). YAML dest export
+is still refused; 100K of these formats follows.
 
 ---
 

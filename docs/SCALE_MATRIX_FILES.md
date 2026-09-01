@@ -531,8 +531,8 @@ proves the destination stayed empty:
 | AWS S3 (all routes) | no AWS credentials in this environment |
 | Google Cloud Storage (all routes) | no GCP service-account credentials in this environment |
 | Azure Data Lake Storage Gen2 (all routes) | no Azure tenant credentials in this environment |
-| `file/fixed_width → database/*` | the engine reports no live driver for this combination |
-| `file/yaml → database/*` | the engine reports no live driver for this combination |
+| `file/fixed_width → database/*` | **was** no live driver; this PR makes the source live. 100K cells still unmeasured |
+| `file/yaml → database/*` | **was** no live driver; this PR makes the source live. 100K cells still unmeasured |
 
 MinIO, fake-gcs-server and Azurite are **emulators**. They prove the S3/GCS/Blob code
 paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
@@ -556,5 +556,6 @@ paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
   refusal cells at 100K. Their harness definitions exist and run with one command; no
   result is claimed for them.
 - MySQL as a *file destination* (`mysql → file`) was never exercised.
-- `fixed_width` and `yaml` remain unproven in either direction beyond the engine's own
-  "no live driver" refusal.
+- `fixed_width` and `yaml` are transfer-live **sources** on this PR (2-row
+  sqlite + live Postgres dest COUNT). They are not 100K-proven and YAML is
+  not a destination export.

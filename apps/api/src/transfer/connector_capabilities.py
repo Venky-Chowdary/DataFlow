@@ -73,6 +73,8 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
+    "yaml": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "fixed_width": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "pdf": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "docx": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "html": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
@@ -223,6 +225,7 @@ _TRANSFER_READY_CORE = frozenset({
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
     "salesforce", "hubspot", "stripe",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
+    "yaml", "fixed_width",
     # SFTP earns this with introspect (typed schema off the remote payload),
     # Validate gates and a Gate-8 read-back, proven against a real SFTP server
     # in test_sftp_live_transfer.py. email stays out: write-only, no read-back.
@@ -308,6 +311,8 @@ def default_port(driver_type: str) -> int:
         "influxdb": 8086,
         "neo4j": 7474,
         "couchbase": 8093,
+        "yaml": 0,
+        "fixed_width": 0,
     }.get((driver_type or "").lower(), 5432)
 
 
@@ -539,6 +544,8 @@ _DRIVER_MODULE: dict[str, str | None] = {
     "avro": "fastavro",
     "orc": "pyarrow",
     "xml": "xmltodict",
+    "yaml": "yaml",
+    "fixed_width": None,
 }
 
 

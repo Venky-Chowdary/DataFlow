@@ -1,6 +1,7 @@
 """Streaming file → database transfer for CSV, TSV, JSONL, NDJSON, JSON arrays,
-Excel, and Parquet.  Supports in-memory ``bytes`` as well as on-disk paths so
-billion-row files can be processed without loading the whole payload into RAM.
+Excel, Parquet, Avro, ORC, XML, YAML, and fixed-width.  Supports in-memory
+``bytes`` as well as on-disk paths so billion-row files can be processed without
+loading the whole payload into RAM.
 """
 
 from __future__ import annotations
@@ -123,6 +124,7 @@ from .stream import _declared_destination_key_columns, _write_batch
 
 STREAMABLE_TYPES = {
     "csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc", "xml",
+    "yaml", "fixed_width",
 }
 STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
 FILE_SPILL_THRESHOLD = int(getenv_brand("FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
@@ -567,6 +569,77 @@ def peek_file_source(
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, int(total), sample_objs[:100]
 
+    if file_type == "yaml":
+        from services.yaml_tabular import YAMLTabularError, count_yaml_records, iter_yaml_dicts
+
+        enc = (read_options.encoding if read_options else "") or "utf-8"
+        src = _xml_source(content)
+        total = count_yaml_records(src, encoding=enc)
+        if total is None:
+            raise ValueError(
+                "YAML document is unmeasured — use a sequence of flat mappings "
+                "(or a single-list wrapper). Nested cells and aliases are refused."
+            )
+        sample_objs = []
+        columns: dict[str, None] = {}
+        try:
+            for rec in iter_yaml_dicts(src, encoding=enc):
+                if not isinstance(rec, dict):
+                    continue
+                for key in rec:
+                    name = str(key).strip()
+                    if name and name not in columns:
+                        columns[name] = None
+                if len(sample_objs) < 100:
+                    sample_objs.append(rec)
+                if len(sample_objs) >= 100:
+                    break
+        except YAMLTabularError as exc:
+            raise ValueError(str(exc)) from exc
+        if total == 0:
+            raise ValueError("YAML file has no record rows")
+        headers = list(columns.keys())
+        schema = FileParser.infer_schema(sample_objs)
+        return headers, schema, int(total), sample_objs[:100]
+
+    if file_type == "fixed_width":
+        from services.fixed_width_layout import (
+            FixedWidthError,
+            count_fixed_width_records,
+            iter_fixed_width_dicts,
+        )
+
+        enc = (read_options.encoding if read_options else "") or "utf-8"
+        layout = read_options.fixed_width_layout if read_options else ()
+        src = _xml_source(content)
+        total = count_fixed_width_records(src, layout, encoding=enc)
+        if total is None:
+            raise ValueError(
+                "Fixed-width file is unmeasured — declare read_options."
+                "fixed_width_layout, a sidecar .layout.json, or a #layout: header"
+            )
+        sample_objs = []
+        columns: dict[str, None] = {}
+        try:
+            for rec in iter_fixed_width_dicts(src, layout, encoding=enc):
+                if not isinstance(rec, dict):
+                    continue
+                for key in rec:
+                    name = str(key).strip()
+                    if name and name not in columns:
+                        columns[name] = None
+                if len(sample_objs) < 100:
+                    sample_objs.append(rec)
+                if len(sample_objs) >= 100:
+                    break
+        except FixedWidthError as exc:
+            raise ValueError(str(exc)) from exc
+        if total == 0:
+            raise ValueError("Fixed-width file has no record rows")
+        headers = list(columns.keys())
+        schema = FileParser.infer_schema(sample_objs)
+        return headers, schema, int(total), sample_objs[:100]
+
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
@@ -758,6 +831,45 @@ def _batch_iterator_for_type(
                 yield batch
 
         return _xml_batches()
+    if file_type == "yaml":
+        from services.yaml_tabular import iter_yaml_dicts
+
+        enc = (read_options.encoding if read_options else "") or "utf-8"
+
+        def _yaml_batches():
+            batch: list[dict] = []
+            for rec in iter_yaml_dicts(_xml_source(content), encoding=enc):
+                if not isinstance(rec, dict):
+                    continue
+                batch.append(rec)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+        return _yaml_batches()
+    if file_type == "fixed_width":
+        from services.fixed_width_layout import iter_fixed_width_dicts
+
+        enc = (read_options.encoding if read_options else "") or "utf-8"
+        layout = read_options.fixed_width_layout if read_options else ()
+
+        def _fwf_batches():
+            batch: list[dict] = []
+            for rec in iter_fixed_width_dicts(
+                _xml_source(content), layout, encoding=enc
+            ):
+                if not isinstance(rec, dict):
+                    continue
+                batch.append(rec)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+        return _fwf_batches()
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 

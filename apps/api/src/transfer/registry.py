@@ -9,6 +9,7 @@ import logging
 # and explicit PRODUCTION_SKU routes — they are not tabular matrix sources.
 LIVE_TABULAR_SOURCE_FORMATS = [
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "yaml", "fixed_width",
 ]
 LIVE_DOCUMENT_SOURCE_FORMATS = ["pdf", "docx", "html"]
 LIVE_SOURCE_FORMATS = LIVE_TABULAR_SOURCE_FORMATS + LIVE_DOCUMENT_SOURCE_FORMATS
@@ -18,6 +19,7 @@ LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "nd
 # as database destinations, while the listed file formats are file targets.
 _FILE_FORMATS = {
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+    "yaml", "fixed_width",
     "pdf", "docx", "html",
 }
 
@@ -167,6 +169,10 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "json", "database", "bigquery"),
     ("file", "json", "file_export", "csv"),
     ("file", "json", "file_export", "json"),
+    ("file", "yaml", "database", "sqlite"),
+    ("file", "yaml", "database", "postgresql"),
+    ("file", "fixed_width", "database", "sqlite"),
+    ("file", "fixed_width", "database", "postgresql"),
     # Database sources
     ("database", "sqlite", "database", "sqlite"),
     ("database", "sqlite", "database", "postgresql"),
