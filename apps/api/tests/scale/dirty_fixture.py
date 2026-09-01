@@ -13,7 +13,7 @@ UTF-8 / latin-1 / UTF-16 + BOM        must decode, never mojibake
 leading-zero identifiers (``0000007``)must stay text, never become ``7``
 decimals in scientific notation       must land at full declared scale
 several date spellings in one column  must stay text, never be reinterpreted
-very long strings (10 KiB)            must not be truncated
+very long strings (10 KiB)            must not be truncated (fwf: layout-capped)
 nulls as empty / ``NULL`` / ``\\N``    measured per format, never guessed
 non-numeric cell in a numeric column  must be **quarantined**, not coerced
 ragged rows / duplicate headers       structural — see ``STRUCTURAL_VARIANTS``
@@ -343,12 +343,22 @@ def expected_checksum(
     *,
     latin1_safe: bool = False,
     include_quarantined: bool = False,
+    source_format: str = "",
 ) -> tuple[str, int]:
-    """Checksum a correct destination must hold after the run."""
+    """Checksum a correct destination must hold after the run.
+
+    ``source_format='fixed_width'`` hashes the layout-projected records — a
+    40-character ``note`` field cannot carry the fixture's 10 KiB dirt, and
+    claiming the untruncated digest would fail a correct transfer. YAML and
+    every other format hash the generator rows as-is.
+    """
     def _gen() -> Iterator[dict[str, str]]:
         for rec in iter_rows_text(rows, latin1_safe=latin1_safe):
             if include_quarantined or not is_quarantine_row(int(rec["id"])):
-                yield rec
+                if source_format == "fixed_width":
+                    yield project_fixed_width_record(rec)
+                else:
+                    yield rec
 
     return checksum_rows(_gen())
 
@@ -403,7 +413,12 @@ FORMATS: dict[str, FormatSpec] = {
 _DELIMITERS = {"csv": ",", "tsv": "\t", "psv": "|", "scsv": ";"}
 
 #: Fixed-width layout (column, width) — declared, because a fixed-width file
-#: without a declared layout is unparseable by definition.
+#: without a declared layout is unparseable by definition. Widths must hold
+#: every planted cell except ``note``'s 10 KiB dirt: a 40-character field
+#: cannot round-trip 10 KiB, and the expected checksum hashes the
+#: layout-projected record (see ``project_fixed_width_record``). ``created_at``
+#: is 32 characters so an offset-bearing ISO instant (25 chars) is not
+#: accidentally clipped — that dirt is timezone fidelity, not layout overflow.
 FIXED_WIDTH_LAYOUT: tuple[tuple[str, int], ...] = (
     ("id", 8),
     ("acct_code", 10),
@@ -411,12 +426,30 @@ FIXED_WIDTH_LAYOUT: tuple[tuple[str, int], ...] = (
     ("qty", 6),
     ("note", 40),
     ("unicode_name", 20),
-    ("created_at", 22),
+    ("created_at", 32),
     ("dob_mixed", 12),
     ("flag", 6),
     ("null_empty", 8),
     ("null_token", 8),
 )
+
+#: Shortest ISO-8601 offset instant the dirty fixture plants (``…-08:00``).
+FIXED_WIDTH_TIMESTAMPTZ_MIN_WIDTH = 25
+
+
+def project_fixed_width_record(rec: dict[str, str]) -> dict[str, str]:
+    """What the declared layout can actually carry.
+
+    Matches ``write_fixed_width`` (newline/tab → space, clip to width) and
+    ``iter_fixed_width_dicts`` (rstrip padding). Truncation is the format,
+    not an engine bug.
+    """
+    out = dict(rec)
+    for col, width in FIXED_WIDTH_LAYOUT:
+        raw = out.get(col, "")
+        text = "" if raw is None else str(raw)
+        out[col] = text.replace("\n", " ").replace("\t", " ")[:width].rstrip(" ")
+    return out
 
 
 def _open_text(path: Path, encoding: str, *, compress: bool, bom: bool):
@@ -534,9 +567,9 @@ def write_fixed_width(path: Path, rows: int = DEFAULT_ROWS) -> Path:
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(layout_header_line(FIXED_WIDTH_LAYOUT) + "\n")
         for rec in iter_rows_text(rows):
+            projected = project_fixed_width_record(rec)
             line = "".join(
-                str(rec[col]).replace("\n", " ").replace("\t", " ")[:width].ljust(width)
-                for col, width in FIXED_WIDTH_LAYOUT
+                projected[col].ljust(width) for col, width in FIXED_WIDTH_LAYOUT
             )
             f.write(line + "\n")
     return path

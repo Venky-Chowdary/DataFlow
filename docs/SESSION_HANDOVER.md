@@ -7,11 +7,13 @@ there, and no CI workflow triggers on it). Latest wave head:
 workspaces wave: `a1cc1f91` via
 [#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
-**Latest (this branch):** YAML and fixed-width are transfer-live **file sources**
-on `feature/yaml-fixed-width-live`. YAML keeps scalar text (no `yes`→bool).
-Fixed-width refuses a guessed layout. Do not fold D1 [#132], N2 [#133],
-N4 [#134], or N5 [#135] into this tree. Next: 100K of these formats, then
-other never-measured / fleet items.
+**Latest (this branch):** YAML/fixed-width 100K cells are *measurable* on
+`feature/yaml-fwf-100k` (layout-projected fwf checksum; 12,100-row sqlite
+COUNT + checksum + DLQ). Do not quote 12k as 100K. 100K Postgres is
+env-gated (`DATAFLOW_SCALE_YAML_FWF_100K=1`). Do not fold D1 [#132], N2
+[#133], N4 [#134], N5 [#135], or yaml-live [#136] into this tree. Next:
+run the 100K yaml/fwf Postgres cells, then remaining never-measured /
+fleet items.
 
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from

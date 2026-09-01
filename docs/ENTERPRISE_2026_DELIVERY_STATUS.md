@@ -168,10 +168,12 @@ the verdict would fail open and quarantine rows while Map showed green.
    ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)) and N5
    ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)) are already
    open on their own branches — do not fold them into later PRs.
-2. **This PR** closes never-measured item 8 as *sources*: YAML and fixed-width
-   ingest is transfer-live (sqlite + live Postgres dest COUNT). YAML export and
-   100K cells stay unmeasured.
-3. Then the remaining never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6
+2. YAML/fixed-width sources are live on [#136](https://github.com/Venky-Chowdary/DataFlow/pull/136).
+   **This PR** makes their 100K cells measurable (layout-projected fwf
+   checksum; 12,100-row sqlite COUNT + checksum + DLQ). YAML export and
+   100K Postgres stay unmeasured — do not quote 12k as 100K.
+3. Run `DATAFLOW_SCALE_YAML_FWF_100K=1` for the 100K Postgres cells, then
+   the remaining never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6
    and the local fleet / 10k–1M throughput work.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything

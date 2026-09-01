@@ -193,10 +193,12 @@ N2 ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)), N4
 ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)), N5
 ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)) and D1
 ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)) are open on their
-own branches and are not in this tree. **This PR** makes YAML and fixed-width
-transfer-live file sources (never-measured item 8). After that: 100K of these
-formats, then remaining never-measured / fleet throughput — do not fold
-D1/N2/N4/N5.
+own branches and are not in this tree. YAML/fixed-width sources are live
+on [#136](https://github.com/Venky-Chowdary/DataFlow/pull/136). **This PR**
+makes their 100K cells measurable (layout-projected fwf checksum; 12,100-row
+sqlite dest COUNT + checksum + DLQ). 100K Postgres remains unmeasured.
+Then remaining never-measured / fleet throughput — do not fold
+D1/N2/N4/N5/#136.
 
 ---
 

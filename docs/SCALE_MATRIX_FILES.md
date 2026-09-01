@@ -531,8 +531,8 @@ proves the destination stayed empty:
 | AWS S3 (all routes) | no AWS credentials in this environment |
 | Google Cloud Storage (all routes) | no GCP service-account credentials in this environment |
 | Azure Data Lake Storage Gen2 (all routes) | no Azure tenant credentials in this environment |
-| `file/fixed_width → database/*` | **was** no live driver; this PR makes the source live. 100K cells still unmeasured |
-| `file/yaml → database/*` | **was** no live driver; this PR makes the source live. 100K cells still unmeasured |
+| `file/fixed_width → database/*` | source is live ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); expected checksum is layout-projected (40-char `note`, 32-char `created_at`). 12,100-row sqlite proven on this PR. **100K still unmeasured** |
+| `file/yaml → database/*` | source is live ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)); 12,100-row sqlite proven on this PR. **100K still unmeasured** |
 
 MinIO, fake-gcs-server and Azurite are **emulators**. They prove the S3/GCS/Blob code
 paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
@@ -556,6 +556,7 @@ paths, not the hosted services; the hosted cells stay `skip (no credentials)`.
   refusal cells at 100K. Their harness definitions exist and run with one command; no
   result is claimed for them.
 - MySQL as a *file destination* (`mysql → file`) was never exercised.
-- `fixed_width` and `yaml` are transfer-live **sources** on this PR (2-row
-  sqlite + live Postgres dest COUNT). They are not 100K-proven and YAML is
-  not a destination export.
+- `fixed_width` and `yaml` are transfer-live **sources** ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)).
+  This PR proves 12,100-row sqlite dest COUNT + checksum + DLQ and owns the
+  layout-projected fwf checksum so a 100K cell can pass honestly. They are
+  not 100K-proven. YAML is not a destination export.
