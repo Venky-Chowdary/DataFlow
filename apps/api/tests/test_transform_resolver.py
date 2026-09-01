@@ -11,6 +11,7 @@ from services.transform_resolver import (
 def test_ui_transform_maps_to_engine():
     assert resolve_transform({"source": "a", "target": "b", "transform": "cast_number"}) == "decimal"
     assert resolve_transform({"source": "a", "target": "b", "transform": "hash_pii"}) == "hash_pii"
+    assert resolve_transform({"source": "a", "target": "b", "transform": "redact"}) == "redact"
 
 
 def test_none_transform_does_not_resolve_to_trim():

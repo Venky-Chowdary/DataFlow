@@ -149,7 +149,11 @@ the PR that carries it):
   narrowing on an object store is still enforced at the write, so suppressing
   the verdict would fail open. See `docs/OPEN_DEFECT_REGISTER.md` §1 D1.
 - Scheduler DST + workspace-ownership cells not re-measured after the access fix.
-- Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
+- ~~Governance ops (mask/hash/redact) not yet recorded in the audit certificate.~~
+  **Closed (this PR).** `services/governance_ops.py` harvests declared mask /
+  hash / redact, Execute stamps the ledger on the job, and the signed
+  migration certificate (and proof pack) renders it. Live sqlite→sqlite 2-row
+  proof in `tests/test_governance_ops_certificate.py`.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
 - SFTP daily Excel sync modes started, not finished.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
@@ -189,7 +193,11 @@ Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N2, N4 and N5 are not started.
+N2, N4 and N5 are not started on this integration branch (they live on their
+own PRs). **This PR** records declared mask / hash / redact on the signed
+migration certificate (`services/governance_ops.py`, live sqlite proof in
+`tests/test_governance_ops_certificate.py`). Do not fold D1/N2/N4/N5/yaml/DST
+into it.
 
 ---
 

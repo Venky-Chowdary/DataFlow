@@ -173,3 +173,5 @@ the verdict would fail open and quarantine rows while Map showed green.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).
+5. **This PR** records mask / hash / redact on the migration certificate
+   (`docs/MIGRATION_CERTIFICATE.md`). Do not fold D1/N2/N4/N5/yaml/DST into it.

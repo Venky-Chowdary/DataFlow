@@ -426,8 +426,13 @@ material, and host routing in a real browser vhost (verified at service level on
   (append / overwrite-full-refresh / upsert-sync) across the 40 connectors.
 * SFTP daily-Excel ingestion into an existing table under each sync mode, with a
   2-minute schedule replaying the same Transform recipe.
-* Governance operations (mask / hash / redact) recorded in the audit certificate
-  — designed, not built.
+* ~~Governance operations (mask / hash / redact) recorded in the audit certificate
+  — designed, not built.~~ **Closed (this PR).** Execute stamps
+  `governance_operations` on the job; the signed certificate (and proof pack)
+  lists each declared mask / hash / redact column. Live sqlite→sqlite: 2 rows,
+  `ssn` mask_pii, `email` hash_pii, `name` redact; independent `COUNT(*) = 2`,
+  originals absent, certificate lists all three. YAML dest export is unrelated
+  and still refused.
 * SAML / single sign-on against a real IdP.
 * 1M / 10M-row phase timing for this branch (the only measured throughput figure
   is the earlier `docs/THROUGHPUT_1M_EVIDENCE.md` append).

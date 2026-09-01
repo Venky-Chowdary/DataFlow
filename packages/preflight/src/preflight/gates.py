@@ -2100,7 +2100,10 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return value
     # Non-deterministic / one-way transforms break reconciliation previews.
-    if t in {"hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
+    if t in {
+        "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
+        "hash_pii", "mask_pii",
+    }:
         return None
     # For other deterministic string-preserving transforms, keep the value as-is.
     return value
@@ -2109,6 +2112,7 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
 _NON_DETERMINISTIC = {
     # Deterministic UUID *parse* stays comparable — only generators/one-way.
     "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
+    "hash_pii", "mask_pii",
 }
 
 

@@ -142,6 +142,14 @@ def test_hash_pii_fails_closed_without_secret(monkeypatch):
     assert err and "DATAFLOW_PII_HASH_KEY" in err
 
 
+def test_apply_redact_replaces_the_cell():
+    from services.transform_engine import REDACTED_PLACEHOLDER
+
+    val, err = apply_transform("Alice Patient", "redact")
+    assert err is None
+    assert val == REDACTED_PLACEHOLDER
+
+
 def test_apply_uuid_validates():
     val, err = apply_transform("550e8400-e29b-41d4-a716-446655440000", "uuid")
     assert err is None

@@ -435,6 +435,23 @@ def assert_pack_may_claim_migration_proven(pack: dict[str, Any]) -> None:
         )
 
 
+def _governance_operations_for_pack(raw: dict[str, Any] | None) -> dict[str, Any]:
+    from services.governance_ops import (
+        empty_governance_operations,
+        normalize_governance_operations,
+    )
+
+    if raw is None:
+        return empty_governance_operations()
+    return normalize_governance_operations(raw)
+
+
+def _collect_governance_for_pack(job: dict[str, Any]) -> dict[str, Any]:
+    from services.governance_ops import collect_governance_operations
+
+    return collect_governance_operations(job)
+
+
 def collect_accepted_risks_from_job(job: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Harvest Migration Risk Contracts from job mappings / preflight (deduped by risk_id)."""
     if not isinstance(job, dict):
@@ -611,6 +628,7 @@ def build_signed_proof_pack(
     job_success: bool = False,
     require_risk_completeness: bool | None = None,
     anchor_in_chain: bool = False,
+    governance_operations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -712,6 +730,7 @@ def build_signed_proof_pack(
                 "exactly-once and at-most-once are not claimed."
             ),
         },
+        "governance_operations": _governance_operations_for_pack(governance_operations),
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
     }
     if anchor_in_chain:
@@ -879,4 +898,5 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         require_risk_completeness=bool(job_success and expected_risks)
         or bool(job_success and not accepted and expected_risks),
         anchor_in_chain=True,
+        governance_operations=_collect_governance_for_pack(job),
     )

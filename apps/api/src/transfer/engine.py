@@ -1981,6 +1981,22 @@ class UniversalTransferEngine:
             except Exception:
                 # Audit best-effort — contracts are already on the job document.
                 pass
+        # Stamp declared mask/hash/redact so the certificate still lists them
+        # after transfer_request mappings are redacted away. Best-effort —
+        # harvest at export time if this write does not land.
+        try:
+            from services.governance_ops import harvest_governance_operations
+
+            gov = harvest_governance_operations(
+                {"mappings": list(request.mappings or [])}
+            )
+            get_mongodb_service().update_job_fields(
+                job_id, {"governance_operations": gov}
+            )
+        except Exception:
+            logger.warning(
+                "governance_operations stamp skipped for %s", job_id, exc_info=True
+            )
         locale_token = set_active_date_locale(request.date_locale)
         number_token = set_active_number_locale(
             _run_number_locale(request)

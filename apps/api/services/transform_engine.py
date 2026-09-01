@@ -1394,9 +1394,13 @@ def _parse_time(value: str) -> str | None:
     return None
 
 
+#: Write-path full redact — destination holds this token, never the source cell.
+REDACTED_PLACEHOLDER = "<redacted>"
+
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
-    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "none", "identity",
+    "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "redact",
+    "none", "identity",
     # Logical-type aliases Studio / DDL inference sometimes stamp as the transform id.
     "passthrough", "string", "varchar", "text",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
@@ -1834,6 +1838,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return None, "intentional omit — mapping should not project"
 
     # Identity / text transforms: empty string is a real value.
+    if transform_l == "redact":
+        # One-way: every non-null cell becomes the same token. Empty string is
+        # still a cell the operator asked to redact, not a SQL NULL.
+        return REDACTED_PLACEHOLDER, None
+
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
     # Typed + semantic transforms: empty/whitespace must not silently become SQL NULL.

@@ -205,7 +205,7 @@ def _sensitive_source_columns(mappings: list[dict]) -> set[str]:
         for m in mappings
         if m.get("source")
         and (
-            m.get("transform") in {"mask_pii", "hash_pii"}
+            m.get("transform") in {"mask_pii", "hash_pii", "redact"}
             or is_sensitive_name(m.get("source") or "")
         )
     }

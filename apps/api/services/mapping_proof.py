@@ -19,6 +19,7 @@ _MUTATING_TRANSFORMS = frozenset({
     "lower",
     "hash_pii",
     "mask_pii",
+    "redact",
     "strip_controls",
     "normalize_unicode",
     "phone",
@@ -393,7 +394,7 @@ def _mapping_risks(
                 "severity": "info",
                 "message": "Trim strips leading/trailing whitespace — values change vs source.",
             })
-        elif transform in {"hash_pii", "mask_pii"}:
+        elif transform in {"hash_pii", "mask_pii", "redact"}:
             risks.append({
                 "code": "pii_transform",
                 "severity": "info",

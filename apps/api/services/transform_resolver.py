@@ -42,6 +42,7 @@ ENGINE_TO_UI: dict[str, str] = {
     "hash_pii": "hash_pii",
     # Studio has no separate mask control — align with FE hash_pii.
     "mask_pii": "hash_pii",
+    "redact": "redact",
     "strip_controls": "strip_controls",
     "normalize_unicode": "strip_controls",
     "phone": "phone",
@@ -60,6 +61,7 @@ UI_TO_ENGINE: dict[str, str] = {
     "time_iso": "time",
     "hash_pii": "hash_pii",
     "mask_pii": "mask_pii",
+    "redact": "redact",
     "cast_number": "decimal",
     "cast_integer": "integer",
     "cast_boolean": "boolean",
@@ -77,7 +79,8 @@ UI_TO_ENGINE: dict[str, str] = {
 
 # Transforms that naturally produce string output and are safe for string targets.
 _STRING_TRANSFORMS: frozenset[str] = {
-    "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "none",
+    "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "redact",
+    "none",
     "date", "datetime", "json", "binary", "decimal",
     "phone", "email", "url", "iban", "postal",
     "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
