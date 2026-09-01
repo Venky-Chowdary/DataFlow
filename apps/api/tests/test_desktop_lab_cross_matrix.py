@@ -25,6 +25,8 @@ def test_cross_matrix_lists_unique_engines_not_saas_twins():
     assert "mysql" in LIVE_UNIQUE_ENGINES
     assert "mongodb" in LIVE_UNIQUE_ENGINES
     assert "s3" in LIVE_UNIQUE_ENGINES
+    assert "elasticsearch" in LIVE_UNIQUE_ENGINES
+    assert "elasticsearch" not in CORE_UNIQUE_ENGINES
     assert "salesforce" not in LIVE_UNIQUE_ENGINES
     assert "hubspot" not in LIVE_UNIQUE_ENGINES
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
@@ -86,3 +88,32 @@ def test_live_engine_cross_matrix_writes_artifact():
         saved = json.loads(artifact.read_text())
         assert saved["pairs"] == report["pairs"]
         assert saved["passed"] == report["passed"]
+
+
+def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setattr(mod, "_reachable", lambda *a, **k: False)
+    bound = bind_live_engine("elasticsearch", "t", tmp_path)
+    assert isinstance(bound, str)
+    assert "9200" in bound
+
+
+def test_pair_timeout_is_skip_never_pass(monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setenv("DATAFLOW_CROSS_EXTENDED", "")
+    monkeypatch.setattr(mod, "engines_for_run", lambda: ("sqlite",))
+
+    def boom(fn, timeout_sec, *args, **kwargs):
+        raise TimeoutError("exceeded 15s")
+
+    monkeypatch.setattr(mod, "_call_with_timeout", boom)
+    report = mod.run_live_engine_cross_matrix(persist=False)
+    assert report["passed"] == 0
+    assert report["failed"] == 0
+    assert report["skipped"] == 1
+    assert report["routes"][0]["status"] == "skipped"
+    assert "source sqlite was not seeded" in report["routes"][0]["error"]
+    assert report["unique_engines_seed_skipped"]
+    assert "exceeded" in report["unique_engines_seed_skipped"][0]["error"]

@@ -987,9 +987,11 @@ async def run_desktop_lab_proof():
         and ops == slots
         and duplex == slots
         and int(result.get("failed") or 0) == 0
+        and int(result.get("skipped") or 0) == 0
     )
-    status = 200 if result["success"] else 422
-    return JSONResponse(result, status_code=status)
+    # A completed measurement is 200 even when slots skipped/failed. 422 hid the
+    # pass/fail/skip report behind a generic Proofs toast.
+    return JSONResponse(result, status_code=200)
 
 
 @router.get("/proofs/desktop-lab")
@@ -1021,8 +1023,9 @@ async def run_desktop_lab_cross_proof():
     passed = int(result.get("passed") or 0)
     failed = int(result.get("failed") or 0)
     result["success"] = passed > 0 and failed == 0
-    status = 200 if result["success"] else 422
-    return JSONResponse(result, status_code=status)
+    # Completed cartesian is 200 with success=false when pairs failed. Skip
+    # reasons stay in the body so Proofs can show them instead of a generic error.
+    return JSONResponse(result, status_code=200)
 
 
 @router.get("/proofs/desktop-lab-cross")

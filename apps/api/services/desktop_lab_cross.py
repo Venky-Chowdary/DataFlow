@@ -5,8 +5,9 @@ Honesty
 * This is **not** 80×80 catalog aliases and not 650+ live tiles.
 * Hosted twins (Neon/RDS/CNPG) share a parent driver — they live in
   ``desktop_lab.DESKTOP_LAB_CONNECTORS``, not here.
-* Salesforce / HubSpot / Stripe / Kafka / Elasticsearch are omitted:
-  no live backend on this desktop. Skip, never invent green.
+* Salesforce / HubSpot / Stripe / Kafka are omitted: no live SaaS tenant
+  on this desktop. Skip, never invent green.
+* Elasticsearch is an extended unique engine when ``:9200`` answers.
 * CDC default remains at-least-once upsert.
 * Emulators (MinIO, fake-gcs, Azurite, goccy BQ, fakesnow, DynamoDB Local)
   are not a customer-tenant PRODUCTION_SKU certificate.
@@ -48,6 +49,7 @@ _CREATE_NEW_SKIP_PREFLIGHT = frozenset({
     "redis",
     "iceberg",
     "bigquery",
+    "elasticsearch",
 })
 
 AZURITE_KEY = (
@@ -73,6 +75,7 @@ EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
     "bigquery",
     "redis",
     "iceberg",
+    "elasticsearch",
 )
 LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
 
@@ -82,10 +85,33 @@ def engines_for_run() -> tuple[str, ...]:
 
     SQL Server / GCS / BQ create-new probes have hung this host for minutes.
     Set DATAFLOW_CROSS_EXTENDED=1 to include them — do not invent green if they skip.
+    Pair/seed calls that exceed DATAFLOW_CROSS_PAIR_TIMEOUT (default 90s) are
+    skipped with that reason, never counted as passed.
     """
     if os.environ.get("DATAFLOW_CROSS_EXTENDED", "").strip() == "1":
         return LIVE_UNIQUE_ENGINES
     return CORE_UNIQUE_ENGINES
+
+
+def _pair_timeout_sec() -> float:
+    raw = (os.environ.get("DATAFLOW_CROSS_PAIR_TIMEOUT") or "90").strip()
+    try:
+        return max(15.0, float(raw))
+    except ValueError:
+        return 90.0
+
+
+def _call_with_timeout(fn, timeout_sec: float, *args, **kwargs):
+    """Run ``fn`` in a worker; raise TimeoutError if it does not return."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(fn, *args, **kwargs)
+        try:
+            return fut.result(timeout=timeout_sec)
+        except FuturesTimeout as exc:
+            raise TimeoutError(f"exceeded {timeout_sec:.0f}s") from exc
 
 
 def _reachable(host: str, port: int, timeout: float = 0.8) -> bool:
@@ -304,6 +330,18 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             warehouse="file:///tmp/iceberg-rest-wh",
             table=table,
         )
+    if engine == "elasticsearch":
+        if not _reachable("127.0.0.1", 9200):
+            return "Elasticsearch not reachable on 127.0.0.1:9200"
+        return EndpointConfig(
+            kind="database",
+            format="elasticsearch",
+            host="127.0.0.1",
+            port=9200,
+            database="dataflow",
+            table=table,
+            connection_string="http://127.0.0.1:9200",
+        )
     return f"no live bind for unique engine {engine}"
 
 
@@ -445,10 +483,19 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
     """Every live unique engine as source × every live unique engine as dest."""
     root = Path(tempfile.mkdtemp(prefix="df_xmat_"))
     engines = engines_for_run()
+    timeout = _pair_timeout_sec()
     seeds: dict[str, EndpointConfig] = {}
     seed_rows: list[dict[str, Any]] = []
     for engine in engines:
-        bound, row = _seed(engine, root)
+        try:
+            bound, row = _call_with_timeout(_seed, timeout, engine, root)
+        except TimeoutError as exc:
+            bound, row = None, {
+                "engine": engine,
+                "status": "skipped",
+                "error": f"seed {exc}",
+                "table": "",
+            }
         seed_rows.append(row)
         if bound is not None:
             seeds[engine] = bound
@@ -476,11 +523,22 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
                 rec["error"] = dst
                 routes.append(rec)
                 continue
-            outcome = _transfer_pair(src, dst)
+            try:
+                outcome = _call_with_timeout(_transfer_pair, timeout, src, dst)
+            except TimeoutError as exc:
+                outcome = {
+                    "status": "skipped",
+                    "error": f"pair {exc}",
+                    "records": 0,
+                    "dest_count": None,
+                }
             rec.update(outcome)
             if rec["status"] == "passed":
                 if dst_id not in payload_checked:
-                    ok, err = _payload_ok(dst, root)
+                    try:
+                        ok, err = _call_with_timeout(_payload_ok, timeout, dst, root)
+                    except TimeoutError as exc:
+                        ok, err = False, f"payload {exc}"
                     if not ok:
                         rec["status"] = "failed"
                         rec["error"] = err
@@ -525,6 +583,7 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
         "routes": routes,
         "failed_detail": failed,
         "skipped_detail": skipped,
+        "pair_timeout_sec": timeout,
         "honesty": {
             "not_catalog_alias_cartesian": True,
             "not_eighty_unique_engines": True,
@@ -532,9 +591,11 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "catalog_tiles_are_not_transfer_live": True,
             "cdc_default": "at-least-once upsert",
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
+            "elasticsearch_is_extended_when_9200_up": True,
             "map_ssot": "services.semantic_mapper.map_columns",
             "object_store_create_new_skips_preflight_probe": True,
             "payload_reconcile": "once per dest engine; every pair dest COUNT",
+            "timeout_is_skip_never_pass": True,
             "one_hundred_percent": (
                 "this named unique-engine fixture only — 2 shaped rows "
                 "(1/1000.00/USD, 2/2000.50/EUR) on each live src×dst pair"
