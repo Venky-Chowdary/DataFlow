@@ -847,6 +847,24 @@ def write_mapped_rows(
     )
 
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
+    from connectors.mysql_load_data import (
+        mysql_load_data_eligible,
+        mysql_load_data_session_ready,
+        try_mysql_load_data_local,
+    )
+
+    use_load_data, load_data_skip_reason = mysql_load_data_eligible(
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+        target_cols=target_cols,
+        target_types=target_types,
+        proxy=proxy_dest,
+    )
+    load_session_ok = False
+    load_data_chunks = 0
+    load_data_fallbacks = 0
+    if load_data_skip_reason:
+        logger.info("MySQL LOAD DATA not eligible: %s", load_data_skip_reason)
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
         table_name=table_name,
@@ -867,7 +885,7 @@ def write_mapped_rows(
     # for the proxy-friendly INSERT budget. DROP uses purpose="ddl" in
     # table_manager separately.
     def _reconnect(*, purpose: str = "write"):
-        nonlocal conn, cur
+        nonlocal conn, cur, load_session_ok
         close_quietly(conn)
         conn = _open_mysql(
             host=host, port=port, database=database,
@@ -876,6 +894,12 @@ def write_mapped_rows(
             purpose=purpose,
         )
         cur = conn.cursor()
+        load_session_ok = False
+        if use_load_data and purpose in {"write", "bulk"}:
+            ready, why = mysql_load_data_session_ready(cur, conn)
+            load_session_ok = ready
+            if not ready:
+                logger.info("MySQL LOAD DATA not used this session: %s", why)
 
     _identity = reflection_cache.dsn_identity(
         driver="mysql",
@@ -1299,8 +1323,21 @@ def write_mapped_rows(
 
             rows_skipped = 0
 
+            def _chunk_may_load_data() -> bool:
+                if not use_load_data or not load_session_ok:
+                    return False
+                ok, _reason = mysql_load_data_eligible(
+                    write_mode=write_mode,
+                    conflict_columns=conflict_columns,
+                    target_cols=target_cols,
+                    target_types=target_types,
+                    proxy=proxy_dest,
+                )
+                return ok
+
             def _land_dense_chunk(batch, chunk_idx, row_numbers):
                 nonlocal written, rows_skipped, rejected_details, transform_errors
+                nonlocal load_data_chunks, load_data_fallbacks
                 if not batch:
                     return 0
                 start = int(row_numbers[0]) if row_numbers else 1
@@ -1343,7 +1380,33 @@ def write_mapped_rows(
                                 placeholder="%s",
                             )
                             rows_skipped += skipped
-                        if write_batch:
+                        loaded = False
+                        if write_batch and _chunk_may_load_data():
+                            ld = try_mysql_load_data_local(
+                                cur,
+                                table_q=table_q,
+                                columns=target_cols,
+                                rows=write_batch,
+                                conn=conn,
+                            )
+                            if ld.ok:
+                                loaded = True
+                                load_data_chunks += 1
+                            else:
+                                load_data_fallbacks += 1
+                                try:
+                                    conn.rollback()
+                                except Exception as exc:
+                                    logger.debug(
+                                        "LOAD DATA rollback skipped: %s",
+                                        exc,
+                                        exc_info=exc,
+                                    )
+                                logger.info(
+                                    "MySQL LOAD DATA chunk fallback to INSERT: %s",
+                                    ld.reason,
+                                )
+                        if write_batch and not loaded:
                             cur.executemany(insert_sql, write_batch)
                         if use_ledger:
                             mark_raw_chunk_committed(
@@ -1566,6 +1629,11 @@ def write_mapped_rows(
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         close_quietly(conn)
+        load_method = (
+            "load_data"
+            if load_data_chunks and not load_data_fallbacks
+            else ("load_data_fallback_insert" if load_data_chunks else "insert")
+        )
         if child_flush_error:
             return WriteResult(
                 ok=False,
@@ -1580,6 +1648,7 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
+                load_method=load_method,
             )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "MySQL")
         if _final_abort:
@@ -1596,6 +1665,7 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
+                load_method=load_method,
             )
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=database,
@@ -1606,6 +1676,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            load_method=load_method,
             meta=writer_meta_with_source_rows(
                 {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
                 if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
@@ -1628,6 +1699,11 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped if 'rows_skipped' in locals() else 0,
             warnings=transform_errors,
+            load_method=(
+                "load_data"
+                if load_data_chunks and not load_data_fallbacks
+                else ("load_data_fallback_insert" if load_data_chunks else "insert")
+            ) if "load_data_chunks" in locals() else "insert",
         )
     finally:
         _cleanup_spool()

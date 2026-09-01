@@ -80,6 +80,8 @@ services:
       - --binlog-row-metadata=FULL
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
+      # Client LOAD DATA LOCAL INFILE (STRICT insert path). Off by default in 8.0.
+      - --local-infile=1
     environment:
       MYSQL_ROOT_PASSWORD: dataflow
       MYSQL_DATABASE: dataflow

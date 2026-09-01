@@ -57,6 +57,7 @@ REPORTED_SUMMARY_KEYS = (
     "rows_skipped",
     "rejected_details_total",
     "target_rows_before",
+    "load_method",
 )
 
 
@@ -148,6 +149,61 @@ def destination_count(mysql: dict[str, Any], table: str) -> int:
     return count
 
 
+def ensure_mysql_local_infile(mysql: dict[str, Any]) -> str:
+    """Best-effort lab enable of ``local_infile``. Writer never SET GLOBAL.
+
+    Correctness does not depend on this — INSERT is the fallback. Speed
+    measurements need it on so LOAD DATA actually fires.
+    """
+    def _on(raw: object) -> bool:
+        return str(raw).strip().lower() in {"1", "on", "true"}
+
+    try:
+        conn = pymysql.connect(
+            host=mysql["host"],
+            port=mysql["port"],
+            user=mysql["user"],
+            password=mysql["password"],
+            database=mysql["database"],
+            connect_timeout=3,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT @@GLOBAL.local_infile")
+                if _on(cur.fetchone()[0]):
+                    return "already_on"
+        finally:
+            conn.close()
+    except Exception as exc:
+        already_err = str(exc)[:120]
+    else:
+        already_err = ""
+
+    root_password = mysql.get("password") or "dataflow"
+    try:
+        conn = pymysql.connect(
+            host=mysql["host"],
+            port=mysql["port"],
+            user="root",
+            password=root_password,
+            database=mysql["database"],
+            autocommit=True,
+            connect_timeout=3,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET GLOBAL local_infile = 1")
+                cur.execute("SELECT @@GLOBAL.local_infile")
+                if _on(cur.fetchone()[0]):
+                    return "enabled_as_root"
+        finally:
+            conn.close()
+    except Exception as exc:
+        suffix = f" ({already_err})" if already_err else ""
+        return f"off:{exc}{suffix}"[:200]
+    return "off:SET GLOBAL did not stick"
+
+
 def run_pg_mysql_volume(
     *,
     rows: int,
@@ -170,6 +226,8 @@ def run_pg_mysql_volume(
     seed_source(pg, src_table, rows)
     if not keep_dest:
         reset_destination(mysql, dest_table)
+    local_infile = ensure_mysql_local_infile(mysql)
+    print(f"mysql local_infile: {local_infile}")
 
     from services.mongodb_service import get_mongodb_service
     from src.transfer.models import EndpointConfig
@@ -249,6 +307,8 @@ def run_pg_mysql_volume(
         "mysql_port": mysql["port"],
         "job_store": job_store,
         "job_id": job_id,
+        "mysql_local_infile": local_infile,
+        "load_method": summary.get("load_method"),
         "rows_requested": rows,
         "rows_transferred": transferred,
         "elapsed_seconds": round(elapsed, 3),

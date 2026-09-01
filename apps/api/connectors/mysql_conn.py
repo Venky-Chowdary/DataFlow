@@ -76,6 +76,9 @@ def get_connection(
         "charset": "utf8mb4",
         "read_timeout": io_timeout,
         "write_timeout": io_timeout,
+        # Client LOCAL_FILES flag. Server must also have local_infile=ON;
+        # the writer probes and falls back to INSERT if it does not.
+        "local_infile": True,
     }
     if ssl or public_proxy:
         kwargs["ssl"] = {"ssl": {}}
