@@ -116,21 +116,43 @@ Mongo contract/breaker persistence rejected `Decimal`. 12 cells classified.
 
 ---
 
-## 4. Open defects (known, not yet fixed)
+## 4. Open defects — state as of 2026-08-30
 
-- PostgreSQL key census: `operator does not exist: text = integer` (Track C).
-- `postgresql→mongodb` CDC at 100K — timestamp risk-ack not re-measured (Track D).
-- `mysql→mysql` CDC snapshot lock wait timeout, not root-caused (Track D).
-- Scheduler DST + workspace cells not re-measured after the access fix (Track D).
-- Elasticsearch destination writes `DECIMAL` as JSON strings, so ES dynamic-maps
-  the field as `text` — no explicit index mapping is created (Track E).
-- The 500-row reconcile cap still exists in the hubspot/salesforce/airtable/kafka
-  verifiers (hosted; unprovable in this environment).
-- `type_system` reads the bare token `long` as Oracle `LONG` text, flagging
-  document-store `long → BIGINT` as invent (Track E).
-- CI: 77 service-container failures on PR #35 (pre-existing, task #20).
-- Configured CI mypy: 4 baseline errors in `services/type_system.py`,
-  `services/decision_kernel/findings.py`, `services/decision_kernel/execute_gate.py`.
+The wave's original list is now mostly closed; `docs/OPEN_DEFECT_REGISTER.md` is
+the authoritative per-defect record with the live evidence behind each closure.
+
+**Closed since this file was last written** (each with a live-engine proof, and
+the PR that carries it):
+
+| Item | Closed by |
+|------|-----------|
+| PostgreSQL key census `operator does not exist: text = integer` (D6) | merged pre-#125 |
+| Elasticsearch `DECIMAL` written as a string / dynamic `text` mapping (D7) | merged pre-#125 |
+| 500-row reconcile cap in the hosted verifiers, plus the Salesforce 2,000-row read truncation found under it (D9) | merged pre-#125 |
+| bare token `long` read as Oracle `LONG` (D8) | merged pre-#125 |
+| base-branch typed-transfer failures (D17) | merged pre-#125 |
+| `mysql→mysql` CDC snapshot lock wait, root-caused (D13) and its remaining coordinate window (D20) | [#128](https://github.com/Venky-Chowdary/DataFlow/pull/128) |
+| destination recreate silently redefining a declared carrier — new gate G19 (D19) | [#127](https://github.com/Venky-Chowdary/DataFlow/pull/127) |
+| Iceberg on Windows drive-letter warehouses, and the writer reporting the warehouse directory as the schema (D18) | [#129](https://github.com/Venky-Chowdary/DataFlow/pull/129) |
+| CI mypy baseline (6 errors, not 4) and the ES `id → id` 0.63 confidence anomaly (D16) | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) |
+
+**Still open:**
+
+- **D1 — a schemaless destination's shape is inferred from a value sample and
+  then compared as a declared target type.** Reproduced live on 2026-08-30
+  against the compose MinIO: a Postgres `amount decimal(12,2)` lands correctly
+  and the product's own destination introspection reads it back as
+  `DECIMAL(2,2)`. Document stores (`mongodb`, `dynamodb`) are already exempt via
+  `dest_decimal_single_capacity_digits`; object stores, SFTP, Redis and
+  Elasticsearch are not. The fix must carry *provenance* (sampled vs declared)
+  out of the probe rather than weaken any comparison — an operator-declared
+  narrowing on an object store is still enforced at the write, so suppressing
+  the verdict would fail open. See `docs/OPEN_DEFECT_REGISTER.md` §1 D1.
+- Scheduler DST + workspace-ownership cells not re-measured after the access fix.
+- Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
+- The connector-family matrix never completed (Track A halted at 122 of 225).
+- SFTP daily Excel sync modes started, not finished.
+- SAML/SSO round-trip — needs a real IdP, unprovable here.
 
 ---
 
@@ -158,6 +180,16 @@ Not measured end to end by anyone in this wave:
 6. Real host routing per client domain, SSO/IdP, KMS/BYOK.
 7. CDC remains **at-least-once** except where a named route + crash injection is
    in `docs/CDC_EXACTLY_ONCE_LIVE_EVIDENCE.md`.
+
+---
+
+## 6a. Enterprise-2026 feature wave (this session)
+
+Driven by the research report `Datawrap — the future of enterprise data
+migration (2026)`; delivery state, evidence and the remaining tiers are in
+`docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
+gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
+N2, N4 and N5 are not started.
 
 ---
 
