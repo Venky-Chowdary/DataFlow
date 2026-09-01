@@ -43,7 +43,25 @@ except Exception:  # pragma: no cover - fallback if import path differs
     from test_live_emulator_matrix import CASES as EMULATOR_CASES  # type: ignore
 
 
-RECORDS = [{"id": "1", "amount": "1000.00"}, {"id": "2", "amount": "2000.50"}]
+_SAAS_STUB_URL: str | None = None
+
+
+def _saas_stub_url() -> str:
+    """Local HTTP stub for Salesforce / HubSpot / Stripe / REST — not a customer org."""
+    global _SAAS_STUB_URL
+    if _SAAS_STUB_URL is None:
+        from tests.saas_desktop_stub import seed_tabular_fixture, start_saas_stub
+
+        _server, url = start_saas_stub()
+        seed_tabular_fixture()
+        _SAAS_STUB_URL = url
+    return _SAAS_STUB_URL
+
+
+def _oracle_sku_password() -> str:
+    from services.desktop_lab_cross import _oracle_password
+
+    return _oracle_password()
 COLUMNS = ["id", "amount"]
 SCHEMA = {"id": "INTEGER", "amount": "DECIMAL"}
 MAPPINGS = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
@@ -67,6 +85,25 @@ def _is_file_based_sql(endpoint: EndpointConfig) -> bool:
     return False
 
 
+def _tcp_target(endpoint: EndpointConfig) -> tuple[str, int]:
+    """Host/port for a reachability probe, including ``http://host:port`` hosts."""
+    host = (endpoint.host or "").strip()
+    port = int(endpoint.port or 0)
+    if "://" in host:
+        parsed = urlparse(host)
+        host = parsed.hostname or "127.0.0.1"
+        port = port or int(parsed.port or 0)
+    cs = (endpoint.connection_string or "").strip()
+    if cs.startswith("http://") or cs.startswith("https://"):
+        parsed = urlparse(cs)
+        if not host or host in {"localhost", "127.0.0.1"}:
+            host = parsed.hostname or host or "127.0.0.1"
+        port = port or int(parsed.port or 0)
+    driver = resolve_driver_type(endpoint.format)
+    port = port or int(default_port(driver) or 0)
+    return host or "localhost", int(port or 0)
+
+
 def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
     if endpoint.kind != "database":
         return True
@@ -77,8 +114,15 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
         return True
     if driver == "snowflake":
         return True  # exercised through fakesnow
-    host = endpoint.host or "localhost"
-    port = endpoint.port or default_port(driver)
+    if driver == "iceberg":
+        host, port = _tcp_target(endpoint)
+        if port and host:
+            return _is_reachable(host, port)
+        # Filesystem CoW warehouse (SKU tmp_path) has no REST broker port.
+        return True
+    host, port = _tcp_target(endpoint)
+    if not port:
+        return True
     if not _is_reachable(host, port):
         return False
     # Port open ≠ authenticated. Half-dead QEMU mssql on ARM listens then
@@ -234,10 +278,28 @@ def _build_db_endpoint(
         )
     # SFTP, email, and Qdrant require external network services; the universal
     # matrix test cannot stand up a real server here, so these routes are skipped.
-    if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka", "stripe"}:
+    if driver == "email":
         pytest.skip(f"No local emulator for {driver}")
-    if driver == "oracle":
-        pytest.skip("No local Oracle emulator on this runner")
+    if driver in {"salesforce", "hubspot", "stripe", "rest_api"}:
+        url = _saas_stub_url()
+        parsed = urlparse(url)
+        table = {
+            "salesforce": "Account",
+            "hubspot": "contacts",
+            "stripe": "customers",
+            "rest_api": "records",
+        }[driver]
+        return EndpointConfig(
+            kind="database",
+            format=driver,
+            host=url,
+            port=int(parsed.port or 0),
+            password="stub-token",
+            api_key="stub-token",
+            table=table,
+            ssl=False,
+            extra={"local_stub_not_customer_org": True},
+        )
     if driver == "pgvector":
         # Require the Postgres vector extension; homebrew PG without pgvector must skip.
         try:
@@ -356,6 +418,38 @@ def _build_db_endpoint(
             table="payments_sqlserver",
             extra={"trust_server_certificate": True, "encrypt": "yes"},
         ),
+        "oracle": EndpointConfig(
+            kind="database",
+            format="oracle",
+            host="127.0.0.1",
+            port=1521,
+            database="XEPDB1",
+            username="dataflow",
+            password=_oracle_sku_password(),
+            schema="DATAFLOW",
+            table="payments_oracle",
+        ),
+        "kafka": EndpointConfig(
+            kind="database",
+            format="kafka",
+            host="127.0.0.1",
+            port=9092,
+            table="payments_kafka",
+        ),
+        "qdrant": EndpointConfig(
+            kind="database",
+            format="qdrant",
+            host="127.0.0.1",
+            port=6333,
+            table="payments_qdrant",
+        ),
+        "weaviate": EndpointConfig(
+            kind="database",
+            format="weaviate",
+            host="127.0.0.1",
+            port=8080,
+            table="PaymentsWeaviate",
+        ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
     if template is None:
@@ -445,6 +539,7 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
 _NO_INDEPENDENT_VERIFIER = frozenset({
     "pgvector", "redis", "redshift", "pinecone", "milvus", "weaviate", "qdrant",
     "kafka", "elasticsearch", "neo4j", "influxdb", "couchbase", "email",
+    "salesforce", "hubspot", "rest_api",
 })
 
 

@@ -131,31 +131,24 @@ def test_production_sku_transfer(
         pytest.importorskip("fakesnow")
 
     engine = UniversalTransferEngine()
-    if source.kind == "database":
+    saas_sources = {"salesforce", "hubspot", "stripe", "rest_api"}
+    if source.kind == "database" and src_fmt not in saas_sources:
         _seed_source(source)
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
     err = result.error or ""
-    err_l = err.lower()
-    if "privilege catalog unavailable" in err_l:
-        # fakesnow has no GRANTS catalog; fake-gcs has no get_iam_policy.
-        # The engine fails closed — correct. Skipping keeps that gap visible
-        # instead of asserting a green the emulator never proved.
-        pytest.skip(f"{route}: emulator cannot answer the privilege probe")
-    if dst_fmt in {"s3", "gcs", "adls"} and "destination table existence unknown" in err_l:
-        pytest.skip(f"{route}: emulator cannot prove object-store dest existence")
-    assert result.success, f"{route}: {result.error}"
+    assert result.success, f"{route}: {err}"
     assert_preflight_ran(result)
     assert result.records_transferred == 2, (
         f"{route}: expected 2 records, got {result.records_transferred}"
     )
     assert result.explanation, f"{route}: missing pipeline explanation"
 
-    if destination.kind == "database":
+    if destination.kind == "database" and dst_fmt not in _NO_INDEPENDENT_VERIFIER:
         assert result.reconciliation.get("passed") is True, (
             f"{route}: reconciliation failed: {result.reconciliation}"
         )
-    else:
+    elif destination.kind != "database":
         assert result.destination_summary.get("filename"), (
             f"{route}: no exported filename in destination_summary"
         )

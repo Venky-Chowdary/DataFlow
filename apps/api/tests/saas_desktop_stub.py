@@ -100,7 +100,10 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             self._json(200, {"id": "acct_stub", "object": "account"})
             return
         if path.startswith("/v1/customers"):
-            self._json(200, {"object": "list", "data": STORE.rows.get("customers") or []})
+            self._json(200, {"object": "list", "data": STORE.rows.get("customers") or [], "has_more": False})
+            return
+        if path.rstrip("/").endswith("/records") or path == "/records":
+            self._json(200, STORE.rows.get("records") or [])
             return
         self._json(200, {"ok": True})
 
@@ -140,9 +143,27 @@ class SaasStubHandler(BaseHTTPRequestHandler):
 
 
 def start_saas_stub(port: int = 0) -> tuple[HTTPServer, str]:
-    STORE.rows = {"Account": [], "contacts": [], "customers": []}
+    STORE.rows = {"Account": [], "contacts": [], "customers": [], "records": []}
     server = HTTPServer(("127.0.0.1", port), SaasStubHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     assigned = server.server_address[1]
     return server, f"http://127.0.0.1:{assigned}"
+
+
+def seed_tabular_fixture() -> None:
+    """Two id/amount rows for PRODUCTION_SKU source reads against this stub."""
+    rows = [
+        {"id": "1", "Id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
+        {"id": "2", "Id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
+    ]
+    STORE.rows["Account"] = [dict(r) for r in rows]
+    STORE.rows["contacts"] = [dict(r) for r in rows]
+    STORE.rows["customers"] = [
+        {"id": "cus_1", "object": "customer", "amount": 100000, "email": "a@example.com"},
+        {"id": "cus_2", "object": "customer", "amount": 200050, "email": "b@example.com"},
+    ]
+    STORE.rows["records"] = [
+        {"id": "1", "amount": "1000.00"},
+        {"id": "2", "amount": "2000.50"},
+    ]
