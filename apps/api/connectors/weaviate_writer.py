@@ -159,6 +159,8 @@ def build_weaviate_objects(
             })
             continue
         props["chunk_index"] = chunk
+        for reserved in ("id", "_id", "vector", "_additional", "class"):
+            props.pop(reserved, None)
         vector, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or vector is None:
             rejected.append({
