@@ -37,15 +37,32 @@ MAPPINGS = [
     {"source": "id", "target": "id", "transform": "direct"},
     {"source": "v", "target": "v", "transform": "direct"},
 ]
+# Mongo dest identity is ``_id``. Mapping business id → ``_id`` is the same
+# leftover contract as PRODUCTION_SKU; listing ``id`` against ObjectId-only
+# docs leaves the census unmeasured.
+MONGO_MAPPINGS = [
+    {"source": "id", "target": "_id", "transform": "direct"},
+    {"source": "v", "target": "v", "transform": "direct"},
+]
 GHOST_ROWS = [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
 SOURCE_KEYS = [("1",), ("2",), ("3",)]
 
 
-def _assert_leftover_merge(db_type: str, cfg: dict, *, schema: str, table: str) -> None:
+def _maps(engine: str) -> list[dict]:
+    return list(MONGO_MAPPINGS if engine == "mongodb" else MAPPINGS)
+
+
+def _key_columns(engine: str) -> list[str]:
+    return ["_id"] if engine == "mongodb" else ["id"]
+
+
+def _assert_leftover_merge(
+    db_type: str, cfg: dict, *, schema: str, table: str, key_columns: list[str]
+) -> None:
     before = destination_row_count(db_type, cfg, schema=schema, table_name=table)
     assert before == 4, f"{db_type} dest COUNT before leftover MERGE: {before}"
     census_before = destination_keyset_census(
-        db_type, cfg, schema=schema, table_name=table, key_columns=["id"], keys=SOURCE_KEYS
+        db_type, cfg, schema=schema, table_name=table, key_columns=key_columns, keys=SOURCE_KEYS
     )
     assert census_before is not None, f"{db_type} dest keyset census unmeasured"
     assert census_before["dest_count"] == 4
@@ -57,7 +74,7 @@ def _assert_leftover_merge(db_type: str, cfg: dict, *, schema: str, table: str) 
         cfg=cfg,
         schema=schema,
         table_name=table,
-        key_columns=["id"],
+        key_columns=key_columns,
         keys=SOURCE_KEYS,
         complete_snapshot=False,
     )
@@ -69,13 +86,13 @@ def _assert_leftover_merge(db_type: str, cfg: dict, *, schema: str, table: str) 
         cfg=cfg,
         schema=schema,
         table_name=table,
-        key_columns=["id"],
+        key_columns=key_columns,
         keys=SOURCE_KEYS,
         complete_snapshot=True,
     )
     assert deleted == 1, f"{db_type} leftover MERGE deleted {deleted}, expected 1"
     after = destination_keyset_census(
-        db_type, cfg, schema=schema, table_name=table, key_columns=["id"], keys=SOURCE_KEYS
+        db_type, cfg, schema=schema, table_name=table, key_columns=key_columns, keys=SOURCE_KEYS
     )
     assert after is not None
     assert after["dest_count"] == 3
@@ -88,7 +105,7 @@ def _assert_leftover_merge(db_type: str, cfg: dict, *, schema: str, table: str) 
         cfg=cfg,
         schema=schema,
         table_name=table,
-        key_columns=["id"],
+        key_columns=key_columns,
         keys=SOURCE_KEYS,
         complete_snapshot=True,
     )
@@ -102,9 +119,9 @@ def _write_ghost(ep) -> None:
         records,
         ["id", "v"],
         {"id": "INTEGER", "v": "STRING"},
-        MAPPINGS,
+        _maps(ep.format),
         write_mode="insert",
-        conflict_columns=["id"],
+        conflict_columns=_key_columns(ep.format),
     )
     err = ""
     if isinstance(summary, dict):
@@ -126,6 +143,7 @@ def test_unique_engine_leftover_merge_4_to_3(engine: str) -> None:
             cfg,
             schema=bound.schema or "",
             table=bound.table,
+            key_columns=_key_columns(engine),
         )
 
 

@@ -742,6 +742,14 @@ def destination_key_hits(
         except Exception as exc:
             logger.warning("DynamoDB dest key census failed: %s", exc)
             return None
+    if db_type in {"mongodb", "mongo"}:
+        try:
+            return _mongodb_key_hits(
+                cfg, schema=schema, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("MongoDB dest key census failed: %s", exc)
+            return None
     if db_type in {"elasticsearch", "opensearch"}:
         try:
             return _elasticsearch_key_hits(
@@ -1743,6 +1751,32 @@ def _mongodb_key_list(
         return None
     finally:
         client.close()
+
+
+def _mongodb_key_hits(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many leftover identities Mongo already holds.
+
+    ``_id`` is typed (int vs ObjectId vs string). Census keys from a
+    tabular fixture are often ``("1",)`` while dest lists ``(1,)``.
+    ``coerce_pk_part`` is the same integer affinity leftover MERGE uses
+    for the anti-join — a string/int mismatch must not leave EXTRA unmeasured.
+    """
+    from services.row_conservation import coerce_pk_part
+
+    listed = _mongodb_key_list(
+        cfg, schema=schema, table_name=table_name, cols=cols
+    )
+    if listed is None:
+        return None
+    wanted = {tuple(coerce_pk_part(p) for p in tup) for tup in keys}
+    return sum(1 for tup in listed if tuple(coerce_pk_part(p) for p in tup) in wanted)
 
 
 def _warehouse_sql_key_list(
