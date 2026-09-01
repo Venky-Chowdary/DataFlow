@@ -8,6 +8,9 @@ keeps every scalar's original text.
 
 Nested cell values, aliases, and mixed wrapper documents are refused rather
 than flattened. COUNT is the walk of ``iter_yaml_dicts`` — never a prefix.
+Export (``dump_yaml_records``) is the inverse: a sequence of flat mappings
+with every scalar double-quoted so YAML 1.1 cannot coerce ``yes`` into a
+boolean. An empty population is ``[]``, still YAML.
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ from typing import Any
 __all__ = [
     "YAMLTabularError",
     "count_yaml_records",
+    "dump_yaml_records",
     "iter_yaml_dicts",
+    "yaml_quote",
 ]
 
 
@@ -46,13 +51,19 @@ def _open_text(content: bytes | str | Path, encoding: str) -> tuple[Any, Any]:
     if isinstance(content, (bytes, bytearray)):
         try:
             text = bytes(content).decode(encoding)
-        except UnicodeDecodeError as exc:
+        except UnicodeDecodeError as extra:
             raise YAMLTabularError(
-                f"YAML is not valid {encoding} ({exc}); refuse silent byte replacement"
-            ) from exc
+                f"YAML is not valid {encoding} ({extra}); refuse silent byte replacement"
+            ) from extra
         return io.StringIO(text), None
     if isinstance(content, str):
         return io.StringIO(content), None
+    read = getattr(content, "read", None)
+    if callable(read):
+        if isinstance(getattr(content, "encoding", None), str):
+            return content, None
+        wrapper = io.TextIOWrapper(content, encoding=encoding, newline="")
+        return wrapper, None
     raise YAMLTabularError("YAML COUNT expects bytes, str, Path, or a readable stream")
 
 
@@ -325,3 +336,67 @@ def _scalar_text(event: Any) -> str:
     if raw is None:
         return ""
     return str(raw)
+
+
+def yaml_quote(text: str) -> str:
+    """Double-quoted YAML scalar. Always quoted so YAML 1.1 cannot coerce.
+
+    ``yes`` / ``NO`` / ``on`` / ``007`` / ``1.50`` stay characters. PyYAML's
+    default dump would emit a bool or a float and the next ingest would
+    not see what this run wrote.
+    """
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def _cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        raise YAMLTabularError(
+            "YAML export refuses nested cell values; flatten before write"
+        )
+    return str(value)
+
+
+def dump_yaml_records(
+    records: list[dict[str, Any]],
+    columns: list[str] | None = None,
+    *,
+    encoding: str = "utf-8",
+) -> bytes:
+    """Write a sequence of flat mappings — the inverse of ``iter_yaml_dicts``.
+
+    Empty population is the YAML sequence ``[]``, never a JSON array under a
+    ``.yaml`` name and never an empty file that COUNT cannot measure.
+    """
+    if not records:
+        return b"[]\n"
+    cols = list(columns or [])
+    if not cols:
+        seen: set[str] = set()
+        for rec in records:
+            for key in rec.keys():
+                name = str(key)
+                if name not in seen:
+                    seen.add(name)
+                    cols.append(name)
+    if not cols:
+        return b"[]\n"
+    lines: list[str] = []
+    for rec in records:
+        first = True
+        for col in cols:
+            rendered = f"{yaml_quote(str(col))}: {yaml_quote(_cell_text(rec.get(col)))}"
+            if first:
+                lines.append(f"- {rendered}")
+                first = False
+            else:
+                lines.append(f"  {rendered}")
+    return ("\n".join(lines) + "\n").encode(encoding)

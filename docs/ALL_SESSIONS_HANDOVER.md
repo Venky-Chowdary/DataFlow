@@ -202,8 +202,10 @@ Postgres cells passed dest COUNT=99,991, DLQ=9, independent checksum
 workspace-ownership cells re-measured
 ([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Governance ops
 (mask/hash/redact) are stamped on the signed certificate
-([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)). MySQL twins
-were not run; YAML dest export is still refused.
+([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)). YAML dest
+export writes a quoted sequence of mappings (this PR). MySQL twins were
+not run; fixed-width dest export is still refused. YAML dest 100K was not
+measured.
 
 ---
 
@@ -215,6 +217,7 @@ were not run; YAML dest export is still refused.
    are merged into `feature/Venkat-Analysis`. Re-run track harnesses on this
    tree — a cell that passed on a track branch is not proof on the integration
    branch.
-3. §4 defects from this sequence, N2–N5, yaml/fwf live + 100K, DST, and
-   certificate governance ops are closed. Next is the never-measured items in
-   §2 / §6 (YAML dest export, MySQL twins, Track A matrix, SFTP Excel, fleet).
+3. §4 defects from this sequence, N2–N5, yaml/fwf live + 100K, YAML dest
+   export, DST, and certificate governance ops are closed. Next is the
+   never-measured items in §2 / §6 (MySQL twins, Track A matrix, SFTP Excel,
+   fleet). Fixed-width dest export is still refused.

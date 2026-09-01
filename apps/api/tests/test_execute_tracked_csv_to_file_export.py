@@ -62,6 +62,10 @@ def test_csv_to_jsonl_export():
     _run_export("jsonl", "jsonl", "application/x-ndjson")
 
 
+def test_csv_to_yaml_export():
+    _run_export("yaml", "yaml", "application/yaml")
+
+
 def test_csv_to_csv_export():
     _run_export("csv", "csv", "text/csv")
 

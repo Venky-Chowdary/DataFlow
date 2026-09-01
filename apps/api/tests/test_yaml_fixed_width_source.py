@@ -105,6 +105,9 @@ def test_yaml_routes_are_live() -> None:
     ok, msg = validate_transfer("file", "yaml", "database", "sqlite")
     assert ok, msg
     assert ("file", "yaml", "database", "postgresql") in PRODUCTION_SKU
+    ok, msg = validate_transfer("database", "sqlite", "file_export", "yaml")
+    assert ok, msg
+    assert ("database", "sqlite", "file_export", "yaml") in PRODUCTION_SKU
 
 
 def test_fixed_width_needs_a_layout() -> None:
