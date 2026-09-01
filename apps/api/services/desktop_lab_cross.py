@@ -418,6 +418,7 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             table=table,
             schema="default",
             warehouse=str(path),
+            extra={"catalog_type": "filesystem"},
         )
     if engine == "elasticsearch":
         if not _reachable("127.0.0.1", 9200):

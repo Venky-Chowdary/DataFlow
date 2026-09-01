@@ -381,6 +381,11 @@ def load_catalog(endpoint: Any) -> Any:
         from pyiceberg.catalog.hive import HiveCatalog
 
         return HiveCatalog(name, **props)
+    if catalog_type == "filesystem":
+        raise RuntimeError(
+            "Iceberg filesystem CoW is not a pyiceberg SqlCatalog; "
+            "refusing SQL connection URI invent. Use the filesystem writer/reader."
+        )
     # Default SQL catalog (SQLite, PostgreSQL, etc.).
     from pyiceberg.catalog.sql import SqlCatalog
 

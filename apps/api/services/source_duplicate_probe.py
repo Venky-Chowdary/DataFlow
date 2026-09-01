@@ -66,9 +66,14 @@ READER_PAGED_SOURCE_TYPES = frozenset({"redis", "elasticsearch", "opensearch"})
 # not fail-close uniqueness — scan the readable population instead.
 _SQL_INSPECT_FALLBACK_TYPES = frozenset({"snowflake", "bigquery"})
 
+# Lakehouse snapshot (filesystem CoW or catalog files): no SQL GROUP BY to
+# push down. The transfer reader already pages the current snapshot, so
+# uniqueness is the same payload scan as Redis / object stores.
+ICEBERG_SOURCE_TYPES = frozenset({"iceberg", "apache_iceberg"})
+
 #: Sources whose population the payload scan can page through.
 PAYLOAD_SCANNED_SOURCE_TYPES = (
-    OBJECT_PAYLOAD_SOURCE_TYPES | READER_PAGED_SOURCE_TYPES
+    OBJECT_PAYLOAD_SOURCE_TYPES | READER_PAGED_SOURCE_TYPES | ICEBERG_SOURCE_TYPES
 )
 
 PROBED_SOURCE_TYPES = (
