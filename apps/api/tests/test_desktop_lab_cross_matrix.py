@@ -20,7 +20,8 @@ from services.desktop_lab_cross import (
 )
 
 
-def test_cross_matrix_lists_unique_engines_not_saas_twins():
+def test_cross_matrix_lists_unique_engines_not_saas_twins(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_CROSS_EXTENDED", raising=False)
     assert "postgresql" in LIVE_UNIQUE_ENGINES
     assert "mysql" in LIVE_UNIQUE_ENGINES
     assert "mongodb" in LIVE_UNIQUE_ENGINES
@@ -129,6 +130,56 @@ def test_kafka_bind_skips_closed_port(tmp_path, monkeypatch):
     bound = bind_live_engine("kafka", "t", tmp_path)
     assert isinstance(bound, str)
     assert "9092" in bound
+
+
+def test_kafka_uniqueness_is_a_payload_scan_not_sql_group_by():
+    """Kafka has no relation for GROUP BY; uniqueness is the topic payload."""
+    from services.source_duplicate_probe import (
+        PAYLOAD_SCANNED_SOURCE_TYPES,
+        READER_PAGED_SOURCE_TYPES,
+        SQLISH_SOURCE_TYPES,
+    )
+
+    assert "kafka" in READER_PAGED_SOURCE_TYPES
+    assert "kafka" in PAYLOAD_SCANNED_SOURCE_TYPES
+    assert "kafka" not in SQLISH_SOURCE_TYPES
+
+
+def test_extended_run_lists_sixteen_unique_engines(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_CROSS_EXTENDED", "1")
+    engines = engines_for_run()
+    assert "kafka" in engines
+    assert len(engines) == 16
+    assert len(engines) == len(set(engines))
+
+
+def test_kafka_uniqueness_and_sql_dest_when_reachable(tmp_path):
+    """kafka→sqlite previously fail-closed: probe did not address the topic."""
+    from services.desktop_lab_cross import _cfg, _kafka_reread, _seed, _sid, _transfer_pair
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    bound, row = _seed("kafka", tmp_path)
+    if row["status"] == "skipped":
+        pytest.skip(row["error"] or "kafka not reachable")
+    assert row["status"] == "passed", row
+    src = _kafka_reread(bound)
+    probe = probe_source_duplicate_keys_result(
+        source_config=_cfg(src),
+        source_table=bound.table,
+        primary_key="id",
+    )
+    assert probe.status == "ran", probe.message
+    assert probe.findings == []
+
+    sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+    assert not isinstance(sqlite_dst, str), sqlite_dst
+    sqlite_out = _transfer_pair(bound, sqlite_dst)
+    assert sqlite_out["status"] == "passed", sqlite_out
+
+    kafka_dst = bind_live_engine("kafka", _sid("d"), tmp_path)
+    assert not isinstance(kafka_dst, str), kafka_dst
+    kafka_out = _transfer_pair(bound, kafka_dst)
+    assert kafka_out["status"] == "passed", kafka_out
 
 
 def test_pair_timeout_is_skip_never_pass(monkeypatch):

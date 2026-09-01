@@ -102,6 +102,55 @@ def test_source_duplicate_probe_sqlite(sqlite_dupes_connector: tuple[str, str]) 
     assert values.get("b") == 2
 
 
+def test_kafka_uniqueness_is_payload_scanned_not_sql() -> None:
+    """A topic is not a relation. GROUP BY against Kafka invented a skip."""
+    from services.source_duplicate_probe import (
+        PAYLOAD_SCANNED_SOURCE_TYPES,
+        READER_PAGED_SOURCE_TYPES,
+        SQLISH_SOURCE_TYPES,
+    )
+
+    assert "kafka" in READER_PAGED_SOURCE_TYPES
+    assert "kafka" in PAYLOAD_SCANNED_SOURCE_TYPES
+    assert "kafka" not in SQLISH_SOURCE_TYPES
+
+
+def test_kafka_uniqueness_scan_uses_ephemeral_consumer_group(monkeypatch) -> None:
+    """Proof scan must not join the transfer group_id — commit then fail-closes."""
+    from connectors.base import ReadBatch
+    from services.source_duplicate_probe import _object_payload_duplicates
+
+    seen: dict[str, Any] = {}
+
+    def fake_read(db_type, cfg, key, *_a, **_k):
+        seen["group_id"] = cfg.get("group_id")
+        seen["extra_gid"] = (cfg.get("extra") or {}).get("group_id")
+        seen["reset"] = cfg.get("auto_offset_reset")
+        batch = ReadBatch(headers=["id"], rows=[["1"], ["2"]], offset=0, total_rows=2)
+        return batch, None
+
+    monkeypatch.setattr("src.transfer.batch_readers._read_batch_impl", fake_read)
+    findings, scanned, complete = _object_payload_duplicates(
+        {
+            "type": "kafka",
+            "host": "127.0.0.1",
+            "port": 9092,
+            "group_id": "dataflow-kafka-source",
+            "extra": {"group_id": "dataflow-kafka-source"},
+        },
+        "kafka",
+        "payments",
+        ["id"],
+    )
+    assert complete is True
+    assert scanned == 2
+    assert findings == []
+    assert str(seen.get("group_id") or "").startswith("dataflow-kafka-uniqueness-")
+    assert seen["group_id"] == seen["extra_gid"]
+    assert seen["group_id"] != "dataflow-kafka-source"
+    assert seen["reset"] == "earliest"
+
+
 def test_warehouse_sql_inspect_failure_falls_back_to_payload_scan(monkeypatch) -> None:
     """fakesnow/goccy cannot address GROUP BY via inspector — scan the readable rows."""
     from services.source_duplicate_probe import probe_source_duplicate_keys_result

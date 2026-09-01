@@ -1,9 +1,11 @@
 """Leftover MERGE on every unique engine the desktop cartesian certified.
 
-Overwrite cartesian 225/225 proves dest COUNT after a 2-row write. Fivetran
+Overwrite cartesian proves dest COUNT after a 2-row write. Fivetran
 historical re-sync soft-flags leftovers (``_fivetran_deleted``) so COUNT(*)
 does not drop. Airbyte incremental refuses inferred deletes. This fixture is
-the dest-engine identity on the same 15 unique engines:
+the dest-engine identity on unique engines whose leftover is a PK anti-join
+(Kafka is bound as the 16th unique engine; leftover MERGE there is log
+compaction and this fixture skips it):
 
     dest {1,2,3,99} vs S {1,2,3} → DELETE 99
     dest COUNT 4→3 (native COUNT, never catalog stats)

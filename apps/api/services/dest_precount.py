@@ -3748,6 +3748,7 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     consumer = KafkaConsumer(
         bootstrap_servers=_bootstrap(cfg),
         consumer_timeout_ms=2000,
+        request_timeout_ms=8000,
         enable_auto_commit=False,
     )
     try:
