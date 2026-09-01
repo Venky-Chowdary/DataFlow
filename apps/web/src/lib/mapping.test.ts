@@ -37,6 +37,7 @@ import {
   parseCodeCrosswalk,
   uiTransformToEngine,
   widenMappingToVarchar,
+  isControlTotalCandidate,
   type EditableMapping,
 } from "./mapping.js";
 import { needsMappingReview } from "./columnWorkbench.js";
@@ -1300,5 +1301,52 @@ describe("column profile Map strip", () => {
   it("formatColumnProfileStrip returns null when empty", () => {
     assert.equal(formatColumnProfileStrip(undefined), null);
     assert.equal(formatColumnProfileStrip({}), null);
+  });
+});
+
+describe("G21 control total wire", () => {
+  it("carries control_total through buildPreflightMappings", () => {
+    const payload = buildPreflightMappings([], [
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        destType: "DECIMAL(12,2)",
+        controlTotal: true,
+      },
+      {
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        approved: true,
+        transform: "none",
+        destType: "INTEGER",
+      },
+    ]);
+    assert.equal(payload[0].control_total, true);
+    assert.equal(payload[1].control_total, undefined);
+  });
+
+  it("defaults MONEY carriers as control-total candidates", () => {
+    const money: EditableMapping = {
+      source: "balance",
+      target: "balance",
+      confidence: 0.99,
+      approved: true,
+      transform: "none",
+      destType: "MONEY",
+    };
+    const id: EditableMapping = {
+      source: "id",
+      target: "id",
+      confidence: 0.99,
+      approved: true,
+      transform: "none",
+      destType: "INTEGER",
+    };
+    assert.equal(isControlTotalCandidate(money), true);
+    assert.equal(isControlTotalCandidate(id), false);
   });
 });

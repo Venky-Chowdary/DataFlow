@@ -114,6 +114,18 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     icon: "shield",
     rule: "Destination FK columns must be mapped (or FK risk acknowledged). Schema metadata coverage only — not population orphan proof.",
   },
+  {
+    id: "g21_control_totals",
+    label: "Control totals",
+    icon: "activity",
+    rule: "Declared monetary columns get an independent source SUM compared to the destination SUM after write. A row count is not a ledger balance. Browser sample SUM is not that proof.",
+  },
+  {
+    id: "g22_dest_referential_integrity",
+    label: "Destination referential integrity",
+    icon: "shield",
+    rule: "After write, every source relationship is dest-enforced or anti-join scanned with zero orphans. Schema FK coverage and a sample orphan probe are not dest population proof.",
+  },
 ];
 
 export const CORE_ENGINE_GATE_IDS = [

@@ -279,3 +279,64 @@ def test_missing_ri_evidence_is_reported_not_assumed() -> None:
     referential = physical_state_findings({})["referential_integrity"]
     assert referential["verified"] is False
     assert "not scanned" in referential["reason"]
+
+
+def test_g22_skip_when_no_relationships() -> None:
+    from services.destination_ri_probe import build_dest_ri_gate, referential_integrity_proven
+
+    gate = build_dest_ri_gate(
+        {"verified": False, "asked": False, "relations": []},
+        has_relationships=False,
+    )
+    assert gate["status"] == "skip"
+    assert referential_integrity_proven({"verified": True, "relations": []}) is False
+
+
+def test_g22_blocks_orphans_and_unproven() -> None:
+    from services.destination_ri_probe import (
+        apply_dest_ri_to_reconcile,
+        build_dest_ri_gate,
+        referential_integrity_proven,
+    )
+
+    orphans = {
+        "verified": False,
+        "asked": True,
+        "orphan_rows": 2,
+        "orphan_relations": ["parent_id->parent"],
+        "relations": [
+            {
+                "columns": ["parent_id"],
+                "referred_table": "parent",
+                "status": "scanned",
+                "available": True,
+                "orphan_count": 2,
+            }
+        ],
+    }
+    assert referential_integrity_proven(orphans) is False
+    gate = build_dest_ri_gate(orphans, has_relationships=True)
+    assert gate["status"] == "block"
+    stamped = apply_dest_ri_to_reconcile(
+        {"passed": True, "message": "checksums match"},
+        evidence=orphans,
+        has_relationships=True,
+    )
+    assert stamped["passed"] is False
+
+    clean = {
+        "verified": True,
+        "asked": True,
+        "orphan_rows": 0,
+        "relations": [
+            {
+                "columns": ["parent_id"],
+                "referred_table": "parent",
+                "status": "scanned",
+                "available": True,
+                "orphan_count": 0,
+            }
+        ],
+    }
+    assert referential_integrity_proven(clean) is True
+    assert build_dest_ri_gate(clean, has_relationships=True)["status"] == "pass"

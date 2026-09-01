@@ -67,7 +67,18 @@ export function carryOperatorDecisions(
     if (!p.approved && !p.riskAcknowledged) continue;
     decided.set(mappingDecisionFingerprint(p), p);
   }
-  if (!decided.size && !omitted.size && !crosswalks.size) return next;
+  if (
+    !decided.size
+    && !omitted.size
+    && !crosswalks.size
+    && !prior.some((p) => typeof p.controlTotal === "boolean")
+  ) {
+    return next;
+  }
+  const controlTotals = new Map<string, boolean>();
+  for (const p of prior) {
+    if (typeof p.controlTotal === "boolean") controlTotals.set(p.source, p.controlTotal);
+  }
   return next.map((m) => {
     const dropped = omitted.get(m.source);
     if (dropped) return carryReduction(m, dropped);
@@ -77,13 +88,19 @@ export function carryOperatorDecisions(
     if (priorWalk && !isIntentionalOmit(m)) {
       nextRow = { ...nextRow, codeCrosswalk: priorWalk.table, codeCrosswalkSystem: priorWalk.system };
     }
-    if (!hit) return nextRow;
+    const controlTotal = controlTotals.has(m.source) ? controlTotals.get(m.source) : nextRow.controlTotal;
+    if (!hit && controlTotal === nextRow.controlTotal) return nextRow;
     return {
       ...nextRow,
-      approved: hit.approved,
-      requiresReview: hit.requiresReview,
-      riskAcknowledged: hit.riskAcknowledged,
-      riskContract: hit.riskContract,
+      ...(hit
+        ? {
+            approved: hit.approved,
+            requiresReview: hit.requiresReview,
+            riskAcknowledged: hit.riskAcknowledged,
+            riskContract: hit.riskContract,
+          }
+        : {}),
+      controlTotal,
     };
   });
 }

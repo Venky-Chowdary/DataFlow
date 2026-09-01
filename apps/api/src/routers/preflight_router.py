@@ -75,6 +75,9 @@ class MappingItem(BaseModel):
     # population code is seen. Empty dict is still a declaration.
     code_crosswalk: dict[str, str] | None = None
     code_crosswalk_system: str | None = None
+    # G21 — opt-in independent SUM of this monetary column after write.
+    # Must survive Validate → Execute; extra=ignore would drop it.
+    control_total: bool | None = None
 
 
 class PreflightRequest(BaseModel):

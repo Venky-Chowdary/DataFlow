@@ -183,9 +183,10 @@ gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified
 D1 (sampled dest carrier provenance) is closed with a live Postgres→MinIO
 independent reread ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132));
 N2 (AI egress manifest + metadata-only mapper) is merged
-([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)) — default **on**,
-ITEM 1 unchanged; no cloud LLM key so live OpenAI/Anthropic egress is not
-claimed. N4 and N5 follow.
+([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)); N4 / G20 is merged
+([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)); N5 / G21+G22 is
+merged ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). Next:
+never-measured items and local fleet throughput.
 
 ---
 
@@ -200,5 +201,5 @@ claimed. N4 and N5 follow.
    is a defect, not a merge artifact.
 3. Re-run the track harnesses on the merged tree — a cell that passed on a track
    branch is not proof on the integration branch.
-4. §4 defects from this sequence and N2 are closed. Next is N4, then N5,
-   then the never-measured items in §2 / §6.
+4. §4 defects from this sequence and N2/N4/N5 are closed. Next is the
+   never-measured items in §2 / §6.

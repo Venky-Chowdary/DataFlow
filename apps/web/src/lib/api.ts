@@ -390,6 +390,8 @@ export async function runPreflight(payload: {
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
     risk_contract?: Record<string, unknown>;
+    /** G21 — independent SUM of this monetary column after write. */
+    control_total?: boolean;
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;

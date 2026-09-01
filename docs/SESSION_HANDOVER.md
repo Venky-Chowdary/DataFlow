@@ -12,11 +12,11 @@ anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the
 product is deployment-ready; §7 lists exactly what is missing for that claim.
 
-**Latest feature PR (not merged):** N4 / gate **G20** on
-`feature/n4-code-crosswalk-coverage` — population-level code-crosswalk coverage.
-Owner `apps/api/services/code_crosswalk.py`. Independent of D1 (#132) and N2
-(#133). Next after merge: **N5**. See
-`docs/ENTERPRISE_2026_DELIVERY_STATUS.md` §2 N4.
+**Latest on `feature/Venkat-Analysis`:** D1 [#132], N2 [#133], N4 / G20 [#134],
+and N5 / G21+G22 [#135] are merged. Next: never-measured items (scheduler DST,
+governance ops on the certificate, remaining matrix cells, SFTP Excel) and
+local fleet / 10k–1M throughput. See
+`docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 
 ---
 

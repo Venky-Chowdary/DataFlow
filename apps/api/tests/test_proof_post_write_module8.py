@@ -81,6 +81,61 @@ def test_full_checksum_post_write_is_strongest_claim():
     assert a["referential_integrity_proven"] is False
 
 
+def test_full_checksum_with_dest_ri_scan_is_ri_proven():
+    a = classify_post_write_assurance(
+        {
+            "passed": True,
+            "phase": "post_write_verified",
+            "coverage": "full_checksum",
+            "checksum_match": True,
+            "source_checksum": "abc",
+            "target_checksum": "abc",
+            "physical_state": {
+                "referential_integrity": {
+                    "verified": True,
+                    "asked": True,
+                    "relations": [
+                        {
+                            "columns": ["parent_id"],
+                            "referred_table": "parent",
+                            "status": "scanned",
+                            "available": True,
+                            "orphan_count": 0,
+                        }
+                    ],
+                    "orphan_rows": 0,
+                }
+            },
+        }
+    )
+    assert a["migration_proven"] is True
+    assert a["referential_integrity_proven"] is True
+    assert "referential integrity proven" in a["note"].lower()
+
+
+def test_full_checksum_without_relationships_is_not_ri_proven():
+    a = classify_post_write_assurance(
+        {
+            "passed": True,
+            "phase": "post_write_verified",
+            "coverage": "full_checksum",
+            "checksum_match": True,
+            "source_checksum": "abc",
+            "target_checksum": "abc",
+            "physical_state": {
+                "referential_integrity": {
+                    "verified": False,
+                    "asked": False,
+                    "reason": "source declares no foreign keys",
+                    "relations": [],
+                }
+            },
+        }
+    )
+    assert a["migration_proven"] is True
+    assert a["referential_integrity_proven"] is False
+
+
 def test_signed_pack_stamps_assurance_and_refuses_fake_proven():
     pack = build_signed_proof_pack(
         job_id="j1",

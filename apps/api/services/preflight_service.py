@@ -2315,6 +2315,22 @@ def run_file_preflight(
             },
         ]
 
+    from services.control_totals import (
+        build_control_totals_gate,
+        build_control_totals_report,
+        proof_pack_control_totals,
+    )
+
+    control_totals_report = build_control_totals_report(
+        mappings=list(mappings or []),
+        phase="validate",
+    )
+    control_totals_gate = build_control_totals_gate(
+        control_totals_report, phase="validate"
+    )
+    out["control_totals"] = control_totals_report
+    contract_gates = [*contract_gates, control_totals_gate]
+
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {
             **out["proof_bundle"],
@@ -2328,6 +2344,7 @@ def run_file_preflight(
             # were decided on every row or on a preview.
             "population_fit": fit_report_payload,
             "code_crosswalk": code_crosswalk,
+            "control_totals": proof_pack_control_totals(control_totals_report),
         }
     # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
     contract_ids = {str(g.get("id") or "") for g in contract_gates}
@@ -2549,6 +2566,27 @@ def run_file_preflight(
             "finding_count": 0,
             "note": "Constraint assessment unavailable for this run.",
         }
+
+    # G22 — dest population RI is a post-write Gate-8 proof. State it every
+    # Validate so the question is never unasked; never green-pass a sample.
+    from services.destination_ri_probe import build_dest_ri_validate_gate
+
+    has_relationships = bool(
+        out.get("source_foreign_keys")
+        or destination_foreign_keys
+        or (out.get("constraint_findings") or [])
+    )
+    dest_ri_gate = build_dest_ri_validate_gate(has_relationships=has_relationships)
+    out["gates"] = [
+        g
+        for g in out["gates"]
+        if str(g.get("id") or "") != dest_ri_gate["id"]
+    ] + [dest_ri_gate]
+    out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+    out["total_gates"] = len(out["gates"])
+    out["readiness_score"] = round(
+        out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+    )
 
     # Soft Snowflake warehouse sizing from G7 volume — never a GateId.
     try:

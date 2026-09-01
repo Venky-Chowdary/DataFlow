@@ -189,6 +189,12 @@ export interface EditableMapping {
   codeCrosswalk?: Record<string, string>;
   /** Optional code-system label for the proof pack (ICD-9→ICD-10, …). */
   codeCrosswalkSystem?: string;
+  /**
+   * G21 — operator asked for an independent source/dest SUM of this column
+   * after write. Opt-in; a DECIMAL named "amount" is not a control total
+   * until this is set (MONEY/CURRENCY/SMALLMONEY carriers default on).
+   */
+  controlTotal?: boolean;
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -1901,6 +1907,45 @@ export function isIntentionalOmit(m: EditableMapping): boolean {
   return m.transform === "omit" || m.engineTransform === "omit" || Boolean((m as { intentionalOmit?: boolean }).intentionalOmit);
 }
 
+const MONEY_LOGICAL = /\b(MONEY|CURRENCY|SMALLMONEY)\b/i;
+const CONTROL_TOTAL_ROLES = new Set([
+  "payment_amount",
+  "order_total",
+  "tax_amount",
+  "discount_amount",
+  "line_amount",
+  "net_amount",
+  "gross_amount",
+  "salary_amount",
+  "commission_amount",
+  "bonus_amount",
+  "unit_price",
+  "unit_cost",
+]);
+
+/** Dest/source MONEY carriers default the G21 checkbox on — not name guessing. */
+export function defaultControlTotal(
+  sourceType?: string,
+  destType?: string,
+  semanticRole?: string,
+): boolean | undefined {
+  const types = `${sourceType || ""} ${destType || ""}`;
+  if (MONEY_LOGICAL.test(types)) return true;
+  void semanticRole;
+  return undefined;
+}
+
+/** Show the G21 checkbox: money carriers, amount roles, or already declared. */
+export function isControlTotalCandidate(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (typeof m.controlTotal === "boolean") return true;
+  const types = `${m.inferredType || ""} ${m.destType || ""}`;
+  if (MONEY_LOGICAL.test(types)) return true;
+  const role = (m.semanticRole || "").toLowerCase();
+  if (CONTROL_TOTAL_ROLES.has(role)) return true;
+  return false;
+}
+
 export function applyTransformChange(m: EditableMapping, next: MappingTransform): EditableMapping {
   if (next === "omit") {
     return {
@@ -2155,6 +2200,7 @@ export function buildPreflightMappings(
         review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
         // Engine G15 only clears false-friend on this flag — not Approve / user_override.
         false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
+        control_total: omitted ? undefined : (safe.controlTotal === true ? true : safe.controlTotal === false ? false : undefined),
       };
     });
   }
@@ -2283,6 +2329,7 @@ export function editableFromPipelineMappings(
     false_friend_confirmed?: boolean;
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
+    control_total?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -2456,6 +2503,9 @@ export function editableFromPipelineMappings(
           )
         : undefined,
       codeCrosswalkSystem: m.code_crosswalk_system || undefined,
+      controlTotal: typeof m.control_total === "boolean"
+        ? m.control_total
+        : defaultControlTotal(sourceType, destType, m.semantic_role),
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

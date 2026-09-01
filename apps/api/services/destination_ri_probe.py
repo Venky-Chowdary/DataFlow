@@ -22,6 +22,7 @@ and only one of them is true.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import sqlalchemy as sa
@@ -33,7 +34,18 @@ from services.physical_state_diff import catalog_table_names, resolve_stored_nam
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["verify_destination_referential_integrity"]
+GATE_ID = "g22_dest_referential_integrity"
+REPORT_SCHEMA = "dest_referential_integrity_v1"
+_PROVEN_STATUSES = frozenset({"enforced", "scanned"})
+
+__all__ = [
+    "verify_destination_referential_integrity",
+    "referential_integrity_proven",
+    "build_dest_ri_gate",
+    "build_dest_ri_validate_gate",
+    "apply_dest_ri_to_reconcile",
+    "GATE_ID",
+]
 
 
 def _fold(name: Any) -> str:
@@ -209,3 +221,195 @@ def verify_destination_referential_integrity(
         ],
         "orphan_rows": sum(int(r.get("orphan_count") or 0) for r in relations),
     }
+
+
+def referential_integrity_proven(evidence: Mapping[str, Any] | None) -> bool:
+    """True only when dest-side relations were enforced or scanned with 0 orphans.
+
+    No relationships is not proven of nothing. Schema-only ``constraint_fk``
+    and a source sample orphan probe never set this.
+    """
+    if not isinstance(evidence, dict):
+        return False
+    relations = [
+        r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
+    ]
+    if not relations:
+        return False
+    if not evidence.get("verified"):
+        return False
+    for rel in relations:
+        status = str(rel.get("status") or "").strip().lower()
+        if status not in _PROVEN_STATUSES:
+            return False
+        if not rel.get("available"):
+            return False
+        if int(rel.get("orphan_count") or 0) > 0:
+            return False
+    return True
+
+
+def build_dest_ri_validate_gate(*, has_relationships: bool) -> dict[str, Any]:
+    """Validate never claims dest population RI — that is a post-write Gate-8 proof."""
+    if not has_relationships:
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "No foreign keys were declared on this route — destination "
+                "referential integrity was not asked."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": False,
+                "rule_id": f"{GATE_ID}.undeclared",
+            },
+        }
+    return {
+        "id": GATE_ID,
+        "status": "skip",
+        "message": (
+            "Source relationships are present. Destination-side referential "
+            "integrity (enforced FK or anti-join orphan scan) is a post-write "
+            "Gate-8 proof — Validate schema coverage (constraint_fk) and a "
+            "sample orphan probe are not that proof."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "schema": REPORT_SCHEMA,
+            "declared": True,
+            "evidence": "unmeasured",
+            "rule_id": f"{GATE_ID}.post_write",
+        },
+    }
+
+
+def build_dest_ri_gate(
+    evidence: Mapping[str, Any] | None,
+    *,
+    has_relationships: bool | None = None,
+) -> dict[str, Any]:
+    """Execute Gate-8 G22 from dest RI evidence. Fail closed on orphans/unproven."""
+    relations = []
+    if isinstance(evidence, Mapping):
+        relations = [
+            r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
+        ]
+    asked = bool(has_relationships) or bool(relations)
+    if not asked:
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "No foreign keys were declared on this route — destination "
+                "referential integrity was not asked."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": False,
+                "rule_id": f"{GATE_ID}.undeclared",
+            },
+        }
+    if not isinstance(evidence, Mapping) or not evidence:
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                "Destination referential integrity is unproven — the dest-side "
+                "orphan scan did not run. Fail closed."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "rule_id": f"{GATE_ID}.unproven",
+            },
+        }
+    if referential_integrity_proven(evidence):
+        n = len(relations)
+        return {
+            "id": GATE_ID,
+            "status": "pass",
+            "message": (
+                f"Destination referential integrity holds on {n} relationship(s) "
+                "(enforced FK or anti-join scan, 0 orphans)."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.proven",
+            },
+        }
+    orphan_rows = int(evidence.get("orphan_rows") or 0)
+    orphan_rels = list(evidence.get("orphan_relations") or [])
+    unavailable = list(evidence.get("unavailable_relations") or [])
+    if orphan_rows > 0 or orphan_rels:
+        named = ", ".join(str(r) for r in orphan_rels[:4]) or "relationship"
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                f"Destination referential integrity failed: {orphan_rows} orphan "
+                f"row(s) on {named}. A matching row count does not prove parents exist."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "orphan_rows": orphan_rows,
+                "orphan_relations": orphan_rels,
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.orphans",
+            },
+        }
+    reason = str(evidence.get("reason") or "")
+    named_unavail = ", ".join(str(r) for r in unavailable[:4])
+    return {
+        "id": GATE_ID,
+        "status": "block",
+        "message": (
+            "Destination referential integrity is unproven"
+            + (f" ({named_unavail})" if named_unavail else "")
+            + (f": {reason}" if reason else "")
+            + ". Fail closed."
+        ),
+        "duration_ms": 0,
+        "details": {
+            "schema": REPORT_SCHEMA,
+            "declared": True,
+            "unavailable_relations": unavailable,
+            "reason": reason,
+            "relations": relations,
+            "rule_id": f"{GATE_ID}.unproven",
+        },
+    }
+
+
+def apply_dest_ri_to_reconcile(
+    stamped: dict[str, Any],
+    *,
+    evidence: Mapping[str, Any] | None = None,
+    has_relationships: bool | None = None,
+) -> dict[str, Any]:
+    """Stamp G22 onto a Gate-8 report and fail the job on dest orphans/unproven."""
+    phys = stamped.get("physical_state") if isinstance(stamped.get("physical_state"), dict) else {}
+    ri = evidence
+    if not isinstance(ri, Mapping):
+        ri = phys.get("referential_integrity") if isinstance(phys, dict) else None
+    gate = build_dest_ri_gate(
+        ri if isinstance(ri, Mapping) else None,
+        has_relationships=has_relationships,
+    )
+    out = dict(stamped)
+    out["g22_dest_referential_integrity"] = gate
+    if gate.get("status") == "block":
+        out["passed"] = False
+        prior = str(out.get("message") or "").rstrip()
+        extra = str(gate.get("message") or "G22 destination referential integrity failed")
+        out["message"] = f"{prior} {extra}".strip() if prior else extra
+    return out
+

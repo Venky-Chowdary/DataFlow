@@ -145,7 +145,8 @@ PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
   removed.
 * **Why it matters commercially.** It is the difference between "a JSON
   Datawrap generated about itself" and "evidence a third party can verify".
-  N2 writes `ai.egress` attestations here. N5 still depends on this store.
+  N2 writes `ai.egress` attestations here. N5 writes control-total and dest-RI
+  attestations here.
 * **Regulatory driver.** GDPR Art. 30, SOX, BCBS 239, DORA — retained,
   verifiable records rather than a live dashboard.
 * **Proof.** Targeted suites green, web `tsc -b` clean. One Mongo CDC failure
@@ -153,17 +154,39 @@ PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
   the identical error (local Mongo has no change-stream pre-images), so it is
   pre-existing, not caused by this change.
 
+### N5 · Control-total + dest-side referential-integrity proof (gates **G21**, **G22**) — **Delivered**
+
+Branch `feature/n5-control-totals-ri`.
+
+* **What it is.** Gate-8 extensions a bank examiner asks for. **G21** independently
+  recomputes `SUM` of operator-declared monetary columns on source and
+  destination (separate connections, exact `Decimal`, no 0.01 slop). **G22**
+  fails the job when dest-side FK enforcement or anti-join scan finds orphans
+  or cannot run. A matching row count is not a ledger balance and is not dest RI.
+* **Opt-in honesty.** G21 does not invent money columns from names (`amount`)
+  and does not auto-SUM every `MONEY` carrier. A mapping is in G21 only when
+  `control_total: true`. Map defaults the checkbox on for `MONEY` /
+  `CURRENCY` / `SMALLMONEY` so the declaration is one click, not a hidden
+  SUM. Identity mappings only. Quarantine without a quarantined-amount SUM is
+  unproven, fail closed. A signed risk contract does **not** demote G21.
+* **User surface.** Map checkbox on monetary rows. Validate states G21/G22
+  every run and skips — population SUM and dest RI are post-write proofs. A
+  browser sample SUM is not that proof.
+* **Proof pack.** `referential_integrity_proven` is true only on dest
+  enforced/scanned clean relations. Empty relationships stay false ("nothing
+  to prove"). Control totals travel as column names + SUMs, never full rows.
+
 ---
 
 ## 3. NOW tier — not started
 
 Named precisely so nobody reads §2 as "the tier is done".
 
-| # | Capability | What it must do | Why it is not optional |
-|---|------------|-----------------|------------------------|
-| N5 | **Control-total + referential-integrity proof gates** | Gate-8 extensions: independently recomputed control totals (sums of monetary columns, not just counts) and destination-side referential-integrity checks | A row count proves nothing about a ledger balance; this is what a bank examiner asks for |
-
-N2 and N4 have left this table. Dependency: N5 writes attestations onto N3's chain.
+The NOW-tier capabilities N2, N4 and N5 have left this table (merged
+[#133](https://github.com/Venky-Chowdary/DataFlow/pull/133),
+[#134](https://github.com/Venky-Chowdary/DataFlow/pull/134),
+[#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)). Remaining work is
+the never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6.
 
 ---
 
@@ -180,8 +203,7 @@ proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
 | D16 | [#130](https://github.com/Venky-Chowdary/DataFlow/pull/130) | The Elasticsearch reader reported no types, so an index read back as `string` placeholders and Map demoted an exact `id → id` identity to 0.63 on a route that is not lossy. An index *declares* its fields; the reader now reports the mapping (0.99 measured live). CI mypy baseline also cleaned |
 | D1 | [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132) | A schemaless dest shape inferred from a sample was compared as declared DDL, so run 2 refused run 1. Authority now leaves the probe: sampled profiles widen; declared catalogs stay enforced; `NoSuchKey` stays unread. Live Postgres→MinIO 2026-09-01: probe still measured `DECIMAL(4,1)`, Map `preserve` @ 0.99 origin `sampled_profile`, run 2 transferred 2 rows, independent boto3 reread matched |
 
-This sequence is closed. N2 is merged ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)).
-N4 is merged ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)). N5 remains.
+This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 
 ---
 
@@ -221,10 +243,9 @@ N4 is merged ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)). N5 r
 
 ## 7. How to continue
 
-1. **N5** — control totals and destination referential integrity (G21/G22).
-2. Then the never-measured items: scheduler DST/workspace cells, governance
-   ops in the audit certificate, the remaining connector-matrix cells, SFTP
-   Excel sync modes.
+1. Never-measured items: scheduler DST/workspace cells, governance ops in the
+   audit certificate, remaining connector-matrix cells, SFTP Excel sync modes.
+2. Local fleet / 10k–1M throughput work.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5). No cloud LLM key is present here, so

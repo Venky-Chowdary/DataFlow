@@ -1406,6 +1406,22 @@
   color: #b45309;
 }
 
+.df2-column-control-total {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--df-text-secondary, #475569);
+  white-space: nowrap;
+}
+
+.df2-column-control-total input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
 .df2-column-row.is-omitted td .df2-column-omit-block {
   opacity: 1;
 }

@@ -109,16 +109,18 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         estimated_bytes=record.get("file_size_bytes", 0),
     )
     # 13 file gates, plus the population fit, field reduction, destination
-    # schema replacement, and code-crosswalk gates, each stated on every run
-    # (including "nothing to scan" / undeclared) so a coded field is never an
-    # unasked question.
-    assert pf["total_gates"] == 17
+    # schema replacement, code-crosswalk, control-total and dest-RI gates, each
+    # stated on every run (including "nothing to scan" / undeclared) so a coded
+    # field / ledger SUM / dest RI is never an unasked question.
+    assert pf["total_gates"] == 19
     by_id = {g["id"]: g for g in pf["gates"]}
     assert "g13_source_coverage" in by_id
     assert "g3f_population_fit" in by_id
     assert "g16_field_reduction" in by_id
     assert "g19_dest_schema_replacement" in by_id
     assert "g20_code_crosswalk" in by_id
+    assert "g21_control_totals" in by_id
+    assert "g22_dest_referential_integrity" in by_id
     assert by_id.get("g1_source", {}).get("status") == "pass", pf["gates"]
     assert by_id.get("g2_destination", {}).get("status") == "block", pf["gates"]
     # Offline warehouse map: G3/G4 may block on low confidence or residual coercion —
