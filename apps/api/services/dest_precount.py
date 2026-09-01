@@ -2387,17 +2387,15 @@ def _count_iceberg_data_uri(
 
 
 def _iceberg_local_path(uri: str, *, warehouse: str = "") -> Path | None:
+    from connectors.iceberg_catalog import local_path_from_location
+
     raw = str(uri or "").strip()
-    if raw.startswith("file:"):
-        raw = raw.split(":", 1)[1]
-        if raw.startswith("//"):
-            raw = raw[2:]
     if not raw:
         return None
-    candidates = [Path(raw)]
+    candidates = [local_path_from_location(raw)]
     root = str(warehouse or "").strip()
     if root:
-        candidates.append(Path(root) / raw)
+        candidates.append(local_path_from_location(root) / raw)
     for path in candidates:
         if path.is_file():
             return path
