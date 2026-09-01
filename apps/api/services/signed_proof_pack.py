@@ -714,6 +714,9 @@ def build_signed_proof_pack(
         },
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
     }
+    from services.ai_egress import proof_pack_ai_egress
+
+    body["ai_egress"] = proof_pack_ai_egress(job_id)
     if anchor_in_chain:
         from services.evidence_chain import anchor_evidence
 

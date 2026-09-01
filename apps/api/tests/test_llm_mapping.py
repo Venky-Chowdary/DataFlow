@@ -106,7 +106,31 @@ def test_sanitize_samples_masks_pii():
     assert sanitized["url"] == ["<redacted>"]
 
 
-def test_build_prompt_redacts_pii_in_context():
+def test_build_prompt_metadata_only_withholds_cells(monkeypatch):
+    """N2: default metadata-only must not interpolate cell values, masked or not."""
+    monkeypatch.delenv("DATAWRAP_AI_METADATA_ONLY", raising=False)
+    monkeypatch.delenv("DATAFLOW_AI_METADATA_ONLY", raising=False)
+    prompt = _build_prompt(
+        ["email", "amount"],
+        ["email", "amount"],
+        {
+            "email": ["alice@example.com"],
+            "amount": ["$1,000.00"],
+        },
+        [],
+        source_types={"email": "VARCHAR", "amount": "DECIMAL(12,2)"},
+    )
+    assert "alice@example.com" not in prompt
+    assert "$1,000.00" not in prompt
+    assert "<redacted>" not in prompt
+    assert "VARCHAR" in prompt
+    assert "DECIMAL(12,2)" in prompt
+    assert "metadata-only" in prompt.lower()
+
+
+def test_build_prompt_redacts_pii_when_cells_allowed(monkeypatch):
+    """Opt-out still masks PII; it does not send raw emails."""
+    monkeypatch.setenv("DATAFLOW_AI_METADATA_ONLY", "false")
     prompt = _build_prompt(
         ["email", "amount"],
         ["email", "amount"],

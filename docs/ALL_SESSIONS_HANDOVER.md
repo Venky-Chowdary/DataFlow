@@ -188,8 +188,12 @@ Not measured end to end by anyone in this wave:
 Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
-gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N2, N4 and N5 are not started.
+gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified.
+N2 (AI egress manifest + metadata-only mapper) lands on
+`feature/n2-ai-egress-manifest` — default **on**, ITEM 1 unchanged, no cloud
+LLM key so live OpenAI/Anthropic egress is not claimed. D1 is a separate PR
+([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)); do not fold it
+into N2. N4 and N5 are not started. Next: N4, then N5.
 
 ---
 

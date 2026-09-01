@@ -108,6 +108,7 @@ def run_plan_mapping(
             str(src.get("kind") or ""),
             str(src.get("format") or ""),
         ),
+        job_id=str(plan_id or "").strip(),
     )
 
     updated = add_mapping_revision(plan_id, result)
