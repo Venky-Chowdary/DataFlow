@@ -38,6 +38,51 @@ def profile_object_batch(headers: list[str], rows: list[list[str]]) -> dict[str,
     }
 
 
+def profile_schemaless_source_schema(
+    headers: list[str],
+    rows: list[Any],
+    *,
+    source_format: str,
+) -> dict[str, str]:
+    """Source carriers for a schemaless page — same owner as Validate.
+
+    Redis (and other keyspace/document probes) flatten values through
+    ``cell_to_string``, so the transfer wire is text. Peek used to stamp every
+    header ``string`` while Validate re-inferred INTEGER/DECIMAL from the same
+    digit samples, so Execute invented TEXT and the proof_bundle hashed
+    NUMERIC — Map stamp / materialize diverged on redis→SQL create-new.
+
+    A bare ``string`` per header is a placeholder, not a declaration
+    (``_schema_from_batch``). Profiling fills the placeholder; sampled numeric
+    width is unbound so the page cannot size the destination column.
+    """
+    from services.data_profiler import merge_profiler_schema
+    from services.type_system import destination_carriers_are_inferred
+
+    if not headers:
+        return {}
+    records: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            records.append(row)
+        else:
+            records.append(
+                {
+                    headers[i]: row[i] if i < len(row) else None
+                    for i in range(len(headers))
+                }
+            )
+    if not records:
+        return {c: "string" for c in headers}
+    profiled = profile_dataset(headers, records).get("schema") or {}
+    return merge_profiler_schema(
+        {c: "string" for c in headers},
+        {c: profiled[c] for c in headers if c in profiled},
+        authoritative_existing=False,
+        source_carriers_sampled=destination_carriers_are_inferred(source_format),
+    )
+
+
 def _widen_type(a: str, b: str) -> str:
     """Least-lossy merge of two inferred carriers."""
     from services.type_system import normalize_logical_type

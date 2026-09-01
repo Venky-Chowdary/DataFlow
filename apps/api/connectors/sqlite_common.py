@@ -79,3 +79,31 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             f"SQLite path must be under DATAFLOW_SQLITE_ROOT ({root_resolved})"
         ) from exc
     return str(resolved)
+
+
+def duckdb_file_path(database: str, connection_string: str, host: str = "") -> str:
+    """Resolve a filesystem path (or ``:memory:``) from DuckDB endpoint fields.
+
+    SQLAlchemy URLs: ``duckdb:///rel``, ``duckdb:////abs``, ``duckdb:///:memory:``.
+    MotherDuck ``md:`` / ``motherduck:`` tokens are returned unchanged so callers
+    can refuse a local-file open instead of treating the token as a filename.
+    """
+    raw = (database or connection_string or host or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith("md:") or lowered.startswith("motherduck:"):
+        return raw
+    for prefix in ("duckdb:///", "duckdb://", "duckdb:"):
+        if lowered.startswith(prefix):
+            raw = raw[len(prefix) :]
+            lowered = raw.lower()
+            break
+    if lowered.startswith("//"):
+        raw = raw.lstrip("/")
+        lowered = raw.lower()
+    if not raw or raw == ":memory:" or lowered.endswith(":memory:"):
+        return ":memory:" if raw else ""
+    if "\x00" in raw:
+        raise ValueError("Invalid DuckDB path")
+    return raw

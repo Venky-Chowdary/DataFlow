@@ -54,7 +54,19 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
         except Exception:
             schema = {c: "string" for c in columns}
     elif src_type == "redis":
-        schema = {c: "string" for c in columns}
+        # Placeholder ``string`` is not a Redis declaration — Validate re-infers
+        # from the same page. Peek must use that profiler or Execute invents TEXT
+        # while the proof_bundle hashes NUMERIC/BIGINT (redis→SQL DDL identity).
+        try:
+            from services.object_store_introspect import (
+                profile_schemaless_source_schema,
+            )
+
+            schema = profile_schemaless_source_schema(
+                columns, probe.rows, source_format="redis"
+            ) or {c: "string" for c in columns}
+        except Exception:
+            schema = {c: "string" for c in columns}
     else:
         probe_meta = getattr(probe, "meta", None) or {}
         native = probe_meta.get("native_types") or probe_meta.get("schema") or {}

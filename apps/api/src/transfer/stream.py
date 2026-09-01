@@ -1492,7 +1492,16 @@ def _stream_database_transfer_impl(
             except Exception:
                 schema = {c: "string" for c in columns}
         elif src_type == "redis":
-            schema = {c: "string" for c in columns}
+            try:
+                from services.object_store_introspect import (
+                    profile_schemaless_source_schema,
+                )
+
+                schema = profile_schemaless_source_schema(
+                    columns, probe.rows, source_format="redis"
+                ) or {c: "string" for c in columns}
+            except Exception:
+                schema = {c: "string" for c in columns}
         else:
             # Prefer reader-declared native_types (Kafka, thin SaaS typed flatten,
             # Dynamo) over all-string fiction from a failed SQL introspect.
@@ -1996,6 +2005,14 @@ def _stream_database_transfer_impl(
         if limit > 0 and fetch_offset >= limit:
             return None
         if total_rows is not None and fetch_offset >= total_rows and src_type != "dynamodb":
+            return None
+        # A zero-row page is drained. Short *non-empty* pages may be driver
+        # vectors (DuckDB 2048) and must continue — that is ``page_may_be_partial``
+        # below. An empty fetchmany after ``close_table_scan`` used to fall
+        # through and reopen the snapshot from row 0 because ``while batch:``
+        # is true for any ReadBatch object, so SQL Server (no keyset bookmark)
+        # checkpoint-looped forever on a 2-row table.
+        if last_batch is not None and _raw_page_rows(last_batch) == 0:
             return None
         batch_limit = _batch_limit(fetch_offset)
         # A short page only proves the source is drained when the reader owned

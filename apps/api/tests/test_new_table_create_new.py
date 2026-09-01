@@ -86,3 +86,43 @@ def test_attach_db_sample_exception_preserves_false():
     if out.get("table_exists") not in (True, False):
         out["table_exists"] = None
     assert out["table_exists"] is False
+
+
+def test_pgvector_missing_table_stamps_table_exists_false():
+    """pgvector is PostgreSQL + vector — existence comes from the PG catalog."""
+    from src.transfer import endpoint_intelligence as ei
+    from src.transfer.models import EndpointConfig
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="pgvector",
+        host="127.0.0.1",
+        port=5432,
+        database="dataflow",
+        schema="public",
+        table="payments_pgvector_brand_new",
+        extra={"introspect_purpose": "destination"},
+    )
+
+    with (
+        patch.object(ei, "resolve_connector_config", return_value={
+            "type": "pgvector",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "dataflow",
+            "schema": "public",
+            "username": "dataflow",
+            "password": "dataflow",
+            "ssl": False,
+        }),
+        patch.object(
+            ei, "_introspect_table_schema_rich", return_value=({}, {}, {})
+        ) as introspect,
+        patch("connectors.postgresql.test_postgresql") as list_tables,
+    ):
+        out = ei.introspect_endpoint(endpoint)
+
+    assert introspect.called
+    assert not list_tables.called
+    assert out.get("connected") is True
+    assert out.get("table_exists") is False, out

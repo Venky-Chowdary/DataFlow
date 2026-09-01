@@ -503,6 +503,25 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _schemaless_live_is_placeholder(fmt: str, live: dict[str, str]) -> bool:
+    """True when a schemaless probe answered only untyped string placeholders.
+
+    Redis / document introspect without ``native_types`` reports ``string`` per
+    header. That is not DDL. Relational TEXT (SQLite ``id TEXT``) is a real
+    declaration and must still overlay.
+    """
+    if not live:
+        return False
+    try:
+        from services.data_profiler import _is_weak_declared
+        from services.type_system import destination_carriers_are_inferred
+    except Exception:
+        return False
+    if not destination_carriers_are_inferred(fmt):
+        return False
+    return all(_is_weak_declared(str(t or "")) for t in live.values())
+
+
 def _authoritative_source_schema(
     source: EndpointConfig,
     schema: dict[str, str],
@@ -524,6 +543,13 @@ def _authoritative_source_schema(
 
         live = endpoint_source_column_types(source)
         if not live:
+            return _rekey_to_read_columns(schema, columns)
+        # A keyspace / document probe that still answers every header
+        # ``string`` is a placeholder catalog, not DDL. Overlaying it on a
+        # profiled peek (INTEGER/DECIMAL) made Execute invent TEXT while
+        # Validate hashed NUMERIC — redis→SQL cartesian DDL identity.
+        fmt = str(getattr(source, "format", "") or "").strip().lower()
+        if _schemaless_live_is_placeholder(fmt, live):
             return _rekey_to_read_columns(schema, columns)
         merged, _drift = reconcile_source_types(schema, live)
         return _rekey_to_read_columns(merged, columns)

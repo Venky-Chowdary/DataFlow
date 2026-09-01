@@ -260,6 +260,32 @@ def test_bigquery_cross_dataset_recovery():
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
 
 
+def test_bigquery_introspect_passes_emulator_host_port():
+    """goccy has no connection_string on some SKU templates — host/port must reach get_client."""
+    captured: dict[str, object] = {}
+
+    def fake_get_client(**kwargs):
+        captured.update(kwargs)
+        client = MagicMock()
+        client.list_tables.return_value = []
+        client.get_table.side_effect = Exception("Not found: Table")
+        return client
+
+    with patch("connectors.bigquery_conn.get_client", side_effect=fake_get_client):
+        result = _introspect_bigquery(
+            database="dataflow-test",
+            schema="dataflow",
+            table="payments_brand_new",
+            host="127.0.0.1",
+            port=9050,
+            strict_namespace=True,
+        )
+    assert captured.get("host") == "127.0.0.1"
+    assert int(captured.get("port") or 0) == 9050
+    assert result["ok"] is True
+    assert result["columns"] == []
+
+
 def test_oracle_single_table_probe_skips_owner_catalog_list():
     """Dest-exists must not SELECT every owner table — that hung Oracle XE."""
     executed: list[str] = []

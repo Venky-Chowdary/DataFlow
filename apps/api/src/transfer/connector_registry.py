@@ -686,6 +686,24 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         # about to create must not be demanded before the run creates it.
         "require_object": bool(cfg.get("require_object", True)),
     }
+    # TLS / SID / driver keywords change which handshake the probe opens.
+    # Dropping them made Validate ping a different connection than Execute
+    # (SQL Server Driver 18 verify-or-fail vs operator-declared trust).
+    try:
+        from connectors.generic_sql import connection_options
+
+        probe_kwargs.update(connection_options(cfg))
+    except Exception:
+        for key in (
+            "trust_server_certificate",
+            "encrypt",
+            "server_certificate",
+            "hostname_in_certificate",
+            "sslmode",
+        ):
+            value = cfg.get(key)
+            if value not in (None, ""):
+                probe_kwargs[key] = value
 
     if resolved == "generic_sql":
         # The catalog id (e.g. tidb, clickhouse) must reach the generic SQL engine

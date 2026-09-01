@@ -122,6 +122,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **connection_options(cfg),
             )
         if cursor_column:
             return read_table_cursor_batch(
@@ -512,6 +513,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **connection_options(cfg),
             )
         if cursor_column or cursor_key_columns:
             return read_table_cursor_batch(

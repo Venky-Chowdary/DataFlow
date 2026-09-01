@@ -80,14 +80,28 @@ def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
     ``dest_table_prior_spelling`` is the spelling a destination had before an
     overwrite dropped it: without it a case-folding engine recreates the table
     under the folded name and the object the operator pointed at is gone.
+
+    TLS / SID / driver keywords must ride the same path: readers already
+    merge ``connection_options``, but the writer ``common`` dict used to drop
+    them, so SQL Server Driver 18 verified a compose self-signed cert on
+    seed/write after Validate had already declared trust.
     """
+    from connectors.generic_sql import connection_options
+
+    dest_extra = getattr(dest, "extra", None) or {}
+    if not isinstance(dest_extra, dict):
+        dest_extra = {}
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    out = dict(connection_options({**dest_extra, **nested, **cfg}))
     prior = str(
         cfg.get("dest_table_prior_spelling")
-        or (cfg.get("extra") or {}).get("dest_table_prior_spelling")
-        or (getattr(dest, "extra", None) or {}).get("dest_table_prior_spelling")
+        or nested.get("dest_table_prior_spelling")
+        or dest_extra.get("dest_table_prior_spelling")
         or ""
     )
-    return {"dest_table_prior_spelling": prior} if prior else {}
+    if prior:
+        out["dest_table_prior_spelling"] = prior
+    return out
 
 
 def _driver_writer_kwargs(

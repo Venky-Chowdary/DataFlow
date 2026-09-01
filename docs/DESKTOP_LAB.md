@@ -26,16 +26,30 @@ runs every *live unique engine* as source × every live unique engine as dest:
 Default unique engines (25 pairs): PostgreSQL, MySQL, MongoDB, SQLite, MinIO S3.
 
 `DATAFLOW_CROSS_EXTENDED=1` adds SQL Server, Oracle, fake-gcs, Azurite, DynamoDB
-Local, fakesnow, BigQuery emulator, Redis, Iceberg REST. Those dests have hung
-create-new probes on this host — they are opt-in, never fake green.
+Local, fakesnow, BigQuery emulator, Redis, Iceberg REST, and Elasticsearch when
+`:9200` answers. Pair/seed calls that exceed `DATAFLOW_CROSS_PAIR_TIMEOUT`
+(default 90s) are **skipped**, never passed. Closed ports skip with a named
+reason. Salesforce / HubSpot / Stripe stay omitted until a live tenant exists.
+Emulators are not a customer-tenant SKU.
 
-That is **not** 80×80 catalog aliases (Neon/RDS share the Postgres wire). A
-backend that is down is `skipped`. Salesforce / HubSpot / Stripe stay omitted
-until a live backend exists. Emulators are not a customer-tenant SKU.
+Proofs → **Run unique-engine matrix** returns HTTP 200 with `success=false` when
+pairs failed or skipped so the ledger can show the report. A 422 used to hide
+the counts behind a generic toast.
+
+That is **not** 80×80 catalog aliases (Neon/RDS share the Postgres wire) and not
+60 unique connectors.
 
 ```bash
 DATAFLOW_CROSS_MATRIX=1 PYTHONPATH=. python -m pytest \
   tests/test_desktop_lab_cross_matrix.py -q
+
+# Every unique engine that can answer on this box (SQL Server, Redis, ES, warehouses)
+DATAFLOW_CROSS_MATRIX=1 DATAFLOW_CROSS_EXTENDED=1 PYTHONPATH=. python -m pytest \
+  tests/test_desktop_lab_cross_matrix.py -q
+
+# Cartesian + 80 catalog slots + every saved schedule + port inventory
+DATAFLOW_PROVE_ALL=1 DATAFLOW_CROSS_EXTENDED=1 PYTHONPATH=. python -m pytest \
+  tests/test_live_fleet_proof.py -q
 ```
 
 ## Type × sync × schema (named fixture — not every type)
@@ -136,3 +150,18 @@ Two fleet notes learned by running it:
 
 Measured results live in `docs/SCALE_MATRIX_NOSQL.md`, dated and attributed to
 this host — never quote them without that attribution.
+
+## Measured on this host — 2026-09-01
+
+Not 60+ unique connectors. Not 650+ tiles.
+
+| Proof | Passed | Failed | Skipped | Of | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Core unique-engine cartesian (PG, MySQL, Mongo, SQLite, MinIO S3) | 25 | 0 | 0 | 25 | dest COUNT=2 every pair |
+| Extended unique-engine cartesian (15 engines) | 121 | 35 | 69 | 225 | Oracle/Iceberg ports closed; SQL Server TLS; DynamoDB DDL identity; fakesnow/BQ uniqueness probe; Redis/ES G13 |
+| Desktop lab catalog slots | 88 | 0 | 0 | 88 | unique engines duplex 18 |
+| Saved schedules Run Now | 1 | 0 | 0 | 1 | Lab PG→MySQL; independent MySQL COUNT=5 |
+| PRODUCTION_SKU pytest | 52 | 9 | 25 | 86 | emulator dest-existence / SQL Server TLS / pgvector / DynamoDB |
+
+Reachable backends: PostgreSQL, MySQL, MongoDB, SQL Server, Redis, Elasticsearch, MinIO, fake-GCS, Azurite, DynamoDB Local, BigQuery emulator, fakesnow. Closed: Oracle `:1521`, Iceberg REST `:8181`.
+

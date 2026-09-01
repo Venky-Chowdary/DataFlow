@@ -381,6 +381,30 @@ def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
     )
 
 
+def _inference_would_narrow_numeric_domain(declared: str, inferred: str) -> bool:
+    """True when profiling would collapse an unbounded Number to a sample integer.
+
+    DynamoDB ``N`` / BSON ``Decimal128`` / bare ``DECIMAL`` accept values no
+    Validate page bounds. Integer-looking samples (``1``, ``2``) profile as
+    ``INTEGER``, Map invents ``BIGINT``, and Execute rematerializes the
+    catalog ``DECIMAL`` → dest ``NUMERIC``/``DECIMAL`` — a Map→DDL identity
+    mismatch on every DynamoDB ``N`` HASH key. The declaration owns the
+    family; samples do not invent a 64-bit cliff.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        declared_logical = normalize_logical_type(declared)
+        inferred_logical = normalize_logical_type(inferred)
+    except Exception:
+        return False
+    if declared_logical not in {"decimal", "float"}:
+        return False
+    return inferred_logical == "integer"
+
+
 def _inference_would_invent_fixed_point(declared: str, inferred: str) -> bool:
     """True when profiling would turn a declared float into a sized decimal.
 
@@ -463,6 +487,8 @@ def merge_profiler_schema(
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue
         if _inference_would_invent_fixed_point(declared, str(inferred)):
+            continue
+        if _inference_would_narrow_numeric_domain(declared, str(inferred)):
             continue
         if "(" not in declared and "(" in str(inferred):
             try:

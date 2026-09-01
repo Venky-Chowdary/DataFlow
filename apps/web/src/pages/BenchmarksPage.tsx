@@ -290,8 +290,9 @@ export function BenchmarksPage() {
                       <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
                         Unique-engine matrix: every live unique engine as source × dest. Default is
                         Postgres, MySQL, Mongo, SQLite, MinIO S3 (25 pairs). Not 80×80 catalog aliases.
-                        SQL Server / warehouse emulators are opt-in — they have hung create-new probes.
-                        SaaS tiles without a desktop backend stay skipped.
+                        Extended adds SQL Server, Redis, Elasticsearch, object-store emulators, and
+                        warehouses when those ports answer. A closed port is skipped — never fake green.
+                        SaaS tiles without a desktop backend stay omitted.
                       </p>
                       <Button
                         variant="secondary"
@@ -315,6 +316,32 @@ export function BenchmarksPage() {
                           {cross.unique_engines_seeded?.length
                             ? ` · seeded ${cross.unique_engines_seeded.join(", ")}`
                             : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {cross?.routes && cross.routes.some((r) => r.status === "skipped") && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Unique-engine pairs that skipped</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Reason</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cross.routes.filter((r) => r.status === "skipped").map((row) => (
+                                <tr key={`${row.source}-${row.destination}-skip`}>
+                                  <td><code>{row.source}</code></td>
+                                  <td><code>{row.destination}</code></td>
+                                  <td>{row.error || "skipped"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     )}

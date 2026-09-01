@@ -4151,10 +4151,11 @@ export type DesktopLabReport = {
 export async function runDesktopLab(): Promise<DesktopLabReport> {
   const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`, {
     method: "POST",
-    timeoutMs: 300_000,
+    timeoutMs: 900_000,
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Desktop lab failed"));
-  return res.json();
+  const body = (await res.json().catch(() => null)) as DesktopLabReport | null;
+  if (body && typeof body.catalog_slots === "number") return body;
+  throw new Error(body?.error || (res.ok ? "Desktop lab returned no report" : "Desktop lab failed"));
 }
 
 export async function fetchDesktopLab(): Promise<DesktopLabReport> {
@@ -4189,8 +4190,9 @@ export async function runDesktopLabCross(): Promise<DesktopLabCrossReport> {
     method: "POST",
     timeoutMs: 900_000,
   });
-  if (!res.ok) throw new Error(await parseApiError(res, "Unique-engine matrix failed"));
-  return res.json();
+  const body = (await res.json().catch(() => null)) as DesktopLabCrossReport | null;
+  if (body && typeof body.pairs === "number") return body;
+  throw new Error(body?.error || (res.ok ? "Unique-engine matrix returned no report" : "Unique-engine matrix failed"));
 }
 
 export async function fetchDesktopLabCross(): Promise<DesktopLabCrossReport> {

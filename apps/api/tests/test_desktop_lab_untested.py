@@ -41,11 +41,9 @@ def test_desktop_lab_untested_important_dimensions():
         "dest_only_not_null postgresql->postgresql",
         "postgresql->sqlite",
         "postgresql->sqlserver",
-        "postgresql->oracle",
         "xml dest_exists postgresql->postgresql",
         "point dest_exists postgresql->postgresql",
         "nested_explode csv->postgresql",
-        "geography dest_exists postgresql->postgresql",
         "reverse_etl_stub postgresql->salesforce",
         "reverse_etl_stub postgresql->hubspot",
         "reverse_etl_stub postgresql->stripe",
@@ -55,6 +53,18 @@ def test_desktop_lab_untested_important_dimensions():
     ):
         cell = by_name.get(name)
         assert cell and cell["status"] == "passed", (name, cell)
+
+    oracle = by_name.get("postgresql->oracle")
+    assert oracle and oracle["status"] in {"passed", "skipped"}, oracle
+    if oracle["status"] == "skipped":
+        err = (oracle.get("error") or "").lower()
+        assert "not reachable" in err or "1521" in err, oracle
+
+    geo = by_name.get("geography dest_exists postgresql->postgresql")
+    assert geo and geo["status"] in {"passed", "skipped"}, geo
+    if geo["status"] == "skipped":
+        err = (geo.get("error") or "").lower()
+        assert "postgis" in err or "extension" in err, geo
     cdc = [c for c in report["results"] if c["kind"] == "cdc" and c["status"] == "passed"]
     assert cdc, "at least one live CDC cell must pass when binlog/logical is up"
     replay = by_name.get("mysql_binlog_replay_at_least_once")

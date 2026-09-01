@@ -619,6 +619,73 @@ def test_gcs_iam_deny_matrix():
     ) == (True, False)
 
 
+def test_gcs_emulator_iam_fallback_is_bucket_access_not_customer_iam():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.side_effect = RuntimeError("IAM not implemented")
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "gcs",
+            host="localhost",
+            port=4443,
+            database="dataflow-test",
+            connection_string="http://localhost:4443",
+            table="exports/out.json",
+            table_exists=False,
+            extra={"storage_emulator": True, "anonymous": True},
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert result.method == "emulator_bucket_access"
+    assert result.engine == "gcs"
+
+
+def test_gcs_customer_iam_unavailable_stays_unavailable():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.side_effect = RuntimeError("IAM not implemented")
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "google_cloud_storage",
+            host="my-project",
+            database="landing",
+            table="exports/out.json",
+            table_exists=True,
+        )
+    assert result.status == "unavailable"
+    assert result.method == "get_iam_policy"
+
+
+def test_sqlserver_probe_threads_tls_extra_into_engine():
+    captured: dict = {}
+
+    def fake_engine(cfg):
+        captured.update(cfg)
+        raise RuntimeError("stop-after-cfg")
+
+    with patch(
+        "connectors.generic_sql.get_sqlalchemy_engine",
+        side_effect=fake_engine,
+    ):
+        result = probe_destination_privileges(
+            "sqlserver",
+            host="127.0.0.1",
+            port=1433,
+            database="dataflow",
+            schema="dbo",
+            table="t1",
+            username="sa",
+            password="x",
+            extra={"trust_server_certificate": True, "encrypt": "yes"},
+        )
+    assert captured.get("extra", {}).get("trust_server_certificate") is True
+    assert captured.get("extra", {}).get("encrypt") == "yes"
+    assert result.status == "unavailable"
+
+
 def test_gcs_probe_mocked_iam_deny():
     mock_bucket = MagicMock()
     mock_bucket.get_iam_policy.return_value = {

@@ -271,7 +271,7 @@ def _introspect_schema(
     schema, database, table = split_object_namespace(
         db_type, table, schema=schema, database=database
     )
-    if db_type == "postgresql" or db_type == "redshift":
+    if db_type in {"postgresql", "redshift", "pgvector"}:
         return _introspect_postgresql(
             host=host,
             port=port,
@@ -351,6 +351,10 @@ def _introspect_schema(
             connection_string=connection_string,
             table=table,
             strict_namespace=strict_namespace,
+            host=host,
+            port=port,
+            service_account=str(options.get("service_account") or ""),
+            location=str(options.get("location") or ""),
         )
     if db_type == "mongodb":
         return _introspect_mongodb(
@@ -1235,7 +1239,15 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
     try:
         from connectors.bigquery_conn import get_client
 
-        client = get_client(project_id=project_id, credentials_path=kwargs.get("connection_string", ""))
+        client = get_client(
+            project_id=project_id,
+            credentials_path=kwargs.get("connection_string", ""),
+            service_account=str(kwargs.get("service_account") or ""),
+            location=str(kwargs.get("location") or ""),
+            host=str(kwargs.get("host") or ""),
+            port=int(kwargs.get("port") or 0),
+            connection_string=str(kwargs.get("connection_string") or ""),
+        )
         tables = [t.table_id for t in client.list_tables(f"{project_id}.{dataset_id}", max_results=100)]
         columns: list[dict] = []
         resolved_dataset = dataset_id

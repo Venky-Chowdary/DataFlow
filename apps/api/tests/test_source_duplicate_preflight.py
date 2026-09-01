@@ -82,6 +82,31 @@ def test_source_duplicate_probe_sqlite(sqlite_dupes_connector: tuple[str, str]) 
     assert values.get("b") == 2
 
 
+def test_warehouse_sql_inspect_failure_falls_back_to_payload_scan(monkeypatch) -> None:
+    """fakesnow/goccy cannot address GROUP BY via inspector — scan the readable rows."""
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    def boom(*_a, **_k):
+        raise RuntimeError("probe did not address the source table")
+
+    monkeypatch.setattr(
+        "services.source_duplicate_probe._sql_duplicates",
+        boom,
+    )
+    monkeypatch.setattr(
+        "services.source_duplicate_probe._object_payload_duplicates",
+        lambda *_a, **_k: ([], 2, True),
+    )
+    result = probe_source_duplicate_keys_result(
+        source_config={"type": "snowflake", "host": "localhost", "database": "demo"},
+        source_table="payments_src",
+        primary_key="id",
+    )
+    assert result.status == "ran"
+    assert result.findings == []
+    assert "payload uniqueness scan" in result.message.lower()
+
+
 def test_preflight_blocks_on_source_duplicate_keys(
     sqlite_dupes_connector: tuple[str, str],
 ) -> None:

@@ -30,6 +30,17 @@ def test_decimal_declaration_survives_string_inference():
     assert merged["amount"] == "DECIMAL(18,4)"
 
 
+def test_bare_decimal_survives_integer_sample_inference():
+    """DynamoDB N / Decimal128 must not collapse to INTEGER from samples ``1``, ``2``."""
+    merged = merge_profiler_schema(
+        {"id": "DECIMAL", "amount": "DECIMAL"},
+        {"id": "INTEGER", "amount": "BIGINT"},
+        authoritative_existing=False,
+    )
+    assert merged["id"] == "DECIMAL"
+    assert merged["amount"] == "DECIMAL"
+
+
 def test_untyped_carrier_still_upgrades_from_inference():
     """CSV declares VARCHAR for every column — profiling it is evidence, not loss."""
     merged = merge_profiler_schema(

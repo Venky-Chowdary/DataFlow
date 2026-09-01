@@ -361,6 +361,26 @@ def inspect_destination_for_preflight(
                 host_key=str(cfg.get("host_key") or ""),
                 known_hosts=str(cfg.get("known_hosts") or ""),
                 host_key_policy=str(cfg.get("host_key_policy") or ""),
+                extra={
+                    **dict(getattr(endpoint, "extra", None) or {}),
+                    **{
+                        key: cfg[key]
+                        for key in (
+                            "trust_server_certificate",
+                            "encrypt",
+                            "server_certificate",
+                            "sslmode",
+                            "driver",
+                            "odbc_driver",
+                            "storage_emulator",
+                            "emulator",
+                            "anonymous",
+                            "endpoint",
+                            "endpoint_url",
+                        )
+                        if cfg.get(key) not in (None, "")
+                    },
+                },
             )
             can_write, can_create, priv_meta = resolve_write_flags(True, probe)
             out["can_write"] = can_write

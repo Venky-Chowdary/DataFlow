@@ -25,6 +25,8 @@ def test_cross_matrix_lists_unique_engines_not_saas_twins():
     assert "mysql" in LIVE_UNIQUE_ENGINES
     assert "mongodb" in LIVE_UNIQUE_ENGINES
     assert "s3" in LIVE_UNIQUE_ENGINES
+    assert "elasticsearch" in LIVE_UNIQUE_ENGINES
+    assert "elasticsearch" not in CORE_UNIQUE_ENGINES
     assert "salesforce" not in LIVE_UNIQUE_ENGINES
     assert "hubspot" not in LIVE_UNIQUE_ENGINES
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
@@ -86,3 +88,91 @@ def test_live_engine_cross_matrix_writes_artifact():
         saved = json.loads(artifact.read_text())
         assert saved["pairs"] == report["pairs"]
         assert saved["passed"] == report["passed"]
+
+
+def test_pair_mappings_declare_mongo_id_omit_and_do_not_stamp_dest_types():
+    from src.transfer.models import EndpointConfig
+
+    from services.desktop_lab_cross import _pair_mappings
+
+    mongo = EndpointConfig(kind="database", format="mongodb", table="t")
+    maps = _pair_mappings(mongo)
+    omit = [m for m in maps if m.get("intentional_omit")]
+    assert omit and omit[0]["source"] == "_id"
+    pg = EndpointConfig(kind="database", format="postgresql", table="t")
+    pg_maps = _pair_mappings(pg)
+    assert not any(m.get("intentional_omit") for m in pg_maps)
+    assert all("target_type" not in m for m in pg_maps)
+    redis = EndpointConfig(kind="database", format="redis", table="t")
+    redis_omits = {m["source"] for m in _pair_mappings(redis) if m.get("intentional_omit")}
+    assert redis_omits == {"redis_key", "redis_type"}
+    es = EndpointConfig(kind="database", format="elasticsearch", table="t")
+    es_omits = {m["source"] for m in _pair_mappings(es) if m.get("intentional_omit")}
+    assert es_omits == {"_id", "_index"}
+
+
+def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setattr(mod, "_reachable", lambda *a, **k: False)
+    bound = bind_live_engine("elasticsearch", "t", tmp_path)
+    assert isinstance(bound, str)
+    assert "9200" in bound
+
+
+def test_pair_timeout_is_skip_never_pass(monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setenv("DATAFLOW_CROSS_EXTENDED", "")
+    monkeypatch.setattr(mod, "engines_for_run", lambda: ("sqlite",))
+
+    def boom(fn, timeout_sec, *args, **kwargs):
+        raise TimeoutError("exceeded 15s")
+
+    monkeypatch.setattr(mod, "_call_with_timeout", boom)
+    report = mod.run_live_engine_cross_matrix(persist=False)
+    assert report["passed"] == 0
+    assert report["failed"] == 0
+    assert report["skipped"] == 1
+    assert report["routes"][0]["status"] == "skipped"
+    assert "source sqlite was not seeded" in report["routes"][0]["error"]
+    assert report["unique_engines_seed_skipped"]
+    assert "exceeded" in report["unique_engines_seed_skipped"][0]["error"]
+
+
+def test_iceberg_filesystem_warehouse_counts_reachable(tmp_path):
+    from src.transfer.models import EndpointConfig
+    from tests.test_execute_tracked_universal_matrix import _endpoint_reachable
+
+    ep = EndpointConfig(
+        kind="database",
+        format="iceberg",
+        database=str(tmp_path / "wh"),
+        table="t_sku",
+        schema="default",
+    )
+    assert _endpoint_reachable(ep) is True
+
+
+def test_adls_introspect_dispatch_is_implemented():
+    import inspect
+
+    from src.transfer import endpoint_intelligence as ei
+
+    src = inspect.getsource(ei.introspect_endpoint)
+    sample = inspect.getsource(ei._attach_db_sample)
+    assert 'if fmt == "adls"' in src
+    assert 'if fmt == "adls"' in sample
+    assert "connectors.adls" in src
+
+
+def test_ensure_postgis_installs_inside_docker_not_host_socket():
+    import inspect
+
+    from tests import desktop_lab_untested as ut
+
+    src = inspect.getsource(ut._ensure_postgis) + inspect.getsource(ut._postgres_docker_id)
+    assert "publish=5432" in src
+    assert "docker" in src
+    assert "CREATE EXTENSION IF NOT EXISTS postgis" in src
+

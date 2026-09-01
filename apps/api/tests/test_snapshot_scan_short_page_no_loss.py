@@ -75,3 +75,90 @@ def test_duckdb_scan_spanning_vectors_transfers_every_row():
         conn.close()
     assert landed == ROW_COUNT
     assert gaps == 0
+
+
+def test_desktop_lab_duckdb_generic_sql_url_transfers_two_rows(tmp_path):
+    """CSV → DuckDB (generic_sql duckdb:///) → SQLite, same bind as desktop lab.
+
+    format=duckdb + database=path already transferred 5000 rows. The duplex
+    failure was the catalog bind: format=generic_sql and duckdb:///abs URL.
+    """
+    pytest.importorskip("duckdb")
+    import sqlite3
+
+    from services.desktop_lab import (
+        CSV_BYTES,
+        FIXTURE_ROWS,
+        MAPPINGS,
+        SHAPE_RECIPE,
+        _approved_shape_hash,
+    )
+    from services.dest_precount import destination_row_count
+
+    duck_path = tmp_path / "lab.duckdb"
+    sqlite_path = tmp_path / "lab.db"
+    duck_table = "lab_orders"
+    url = f"duckdb:///{duck_path}"
+    duck_ep = EndpointConfig(
+        kind="database",
+        format="generic_sql",
+        database=str(duck_path),
+        connection_string=url,
+        table=duck_table,
+    )
+
+    csv_to_duck = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=duck_ep,
+        source_content=CSV_BYTES,
+        source_filename="lab.csv",
+        sync_mode="full_refresh_overwrite",
+        skip_preflight=False,
+        validation_mode="strict",
+        mappings=list(MAPPINGS),
+        shape_recipe=dict(SHAPE_RECIPE),
+        approved_shape_recipe_hash=_approved_shape_hash(),
+    )
+    written = UniversalTransferEngine().execute_tracked(csv_to_duck, uuid.uuid4().hex[:24])
+    assert written.success is True, written.error
+    assert written.records_transferred == FIXTURE_ROWS
+    dest_n = destination_row_count(
+        "generic_sql",
+        {
+            "database": str(duck_path),
+            "connection_string": url,
+            "type": "duckdb",
+        },
+        schema="",
+        table_name=duck_table,
+    )
+    assert dest_n == FIXTURE_ROWS
+
+    duck_to_sqlite = TransferRequest(
+        source=duck_ep,
+        destination=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(sqlite_path),
+            connection_string=f"sqlite:///{sqlite_path}",
+            table="payload",
+        ),
+        sync_mode="full_refresh_overwrite",
+        skip_preflight=True,
+        validation_mode="strict",
+        mappings=list(MAPPINGS),
+    )
+    readback = UniversalTransferEngine().execute_tracked(
+        duck_to_sqlite, uuid.uuid4().hex[:24]
+    )
+    assert readback.success is True, readback.error
+    assert readback.records_transferred == FIXTURE_ROWS
+
+    conn = sqlite3.connect(str(sqlite_path))
+    try:
+        sqlite_n = conn.execute("SELECT count(*) FROM payload").fetchone()[0]
+        rows = conn.execute("SELECT id FROM payload ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert sqlite_n == FIXTURE_ROWS
+    assert [str(r[0]) for r in rows] == ["1", "2"]
