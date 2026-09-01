@@ -167,3 +167,60 @@ def test_bigquery_scan_sql_has_no_offset():
     scan_sql = client.query.call_args_list[-1].args[0]
     assert "OFFSET" not in scan_sql.upper()
     assert "LIMIT" not in scan_sql.upper()
+
+
+def test_sqlite_two_row_snapshot_without_pk_stops_after_empty_page(tmp_path):
+    """Full-refresh snapshot with no keyset must not reopen the scan forever.
+
+    SQL Server compose has no PK on the SKU seed table, so Execute falls back
+    to snapshot scan. An empty fetchmany used to look like a live ReadBatch
+    and the next read reopened SELECT from row 0 — checkpoint-loop, no finish.
+    """
+    import sqlite3
+
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    src_path = tmp_path / "snap_src.db"
+    dst_path = tmp_path / "snap_dst.db"
+    conn = sqlite3.connect(src_path)
+    conn.execute("CREATE TABLE src (id TEXT, amount TEXT)")
+    conn.executemany(
+        "INSERT INTO src VALUES (?, ?)",
+        [("1", "1000.00"), ("2", "2000.50")],
+    )
+    conn.commit()
+    conn.close()
+
+    result = UniversalTransferEngine().execute_tracked(
+        TransferRequest(
+            source=EndpointConfig(
+                kind="database",
+                format="sqlite",
+                database=str(src_path),
+                table="src",
+            ),
+            destination=EndpointConfig(
+                kind="database",
+                format="sqlite",
+                database=str(dst_path),
+                table="dst",
+            ),
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=True,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 0.99},
+                {"source": "amount", "target": "amount", "confidence": 0.99},
+            ],
+        ),
+        "snap-empty-page",
+    )
+    assert result.success is True, result.error
+    assert result.records_transferred == 2
+
+    conn = sqlite3.connect(dst_path)
+    try:
+        n = conn.execute("SELECT count(*) FROM dst").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 2
