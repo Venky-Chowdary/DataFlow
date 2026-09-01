@@ -25,7 +25,7 @@ class _Store:
 STORE = _Store()
 
 _SAAS_FIELDS = (
-    "id", "Id", "email", "name", "Name", "description",
+    "id", "email", "name", "Name", "description",
     "amount", "code", "updated_at",
 )
 
@@ -40,10 +40,9 @@ def _field_describe(col: str) -> dict[str, Any]:
     lower = col.lower()
     if lower == "amount":
         ftype, precision, scale, length = "currency", 18, 2, None
-    elif col == "Id":
-        ftype, precision, scale, length = "id", None, None, 18
     elif lower == "id":
-        ftype, precision, scale, length = "int", None, None, None
+        # Tabular SKU identity — long so Validate sample BIGINT and Describe agree.
+        ftype, precision, scale, length = "long", None, None, None
     else:
         ftype, precision, scale, length = "string", None, None, 255
     return {
@@ -210,8 +209,8 @@ def start_saas_stub(port: int = 0) -> tuple[HTTPServer, str]:
 def seed_tabular_fixture() -> None:
     """Two id/amount rows for PRODUCTION_SKU source reads against this stub."""
     rows = [
-        {"id": "1", "Id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
-        {"id": "2", "Id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
+        {"id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
+        {"id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
     ]
     STORE.rows["Account"] = [dict(r) for r in rows]
     STORE.rows["contacts"] = [dict(r) for r in rows]
