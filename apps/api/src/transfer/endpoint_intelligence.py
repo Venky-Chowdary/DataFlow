@@ -64,6 +64,8 @@ def _is_absent_object_error(message: str) -> bool:
             "no columns for table",
             "nosuchkey",
             "404",
+            "blobnotfound",
+            "resourcenotfound",
         )
     )
 
@@ -377,6 +379,24 @@ def introspect_endpoint(
         from connectors.gcs import test_gcs
 
         probe = test_gcs(
+            host=cfg["host"], port=cfg["port"] or 443, database=cfg["database"],
+            username=cfg.get("username", ""), password=cfg.get("password", ""),
+            schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
+            ssl=cfg.get("ssl", False),
+            service_account=cfg.get("service_account", ""),
+        )
+        out["connected"] = probe.ok
+        out["objects"] = [{"name": t, "type": "object"} for t in probe.tables]
+        out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        key = endpoint.table or endpoint.collection
+        if key and probe.ok:
+            _attach_db_sample(out, endpoint)
+        return out
+
+    if fmt == "adls":
+        from connectors.adls import test_adls
+
+        probe = test_adls(
             host=cfg["host"], port=cfg["port"] or 443, database=cfg["database"],
             username=cfg.get("username", ""), password=cfg.get("password", ""),
             schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
@@ -762,12 +782,15 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     )
                 except Exception as exc:
                     # NoSuchKey / 404 is unread, never an invented compatible schema (D1).
+                    # A proven-absent key is create-new (False), not unknown — unknown
+                    # fail-closes overwrite of a unique SKU prefix that is simply new.
                     out["columns"] = []
                     out["schema"] = {}
                     out["schema_authority"] = {}
                     out["sample_error"] = str(exc)
-                    if out.get("table_exists") not in (True, False):
-                        out["table_exists"] = None
+                    out["table_exists"] = (
+                        False if _is_absent_object_error(str(exc)) else None
+                    )
                     out["message"] = (
                         f"{out.get('message', '')} · object probe: {exc}"
                     ).strip(" ·")
@@ -788,9 +811,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 try:
                     batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 except Exception as exc:
-                    # Absent-object errors stay unknown, not create-new: inventing
-                    # a compatible schema from NoSuchKey was the D1 false-green.
-                    out["table_exists"] = None
+                    # Absent-object errors stay create-new False, not invented schema (D1).
+                    out["table_exists"] = (
+                        False if _is_absent_object_error(str(exc)) else None
+                    )
                     out["schema"] = {}
                     out["schema_authority"] = {}
                     out["columns"] = []
@@ -801,6 +825,35 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     return
                 out["columns"] = batch.headers
                 _stamp_batch_schema(out, batch, "gcs")
+                out["row_estimate"] = (batch.total_rows or 0)
+                out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
+            return
+
+        if fmt == "adls":
+            from connectors.adls_reader import read_object
+
+            bucket = cfg["database"]
+            key = endpoint.table or endpoint.collection or ""
+            if bucket and key:
+                try:
+                    batch = read_object(
+                        cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit
+                    )
+                except Exception as exc:
+                    out["columns"] = []
+                    out["schema"] = {}
+                    out["schema_authority"] = {}
+                    out["sample_error"] = str(exc)
+                    out["table_exists"] = (
+                        False if _is_absent_object_error(str(exc)) else None
+                    )
+                    out["message"] = (
+                        f"{out.get('message', '')} · object probe: {exc}"
+                    ).strip(" ·")
+                    return
+                out["columns"] = batch.headers
+                _stamp_batch_schema(out, batch, "adls")
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)

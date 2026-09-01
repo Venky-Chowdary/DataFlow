@@ -330,6 +330,11 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             database="dataflow-test",
             connection_string="http://localhost:4443",
             table=f"xmat/{table}.json",
+            extra={
+                "storage_emulator": True,
+                "anonymous": True,
+                "endpoint": "http://localhost:4443",
+            },
         )
     if engine == "adls":
         if not _reachable("127.0.0.1", 10000):
@@ -412,6 +417,10 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             connection_string="http://127.0.0.1:8181",
             warehouse="file:///tmp/iceberg-rest-wh",
             table=table,
+            extra={
+                "catalog_type": "rest",
+                "warehouse": "file:///tmp/iceberg-rest-wh",
+            },
         )
     if engine == "elasticsearch":
         if not _reachable("127.0.0.1", 9200):

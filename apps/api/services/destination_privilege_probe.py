@@ -279,6 +279,10 @@ def probe_destination_privileges(
     host_key: str = "",
     known_hosts: str = "",
     host_key_policy: str = "",
+    # Connector extras (SQL Server trust_server_certificate, GCS emulator flags)
+    # must reach the probe — a TLS/IAM handshake that ignores extra is not the
+    # same destination the writer will use.
+    extra: dict[str, Any] | None = None,
 ) -> PrivilegeProbeResult:
     """Probe write/create privileges for a destination without mutating data."""
     engine = _normalize_engine(db_type)
@@ -368,6 +372,7 @@ def probe_destination_privileges(
                 ssl=ssl,
                 table_exists=table_exists,
                 need_update=need_update,
+                extra=extra,
             )
         if engine == "oracle":
             return _probe_oracle(
@@ -482,6 +487,7 @@ def probe_destination_privileges(
                 service_account=service_account or password,
                 key_prefix=tbl or sch,
                 table_exists=table_exists,
+                extra=extra,
             )
         if engine == "adls":
             return _probe_adls(
@@ -1142,6 +1148,7 @@ def _probe_sqlserver(
     ssl: bool,
     table_exists: bool,
     need_update: bool,
+    extra: dict[str, Any] | None = None,
 ) -> PrivilegeProbeResult:
     import sqlalchemy as sa
     from connectors.generic_sql import get_sqlalchemy_engine
@@ -1156,6 +1163,7 @@ def _probe_sqlserver(
         "schema": schema,
         "connection_string": connection_string,
         "ssl": ssl,
+        "extra": dict(extra or {}),
     })
     with engine.connect() as conn:
         # Prefer live OBJECT_ID when reachable; fall back to caller flag.
@@ -2543,6 +2551,32 @@ def evaluate_adls_access(
     return can_write, can_create
 
 
+def _gcs_looks_like_emulator(
+    *,
+    host: str,
+    port: int,
+    connection_string: str,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    """True for fake-gcs / localhost — not a customer GCS IAM catalog."""
+    extra = extra or {}
+    if extra.get("storage_emulator") or extra.get("emulator") or extra.get("anonymous"):
+        return True
+    from connectors.google_emulator import looks_like_google_emulator
+
+    endpoint = str(
+        extra.get("endpoint")
+        or extra.get("endpoint_url")
+        or connection_string
+        or ""
+    )
+    return looks_like_google_emulator(
+        endpoint=endpoint,
+        host=str(host or ""),
+        port=int(port or 0),
+    )
+
+
 def _probe_gcs(
     *,
     host: str,
@@ -2554,6 +2588,7 @@ def _probe_gcs(
     service_account: str,
     key_prefix: str,
     table_exists: bool,
+    extra: dict[str, Any] | None = None,
 ) -> PrivilegeProbeResult:
     from connectors.gcs_common import gcs_client
 
@@ -2615,6 +2650,26 @@ def _probe_gcs(
     try:
         policy = bucket_obj.get_iam_policy(requested_policy_version=3)
     except Exception as exc:
+        if _gcs_looks_like_emulator(
+            host=host,
+            port=port,
+            connection_string=connection_string,
+            extra=extra,
+        ):
+            # fake-gcs has no IAM catalog. Bucket reachability is the lab
+            # authority — never upload, never claim customer IAM.
+            return _finalize(
+                engine="gcs",
+                can_write=True,
+                can_create=True,
+                table_exists=bool(exists),
+                table=key_prefix or bucket_name,
+                schema=bucket_name,
+                need_update=False,
+                method="emulator_bucket_access",
+                write_action="storage.objects.create",
+                create_action="storage.buckets.create",
+            )
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,

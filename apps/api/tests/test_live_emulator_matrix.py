@@ -69,7 +69,7 @@ CASES = [
             host="localhost",
             port=4443,
             database="dataflow-test",
-            table="payments_gcs.json",
+            extra={"storage_emulator": True, "anonymous": True, "endpoint": "http://localhost:4443"},
         ),
         id="gcs-fake-gcs-server",
     ),

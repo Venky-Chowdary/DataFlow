@@ -138,3 +138,41 @@ def test_pair_timeout_is_skip_never_pass(monkeypatch):
     assert "source sqlite was not seeded" in report["routes"][0]["error"]
     assert report["unique_engines_seed_skipped"]
     assert "exceeded" in report["unique_engines_seed_skipped"][0]["error"]
+
+
+def test_iceberg_filesystem_warehouse_counts_reachable(tmp_path):
+    from src.transfer.models import EndpointConfig
+    from tests.test_execute_tracked_universal_matrix import _endpoint_reachable
+
+    ep = EndpointConfig(
+        kind="database",
+        format="iceberg",
+        database=str(tmp_path / "wh"),
+        table="t_sku",
+        schema="default",
+    )
+    assert _endpoint_reachable(ep) is True
+
+
+def test_adls_introspect_dispatch_is_implemented():
+    import inspect
+
+    from src.transfer import endpoint_intelligence as ei
+
+    src = inspect.getsource(ei.introspect_endpoint)
+    sample = inspect.getsource(ei._attach_db_sample)
+    assert 'if fmt == "adls"' in src
+    assert 'if fmt == "adls"' in sample
+    assert "connectors.adls" in src
+
+
+def test_ensure_postgis_installs_inside_docker_not_host_socket():
+    import inspect
+
+    from tests import desktop_lab_untested as ut
+
+    src = inspect.getsource(ut._ensure_postgis) + inspect.getsource(ut._postgres_docker_id)
+    assert "publish=5432" in src
+    assert "docker" in src
+    assert "CREATE EXTENSION IF NOT EXISTS postgis" in src
+

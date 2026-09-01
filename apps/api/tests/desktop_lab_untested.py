@@ -1498,8 +1498,24 @@ def _run_more_types() -> list[dict[str, Any]]:
     return cells
 
 
+def _postgres_docker_id() -> str:
+    """Container id publishing 5432 — PostGIS must be installed there, not on the host."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "publish=5432", "--format", "{{.ID}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return (result.stdout or "").strip().splitlines()[0] if result.stdout.strip() else ""
+    except Exception:
+        return ""
+    return ""
+
+
 def _ensure_postgis() -> str | None:
-    """Install PostGIS on this host when missing. Return skip reason or None."""
+    """Install PostGIS where Postgres actually runs. Return skip reason or None."""
     try:
         ver = _pg_fetch("SELECT PostGIS_Version()")
         if ver:
@@ -1515,7 +1531,41 @@ def _ensure_postgis() -> str | None:
         first_err = str(first)[:200]
     else:
         first_err = "PostGIS_Version empty"
-    import subprocess
+
+    cid = _postgres_docker_id()
+    if cid:
+        install = subprocess.run(
+            [
+                "docker", "exec", "-u", "root", cid, "bash", "-lc",
+                "apt-get update -qq && DEBIAN_FRONTEND=noninteractive "
+                "apt-get install -y -qq postgresql-16-postgis-3",
+            ],
+            capture_output=True, text=True, timeout=300,
+        )
+        if install.returncode != 0:
+            return (
+                f"PostGIS extension absent and docker apt install failed "
+                f"({first_err}; {(install.stderr or install.stdout or '')[-180:]})"
+            )
+        created = subprocess.run(
+            [
+                "docker", "exec", cid, "psql", "-U", "dataflow", "-d", "dataflow",
+                "-v", "ON_ERROR_STOP=1", "-c", "CREATE EXTENSION IF NOT EXISTS postgis;",
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        if created.returncode != 0:
+            return (
+                "CREATE EXTENSION postgis in container failed: "
+                f"{(created.stderr or created.stdout or '')[-200:]}"
+            )
+        try:
+            ver = _pg_fetch("SELECT PostGIS_Version()")
+            if ver:
+                return None
+        except Exception as exc:
+            return f"PostGIS installed but dataflow cannot use it: {exc}"[:300]
+        return "PostGIS_Version empty after container install"
 
     install = subprocess.run(
         ["sudo", "-n", "apt-get", "install", "-y", "-qq", "postgresql-16-postgis-3"],
