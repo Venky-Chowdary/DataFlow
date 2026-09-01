@@ -189,7 +189,6 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "mysql"),
     ("database", "postgresql", "file_export", "csv"),
     ("database", "postgresql", "file_export", "json"),
-    ("database", "postgresql", "file_export", "yaml"),
     ("database", "mongodb", "database", "sqlite"),
     ("database", "mongodb", "database", "postgresql"),
     ("database", "mongodb", "database", "mongodb"),

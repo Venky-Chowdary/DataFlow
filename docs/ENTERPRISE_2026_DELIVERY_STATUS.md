@@ -203,7 +203,9 @@ This PR. Canonical owner `apps/api/services/yaml_tabular.py` (`dump_yaml_records
   document is refused (container, same as JSON/XML).
 * **Proof.** `tests/test_yaml_dest_export.py`: dump round-trip, PyYAML
   `safe_load` keeps `yes` as text, sqlite→yaml→sqlite dest COUNT=2 with
-  amounts `1000.00`/`2000.50`, csv→yaml artifact_readback.
+  amounts `1000.00`/`2000.50`, csv→yaml artifact_readback. Postgres→yaml
+  dest COUNT is skip-gated (`pg_up()`); not in PRODUCTION_SKU until that
+  cell is green.
 
 ---
 
