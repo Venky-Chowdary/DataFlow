@@ -71,7 +71,25 @@ def test_avro_export_reads_back_record_for_record() -> None:
 
 def test_unsupported_format_refuses_instead_of_landing_json() -> None:
     with pytest.raises(ValueError, match="not supported"):
-        _export("yaml", RECORDS)
+        _export("toml", RECORDS)
+
+
+def test_yaml_export_is_yaml_not_json() -> None:
+    content, filename, summary = _export("yaml", RECORDS)
+    assert filename.endswith(".yaml")
+    assert summary["mime"] == "application/yaml"
+    assert content.startswith(b"- ")
+    assert not content.strip().startswith(b"[")
+    from services.yaml_tabular import count_yaml_records, iter_yaml_dicts
+
+    assert count_yaml_records(content) == 2
+    assert [r["name"] for r in iter_yaml_dicts(content)] == ["a", "b"]
+
+
+def test_empty_yaml_export_is_still_yaml() -> None:
+    content, filename, _ = _export("yaml", [])
+    assert filename.endswith(".yaml")
+    assert content == b"[]\n"
 
 
 @pytest.mark.parametrize(

@@ -286,8 +286,9 @@ _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
 _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
+    "yaml",
 })
-_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml", "avro"})
+_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml", "avro", "yaml"})
 _BYTE_IMAGE_KINDS = frozenset({"parquet", "orc", "excel"})
 
 
@@ -3846,6 +3847,11 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
     if kind == "avro":
         yield from iter_avro_dicts(source)
         return
+    if kind == "yaml":
+        from services.yaml_tabular import iter_yaml_dicts
+
+        yield from iter_yaml_dicts(source)
+        return
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
 
@@ -4309,6 +4315,8 @@ def _infer_artifact_format(path: Path, fmt: str | None) -> str:
         return "orc"
     if name.endswith(".xml"):
         return "xml"
+    if name.endswith(".yaml") or name.endswith(".yml"):
+        return "yaml"
     return ""
 
 
@@ -4453,6 +4461,11 @@ def _count_streaming_kind(kind: str, source: Any) -> int | None:
         return None if n is None else int(n)
     if kind == "avro":
         n = count_avro_records(source)
+        return None if n is None else int(n)
+    if kind == "yaml":
+        from services.yaml_tabular import count_yaml_records
+
+        n = count_yaml_records(source)
         return None if n is None else int(n)
     return None
 

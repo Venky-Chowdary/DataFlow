@@ -190,6 +190,21 @@ PR [#139](https://github.com/Venky-Chowdary/DataFlow/pull/139).
   2-row: `ssn` mask, `email` hash, `name` redact; independent `COUNT(*)=2`;
   originals absent from dest; certificate lists all three.
 
+### YAML dest export — **Delivered**
+
+This PR. Canonical owner `apps/api/services/yaml_tabular.py` (`dump_yaml_records`).
+
+* **What it is.** YAML as a file destination: a sequence of flat mappings,
+  every scalar double-quoted so YAML 1.1 cannot coerce `yes` / `NO` / `007`.
+  Empty population is `[]`, still YAML — never JSON bytes under a `.yaml`
+  name (D11). Dest COUNT is `iter_yaml_dicts` on disk (`artifact_readback`).
+* **Honesty.** Fixed-width dest export stays refused (needs a declared
+  layout). YAML dest at 100K is unproven. Append into an existing YAML
+  document is refused (container, same as JSON/XML).
+* **Proof.** `tests/test_yaml_dest_export.py`: dump round-trip, PyYAML
+  `safe_load` keeps `yes` as text, sqlite→yaml→sqlite dest COUNT=2 with
+  amounts `1000.00`/`2000.50`, csv→yaml artifact_readback.
+
 ---
 
 ## 3. NOW tier — not started
@@ -258,5 +273,6 @@ This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 ## 7. How to continue
 
 1. Remaining connector-matrix cells, SFTP Excel sync modes.
-2. YAML dest export is still refused; MySQL yaml/fwf 100K twins were not run.
+2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K was not measured.
+   Fixed-width dest export is still refused.
 3. Local fleet / 10k–1M throughput work.

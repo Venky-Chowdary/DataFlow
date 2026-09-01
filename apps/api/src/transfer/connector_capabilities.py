@@ -73,7 +73,7 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "avro": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "orc": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "xml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
-    "yaml": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
+    "yaml": {"test": True, "read": True, "write": True, "file_source": True, "file_export": True},
     "fixed_width": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "pdf": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
     "docx": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},

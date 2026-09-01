@@ -2107,7 +2107,7 @@ def write_destination_file(
     column_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, or TSV using unified format converter."""
+    """Write records to CSV, JSON, JSONL, TSV, YAML, or a container format."""
     import sys
     from pathlib import Path
 
@@ -2261,7 +2261,7 @@ def write_destination_file(
     # JSON bytes under an ``.avro`` name that no Avro reader can open. An empty
     # population is still that container, not an empty JSON array.
     container = fmt in _CONTAINER_EXPORT_FORMATS
-    if fmt not in {"json", "jsonl"} and (container or (can_convert(src_fmt, fmt) and grid)):
+    if fmt not in {"json", "jsonl", "yaml"} and (container or (can_convert(src_fmt, fmt) and grid)):
         content, mime = convert_rows(
             export_columns,
             grid,
@@ -2347,8 +2347,18 @@ def write_destination_file(
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
         export_mime = "application/x-ndjson"
+    elif fmt == "yaml":
+        from services.yaml_tabular import dump_yaml_records
+
+        yaml_rows = [
+            {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+            for r in export_records
+        ]
+        content = dump_yaml_records(yaml_rows, export_columns)
+        filename = "export.yaml"
+        export_mime = "application/yaml"
     else:
-        if fmt not in {"json", "csv", "tsv", "jsonl"}:
+        if fmt not in {"json", "csv", "tsv", "jsonl", "yaml"}:
             raise ValueError(
                 f"File export format '{fmt}' is not supported — refusing to "
                 "write JSON bytes under that name"

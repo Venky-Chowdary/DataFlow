@@ -9,10 +9,12 @@ workspaces wave: `a1cc1f91` via
 
 **Latest on `feature/Venkat-Analysis`:** D1 [#132], N2 [#133], N4 / G20 [#134],
 N5 / G21+G22 [#135], YAML/fixed-width live sources [#136], YAML/fwf 100K
-Postgres [#137], scheduler DST + workspace ownership [#138], and governance
-ops on the certificate [#139] are merged. 100K dest COUNT=99,991, DLQ=9.
-YAML dest export is still refused; MySQL twins were not run. Next: remaining
-matrix cells, SFTP Excel, and local fleet / 10k–1M throughput. See
+Postgres [#137], scheduler DST + workspace ownership [#138], governance
+ops on the certificate [#139], and YAML dest export (this PR) are merged
+or in flight. 100K dest COUNT=99,991, DLQ=9. YAML dest export writes a
+quoted sequence of mappings; independent dest COUNT is `iter_yaml_dicts`.
+Fixed-width dest export is still refused. MySQL twins were not run. Next:
+remaining matrix cells, SFTP Excel, and local fleet / 10k–1M throughput. See
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 
 This document is written so the next engineer can continue without re-deriving
@@ -440,7 +442,9 @@ material, and host routing in a real browser vhost (verified at service level on
   (and proof pack) lists each declared mask / hash / redact column. Live
   sqlite→sqlite: 2 rows, `ssn` mask_pii, `email` hash_pii, `name` redact;
   independent `COUNT(*) = 2`, originals absent, certificate lists all three.
-  YAML dest export is unrelated and still refused.
+* ~~YAML dest export refused.~~ **Closed (this PR).** `dump_yaml_records` writes
+  a sequence of flat mappings with quoted scalars; dest COUNT is
+  `iter_yaml_dicts` on disk. Fixed-width dest export is still refused.
 * SAML / single sign-on against a real IdP.
 * 1M / 10M-row phase timing for this branch (the only measured throughput figure
   is the earlier `docs/THROUGHPUT_1M_EVIDENCE.md` append).
