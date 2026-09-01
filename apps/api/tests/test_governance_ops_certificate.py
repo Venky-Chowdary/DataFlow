@@ -80,7 +80,7 @@ def test_harvest_lists_mask_and_hash_and_omits_identity() -> None:
     }
     assert all(row["reversible"] is False for row in ledger["applied"])
     assert all(row["write_path_applied"] is True for row in ledger["applied"])
-    assert "PII" in ledger["note"]
+    assert "original values" in ledger["note"]
 
 
 def test_harvest_records_declared_alias_as_not_applied_on_write() -> None:
