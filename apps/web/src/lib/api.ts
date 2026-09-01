@@ -386,6 +386,9 @@ export async function runPreflight(payload: {
     archive_reference?: string;
     retention_until?: string;
     omit_approved_by?: string;
+    /** G20 operator-declared source→target code map. */
+    code_crosswalk?: Record<string, string>;
+    code_crosswalk_system?: string;
     risk_contract?: Record<string, unknown>;
     struct_policy?: string;
     struct_derived?: boolean;

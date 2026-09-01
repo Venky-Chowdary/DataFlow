@@ -262,6 +262,10 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     kind: "cdc_snapshot_mode", coverage: "n/a",
     note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
   });
+  skip("g20_code_crosswalk", "Browser-only — population code-crosswalk coverage requires API Validate.", {
+    kind: "code_crosswalk", coverage: "n/a",
+    note: "A covered sample is not population proof. Unmapped codes fail closed on the API path.",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;

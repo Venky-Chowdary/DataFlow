@@ -103,6 +103,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER) are decided on the rows this run actually holds, with the write path's own fit predicates. A finding proves those values cannot be written; a clean scan is population proof only when every source row was scanned.",
   },
   {
+    id: "g20_code_crosswalk",
+    label: "Code crosswalk coverage",
+    icon: "layers",
+    rule: "A declared source→target code map must cover every distinct source value in the population, not a sample. One unmapped code blocks. The write path never passes an unmapped code through as identity.",
+  },
+  {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",

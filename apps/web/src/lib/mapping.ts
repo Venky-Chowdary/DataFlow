@@ -182,6 +182,13 @@ export interface EditableMapping {
   retentionUntil?: string;
   /** Named accepter of the drop — recorded, not authenticated. */
   omitApprovedBy?: string;
+  /**
+   * Operator-declared source→target code map (G20). Missing means this column
+   * is not a coded field. Empty object is a declaration that covers nothing.
+   */
+  codeCrosswalk?: Record<string, string>;
+  /** Optional code-system label for the proof pack (ICD-9→ICD-10, …). */
+  codeCrosswalkSystem?: string;
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -299,6 +306,46 @@ export function reductionEvidenceGap(m: EditableMapping): string | null {
     return "Archive-only needs the archive that holds the field";
   }
   return null;
+}
+
+/** Serialize a code crosswalk for the Map editor (`OLD=NEW` per line). */
+export function formatCodeCrosswalk(map?: Record<string, string> | null): string {
+  if (!map) return "";
+  return Object.entries(map)
+    .map(([src, dest]) => `${src}=${dest}`)
+    .join("\n");
+}
+
+/** Parse `OLD=NEW` / `OLD→NEW` / `OLD -> NEW` lines into a crosswalk. */
+export function parseCodeCrosswalk(text: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {};
+  let saw = false;
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    saw = true;
+    let src = "";
+    let dest = "";
+    const arrow = line.indexOf("->");
+    const eq = line.indexOf("=");
+    if (line.includes("→")) {
+      const parts = line.split("→");
+      src = (parts[0] || "").trim();
+      dest = (parts.slice(1).join("→") || "").trim();
+    } else if (arrow >= 0 && (eq < 0 || arrow < eq)) {
+      src = line.slice(0, arrow).trim();
+      dest = line.slice(arrow + 2).trim();
+    } else if (eq >= 0) {
+      src = line.slice(0, eq).trim();
+      dest = line.slice(eq + 1).trim();
+    } else {
+      src = line;
+      dest = "";
+    }
+    if (src) out[src] = dest;
+  }
+  if (!saw) return undefined;
+  return out;
 }
 
 /** Record (or clear) the reduction reason on an omitted row. */
@@ -2070,6 +2117,9 @@ export function buildPreflightMappings(
         archive_reference: omitted ? (safe.archiveReference?.trim() || undefined) : undefined,
         retention_until: omitted ? (safe.retentionUntil?.trim() || undefined) : undefined,
         omit_approved_by: omitted ? (safe.omitApprovedBy?.trim() || undefined) : undefined,
+        // G20 — a declared code map travels with the mapping, never invented.
+        code_crosswalk: omitted ? undefined : (safe.codeCrosswalk || undefined),
+        code_crosswalk_system: omitted ? undefined : (safe.codeCrosswalkSystem?.trim() || undefined),
         // Existing dest: never invent target_type from inferredType when Map
         // left destType blank (partial Studio honesty — write path fail-closes).
         // Create-new may still preview from inferredType / destType stamp.
@@ -2231,6 +2281,8 @@ export function editableFromPipelineMappings(
     column_profile?: ColumnProfile | Record<string, unknown> | null;
     review_kind?: string;
     false_friend_confirmed?: boolean;
+    code_crosswalk?: Record<string, string>;
+    code_crosswalk_system?: string;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -2398,6 +2450,12 @@ export function editableFromPipelineMappings(
       reviewKind: m.review_kind && REVIEW_KIND_SET.has(m.review_kind)
         ? (m.review_kind as MappingReviewKind)
         : parseReviewKindFromReason(m.reasoning) || undefined,
+      codeCrosswalk: m.code_crosswalk && typeof m.code_crosswalk === "object"
+        ? Object.fromEntries(
+            Object.entries(m.code_crosswalk).map(([k, v]) => [String(k), String(v ?? "")]),
+          )
+        : undefined,
+      codeCrosswalkSystem: m.code_crosswalk_system || undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

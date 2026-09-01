@@ -162,6 +162,8 @@ class FilePreflightContext(PreflightContext):
             "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
             "intentional_omit": bool(getattr(m, "intentional_omit", False)),
             "risk_contract": getattr(m, "risk_contract", None),
+            "code_crosswalk": getattr(m, "code_crosswalk", None),
+            "code_crosswalk_system": getattr(m, "code_crosswalk_system", None),
         }
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
@@ -2251,6 +2253,68 @@ def run_file_preflight(
                 "details": replacement_gate["details"],
             },
         ]
+
+    # G20 — a declared code crosswalk must cover every distinct source value
+    # in the population, not the Validate sample. Unmapped codes fail closed.
+    # Do not consume G3F's population generator: GROUP BY / a replayable file
+    # scan is the population proof. A covered sample is not.
+    from services.code_crosswalk import (
+        build_code_crosswalk_evidence,
+        coded_mappings,
+        collect_observed_codes,
+        probe_population_codes,
+    )
+
+    observed_codes: dict[str, dict[str, int]] | None = None
+    scan_method = ""
+    coded = coded_mappings(list(mappings or []))
+    if coded:
+        coded_cols = [str(c["source"]) for c in coded]
+        probed, _truncated, scan_method = probe_population_codes(
+            columns=coded_cols,
+            source_connector_id=source_connector_id,
+            source_config=source_config,
+            source_table=source_table,
+            source_file_id=source_file_id,
+            shape_recipe=shape_recipe if isinstance(shape_recipe, dict) else None,
+            source_columns=list(columns or []),
+        )
+        if probed is not None:
+            observed_codes = probed
+        elif isinstance(population_rows, (list, tuple)) and rows_are_population:
+            observed_codes, _truncated = collect_observed_codes(
+                population_rows, coded_cols
+            )
+            scan_method = "population_rows"
+
+    population_seq = (
+        list(population_rows)
+        if isinstance(population_rows, (list, tuple))
+        else None
+    )
+    code_crosswalk, crosswalk_gate = build_code_crosswalk_evidence(
+        mappings=list(mappings or []),
+        sample_rows=list(sample_rows or []),
+        population_rows=population_seq,
+        rows_are_population=bool(rows_are_population)
+        and observed_codes is None
+        and (population_seq is not None or population_rows is None),
+        observed_codes=observed_codes,
+    )
+    if scan_method:
+        code_crosswalk["scan_method"] = scan_method
+    out["code_crosswalk"] = code_crosswalk
+    contract_gates = [*contract_gates, crosswalk_gate]
+    if crosswalk_gate.get("status") == "block":
+        contract_blockers = [
+            *contract_blockers,
+            {
+                "id": crosswalk_gate["id"],
+                "message": crosswalk_gate["message"],
+                "details": crosswalk_gate["details"],
+            },
+        ]
+
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {
             **out["proof_bundle"],
@@ -2263,6 +2327,7 @@ def run_file_preflight(
             # response: an exported pack must show whether the bounded carriers
             # were decided on every row or on a preview.
             "population_fit": fit_report_payload,
+            "code_crosswalk": code_crosswalk,
         }
     # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
     contract_ids = {str(g.get("id") or "") for g in contract_gates}

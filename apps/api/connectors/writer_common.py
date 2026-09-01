@@ -1686,6 +1686,7 @@ def build_mapped_rows_with_details(
         disposition_for_execution_policy,
         resolve_write_action_for_mapping,
     )
+    from services.code_crosswalk import apply_code_crosswalk
 
     mapped: list[tuple] = []
     start_no = max(1, int(row_number_start or 1))
@@ -1712,6 +1713,10 @@ def build_mapped_rows_with_details(
                         out[target_idx] = DF_MISSING_SENTINEL
                     continue
                 converted, err = apply_transform(val, transform)
+                if not err and isinstance(mapping, dict):
+                    converted, xwalk_err = apply_code_crosswalk(converted, mapping)
+                    if xwalk_err:
+                        err = xwalk_err
                 # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols
                 # (Airbyte-class empty→null for non-string). Never invent NULL into
                 # proven NOT NULL destinations.

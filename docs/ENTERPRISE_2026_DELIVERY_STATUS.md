@@ -15,7 +15,7 @@ called ready when it is not:
 * **In progress** — reproduced/designed, not merged.
 * **Not started** — no code exists. Saying so is the point of this file.
 
-Integration branch: `feature/Venkat-Analysis`. Last updated 2026-08-30.
+Integration branch: `feature/Venkat-Analysis`. Last updated 2026-09-01.
 
 ---
 
@@ -62,6 +62,36 @@ PR [#125](https://github.com/Venky-Chowdary/DataFlow/pull/125).
   defects and one state-loss defect (returning to Map erased the recorded
   reduction) were found *by* that browser run and fixed in the same PR.
 
+### N4 · Population-level code-system crosswalk coverage (gate **G20**) — **This PR (not yet merged)**
+
+Owner: `apps/api/services/code_crosswalk.py`. Branch `feature/n4-code-crosswalk-coverage`.
+
+* **What it is.** When a mapping **declares** a `code_crosswalk` (opt-in — the
+  gate does not invent coded fields from names), every distinct non-empty
+  source value in the *population* must have a target. Coverage is proven by a
+  SQL `GROUP BY` (or a replayable file scan), not by the Validate sample. A
+  covered sample is a block (`g20_code_crosswalk.unproven`). One unmapped code
+  is a block (`.unmapped`). There is no implicit identity: `A→A` is an explicit
+  entry. The write path applies the same map and refuses unmapped codes into
+  quarantine / fail — never silent passthrough. A signed continue-policy Risk
+  Contract does **not** demote G20 (unlike G19).
+* **User surface.** Map shows a code-crosswalk textarea on enum / `string_enum`
+  rows (and any row that already has a map). Validate lists G20. The signed
+  proof pack carries `preflight_summary.code_crosswalk` (`code_crosswalk_coverage_v1`).
+  CTA: "Open Map to complete the crosswalk".
+* **Honesty.** Empty `{}` is a declaration that covers nothing. Missing/null is
+  undeclared → skip. Browser-local preflight skips G20 (a browser sample is
+  not population proof). Hitting 100,000 distinct values is unproven, fail closed.
+* **Not in this PR.** N2 remains independently on
+  [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133). D1 remains
+  independently on [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132).
+  `is_lossy_coercion` and mapping confidence floors are untouched.
+* **Proof.** Named pytest modules `test_code_crosswalk.py` (unit + sqlite GROUP
+  BY + write-path quarantine + proof pack) and `test_code_crosswalk_live.py`
+  (Postgres: unmapped Z blocks with independent dest `COUNT(*)=0`; covered map
+  rewrites codes with dest reread). Counts are in this PR's test artifacts —
+  do not treat a passing unit test as live closure.
+
 ### N3 · Durable, tamper-evident evidence chain — **Delivered**
 
 PR [#126](https://github.com/Venky-Chowdary/DataFlow/pull/126).
@@ -94,12 +124,13 @@ Named precisely so nobody reads §2 as "the tier is done".
 
 | # | Capability | What it must do | Why it is not optional |
 |---|------------|-----------------|------------------------|
-| N2 | **AI egress manifest + metadata-only mode** | A per-job manifest of exactly what left the customer boundary toward any model, plus an enforced mode in which the mapper sees schema, statistics and profiles — never cell values | This is the answer to the security-review objection ("your product will breach my data if it sends it to an LLM"). Without an enforced mode and a manifest, the answer is a promise |
-| N4 | **Population-level code crosswalk coverage gate** | Prove that every distinct source code value has a target mapping across the *population*, not a sample; unmapped values fail closed | Legacy reference-data conversion is where field-reducing migrations silently corrupt meaning |
+| N2 | **AI egress manifest + metadata-only mode** | A per-job manifest of exactly what left the customer boundary toward any model, plus an enforced mode in which the mapper sees schema, statistics and profiles — never cell values | In progress independently on [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133) — not in this tree, not claimed delivered here |
 | N5 | **Control-total + referential-integrity proof gates** | Gate-8 extensions: independently recomputed control totals (sums of monetary columns, not just counts) and destination-side referential-integrity checks | A row count proves nothing about a ledger balance; this is what a bank examiner asks for |
 
-Dependency: N2 and N5 both write attestations, so both depend on N3 — which is
-why N3 was built first.
+N4 left this table when the G20 PR opened. Dependency: N2 and N5 both write
+attestations, so both depend on N3 — which is why N3 was built first. N5's
+control totals are more valuable once crosswalk coverage is provable, which is
+why N4 precedes N5.
 
 ---
 
@@ -163,13 +194,16 @@ the verdict would fail open and quarantine rows while Map showed green.
 
 ## 7. How to continue
 
-1. Finish **D1** (provenance for sampled destination shapes) — it is the last
-   open defect in the current sequence and it directly undermines the
-   proof-of-movement claim on object-store and schemaless routes.
-2. Then **N2**, because it is the capability that unblocks security review, and
-   N3 has already given it somewhere durable to write.
-3. Then N4 and N5, in that order — N5's control totals are more valuable once
-   crosswalk coverage is provable.
-4. Every item lands as its own PR with a live-engine proof and an independent
+1. Merge **N4** (this PR, G20) into `feature/Venkat-Analysis` after review.
+   Do not fold D1 or N2 into it.
+2. **D1** stays on [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)
+   (sampled destination-shape provenance). Still the last open defect in the
+   current sequence; it is not closed by G20.
+3. **N2** stays on [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)
+   (metadata-only mapper + AI egress manifest).
+4. Next feature after N4 merges: **N5** (control-total + referential-integrity
+   proof gates), on a new `feature/` branch from Venkat-Analysis — not from N4
+   until N4 is merged.
+5. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).

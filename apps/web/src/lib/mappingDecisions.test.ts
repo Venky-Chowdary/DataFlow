@@ -110,6 +110,20 @@ describe("carryOperatorDecisions", () => {
     assert.equal(carried[1].transform, undefined);
   });
 
+  it("keeps a declared code crosswalk across regeneration", () => {
+    const prior: EditableMapping = {
+      ...clean({ source: "status", target: "status", approved: true }),
+      codeCrosswalk: { A: "active", B: "blocked" },
+      codeCrosswalkSystem: "legacy_status→v2",
+    };
+    const carried = carryOperatorDecisions(
+      [clean({ source: "status", target: "status_v2" })],
+      [prior],
+    );
+    assert.deepEqual(carried[0].codeCrosswalk, { A: "active", B: "blocked" });
+    assert.equal(carried[0].codeCrosswalkSystem, "legacy_status→v2");
+  });
+
   it("does not omit a column the operator never dropped", () => {
     const carried = carryOperatorDecisions(
       [clean({ source: "email", target: "email" })],
