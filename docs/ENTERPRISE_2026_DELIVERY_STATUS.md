@@ -86,11 +86,17 @@ Owner: `apps/api/services/code_crosswalk.py`. Branch `feature/n4-code-crosswalk-
   [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133). D1 remains
   independently on [#132](https://github.com/Venky-Chowdary/DataFlow/pull/132).
   `is_lossy_coercion` and mapping confidence floors are untouched.
-* **Proof.** Named pytest modules `test_code_crosswalk.py` (unit + sqlite GROUP
-  BY + write-path quarantine + proof pack) and `test_code_crosswalk_live.py`
-  (Postgres: unmapped Z blocks with independent dest `COUNT(*)=0`; covered map
-  rewrites codes with dest reread). Counts are in this PR's test artifacts —
-  do not treat a passing unit test as live closure.
+* **Proof.** `tests/test_code_crosswalk.py` + `tests/test_code_crosswalk_live.py`:
+  **26 passed** (24 unit/sqlite including SQL `GROUP BY` seeing the rare code a
+  sample missed, write-path quarantine, MappingItem round-trip, Gate-8 sample
+  compare through the same map; **2 live PostgreSQL** — unmapped `Z` blocks with
+  independent dest `COUNT(*)=0` and source `Z` still present; covered map
+  rewrites `A/B/C/Z` to `active/blocked/closed/archived` with dest reread and
+  no identity `Z`). Broader related selection
+  (`test_e2e_pipeline` / `test_reconciliation` / `test_signed_proof_pack` /
+  `test_field_reduction_ledger`) **122 passed**. Web G20-related suites
+  **83 passed, 0 failed**. CI mypy Decision Kernel **17 files clean**. A
+  passing unit test is not live closure; the two Postgres cases are.
 
 ### N3 · Durable, tamper-evident evidence chain — **Delivered**
 

@@ -276,6 +276,42 @@ def test_write_path_quarantines_unmapped_code_never_passthrough() -> None:
     assert "active" in written_status
 
 
+def test_gate8_sample_compare_applies_code_crosswalk() -> None:
+    """A rewritten dest cell is the conversion, not corruption of identity."""
+    from services.reconciliation import sample_compare_rows
+
+    cmp = sample_compare_rows(
+        [{"id": 1, "status": "A"}, {"id": 5, "status": "Z"}],
+        [{"id": 1, "status": "active"}, {"id": 5, "status": "archived"}],
+        [
+            {"source": "id", "target": "id", "transform": "none"},
+            _mapping(
+                transform="none",
+                code_crosswalk={"A": "active", "B": "blocked", "C": "closed", "Z": "archived"},
+            ),
+        ],
+        sort_key="id",
+        rows_are_paired=True,
+    )
+    assert cmp["passed"] is True, cmp
+    assert cmp["compared"] >= 2
+
+
+def test_gate8_sample_compare_still_fails_when_dest_kept_source_token() -> None:
+    from services.reconciliation import sample_compare_rows
+
+    cmp = sample_compare_rows(
+        [{"id": 1, "status": "A"}],
+        [{"id": 1, "status": "A"}],
+        [_mapping(transform="none"), {"source": "id", "target": "id", "transform": "none"}],
+        sort_key="id",
+        rows_are_paired=True,
+    )
+    assert cmp["passed"] is False
+    blob = str(cmp.get("mismatches"))
+    assert "active" in blob or "A" in blob
+
+
 def test_proof_pack_omits_full_rows() -> None:
     report, _gate = build_code_crosswalk_evidence(
         mappings=[_mapping()],
