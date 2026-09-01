@@ -15,7 +15,7 @@ called ready when it is not:
 * **In progress** — reproduced/designed, not merged.
 * **Not started** — no code exists. Saying so is the point of this file.
 
-Integration branch: `feature/Venkat-Analysis`. Last updated 2026-08-30.
+Integration branch: `feature/Venkat-Analysis`. Last updated 2026-09-01.
 
 ---
 
@@ -163,13 +163,16 @@ the verdict would fail open and quarantine rows while Map showed green.
 
 ## 7. How to continue
 
-1. Finish **D1** (provenance for sampled destination shapes) — it is the last
-   open defect in the current sequence and it directly undermines the
-   proof-of-movement claim on object-store and schemaless routes.
-2. Then **N2**, because it is the capability that unblocks security review, and
-   N3 has already given it somewhere durable to write.
-3. Then N4 and N5, in that order — N5's control totals are more valuable once
-   crosswalk coverage is provable.
+1. D1 ([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)), N2
+   ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)), N4
+   ([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)) and N5
+   ([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)) are already
+   open on their own branches — do not fold them into later PRs.
+2. **This PR** closes never-measured item 8 as *sources*: YAML and fixed-width
+   ingest is transfer-live (sqlite + live Postgres dest COUNT). YAML export and
+   100K cells stay unmeasured.
+3. Then the remaining never-measured items in `docs/ALL_SESSIONS_HANDOVER.md` §6
+   and the local fleet / 10k–1M throughput work.
 4. Every item lands as its own PR with a live-engine proof and an independent
    destination reread; a passing unit test alone does not close anything
    (`docs/OPEN_DEFECT_REGISTER.md` §5).

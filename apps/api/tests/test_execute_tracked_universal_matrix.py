@@ -413,6 +413,20 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
             b'<record><id>2</id><amount>2000.50</amount></record></records>',
             "data.xml",
         )
+    if fmt == "yaml":
+        return (
+            b'- id: "1"\n  amount: "1000.00"\n- id: "2"\n  amount: "2000.50"\n',
+            "data.yaml",
+        )
+    if fmt == "fixed_width":
+        # Self-describing layout header — guessing widths is forbidden.
+        id_w, amt_w = 8, 16
+        lines = ["#layout: id:8,amount:16"]
+        for rec in RECORDS:
+            lines.append(
+                str(rec["id"]).ljust(id_w) + str(rec["amount"]).ljust(amt_w)
+            )
+        return ("\n".join(lines) + "\n").encode(), "data.fwf"
     raise ValueError(f"Unsupported file format: {fmt}")
 
 

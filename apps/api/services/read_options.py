@@ -51,6 +51,10 @@ class ReadOptions:
                     utf-8-sig, else utf-8, else latin-1).
     ``delimiter``   single-character field separator for delimited files; empty
                     means sniff. ``\\t`` and ``tab`` are accepted spellings.
+    ``fixed_width_layout``
+                    declared ``(name, width)`` pairs for a fixed-width source.
+                    Empty means the reader looks for a ``#layout:`` header or
+                    a sidecar ``.layout.json``. Guessing widths is forbidden.
     """
 
     sheet: str = ""
@@ -60,6 +64,7 @@ class ReadOptions:
     skip_footer: int = 0
     encoding: str = ""
     delimiter: str = ""
+    fixed_width_layout: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         if self.encoding:
@@ -72,6 +77,10 @@ class ReadOptions:
         if len(self.delimiter) > 1:
             raise ReadOptionsError(
                 f"delimiter must be a single character, got {self.delimiter!r}"
+            )
+        if self.fixed_width_layout and not isinstance(self.fixed_width_layout, tuple):
+            object.__setattr__(
+                self, "fixed_width_layout", _as_fixed_width_layout(self.fixed_width_layout)
             )
         if self.sheet_index < -1:
             raise ReadOptionsError(
@@ -165,6 +174,9 @@ class ReadOptions:
             skip_footer=_as_int(data.get("skip_footer", 0), "skip_footer", default=0),
             encoding=str(data.get("encoding") or "").strip(),
             delimiter=_as_delimiter(data.get("delimiter")),
+            fixed_width_layout=_as_fixed_width_layout(
+                data.get("fixed_width_layout", data.get("colspecs"))
+            ),
         )
 
     @property
@@ -193,6 +205,11 @@ class ReadOptions:
             parts.append(f"encoding {self.encoding}")
         if self.delimiter:
             parts.append(f"delimiter {self.delimiter!r}")
+        if self.fixed_width_layout:
+            parts.append(
+                "fixed-width "
+                + ",".join(f"{n}:{w}" for n, w in self.fixed_width_layout)
+            )
         return ", ".join(parts)
 
 
@@ -247,6 +264,19 @@ def _as_delimiter(value: Any) -> str:
             f"delimiter must be a single character, got {value!r}"
         )
     return text
+
+
+def _as_fixed_width_layout(value: Any) -> tuple[tuple[str, int], ...]:
+    if value is None or value == "" or value == ():
+        return ()
+    try:
+        from services.fixed_width_layout import layout_from_payload
+    except ImportError:
+        from src.services.fixed_width_layout import layout_from_payload  # type: ignore
+    try:
+        return layout_from_payload(value)
+    except ValueError as exc:
+        raise ReadOptionsError(str(exc)) from exc
 
 
 def _as_int(value: Any, field: str, *, default: int) -> int:

@@ -123,7 +123,9 @@ def detect_format(filename: str, content: bytes) -> str:
         return "avro"
     if lower.endswith(".orc"):
         return "orc"
-    if lower.endswith((".txt", ".dat")):
+    if lower.endswith((".yaml", ".yml")):
+        return "yaml"
+    if lower.endswith(".fwf"):
         return "fixed_width"
     if content[:1] == b"{" or content[:1] == b"[":
         return "json"
@@ -145,6 +147,11 @@ _DELIMITED_TYPES = frozenset({"csv", "tsv", "excel"})
 
 def unsupported_read_options(options: ReadOptions, file_type: str) -> str:
     """Empty when this reader honours the whole window, else the refusal."""
+    if options.fixed_width_layout and file_type != "fixed_width":
+        return (
+            "Column-width layout applies to fixed-width sources; "
+            f"this source is {file_type}"
+        )
     if options.selects_sheet and file_type not in _SHEET_WINDOW_TYPES:
         return (
             f"A sheet selection applies to Excel workbooks; this source is {file_type}"
@@ -154,10 +161,15 @@ def unsupported_read_options(options: ReadOptions, file_type: str) -> str:
             "Header row and row-skip options apply to Excel and delimited text "
             f"sources; this source is {file_type}"
         )
-    if (options.encoding or options.delimiter) and file_type not in ("csv", "tsv"):
+    if options.delimiter and file_type not in ("csv", "tsv"):
         return (
-            "Encoding and delimiter options apply to delimited text sources; "
+            "Delimiter options apply to delimited text sources; "
             f"this source is {file_type}"
+        )
+    if options.encoding and file_type not in ("csv", "tsv", "yaml", "fixed_width"):
+        return (
+            "Encoding options apply to delimited text and YAML / fixed-width "
+            f"sources; this source is {file_type}"
         )
     return ""
 
@@ -329,7 +341,7 @@ def store_upload(filename: str, content: bytes) -> dict:
     arrow_schema: Any = None
     columns_override: list | None = None
 
-    if fmt in {"csv", "unknown", "fixed_width"}:
+    if fmt in {"csv", "unknown"}:
         headers, rows, encoding, delimiter = parse_csv_preview(content)
         row_count = count_csv_rows(content, encoding)
         fmt = "csv" if fmt == "unknown" else fmt
@@ -340,6 +352,26 @@ def store_upload(filename: str, content: bytes) -> dict:
         headers, rows, row_count = parse_json(content)
     elif fmt == "jsonl":
         headers, rows, row_count = parse_jsonl(content)
+    elif fmt == "yaml":
+        parsed = FileParser.parse_yaml(content)
+        if not parsed.success:
+            raise ValueError(parsed.error or "YAML upload parse failed")
+        headers = list(parsed.columns or [])
+        rows = [
+            [cell_to_string(rec.get(h) if isinstance(rec, dict) else rec) for h in headers]
+            for rec in (parsed.data or [])[:100]
+        ]
+        row_count = int(parsed.row_count or 0)
+    elif fmt == "fixed_width":
+        parsed = FileParser.parse_fixed_width(content)
+        if not parsed.success:
+            raise ValueError(parsed.error or "Fixed-width upload parse failed")
+        headers = list(parsed.columns or [])
+        rows = [
+            [cell_to_string(rec.get(h) if isinstance(rec, dict) else rec) for h in headers]
+            for rec in (parsed.data or [])[:100]
+        ]
+        row_count = int(parsed.row_count or 0)
     elif fmt == "excel":
         from services.excel_parser import parse_excel_preview, require_xlsx
 
@@ -605,6 +637,7 @@ class FileParser:
 
     SUPPORTED_TYPES = [
         "json", "csv", "tsv", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+        "yaml", "fixed_width",
         "pdf", "docx", "html",
     ]
 
@@ -635,6 +668,10 @@ class FileParser:
                 return "parquet"
             if name.endswith(".xml"):
                 return "xml"
+            if name.endswith((".yaml", ".yml")):
+                return "yaml"
+            if name.endswith(".fwf"):
+                return "fixed_width"
             if name.endswith(".avro"):
                 return "avro"
             if name.endswith(".orc"):
@@ -1384,7 +1421,7 @@ class FileParser:
                 content = decoded.decode(declared_encoding or "utf-8")
             except UnicodeDecodeError as exc:
                 # Text tabular formats must not silently latin-1 mojibake.
-                if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width"}:
+                if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width", "yaml"}:
                     stated = (
                         f"{declared_encoding} as declared"
                         if declared_encoding
@@ -1442,6 +1479,10 @@ class FileParser:
             return cls.parse_orc(raw_bytes)
         elif file_type == "xml":
             return cls.parse_xml(raw_bytes)
+        elif file_type == "yaml":
+            return cls.parse_yaml(raw_bytes, options=read_options)
+        elif file_type == "fixed_width":
+            return cls.parse_fixed_width(raw_bytes, options=read_options)
         elif file_type in ("pdf", "docx", "html"):
             return cls.parse_document(raw_bytes, filename, file_type, enable_ocr=enable_ocr)
         else:
@@ -1452,6 +1493,113 @@ class FileParser:
                 row_count=0,
                 error=f"Unsupported file type: {file_type}",
                 file_type=file_type
+            )
+
+    @staticmethod
+    def parse_yaml(
+        content: str | bytes,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        from services.yaml_tabular import YAMLTabularError, iter_yaml_dicts
+
+        encoding = (options.encoding if options is not None else "") or "utf-8"
+        payload: bytes | str = content
+        try:
+            sample: list[dict] = []
+            columns: list[str] = []
+            seen: set[str] = set()
+            total = 0
+            for rec in iter_yaml_dicts(payload, encoding=encoding):
+                if not isinstance(rec, dict):
+                    continue
+                total += 1
+                if len(sample) < 100:
+                    sample.append(rec)
+                    for key in rec:
+                        name = str(key).strip()
+                        if name and name not in seen:
+                            seen.add(name)
+                            columns.append(name)
+            return ParseResult(
+                success=True,
+                data=sample,
+                columns=columns,
+                row_count=total,
+                file_type="yaml",
+            )
+        except YAMLTabularError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="yaml",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"YAML parse error: {exc}",
+                file_type="yaml",
+            )
+
+    @staticmethod
+    def parse_fixed_width(
+        content: str | bytes,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        from services.fixed_width_layout import (
+            FixedWidthError,
+            iter_fixed_width_dicts,
+        )
+
+        encoding = (options.encoding if options is not None else "") or "utf-8"
+        layout = options.fixed_width_layout if options is not None else ()
+        try:
+            sample: list[dict] = []
+            columns: list[str] = []
+            seen: set[str] = set()
+            total = 0
+            for rec in iter_fixed_width_dicts(
+                content, layout, encoding=encoding
+            ):
+                if not isinstance(rec, dict):
+                    continue
+                total += 1
+                if len(sample) < 100:
+                    sample.append(rec)
+                    for key in rec:
+                        name = str(key).strip()
+                        if name and name not in seen:
+                            seen.add(name)
+                            columns.append(name)
+            return ParseResult(
+                success=True,
+                data=sample,
+                columns=columns,
+                row_count=total,
+                file_type="fixed_width",
+            )
+        except FixedWidthError as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="fixed_width",
+            )
+        except Exception as exc:
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=f"Fixed-width parse error: {exc}",
+                file_type="fixed_width",
             )
 
     @staticmethod

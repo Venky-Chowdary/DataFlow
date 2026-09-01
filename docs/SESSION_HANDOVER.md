@@ -7,6 +7,12 @@ there, and no CI workflow triggers on it). Latest wave head:
 workspaces wave: `a1cc1f91` via
 [#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
+**Latest (this branch):** YAML and fixed-width are transfer-live **file sources**
+on `feature/yaml-fixed-width-live`. YAML keeps scalar text (no `yes`→bool).
+Fixed-width refuses a guessed layout. Do not fold D1 [#132], N2 [#133],
+N4 [#134], or N5 [#135] into this tree. Next: 100K of these formats, then
+other never-measured / fleet items.
+
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the

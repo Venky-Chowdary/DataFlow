@@ -189,7 +189,14 @@ Driven by the research report `Datawrap — the future of enterprise data
 migration (2026)`; delivery state, evidence and the remaining tiers are in
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`. Summary: N1 (Field Reduction Ledger,
 gate G16) and N3 (durable hash-chained evidence) are merged and browser-verified;
-N2, N4 and N5 are not started.
+N2 ([#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)), N4
+([#134](https://github.com/Venky-Chowdary/DataFlow/pull/134)), N5
+([#135](https://github.com/Venky-Chowdary/DataFlow/pull/135)) and D1
+([#132](https://github.com/Venky-Chowdary/DataFlow/pull/132)) are open on their
+own branches and are not in this tree. **This PR** makes YAML and fixed-width
+transfer-live file sources (never-measured item 8). After that: 100K of these
+formats, then remaining never-measured / fleet throughput — do not fold
+D1/N2/N4/N5.
 
 ---
 

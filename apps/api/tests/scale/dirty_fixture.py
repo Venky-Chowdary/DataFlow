@@ -396,7 +396,7 @@ FORMATS: dict[str, FormatSpec] = {
     "excel": FormatSpec("excel", ".xlsx", "excel"),
     "xml": FormatSpec("xml", ".xml", "xml"),
     "csv_gz": FormatSpec("csv", ".csv.gz", ""),
-    "fixed_width": FormatSpec("fixed_width", ".txt", ""),
+    "fixed_width": FormatSpec("fixed_width", ".fwf", ""),
     "yaml": FormatSpec("yaml", ".yaml", ""),
 }
 
@@ -529,7 +529,10 @@ def write_yaml(path: Path, rows: int = DEFAULT_ROWS) -> Path:
 
 def write_fixed_width(path: Path, rows: int = DEFAULT_ROWS) -> Path:
     """Padded, delimiter-free records — the layout is ``FIXED_WIDTH_LAYOUT``."""
+    from services.fixed_width_layout import layout_header_line
+
     with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(layout_header_line(FIXED_WIDTH_LAYOUT) + "\n")
         for rec in iter_rows_text(rows):
             line = "".join(
                 str(rec[col]).replace("\n", " ").replace("\t", " ")[:width].ljust(width)
@@ -862,15 +865,6 @@ def read_bytes_as(export_format: str, payload: bytes, *, suffix: str = "") -> li
 
 def fixed_width_parse(path: Path) -> list[dict[str, Any]]:
     """Reference parse of the fixed-width fixture, using the declared layout."""
-    out: list[dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            rec: dict[str, Any] = {}
-            pos = 0
-            for col, width in FIXED_WIDTH_LAYOUT:
-                rec[col] = line[pos : pos + width].rstrip()
-                pos += width
-            out.append(rec)
-    return out
+    from services.fixed_width_layout import iter_fixed_width_dicts
+
+    return list(iter_fixed_width_dicts(path, FIXED_WIDTH_LAYOUT))
