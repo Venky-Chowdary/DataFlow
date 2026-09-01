@@ -641,7 +641,7 @@ def run_integrity_audit(
     stats["anomalous_rows"] = len(anomalous_rows)
 
     # 4. PII / sensitive-data scan (soft warnings)
-    protected_transforms = {"hash_pii", "mask_pii"}
+    protected_transforms = {"hash_pii", "mask_pii", "redact"}
     protected_sources = {
         m["source"]
         for m in (mappings or [])

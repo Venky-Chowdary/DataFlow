@@ -76,6 +76,27 @@ Burn-down reads DLQ events: `quarantined − replayed = open`. If the DLQ cannot
 be read it returns `available: false` with a note — never zeros, because an
 unreadable ledger must not render as a clean burn-down.
 
+## Governance operations
+
+Mask, hash, and redact are one-way on purpose. The certificate lists every
+mapping that declared one of those families (`mask_pii` / `hash_pii` /
+`redact`, plus declared aliases such as `encrypt`) so a reviewer can see which
+landed columns were deliberately mutated. Original values are never written
+onto the certificate.
+
+The execute path stamps `governance_operations` on the job (same reason
+accepted risk contracts are stamped: mappings can be stripped from
+`transfer_request` redaction paths). Export prefers that stamp and harvests
+from remaining mappings when it is absent.
+
+An empty list means **no governance transform was declared**. It is not proof
+the source held no PII. Hashed destination cells do not hold the original;
+the certificate still does not claim the source was deleted or that the HMAC
+key is unavailable to someone who already has it.
+
+Module: `apps/api/services/governance_ops.py`
+Tests: `apps/api/tests/test_governance_ops_certificate.py`
+
 ## What the certificate explicitly does not prove
 
 - per-cell fidelity beyond the stated reconciliation scope;

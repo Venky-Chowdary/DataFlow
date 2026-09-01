@@ -11,7 +11,10 @@ def _parse_rate(samples: list[str], transform: str) -> tuple[float, list[str]]:
     ok = 0
     evaluated = 0
     issues: list[str] = []
-    nullable_transforms = {"trim", "trim_id", "none", "identity", "upper", "lower", "hash_pii"}
+    nullable_transforms = {
+        "trim", "trim_id", "none", "identity", "upper", "lower",
+        "hash_pii", "mask_pii", "redact",
+    }
     for raw in samples[:12]:
         if raw is None or str(raw).strip() == "":
             if transform in nullable_transforms:

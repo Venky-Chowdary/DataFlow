@@ -176,6 +176,20 @@ Branch `feature/n5-control-totals-ri`.
   enforced/scanned clean relations. Empty relationships stay false ("nothing
   to prove"). Control totals travel as column names + SUMs, never full rows.
 
+### Governance operations on the signed certificate — **Delivered**
+
+PR [#139](https://github.com/Venky-Chowdary/DataFlow/pull/139).
+
+* **What it is.** Declared `mask` / `hash` / `redact` harvests into
+  `governance_operations` on the job at execute. The signed migration
+  certificate and proof pack render the ledger. Empty list means no
+  governance transform was declared — it is not proof that no PII moved.
+* **Write path.** `redact` writes `"<redacted>"`. `hash_pii` stays fail-closed
+  without `DATAFLOW_PII_HASH_KEY`.
+* **Proof.** `tests/test_governance_ops_certificate.py` live sqlite→sqlite
+  2-row: `ssn` mask, `email` hash, `name` redact; independent `COUNT(*)=2`;
+  originals absent from dest; certificate lists all three.
+
 ---
 
 ## 3. NOW tier — not started
@@ -243,7 +257,6 @@ This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 
 ## 7. How to continue
 
-1. Governance ops in the audit certificate, remaining connector-matrix cells,
-   SFTP Excel sync modes.
+1. Remaining connector-matrix cells, SFTP Excel sync modes.
 2. YAML dest export is still refused; MySQL yaml/fwf 100K twins were not run.
 3. Local fleet / 10k–1M throughput work.

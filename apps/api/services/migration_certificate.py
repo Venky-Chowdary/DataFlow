@@ -367,6 +367,13 @@ def _verdict(
     }
 
 
+def _governance_operations(job: dict[str, Any]) -> dict[str, Any]:
+    """Declared mask / hash / redact — never original PII values."""
+    from services.governance_ops import collect_governance_operations
+
+    return collect_governance_operations(job)
+
+
 def build_migration_certificate(
     job: dict[str, Any], *, actor: str = "system"
 ) -> dict[str, Any]:
@@ -436,6 +443,7 @@ def build_migration_certificate(
             ),
         },
         "physical_state": physical,
+        "governance_operations": _governance_operations(job),
         "accepted_risks": pack.get("accepted_risks") or [],
         "hashes": pack.get("hashes") or {},
         "connector_versions": pack.get("connector_versions") or {},
@@ -458,6 +466,10 @@ def build_migration_certificate(
             "foreign keys, trigger timing/events, indexes, "
             "nullability and defaults.",
             "Any claim about rows this job did not read.",
+            "That source PII is unrecoverable — hashed, masked, or redacted "
+            "destination cells do not hold the original, but this certificate "
+            "does not prove the source was deleted or that an HMAC key is "
+            "unavailable to someone who already has it.",
         ],
     }
     return sign_body(body, subject=job_id)
@@ -702,6 +714,29 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                 f"{risk.get('reason') or risk.get('description') or ''}"
             )
         lines.append("")
+
+        lines.append("")
+
+    gov = _dict(cert.get("governance_operations"))
+    gov_rows = [row for row in (gov.get("applied") or []) if isinstance(row, dict)]
+    lines += ["## Governance operations", ""]
+    if gov_rows:
+        lines += [
+            "| Source | Destination | Operation | Transform | Write path |",
+            "|---|---|---|---|---|",
+        ]
+        for row in gov_rows:
+            applied = "applied" if row.get("write_path_applied") else "declared only"
+            lines.append(
+                f"| `{row.get('source', '')}` | `{row.get('target', '')}` | "
+                f"{row.get('operation', '')} | `{row.get('transform', '')}` | "
+                f"{applied} |"
+            )
+        lines.append("")
+        lines.append(str(gov.get("note") or ""))
+        lines.append("")
+    else:
+        lines += [str(gov.get("note") or ""), ""]
 
     lines += [
         "## Not proven by this certificate",

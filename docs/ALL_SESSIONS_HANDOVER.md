@@ -145,7 +145,12 @@ the PR that carries it):
   DST boundary pass; sibling `X-Workspace-Id` GET is 404 and the list excludes
   the foreign schedule; non-member read/create 403/404. The 100K beat was not
   re-run.
-- Governance ops (mask/hash/redact) not yet recorded in the audit certificate.
+- ~~Governance ops (mask/hash/redact) not yet recorded in the audit certificate.~~
+  **Closed ([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)).**
+  `services/governance_ops.py` harvests declared mask / hash / redact, Execute
+  stamps the ledger on the job, and the signed migration certificate (and
+  proof pack) renders it. Live sqlite→sqlite 2-row proof in
+  `tests/test_governance_ops_certificate.py`.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
 - SFTP daily Excel sync modes started, not finished.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
@@ -195,7 +200,9 @@ fixed-width are transfer-live **file sources**
 Postgres cells passed dest COUNT=99,991, DLQ=9, independent checksum
 ([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)). Scheduler DST +
 workspace-ownership cells re-measured
-([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). MySQL twins
+([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Governance ops
+(mask/hash/redact) are stamped on the signed certificate
+([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)). MySQL twins
 were not run; YAML dest export is still refused.
 
 ---
@@ -204,12 +211,10 @@ were not run; YAML dest export is still refused.
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI
    gate commands (ruff/mypy scopes CI actually enforces).
-2. Merge the track PRs into `feature/Venkat-Analysis` bottom-up, checking for a
-   second owner of a concern — the tracks touch shared modules
-   (`services/type_system.py`, `services/row_conservation.py`,
-   `src/transfer/stream.py`). One canonical owner per concern; a duplicated helper
-   is a defect, not a merge artifact.
-3. Re-run the track harnesses on the merged tree — a cell that passed on a track
-   branch is not proof on the integration branch.
-4. §4 defects from this sequence and N2/N4/N5 are closed. Next is the
-   never-measured items in §2 / §6.
+2. PRs [#133](https://github.com/Venky-Chowdary/DataFlow/pull/133)–[#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)
+   are merged into `feature/Venkat-Analysis`. Re-run track harnesses on this
+   tree — a cell that passed on a track branch is not proof on the integration
+   branch.
+3. §4 defects from this sequence, N2–N5, yaml/fwf live + 100K, DST, and
+   certificate governance ops are closed. Next is the never-measured items in
+   §2 / §6 (YAML dest export, MySQL twins, Track A matrix, SFTP Excel, fleet).
