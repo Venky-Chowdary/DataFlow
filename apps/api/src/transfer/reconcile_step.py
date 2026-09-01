@@ -1534,7 +1534,7 @@ def run_reconciliation(
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     dest_types = _dest_types_from_mappings(mapping_dicts)
-    n5_ctx["mappings"] = list(mapping_dicts)
+    n5_ctx["mappings"] = [dict(m) for m in mapping_dicts if isinstance(m, dict)]
     n5_ctx["dest_db_type"] = db_type
     n5_ctx["dest_cfg"] = dict(cfg)
     n5_ctx["dest_schema"] = str(schema or "")

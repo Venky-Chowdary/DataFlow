@@ -39,7 +39,19 @@ EVIDENCE_EXACT = "exact"
 EVIDENCE_SAMPLED = "sampled"
 EVIDENCE_UNMEASURED = "unmeasured"
 
-IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "passthrough", "copy"})
+IDENTITY_TRANSFORMS = frozenset(
+    {
+        "",
+        "none",
+        "identity",
+        "passthrough",
+        "copy",
+        # Type-preserving numeric binds the write path stamps on DECIMAL/INTEGER
+        # identity maps. Not currency/percentage parse.
+        "decimal",
+        "integer",
+    }
+)
 MONEY_LOGICAL_TYPES = frozenset({"MONEY", "CURRENCY", "SMALLMONEY"})
 
 _TRUTHY = frozenset({"true", "1", "yes", "on"})
@@ -72,13 +84,12 @@ def is_money_logical_type(type_str: object) -> bool:
 
 
 def _transform_id(mapping: Mapping[str, Any]) -> str:
-    raw = (
-        mapping.get("transform")
-        or mapping.get("engine_transform")
-        or mapping.get("engineTransform")
-        or ""
-    )
-    return str(raw).strip().lower()
+    """Operator-declared transform. Engine-stamped binds must not hide ``none``."""
+    raw = mapping.get("transform")
+    if raw is None or str(raw).strip() == "":
+        raw = mapping.get("engine_transform") or mapping.get("engineTransform") or ""
+    text = str(raw).strip().lower()
+    return text
 
 
 def mapping_asks_control_total(mapping: Mapping[str, Any] | None) -> bool:

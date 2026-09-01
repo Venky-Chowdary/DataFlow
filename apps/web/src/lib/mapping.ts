@@ -2277,6 +2277,7 @@ export function editableFromPipelineMappings(
     column_profile?: ColumnProfile | Record<string, unknown> | null;
     review_kind?: string;
     false_friend_confirmed?: boolean;
+    control_total?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],

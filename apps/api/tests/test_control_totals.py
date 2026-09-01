@@ -99,6 +99,24 @@ def test_transformed_amount_is_unproven() -> None:
     assert "identity" in report["columns"][0]["reason"]
 
 
+def test_decimal_bind_is_identity_for_control_total() -> None:
+    report = build_control_totals_report(
+        mappings=[
+            {
+                "source": "amount",
+                "target": "amount",
+                "control_total": True,
+                "transform": "decimal",
+            }
+        ],
+        phase="execute",
+        source_sums={"amount": {"available": True, "sum": "30.50"}},
+        dest_sums={"amount": {"available": True, "sum": "30.50"}},
+    )
+    gate = build_control_totals_gate(report, phase="execute")
+    assert gate["status"] == "pass"
+
+
 def test_quarantine_without_amount_sum_is_unproven() -> None:
     report = build_control_totals_report(
         mappings=[
