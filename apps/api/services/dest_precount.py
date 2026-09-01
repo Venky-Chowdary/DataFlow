@@ -626,6 +626,9 @@ def destination_row_count(
         if db_type in {"elasticsearch", "opensearch"}:
             return _search_index_doc_count(cfg, index=table)
 
+        if db_type == "kafka":
+            return _kafka_topic_record_count(cfg, topic=table)
+
         if db_type == "clickhouse":
             return _clickhouse_row_count(cfg, schema=schema, table_name=table)
 
@@ -3725,6 +3728,44 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         return int(client.count(index=index).get("count") or 0)
     finally:
         client.close()
+
+
+def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
+    """Log-end minus log-start watermarks. Does not consume the topic.
+
+    Kafka leftover MERGE is compaction, not this COUNT. Missing topic is 0
+    (create-on-produce). Unreachable broker stays ``None``.
+    """
+    topic_name = (topic or "").strip()
+    if not topic_name:
+        return None
+    try:
+        from kafka import KafkaConsumer, TopicPartition
+    except ImportError:
+        return None
+    from connectors.kafka_reader import _bootstrap
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=_bootstrap(cfg),
+        consumer_timeout_ms=2000,
+        enable_auto_commit=False,
+    )
+    try:
+        parts = consumer.partitions_for_topic(topic_name)
+        if not parts:
+            return 0
+        tps = [TopicPartition(topic_name, int(p)) for p in parts]
+        begin = consumer.beginning_offsets(tps)
+        end = consumer.end_offsets(tps)
+        return int(sum(int(end[tp]) - int(begin[tp]) for tp in tps))
+    except Exception as exc:
+        logger.warning("Kafka dest COUNT failed for %s: %s", topic_name, exc)
+        return None
+    finally:
+        try:
+            consumer.close()
+        except Exception:
+            pass
 
 
 def _redis_key_list(

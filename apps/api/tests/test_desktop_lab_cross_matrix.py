@@ -26,7 +26,9 @@ def test_cross_matrix_lists_unique_engines_not_saas_twins():
     assert "mongodb" in LIVE_UNIQUE_ENGINES
     assert "s3" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" in LIVE_UNIQUE_ENGINES
+    assert "kafka" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" not in CORE_UNIQUE_ENGINES
+    assert "kafka" not in CORE_UNIQUE_ENGINES
     assert "salesforce" not in LIVE_UNIQUE_ENGINES
     assert "hubspot" not in LIVE_UNIQUE_ENGINES
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
@@ -118,6 +120,15 @@ def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
     bound = bind_live_engine("elasticsearch", "t", tmp_path)
     assert isinstance(bound, str)
     assert "9200" in bound
+
+
+def test_kafka_bind_skips_closed_port(tmp_path, monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setattr(mod, "_reachable", lambda *a, **k: False)
+    bound = bind_live_engine("kafka", "t", tmp_path)
+    assert isinstance(bound, str)
+    assert "9092" in bound
 
 
 def test_pair_timeout_is_skip_never_pass(monkeypatch):

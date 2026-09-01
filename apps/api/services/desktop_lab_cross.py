@@ -5,8 +5,10 @@ Honesty
 * This is **not** 80×80 catalog aliases and not 650+ live tiles.
 * Hosted twins (Neon/RDS/CNPG) share a parent driver — they live in
   ``desktop_lab.DESKTOP_LAB_CONNECTORS``, not here.
-* Salesforce / HubSpot / Stripe / Kafka are omitted: no live SaaS tenant
-  on this desktop. Skip, never invent green.
+* Salesforce / HubSpot / Stripe are omitted: no live SaaS tenant on this
+  desktop. Skip, never invent green.
+* Kafka (Redpanda on :9092) is a unique engine: duplex JSON produce +
+  consume. Leftover MERGE on Kafka is log compaction, not a PK anti-join.
 * Elasticsearch is an extended unique engine when ``:9200`` answers.
 * CDC default remains at-least-once upsert.
 * Emulators (MinIO, fake-gcs, Azurite, goccy BQ, fakesnow, DynamoDB Local)
@@ -21,6 +23,7 @@ import os
 import socket
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -147,6 +150,7 @@ EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
     "redis",
     "iceberg",
     "elasticsearch",
+    "kafka",
 )
 LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
 
@@ -432,6 +436,20 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             table=table,
             connection_string="http://127.0.0.1:9200",
         )
+    if engine == "kafka":
+        if not _reachable("127.0.0.1", 9092):
+            return "Kafka / Redpanda not reachable on 127.0.0.1:9092"
+        return EndpointConfig(
+            kind="database",
+            format="kafka",
+            host="127.0.0.1",
+            port=9092,
+            table=table,
+            extra={
+                "auto_offset_reset": "earliest",
+                "local_emulator_not_customer_tenant": True,
+            },
+        )
     return f"no live bind for unique engine {engine}"
 
 
@@ -466,6 +484,18 @@ def _dest_count(ep: EndpointConfig) -> int | None:
         )
     except Exception:
         return None
+
+
+def _kafka_reread(ep: EndpointConfig) -> EndpointConfig:
+    """Ephemeral consumer group so each pair re-reads from earliest.
+
+    Kafka offsets commit after dest apply (at-least-once). Reusing
+    ``dataflow-kafka-source`` would make kafka→mysql empty after kafka→pg.
+    """
+    extra = dict(ep.extra or {})
+    extra["group_id"] = f"xmat-{uuid.uuid4().hex[:12]}"
+    extra["auto_offset_reset"] = "earliest"
+    return replace(ep, extra=extra)
 
 
 def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any]]:
@@ -514,8 +544,9 @@ def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any
 def _payload_ok(source: EndpointConfig, root: Path) -> tuple[bool, str]:
     sqlite_path = root / f"rb_{uuid.uuid4().hex[:8]}.db"
     table = "payload"
+    src = _kafka_reread(source) if source.format == "kafka" else source
     req = TransferRequest(
-        source=source,
+        source=src,
         destination=EndpointConfig(
             kind="database",
             format="sqlite",
@@ -543,8 +574,9 @@ def _payload_ok(source: EndpointConfig, root: Path) -> tuple[bool, str]:
 
 
 def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
+    source = _kafka_reread(src) if src.format == "kafka" else src
     req = TransferRequest(
-        source=src,
+        source=source,
         destination=dst,
         mappings=_pair_mappings(src),
         sync_mode="full_refresh_overwrite",

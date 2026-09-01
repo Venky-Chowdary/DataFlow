@@ -10,8 +10,9 @@ the dest-engine identity on the same 15 unique engines:
     incremental leftover MERGE is a hard no-op
 
 ``100%`` here is every reachable unique engine in
-``LIVE_UNIQUE_ENGINES``. Closed ports skip. Kafka is not a unique engine
-here — leftover MERGE is a PK anti-join, not log compaction.
+``LIVE_UNIQUE_ENGINES`` whose leftover identity is a PK anti-join.
+Closed ports skip. Kafka is a unique engine on this desktop (Redpanda)
+but leftover MERGE there is log compaction, not this fixture.
 Emulators are not a customer tenant. CDC remains at-least-once upsert.
 """
 
@@ -131,6 +132,8 @@ def _write_ghost(ep) -> None:
 
 @pytest.mark.parametrize("engine", LIVE_UNIQUE_ENGINES)
 def test_unique_engine_leftover_merge_4_to_3(engine: str) -> None:
+    if engine == "kafka":
+        pytest.skip("kafka leftover MERGE is log compaction, not a PK anti-join")
     table = f"lo{uuid.uuid4().hex[:10]}"
     with tempfile.TemporaryDirectory(prefix="df-leftover-") as tmp:
         bound = bind_live_engine(engine, table, Path(tmp))
@@ -163,3 +166,14 @@ def test_redis_non_json_key_refuses_key_list() -> None:
     )
     assert listed is None
     client.delete(redis_key_for(bound.table, "1"))
+
+
+def test_kafka_watermark_count_after_produce() -> None:
+    """Log-end minus log-start is dest COUNT. Does not consume the topic."""
+    bound = bind_live_engine("kafka", f"kw{uuid.uuid4().hex[:8]}", Path("/tmp"))
+    if isinstance(bound, str):
+        pytest.skip(bound)
+    _write_ghost(bound)
+    cfg = _cfg(bound)
+    n = destination_row_count("kafka", cfg, schema="", table_name=bound.table)
+    assert n == 4
