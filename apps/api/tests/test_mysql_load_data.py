@@ -24,6 +24,11 @@ from connectors.mysql_load_data import (  # noqa: E402
     render_load_data_tsv,
 )
 from connectors.mysql_writer import write_mapped_rows  # noqa: E402
+from services.copy_pg_mysql import (  # noqa: E402
+    _mysql_create_sql,
+    mapping_is_plain_carry,
+    pg_type_is_load_safe,
+)
 
 
 def _mapping(source: str, target: str) -> dict:
@@ -111,6 +116,32 @@ def test_eligible_refuses_upsert_binary_and_disabled(monkeypatch):
     )
     assert ok is False
     assert "MYSQL_LOAD_DATA=0" in reason
+
+
+def test_copy_pg_mysql_declines_lossy_transform_and_jsonb():
+    ok, reason = mapping_is_plain_carry(
+        [{"source": "id", "target": "id", "transform": "hash_pii"}]
+    )
+    assert ok is False
+    assert "hash_pii" in reason
+    ok, _ = mapping_is_plain_carry(
+        [{"source": "id", "target": "id", "transform": "none"}]
+    )
+    assert ok is True
+    assert pg_type_is_load_safe("VARCHAR(32)") is True
+    assert pg_type_is_load_safe("BIGINT") is True
+    assert pg_type_is_load_safe("DATE") is True
+    assert pg_type_is_load_safe("jsonb") is False
+    assert pg_type_is_load_safe("bytea") is False
+    assert pg_type_is_load_safe("timestamp with time zone") is False
+    sql = _mysql_create_sql(
+        "orders",
+        [("id", "id"), ("amt", "amt")],
+        ["BIGINT", "DECIMAL(10,2)"],
+        ["id"],
+    )
+    assert sql.startswith("CREATE TABLE `orders`")
+    assert "PRIMARY KEY (`id`)" in sql
 
 
 def test_warning_rows_block_commit_notes_do_not():

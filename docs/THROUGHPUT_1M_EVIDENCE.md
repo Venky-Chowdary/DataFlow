@@ -15,7 +15,44 @@ count equals the source with `rejected_rows = 0`.
 
 Conservation algorithm: `services/million_row_proof.py` (`row_conservation`).
 
-## Reproduced on this workspace (2026-08-25)
+Identity PostgreSQL→MySQL append now takes **server COPY text + STRICT
+`LOAD DATA LOCAL INFILE`** when every mapping is a no-op carry and the
+types are LOAD-DATA-safe. Python does not materialize a row on that path.
+`SHOW WARNINGS` Warning/Error rolls back; dest `COUNT(*)` must equal the
+source snapshot. Transforms, jsonb/bytea/timestamptz, upsert/CDC, and
+non-empty append stay on the row path (quarantine intact).
+
+## Reproduced on this workspace (2026-09-01)
+
+Same named fixture as 2026-08-25 (10 columns, PK `employee_id`).
+`load_method=copy_text_pg_to_mysql_load_data`. Server `local_infile=ON`.
+
+| Item | Value |
+|------|-------|
+| Host | Linux container, Python 3.12 |
+| Source | PostgreSQL **5432** (`bench_emp_1000000`) |
+| Destination | MySQL **3306**, create-new `bench_1m`, `full_refresh_append` |
+| Job store | **mongo** (27017 open) |
+| Rows | **1,000,000** |
+| Elapsed | **6.151 s** |
+| rows/s | **162,578** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| Conservation | **OK** |
+| Proof | dest COUNT equals source snapshot count |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_proof.json` |
+
+Same-host 50k insert vs COPY+LOAD DATA (quality: dest COUNT = 50,000 both):
+
+| Path | Elapsed | rows/s | `load_method` |
+|------|--------:|-------:|----------------|
+| Row `executemany` (`DATAFLOW_MYSQL_LOAD_DATA=0`) | 10.9 s | 4,578 | `insert` |
+| COPY text + STRICT LOAD DATA | 0.4 s | 132,909 | `copy_text_pg_to_mysql_load_data` |
+
+1M vs the 2026-08-25 row-path measurement on this fixture: **170.3 s → 6.151 s**
+(~28×). Not an SLA. Not a 200M claim.
+
+## Prior measurement on this workspace (2026-08-25) — row path, still valid history
 
 | Item | Value |
 |------|-------|
@@ -103,11 +140,17 @@ per-cell CPU in transform/validate, not database I/O.
 
 - These numbers are **this fixture, this hardware, these two engines**. Do not
   quote them as a product SLA or extrapolate to TB/hour.
-- Transform work is Python-level CPU inside a thread pool, so
-  `PARALLEL_WORKERS` gains are GIL-bound. Process-level chunk parallelism and
-  engine-native bulk load (`COPY` / `LOAD DATA`) are the next lever and are
-  **not** done.
-- Only PostgreSQL→MySQL append is measured here. Warehouse sources, CDC and
-  upsert/MERGE routes are timed separately and are not covered by this artifact.
+- Transform work on the **row path** is still Python CPU inside a thread pool,
+  so `PARALLEL_WORKERS` is GIL-bound. Identity PG→MySQL append now skips that
+  path (COPY + STRICT LOAD DATA). Other sources, transforms, CDC, and upsert
+  still use the row path.
+- Do **not** extrapolate 1M to 200M. Disk, indexes, tempfile size, and
+  dest-side secondary indexes change the curve. 200M is a partitioned job.
+- Only PostgreSQL→MySQL identity append is measured here. Warehouse sources,
+  CDC and upsert/MERGE routes are timed separately and are not covered by
+  this artifact.
+- Copy-path proof is dest `COUNT(*)` vs the source snapshot, not a second
+  1M checksum reread. Unfit cells on this path fail closed (STRICT + rollback),
+  they do not silently coerce. Quarantine remains on the row path.
 - Profiled runs (`BENCH_PROFILE=1`) are ~2× slower by construction and are
   diagnostic only — never quote them as throughput.
