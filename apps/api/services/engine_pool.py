@@ -50,6 +50,10 @@ DEFAULT_MAX_ENGINES = 32
 #: Fields that can change the resulting connection URL. Anything outside this
 #: set (``table``, ``metadata_columns``, ``connector_id``, …) must not affect
 #: engine identity, or every table in a database would get its own pool.
+#: TLS / SID / driver keywords belong here: ODBC Driver 18 encrypts and
+#: verifies by default, so ``trust_server_certificate`` changes which
+#: handshake the pooled engine will attempt. Reusing a verify-or-fail engine
+#: after the operator declared trust (or the reverse) is a different server.
 _KEY_FIELDS = (
     "type",
     "host",
@@ -66,6 +70,25 @@ _KEY_FIELDS = (
     "auth_role",
     "private_key",
     "service_account",
+    "ssl",
+    "server_certificate",
+    "hostname_in_certificate",
+    "trust_server_certificate",
+    "encrypt",
+    "sslmode",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "ssl_ca",
+    "ssl_cert",
+    "ssl_key",
+    "ssl_verify_cert",
+    "ssl_disabled",
+    "service_name",
+    "sid",
+    "driver",
+    "odbc_driver",
+    "connect_timeout",
     "multi_subnet_failover",
     "MultiSubnetFailover",
     "application_intent",

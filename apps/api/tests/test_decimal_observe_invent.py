@@ -182,6 +182,26 @@ def test_empty_samples_no_fake_invent_via_create_new():
     assert empty == stamped or empty.upper().startswith("DECIMAL")
 
 
+def test_dynamodb_number_does_not_invent_bigint_from_integer_samples():
+    """DynamoDB AttributeType=N is unbounded Number — samples 1,2 must not stamp BIGINT."""
+    from services.type_system import LOGICAL_DECIMAL, normalize_logical_type
+
+    stamped = create_new_mapping_target_type(
+        "DECIMAL",
+        "postgresql",
+        samples=["1", "2"],
+        source_db="dynamodb",
+    )
+    assert normalize_logical_type(stamped) == LOGICAL_DECIMAL
+    s3_stamp = create_new_mapping_target_type(
+        "DECIMAL",
+        "s3",
+        samples=["1", "2"],
+        source_db="dynamodb",
+    )
+    assert normalize_logical_type(s3_stamp) == LOGICAL_DECIMAL
+
+
 def test_map_columns_create_new_uses_sample_decimal():
     from services.semantic_mapper import map_columns
 

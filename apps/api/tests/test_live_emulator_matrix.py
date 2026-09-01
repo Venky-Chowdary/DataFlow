@@ -95,6 +95,7 @@ CASES = [
             database="dataflow-test",
             schema="dataflow",
             table="payments_bigquery",
+            connection_string="http://127.0.0.1:9050",
         ),
         id="bigquery-emulator",
     ),

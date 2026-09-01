@@ -60,6 +60,12 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 # Elasticsearch even though the rows were fully readable.
 READER_PAGED_SOURCE_TYPES = frozenset({"redis", "elasticsearch", "opensearch"})
 
+# Warehouse emulators (fakesnow is DuckDB; goccy BQ has no INFORMATION_SCHEMA
+# the SQLAlchemy inspector can see) still expose every seeded row through the
+# transfer reader. SQL GROUP BY that cannot address the catalog object must
+# not fail-close uniqueness — scan the readable population instead.
+_SQL_INSPECT_FALLBACK_TYPES = frozenset({"snowflake", "bigquery"})
+
 #: Sources whose population the payload scan can page through.
 PAYLOAD_SCANNED_SOURCE_TYPES = (
     OBJECT_PAYLOAD_SOURCE_TYPES | READER_PAGED_SOURCE_TYPES
@@ -854,7 +860,40 @@ def probe_source_duplicate_keys_result(
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )
-        findings = _sql_duplicates(cfg, table, pk_columns, limit=limit)
+        try:
+            findings = _sql_duplicates(cfg, table, pk_columns, limit=limit)
+        except Exception as sql_exc:
+            if db_type not in _SQL_INSPECT_FALLBACK_TYPES:
+                raise
+            # fakesnow / goccy: inspector ``exists=False`` or a quoting miss.
+            # The transfer reader still sees the seeded rows — count those.
+            findings, scanned, complete = _object_payload_duplicates(
+                cfg, db_type, table, pk_columns, limit=limit
+            )
+            if not complete:
+                return SourceDuplicateProbeResult(
+                    findings=findings,
+                    status="skipped_unsupported",
+                    message=(
+                        f"{db_type} SQL uniqueness probe failed ({sql_exc}); "
+                        f"payload exceeds the {_PAYLOAD_SCAN_CAP:,}-row "
+                        f"scan cap ({scanned:,} read); uniqueness on "
+                        f"({pk_label}) is unproven for the remainder"
+                    )[:400],
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status="ran",
+                message=(
+                    f"{db_type} payload uniqueness scan on {table}.({pk_label}) "
+                    f"over {scanned:,} row(s) after SQL inspect could not "
+                    f"address the source table"
+                ),
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
         return SourceDuplicateProbeResult(
             findings=findings,
             status="ran",

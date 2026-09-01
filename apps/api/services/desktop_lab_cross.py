@@ -549,10 +549,7 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
     err_l = err.lower()
     if (
         not res.success
-        and (
-            "source uniqueness probe could not run" in err_l
-            or "privilege catalog unavailable" in err_l
-        )
+        and "privilege catalog unavailable" in err_l
     ):
         return {
             "status": "skipped",

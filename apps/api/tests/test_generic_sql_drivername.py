@@ -140,3 +140,21 @@ def test_build_url_encodes_at_in_password():
     assert "p%40ss" in url
     assert "127.0.0.1" in url
     assert "demo" in url
+
+
+def test_build_url_sqlserver_trust_server_certificate():
+    url = _build_url(
+        {
+            "type": "sqlserver",
+            "host": "127.0.0.1",
+            "port": 1433,
+            "database": "dataflow",
+            "username": "sa",
+            "password": "x",
+            "trust_server_certificate": True,
+            "encrypt": "yes",
+        }
+    )
+    query = dict(getattr(url, "query", {}) or {})
+    assert query.get("TrustServerCertificate") == "Yes"
+    assert str(query.get("Encrypt") or "").lower() == "yes"
