@@ -1019,11 +1019,16 @@ def read_source_database(
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
-        schema = (
-            FileParser.infer_schema(records)
-            if records
-            else {c: "string" for c in batch.headers}
-        )
+        if records:
+            from services.object_store_introspect import (
+                profile_schemaless_source_schema,
+            )
+
+            schema = profile_schemaless_source_schema(
+                list(batch.headers), records, source_format="redis"
+            )
+        else:
+            schema = {c: "string" for c in batch.headers}
         return _pack_source_read(
             records, batch.headers, schema, batch=batch, stamp_total=stamp_total
         )

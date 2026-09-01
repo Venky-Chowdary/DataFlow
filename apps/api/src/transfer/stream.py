@@ -1492,7 +1492,16 @@ def _stream_database_transfer_impl(
             except Exception:
                 schema = {c: "string" for c in columns}
         elif src_type == "redis":
-            schema = {c: "string" for c in columns}
+            try:
+                from services.object_store_introspect import (
+                    profile_schemaless_source_schema,
+                )
+
+                schema = profile_schemaless_source_schema(
+                    columns, probe.rows, source_format="redis"
+                ) or {c: "string" for c in columns}
+            except Exception:
+                schema = {c: "string" for c in columns}
         else:
             # Prefer reader-declared native_types (Kafka, thin SaaS typed flatten,
             # Dynamo) over all-string fiction from a failed SQL introspect.
