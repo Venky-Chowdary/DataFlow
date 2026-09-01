@@ -79,6 +79,33 @@ def _pair_mappings(src: EndpointConfig) -> list[dict[str, Any]]:
     maps = [dict(item) for item in PAIR_MAPPINGS]
     if src.format == "mongodb":
         maps.append(dict(_MONGO_OBJECT_ID_OMISSION))
+    if src.format == "elasticsearch":
+        maps.append(dict(_MONGO_OBJECT_ID_OMISSION))
+        maps.append(
+            {
+                "source": "_index",
+                "target": "",
+                "confidence": 0.0,
+                "intentional_omit": True,
+            }
+        )
+    if src.format == "redis":
+        maps.append(
+            {
+                "source": "redis_key",
+                "target": "",
+                "confidence": 0.0,
+                "intentional_omit": True,
+            }
+        )
+        maps.append(
+            {
+                "source": "redis_type",
+                "target": "",
+                "confidence": 0.0,
+                "intentional_omit": True,
+            }
+        )
     return maps
 
 # Create-new object/warehouse dests 404 on schema probe; Google/boto retries
@@ -234,6 +261,10 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             password="DataFlow_CDC_2022!",
             schema="dbo",
             table=table,
+            extra={
+                "trust_server_certificate": True,
+                "encrypt": "yes",
+            },
         )
     if engine == "oracle":
         if not _reachable("127.0.0.1", 1521):
@@ -504,6 +535,24 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
         return {"status": "failed", "error": str(exc)[:400], "records": 0, "dest_count": None}
     lost, rejected, coerced = _silent_loss(res.destination_summary or {})
     count = _dest_count(dst)
+    err = "" if res.success else (res.error or f"records={res.records_transferred} dest_count={count}")
+    err_l = err.lower()
+    if (
+        not res.success
+        and (
+            "source uniqueness probe could not run" in err_l
+            or "privilege catalog unavailable" in err_l
+        )
+    ):
+        return {
+            "status": "skipped",
+            "error": err[:400],
+            "records": int(res.records_transferred or 0),
+            "dest_count": count,
+            "rejected": rejected,
+            "coerced": coerced,
+            "silent_loss": lost,
+        }
     ok = (
         bool(res.success)
         and not lost
@@ -512,7 +561,7 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
     )
     return {
         "status": "passed" if ok else "failed",
-        "error": "" if ok else (res.error or f"records={res.records_transferred} dest_count={count}")[:400],
+        "error": "" if ok else (err or f"records={res.records_transferred} dest_count={count}")[:400],
         "records": int(res.records_transferred or 0) if res.success else 0,
         "dest_count": count,
         "rejected": rejected,

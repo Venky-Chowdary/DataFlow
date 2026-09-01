@@ -346,6 +346,7 @@ def _build_db_endpoint(
             password="DataFlow_CDC_2022!",
             schema="dbo",
             table="payments_sqlserver",
+            extra={"trust_server_certificate": True, "encrypt": "yes"},
         ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)

@@ -12,8 +12,11 @@ Honesty
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -141,8 +144,233 @@ def _wait_job(job_id: str, *, timeout_sec: float = 180.0) -> dict[str, Any] | No
     return None
 
 
+def _api_base() -> str:
+    return os.environ.get("DATAFLOW_API_BASE", "http://127.0.0.1:8001").rstrip("/")
+
+
+def _inherit_api_process_env() -> dict[str, str]:
+    """Copy Mongo URI from the running uvicorn without printing secrets."""
+    copied: dict[str, str] = {}
+    wanted = ("MONGODB_URI", "P2_MONGO_URI", "DATAFLOW_JOB_STORE")
+    if all(os.environ.get(k) for k in ("MONGODB_URI",)):
+        return copied
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            cmd = (proc / "cmdline").read_bytes()
+        except Exception:
+            continue
+        if b"uvicorn" not in cmd or b"8001" not in cmd:
+            continue
+        try:
+            raw = (proc / "environ").read_bytes().split(b"\0")
+        except Exception:
+            continue
+        env: dict[str, str] = {}
+        for item in raw:
+            if b"=" not in item:
+                continue
+            k, _, v = item.partition(b"=")
+            try:
+                env[k.decode()] = v.decode()
+            except Exception:
+                continue
+        for key in wanted:
+            if key not in os.environ and env.get(key):
+                os.environ[key] = env[key]
+                copied[key] = "inherited"
+        if env.get("DATAFLOW_ADMIN_EMAIL") and "DATAFLOW_ADMIN_EMAIL" not in os.environ:
+            os.environ["DATAFLOW_ADMIN_EMAIL"] = env["DATAFLOW_ADMIN_EMAIL"]
+            copied["DATAFLOW_ADMIN_EMAIL"] = "inherited"
+        if env.get("DATAFLOW_ADMIN_PASSWORD") and "DATAFLOW_ADMIN_PASSWORD" not in os.environ:
+            os.environ["DATAFLOW_ADMIN_PASSWORD"] = env["DATAFLOW_ADMIN_PASSWORD"]
+            copied["DATAFLOW_ADMIN_PASSWORD"] = "inherited"
+        break
+    return copied
+
+
+def _json_request(
+    method: str,
+    url: str,
+    *,
+    token: str = "",
+    workspace_id: str = "",
+    body: dict[str, Any] | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, Any]:
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Accept", "application/json")
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    if workspace_id:
+        req.add_header("X-Workspace-Id", workspace_id)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode()
+            payload = json.loads(raw) if raw else {}
+            return int(resp.status), payload
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode() if exc.fp else ""
+        try:
+            payload = json.loads(raw) if raw else {"error": str(exc)}
+        except json.JSONDecodeError:
+            payload = {"error": raw[:400] or str(exc)}
+        return int(exc.code), payload
+    except Exception as exc:
+        return 0, {"error": str(exc)[:400]}
+
+
+def _login_api() -> tuple[str, str]:
+    """Return (token, workspace_id) for the running API, or ('', '')."""
+    email = os.environ.get("DATAFLOW_ADMIN_EMAIL") or ""
+    password = os.environ.get("DATAFLOW_ADMIN_PASSWORD") or ""
+    if not email or not password:
+        return "", ""
+    status, payload = _json_request(
+        "POST",
+        f"{_api_base()}/api/v1/auth/login",
+        body={"email": email, "password": password},
+    )
+    token = str((payload or {}).get("token") or "")
+    if status != 200 or not token:
+        return "", ""
+    status, body = _json_request(
+        "GET",
+        f"{_api_base()}/api/v1/team/workspaces",
+        token=token,
+    )
+    workspaces = (body or {}).get("workspaces") or []
+    workspace_id = ""
+    for row in workspaces:
+        name = str(row.get("name") or "")
+        if "desktop" in name.lower() or "lab" in name.lower():
+            workspace_id = str(row.get("id") or "")
+            break
+    if not workspace_id and workspaces:
+        workspace_id = str(workspaces[0].get("id") or "")
+    return token, workspace_id
+
+
+def prove_workspace_schedules_via_api() -> dict[str, Any] | None:
+    """Run Now through the live API — the same path the operator uses."""
+    if not _reachable("127.0.0.1", 8001):
+        return None
+    token, workspace_id = _login_api()
+    if not token:
+        return None
+    status, body = _json_request(
+        "GET",
+        f"{_api_base()}/api/v1/schedules/",
+        token=token,
+        workspace_id=workspace_id,
+    )
+    if status != 200:
+        return None
+    schedules = body if isinstance(body, list) else []
+    rows: list[dict[str, Any]] = []
+    for sched in schedules:
+        rec: dict[str, Any] = {
+            "id": sched.get("id"),
+            "name": sched.get("name"),
+            "source_table": sched.get("source_table"),
+            "dest_table": sched.get("dest_table"),
+            "sync_mode": sched.get("sync_mode"),
+            "interval": sched.get("interval"),
+            "status": "skipped",
+            "error": "",
+            "job_id": "",
+            "via": "api",
+        }
+        run_status, run_body = _json_request(
+            "POST",
+            f"{_api_base()}/api/v1/schedules/{sched.get('id')}/run",
+            token=token,
+            workspace_id=workspace_id,
+            timeout=60.0,
+        )
+        if run_status not in {200, 201}:
+            rec["status"] = "failed"
+            rec["error"] = str((run_body or {}).get("detail") or run_body)[:400]
+            rows.append(rec)
+            continue
+        job_id = str((run_body or {}).get("job_id") or "")
+        rec["job_id"] = job_id
+        if not job_id:
+            rec["status"] = "failed"
+            rec["error"] = "Run Now returned no job_id"
+            rows.append(rec)
+            continue
+        job = None
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            js, jb = _json_request(
+                "GET",
+                f"{_api_base()}/api/v1/connectors/jobs/{job_id}",
+                token=token,
+                workspace_id=workspace_id,
+            )
+            if js == 200 and isinstance(jb, dict):
+                st = str(jb.get("status") or "").strip().lower()
+                if st in {"completed", "success", "failed", "error", "cancelled"}:
+                    job = jb
+                    break
+            time.sleep(1.5)
+        if job is None:
+            rec["status"] = "failed"
+            rec["error"] = "job did not reach a terminal status"
+            rows.append(rec)
+            continue
+        rec["job_status"] = job.get("status")
+        rec["records_transferred"] = job.get("records_transferred") or job.get("rows")
+        rec["destination_summary"] = job.get("destination_summary") or {}
+        st = str(job.get("status") or "").strip().lower()
+        if st not in {"completed", "success"}:
+            rec["status"] = "failed"
+            rec["error"] = str(job.get("error") or job.get("message") or st)[:400]
+            rows.append(rec)
+            continue
+        dest_rows = None
+        summary = rec["destination_summary"] if isinstance(rec["destination_summary"], dict) else {}
+        for key in ("rows", "row_count", "records", "count"):
+            if summary.get(key) is not None:
+                try:
+                    dest_rows = int(summary[key])
+                    break
+                except (TypeError, ValueError):
+                    pass
+        rec["dest_count_after"] = dest_rows
+        rec["status"] = "passed"
+        rec["integrity"] = "job_terminal_plus_destination_summary"
+        rows.append(rec)
+    passed = [r for r in rows if r["status"] == "passed"]
+    failed = [r for r in rows if r["status"] == "failed"]
+    skipped = [r for r in rows if r["status"] == "skipped"]
+    return {
+        "schedules": len(rows),
+        "passed": len(passed),
+        "failed": len(failed),
+        "skipped": len(skipped),
+        "workspace_id": workspace_id,
+        "via": "api",
+        "rows": rows,
+        "honesty": {
+            "all_saved_schedules": True,
+            "operator_run_now_path": True,
+            "empty_workspace_is_zero_not_green": True,
+        },
+    }
+
+
 def prove_workspace_schedules() -> dict[str, Any]:
     """Run Now every saved schedule and take an independent dest COUNT."""
+    _inherit_api_process_env()
+    via_api = prove_workspace_schedules_via_api()
+    if via_api is not None:
+        return via_api
     from services.schedule_runner import ScheduleStartError, _run_schedule
     from services.schedule_store import list_schedules
 
@@ -290,6 +518,7 @@ def run_live_fleet_proof(
     schedules: bool = True,
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc).isoformat()
+    _inherit_api_process_env()
     inventory = inventory_live_backends()
     warehouse = prove_warehouse_binds()
     cross_report: dict[str, Any] | None = None

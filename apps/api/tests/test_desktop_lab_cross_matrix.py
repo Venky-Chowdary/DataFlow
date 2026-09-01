@@ -103,6 +103,12 @@ def test_pair_mappings_declare_mongo_id_omit_and_do_not_stamp_dest_types():
     pg_maps = _pair_mappings(pg)
     assert not any(m.get("intentional_omit") for m in pg_maps)
     assert all("target_type" not in m for m in pg_maps)
+    redis = EndpointConfig(kind="database", format="redis", table="t")
+    redis_omits = {m["source"] for m in _pair_mappings(redis) if m.get("intentional_omit")}
+    assert redis_omits == {"redis_key", "redis_type"}
+    es = EndpointConfig(kind="database", format="elasticsearch", table="t")
+    es_omits = {m["source"] for m in _pair_mappings(es) if m.get("intentional_omit")}
+    assert es_omits == {"_id", "_index"}
 
 
 def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
