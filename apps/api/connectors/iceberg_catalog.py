@@ -9,9 +9,16 @@ catalog.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.request import url2pathname
+
+_WINDOWS = os.name == "nt"
+
+PY_IO_IMPL = "py-io-impl"
+LOCAL_URI_FILE_IO = "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO"
 
 # pyiceberg is imported lazily inside functions so that optional installs are
 # picked up without requiring a process restart.
@@ -44,12 +51,60 @@ def _single_or_empty(values: list[str]) -> str:
     return values[0] if values else ""
 
 
+#: Warehouse schemes pyiceberg addresses through an object-store FileIO. They
+#: are never local paths and must reach pyiceberg byte-for-byte.
+_REMOTE_WAREHOUSE_SCHEMES = (
+    "s3://",
+    "s3a://",
+    "s3n://",
+    "gs://",
+    "gcs://",
+    "abfs://",
+    "abfss://",
+    "wasb://",
+    "wasbs://",
+    "hdfs://",
+    "oss://",
+    "http://",
+    "https://",
+    "arn:",
+)
+
+
+def is_remote_location(path_str: str) -> bool:
+    """True for an object-store / remote warehouse, false for a local path."""
+    return (path_str or "").strip().lower().startswith(_REMOTE_WAREHOUSE_SCHEMES)
+
+
+def local_path_from_location(path_str: str) -> Path:
+    """Local path for a bare path or a ``file:`` URI, on POSIX and Windows.
+
+    ``file:///C:/warehouse`` must become ``C:\\warehouse``, not ``\\C:\\warehouse``.
+    """
+    raw = (path_str or ".").strip()
+    if raw.lower().startswith("file:"):
+        parsed = urlparse(raw)
+        raw = url2pathname(parsed.path)
+        if parsed.netloc:  # file://host/share -> UNC
+            raw = f"\\\\{parsed.netloc}{raw}" if _WINDOWS else f"//{parsed.netloc}{raw}"
+    return Path(raw or ".").expanduser().resolve()
+
+
 def _warehouse_root(path_str: str) -> Path:
-    if path_str.startswith("file://"):
-        path_str = path_str[7:]
-    p = Path(path_str or ".").expanduser().resolve()
+    p = local_path_from_location(path_str)
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _warehouse_location(path_str: str) -> str:
+    """Warehouse value handed to pyiceberg for a local warehouse.
+
+    pyiceberg resolves a table location scheme-first, and a Windows drive letter
+    reads as one: ``C:\\warehouse`` is parsed as scheme ``c`` and refused with
+    *Unrecognized filesystem type in URI: c*. A ``file://`` URI names the
+    filesystem explicitly, and is equally valid on POSIX.
+    """
+    return _warehouse_root(path_str).as_uri()
 
 
 def _infer_catalog_type(
@@ -123,11 +178,19 @@ def _sql_props(connection_string: str, warehouse: str, extra: dict[str, Any]) ->
 
     if cs.startswith(("sqlite://", "postgresql://", "postgres://", "mysql://", "mssql://", "sqlserver://")):
         if warehouse:
-            props["warehouse"] = str(_warehouse_root(warehouse))
+            props["warehouse"] = (
+                warehouse.strip()
+                if is_remote_location(warehouse)
+                else _warehouse_location(warehouse)
+            )
         return cs, props
 
-    wh = _warehouse_root(warehouse or cs or ".")
-    props["warehouse"] = str(wh)
+    if is_remote_location(warehouse):
+        props["warehouse"] = warehouse.strip()
+        wh = _warehouse_root(cs or ".")
+    else:
+        wh = _warehouse_root(warehouse or cs or ".")
+        props["warehouse"] = wh.as_uri()
     catalog_db = extra.get("catalog_path") or ".dataflow_iceberg_catalog.db"
     db_path = wh / catalog_db
     return f"sqlite:///{db_path.resolve()}", props
@@ -250,6 +313,11 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
             properties["warehouse"] = warehouse
     elif catalog_type == "glue":
         properties = _glue_props(warehouse, endpoint, extra)
+
+    if str(properties.get("warehouse", "")).lower().startswith("file:"):
+        # A local warehouse is addressed through the URI-aware file IO, which is
+        # what makes a Windows drive letter reachable at all.
+        properties.setdefault(PY_IO_IMPL, LOCAL_URI_FILE_IO)
 
     # Namespace / table resolution.
     schema = _get_value(endpoint, "schema") or extra.get("namespace") or ""

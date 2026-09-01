@@ -1242,7 +1242,10 @@ def _write_mapped_rows_pyiceberg(
     config = parse_iceberg_catalog_config(endpoint)
     table = config["table_name"]
     namespace = config["namespace"]
-    target_schema = ".".join(namespace + (table,))
+    # Namespace only: reconciliation re-resolves the table from schema + table,
+    # so a schema that already carries the table name resolves to ``ns.tbl.tbl``.
+    target_schema = ".".join(namespace)
+    table_identifier = ".".join(namespace + (table,))
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if conflict_columns:
@@ -1302,7 +1305,7 @@ def _write_mapped_rows_pyiceberg(
                 checksum="",
                 chunks_completed=0,
                 error=(
-                    f"Iceberg table {target_schema} does not exist and "
+                    f"Iceberg table {table_identifier} does not exist and "
                     "create_table is disabled"
                 ),
                 driver="iceberg",
@@ -2001,10 +2004,17 @@ def _write_mapped_rows_filesystem(
         )
 
     table_dir = root / (schema.strip() if schema else "") / table if schema else root / table
+    # The reported target schema is the Iceberg namespace, never the warehouse
+    # directory: reconciliation re-resolves ``root / namespace / table`` from it,
+    # and an absolute path there resolves to ``root / <table dir> / table``,
+    # which does not exist — dest reads back as empty and every source key is
+    # reported MISSING_TARGET after a correct write.
+    namespace = schema.strip() if schema else ""
     # Normalize: namespace.table → nested dirs
     if "." in table and not schema:
         parts = table.split(".", 1)
         table_dir = root / parts[0] / parts[1]
+        namespace = parts[0]
         table = parts[1]
     # Deny-create must not invent an empty Iceberg tree (Airbyte-style false provision).
     if not table_dir.exists() and not create_table:
@@ -2012,7 +2022,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error="Iceberg table is missing and create_table is disabled",
@@ -2025,7 +2035,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error="Iceberg table metadata is missing and create_table is disabled",
@@ -2044,7 +2054,7 @@ def _write_mapped_rows_filesystem(
                 ok=False,
                 rows_written=0,
                 table_name=table,
-                target_schema=str(table_dir),
+                target_schema=namespace,
                 checksum="",
                 chunks_completed=0,
                 error=str(exc),
@@ -2083,7 +2093,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error=studio_err,
@@ -2131,7 +2141,7 @@ def _write_mapped_rows_filesystem(
                     ok=False,
                     rows_written=0,
                     table_name=table,
-                    target_schema=str(table_dir),
+                    target_schema=namespace,
                     checksum="",
                     chunks_completed=0,
                     error=phys_err,
@@ -2160,7 +2170,7 @@ def _write_mapped_rows_filesystem(
                 ok=False,
                 rows_written=0,
                 table_name=table,
-                target_schema=str(table_dir),
+                target_schema=namespace,
                 checksum="",
                 chunks_completed=0,
                 error=(
@@ -2197,7 +2207,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error=str(evolve_exc),
@@ -2216,7 +2226,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error=_map_abort,
@@ -2241,7 +2251,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error=_post_q_abort,
@@ -2265,7 +2275,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=0,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum="",
             chunks_completed=0,
             error=(
@@ -2291,7 +2301,7 @@ def _write_mapped_rows_filesystem(
                 ok=False,
                 rows_written=0,
                 table_name=table,
-                target_schema=str(table_dir),
+                target_schema=namespace,
                 checksum="",
                 chunks_completed=0,
                 error=(
@@ -2319,7 +2329,7 @@ def _write_mapped_rows_filesystem(
                     ok=False,
                     rows_written=0,
                     table_name=table,
-                    target_schema=str(table_dir),
+                    target_schema=namespace,
                     checksum="",
                     chunks_completed=0,
                     error=_pk_abort,
@@ -2331,7 +2341,7 @@ def _write_mapped_rows_filesystem(
                     ok=True,
                     rows_written=0,
                     table_name=table,
-                    target_schema=str(table_dir),
+                    target_schema=namespace,
                     checksum="",
                     chunks_completed=1,
                     rejected_details=rejected_details,
@@ -2357,7 +2367,7 @@ def _write_mapped_rows_filesystem(
                 ok=False,
                 rows_written=0,
                 table_name=table,
-                target_schema=str(table_dir),
+                target_schema=namespace,
                 checksum="",
                 chunks_completed=0,
                 error=str(exc)[:500],
@@ -2379,7 +2389,7 @@ def _write_mapped_rows_filesystem(
                     ok=False,
                     rows_written=0,
                     table_name=table,
-                    target_schema=str(table_dir),
+                    target_schema=namespace,
                     checksum="",
                     chunks_completed=0,
                     error=str(exc)[:500],
@@ -2391,7 +2401,7 @@ def _write_mapped_rows_filesystem(
                     ok=True,
                     rows_written=0,
                     table_name=table,
-                    target_schema=str(table_dir),
+                    target_schema=namespace,
                     checksum="",
                     chunks_completed=1,
                     rejected_details=rejected_details,
@@ -2559,7 +2569,7 @@ def _write_mapped_rows_filesystem(
             ok=False,
             rows_written=n_written,
             table_name=table,
-            target_schema=str(table_dir),
+            target_schema=namespace,
             checksum=checksum,
             chunks_completed=1,
             error=_final_abort,
@@ -2575,7 +2585,7 @@ def _write_mapped_rows_filesystem(
         ok=True,
         rows_written=n_written,
         table_name=table,
-        target_schema=str(table_dir),
+        target_schema=namespace,
         checksum=checksum,
         chunks_completed=1,
         rejected_details=rejected_details,
