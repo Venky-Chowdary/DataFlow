@@ -724,10 +724,16 @@ def _persist(payload: dict[str, Any]) -> None:
     (dest / "desktop_lab_cross.json").write_text(text)
     artifacts = Path("/opt/cursor/artifacts")
     if artifacts.is_dir():
-        (artifacts / "desktop_lab_cross.json").write_text(text)
-        lab = artifacts / "warehouse-emulator-lab"
-        lab.mkdir(parents=True, exist_ok=True)
-        (lab / "desktop_lab_cross.json").write_text(text)
+        try:
+            (artifacts / "desktop_lab_cross.json").write_text(text)
+        except OSError:
+            pass
+        try:
+            lab = artifacts / "warehouse-emulator-lab"
+            lab.mkdir(parents=True, exist_ok=True)
+            (lab / "desktop_lab_cross.json").write_text(text)
+        except OSError:
+            pass
 
 
 def last_cross_report() -> dict[str, Any] | None:
