@@ -419,7 +419,7 @@ def enforce_decision_artifact(
         if rid and rid not in route_candidates:
             route_candidates.append(rid)
 
-    def _rebuild(rid: str, dest_fp: str):
+    def _rebuild(rid: str, dest_fp: str) -> DecisionArtifact:
         return build_artifact_from_mappings(
             mappings,
             dest_db=dest_engine,

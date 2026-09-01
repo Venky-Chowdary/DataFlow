@@ -4221,7 +4221,8 @@ def source_column_holds_unicode(source_db: str | None, source_type: str) -> bool
     cap = classify_capacity(source_db or "", source_type)
     if cap.form in {"unknown", "binary"}:
         return False
-    return cap.max_code_point > 0xFF
+    max_code_point: int = cap.max_code_point
+    return max_code_point > 0xFF
 
 
 def unicode_safe_target_carrier(
@@ -4333,7 +4334,9 @@ def _target_holds_full_unicode(dest_db: str, target_type: str) -> bool:
     from services.encoding_capacity import UNICODE_MAX, classify_capacity
 
     cap = classify_capacity(dest_db, target_type)
-    return cap.form == "utf8" and cap.max_code_point >= UNICODE_MAX
+    form: str = cap.form
+    max_code_point: int = cap.max_code_point
+    return form == "utf8" and max_code_point >= UNICODE_MAX
 
 
 def national_charset_would_collapse(
@@ -6127,7 +6130,8 @@ def _unique_filter_decimal(value: Any) -> Decimal | None:
         pass
     from services.transform_engine import decimal_wire_value
 
-    return decimal_wire_value(text)
+    wired: Decimal | None = decimal_wire_value(text)
+    return wired
 
 
 def _split_top_level_and(predicate: str) -> list[str]:
