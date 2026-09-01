@@ -90,6 +90,21 @@ def test_live_engine_cross_matrix_writes_artifact():
         assert saved["passed"] == report["passed"]
 
 
+def test_pair_mappings_declare_mongo_id_omit_and_do_not_stamp_dest_types():
+    from src.transfer.models import EndpointConfig
+
+    from services.desktop_lab_cross import _pair_mappings
+
+    mongo = EndpointConfig(kind="database", format="mongodb", table="t")
+    maps = _pair_mappings(mongo)
+    omit = [m for m in maps if m.get("intentional_omit")]
+    assert omit and omit[0]["source"] == "_id"
+    pg = EndpointConfig(kind="database", format="postgresql", table="t")
+    pg_maps = _pair_mappings(pg)
+    assert not any(m.get("intentional_omit") for m in pg_maps)
+    assert all("target_type" not in m for m in pg_maps)
+
+
 def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
     import services.desktop_lab_cross as mod
 

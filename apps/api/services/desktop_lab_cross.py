@@ -39,6 +39,48 @@ from services.desktop_lab import (
     _silent_loss,
 )
 
+# Engine→engine pairs must not stamp dest types. SQLite stores the seeded
+# DECIMAL(18,2) amount as TEXT affinity; G6 then correctly refuses
+# TEXT → DECIMAL as a collapse. CSV seed still uses typed MAPPINGS so
+# create-new SQL dests invent a real decimal. Mongo's storage key is a
+# G13 omit — same declared omission as PRODUCTION_SKU.
+PAIR_MAPPINGS = [
+    {
+        "source": "id",
+        "target": "id",
+        "confidence": 0.99,
+        "transform": "integer",
+        "approved": True,
+    },
+    {
+        "source": "amount",
+        "target": "amount",
+        "confidence": 0.99,
+        "transform": "decimal",
+        "approved": True,
+    },
+    {
+        "source": "code",
+        "target": "code",
+        "confidence": 0.99,
+        "transform": "none",
+        "approved": True,
+    },
+]
+_MONGO_OBJECT_ID_OMISSION = {
+    "source": "_id",
+    "target": "",
+    "confidence": 0.0,
+    "intentional_omit": True,
+}
+
+
+def _pair_mappings(src: EndpointConfig) -> list[dict[str, Any]]:
+    maps = [dict(item) for item in PAIR_MAPPINGS]
+    if src.format == "mongodb":
+        maps.append(dict(_MONGO_OBJECT_ID_OMISSION))
+    return maps
+
 # Create-new object/warehouse dests 404 on schema probe; Google/boto retries
 # turn that into a hang. Validate still runs on SQL dests. Never skip SQL.
 _CREATE_NEW_SKIP_PREFLIGHT = frozenset({
@@ -428,7 +470,7 @@ def _payload_ok(source: EndpointConfig, root: Path) -> tuple[bool, str]:
             connection_string=f"sqlite:///{sqlite_path}",
             table=table,
         ),
-        mappings=list(MAPPINGS),
+        mappings=_pair_mappings(source),
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
         validation_mode="strict",
@@ -451,7 +493,7 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
     req = TransferRequest(
         source=src,
         destination=dst,
-        mappings=list(MAPPINGS),
+        mappings=_pair_mappings(src),
         sync_mode="full_refresh_overwrite",
         skip_preflight=dst.format in _CREATE_NEW_SKIP_PREFLIGHT,
         validation_mode="strict",
@@ -596,6 +638,8 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "object_store_create_new_skips_preflight_probe": True,
             "payload_reconcile": "once per dest engine; every pair dest COUNT",
             "timeout_is_skip_never_pass": True,
+            "pair_mappings_do_not_stamp_dest_types": True,
+            "mongo_storage_key_is_declared_g13_omit": True,
             "one_hundred_percent": (
                 "this named unique-engine fixture only — 2 shaped rows "
                 "(1/1000.00/USD, 2/2000.50/EUR) on each live src×dst pair"
