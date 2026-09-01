@@ -380,6 +380,36 @@ def read_keys_batch(
             total = len(scan_all_keys(client, pattern or "*"))
         else:
             total = None
-        return ReadBatch(headers=headers, rows=rows, offset=state.keys_seen, total_rows=total), state
+        # Flattened JSON numbers are ``cell_to_string`` text. Stamp sampled
+        # native_types so endpoint introspect cannot pose the string placeholder
+        # as a Redis declaration (that overlay made Execute invent TEXT while
+        # Validate hashed NUMERIC/BIGINT).
+        meta: dict[str, Any] = {}
+        if headers and rows:
+            try:
+                from services.dest_schema_authority import CARRIER_SAMPLED
+                from services.object_store_introspect import (
+                    profile_schemaless_source_schema,
+                )
+
+                types = profile_schemaless_source_schema(
+                    headers, rows, source_format="redis"
+                )
+                if types:
+                    meta = {
+                        "native_types": types,
+                        "native_types_authority": {
+                            name: CARRIER_SAMPLED for name in types
+                        },
+                    }
+            except Exception:
+                meta = {}
+        return ReadBatch(
+            headers=headers,
+            rows=rows,
+            offset=state.keys_seen,
+            total_rows=total,
+            meta=meta or None,
+        ), state
     finally:
         client.close()

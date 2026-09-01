@@ -162,3 +162,67 @@ def test_redis_profiled_peek_matches_validate_ddl_identity(dest_db: str):
     amount = materialized.get("amount", "")
     if dest_db != "sqlite":
         assert "NUMERIC" in amount or "DECIMAL" in amount
+
+
+def test_schemaless_placeholder_catalog_does_not_clobber_profiled_peek():
+    """endpoint_source_column_types used to overlay Redis ``string`` on INTEGER."""
+    from src.transfer.engine import (
+        _authoritative_source_schema,
+        _schemaless_live_is_placeholder,
+    )
+    from src.transfer.models import EndpointConfig
+
+    assert _schemaless_live_is_placeholder(
+        "redis", {"id": "string", "amount": "string"}
+    )
+    assert not _schemaless_live_is_placeholder(
+        "sqlite", {"id": "TEXT", "amount": "TEXT"}
+    )
+    assert not _schemaless_live_is_placeholder(
+        "mongodb", {"_id": "OBJECTID"}
+    )
+
+    peek = {"id": "INTEGER", "amount": "DECIMAL", "code": "TEXT"}
+    source = EndpointConfig(kind="database", format="redis", table="lab")
+
+    def _placeholder(_endpoint):
+        return {c: "string" for c in peek}
+
+    import services.source_schema_authority as ssa
+
+    original = ssa.endpoint_source_column_types
+    ssa.endpoint_source_column_types = _placeholder  # type: ignore[method-assign]
+    try:
+        merged = _authoritative_source_schema(source, peek, list(peek))
+    finally:
+        ssa.endpoint_source_column_types = original  # type: ignore[method-assign]
+    assert merged["id"] == "INTEGER"
+    assert merged["amount"] == "DECIMAL"
+
+
+def test_redis_reader_stamps_sampled_native_types(monkeypatch):
+    """Introspect reads native_types so the string placeholder cannot pose as DDL."""
+    from unittest.mock import MagicMock
+
+    from connectors.redis_reader import RedisScanState, read_keys_batch
+    from services.type_system import normalize_logical_type
+
+    client = MagicMock()
+    client.scan.return_value = (0, [b"lab:1", b"lab:2"])
+    client.type.return_value = b"string"
+    client.get.side_effect = [
+        b'{"id":1,"amount":1000.00,"code":"USD"}',
+        b'{"id":2,"amount":2000.50,"code":"EUR"}',
+    ]
+    monkeypatch.setattr("connectors.redis_reader._redis_client", lambda *_a, **_k: client)
+    monkeypatch.setattr(
+        "connectors.redis_reader.scan_all_keys", lambda *_a, **_k: ["lab:1", "lab:2"]
+    )
+    batch, _state = read_keys_batch(
+        cfg={}, pattern="lab:*", limit=10, scan_state=RedisScanState()
+    )
+    native = (batch.meta or {}).get("native_types") or {}
+    assert "id" in batch.headers
+    assert normalize_logical_type(native.get("id")) == "integer"
+    assert normalize_logical_type(native.get("amount")) == "decimal"
+    assert "(" not in str(native.get("amount") or "")
