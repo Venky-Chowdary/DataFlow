@@ -143,15 +143,25 @@ def test_unique_engine_leftover_merge_4_to_3(engine: str) -> None:
         bound = bind_live_engine(engine, table, Path(tmp))
         if isinstance(bound, str):
             pytest.skip(bound)
-        _write_ghost(bound)
-        cfg = _cfg(bound)
-        _assert_leftover_merge(
-            bound.format,
-            cfg,
-            schema=bound.schema or "",
-            table=bound.table,
-            key_columns=_key_columns(engine),
-        )
+        try:
+            _write_ghost(bound)
+            cfg = _cfg(bound)
+            _assert_leftover_merge(
+                bound.format,
+                cfg,
+                schema=bound.schema or "",
+                table=bound.table,
+                key_columns=_key_columns(engine),
+            )
+        except Exception as exc:
+            if engine == "qdrant" and "too many" in str(exc).lower():
+                pytest.skip(f"Qdrant Local RocksDB EMFILE: {exc}")
+            raise
+        finally:
+            if engine == "qdrant":
+                from connectors.table_manager import drop_table
+
+                drop_table("qdrant", _cfg(bound), bound.table)
 
 
 def test_redis_non_json_key_refuses_key_list() -> None:

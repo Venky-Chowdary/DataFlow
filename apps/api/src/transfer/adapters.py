@@ -1033,6 +1033,27 @@ def read_source_database(
             records, batch.headers, schema, batch=batch, stamp_total=stamp_total
         )
 
+    if db_type == "qdrant":
+        from connectors.qdrant_reader import read_points_batch
+
+        collection = endpoint.table or endpoint.database or endpoint.collection
+        if not collection:
+            raise ValueError(
+                "Qdrant collection name required (table or database field)"
+            )
+        batch, _ = read_points_batch(cfg=cfg, collection=collection, limit=limit)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, collection)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        schema = (
+            FileParser.infer_schema(records)
+            if records
+            else {c: "string" for c in batch.headers}
+        )
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
     if db_type == "sqlite":
         from connectors.sqlite_reader import read_table_batch
 

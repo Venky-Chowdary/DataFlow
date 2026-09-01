@@ -149,7 +149,7 @@ _STREAMING_TYPES = frozenset({
     "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
     "sqlserver", "oracle",
     "s3", "gcs", "adls", "sftp", "dynamodb", "elasticsearch", "redis", "sqlite", "generic_sql",
-    "iceberg", "kafka",
+    "iceberg", "kafka", "qdrant",
     # Salesforce and HubSpot paginate with opaque cursors / capped OFFSET — do not
     # claim resumable numeric-offset streaming until continuation state is wired.
 })
@@ -172,6 +172,8 @@ def _source_name(source: EndpointConfig) -> str:
         return source.table or source.collection or source.schema or ""
     if fmt == "redis":
         return source.table or source.collection or source.schema or "*"
+    if fmt == "qdrant":
+        return source.table or source.collection or source.database or ""
     return source.table or source.collection or ""
 
 

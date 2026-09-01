@@ -4073,21 +4073,32 @@ def _qdrant_key_hits(
         return 0
     if exists.status_code != 200:
         return None
-    resp = session.post(
-        f"{base_url}/collections/{name}/points/retrieve",
-        data=json.dumps(
-            {"ids": ids, "with_payload": False, "with_vector": False},
-            default=json_default,
-        ),
-        headers=headers,
-        timeout=30,
+    body = json.dumps(
+        {"ids": ids, "with_payload": False, "with_vector": False},
+        default=json_default,
     )
-    if resp.status_code != 200:
+    resp = None
+    for path in ("points/retrieve", "points"):
+        resp = session.post(
+            f"{base_url}/collections/{name}/{path}",
+            data=body,
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code in {200, 201}:
+            break
+    if resp is None or resp.status_code not in {200, 201}:
         return None
     payload = load_http_json(resp) if resp.content else {}
     result = payload.get("result") if isinstance(payload, dict) else payload
+    if isinstance(result, dict):
+        result = result.get("points") or result.get("result") or []
     if isinstance(result, list):
-        return sum(1 for point in result if isinstance(point, dict) and point.get("id") is not None)
+        return sum(
+            1
+            for point in result
+            if isinstance(point, dict) and point.get("id") is not None
+        )
     return None
 
 

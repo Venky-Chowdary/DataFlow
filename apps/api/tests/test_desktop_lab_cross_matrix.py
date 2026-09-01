@@ -288,23 +288,31 @@ def test_qdrant_uniqueness_and_sqlite_dest_when_reachable(tmp_path):
         pytest.skip(row["error"] or "qdrant not reachable")
     assert row["status"] == "passed", row
     assert row.get("dest_count") == 2
-    probe = probe_source_duplicate_keys_result(
-        source_config=_cfg(bound),
-        source_table=bound.table,
-        primary_key="id",
-    )
-    assert probe.status == "ran", probe.message
-    assert probe.findings == []
+    qdrant_dst = None
+    try:
+        probe = probe_source_duplicate_keys_result(
+            source_config=_cfg(bound),
+            source_table=bound.table,
+            primary_key="id",
+        )
+        assert probe.status == "ran", probe.message
+        assert probe.findings == []
 
-    sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
-    assert not isinstance(sqlite_dst, str), sqlite_dst
-    sqlite_out = _transfer_pair(bound, sqlite_dst)
-    assert sqlite_out["status"] == "passed", sqlite_out
+        sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+        assert not isinstance(sqlite_dst, str), sqlite_dst
+        sqlite_out = _transfer_pair(bound, sqlite_dst)
+        assert sqlite_out["status"] == "passed", sqlite_out
 
-    qdrant_dst = bind_live_engine("qdrant", _sid("d"), tmp_path)
-    assert not isinstance(qdrant_dst, str), qdrant_dst
-    qdrant_out = _transfer_pair(bound, qdrant_dst)
-    assert qdrant_out["status"] == "passed", qdrant_out
+        qdrant_dst = bind_live_engine("qdrant", _sid("d"), tmp_path)
+        assert not isinstance(qdrant_dst, str), qdrant_dst
+        qdrant_out = _transfer_pair(bound, qdrant_dst)
+        assert qdrant_out["status"] == "passed", qdrant_out
+    finally:
+        from connectors.table_manager import drop_table
+
+        drop_table("qdrant", _cfg(bound), bound.table)
+        if qdrant_dst is not None:
+            drop_table("qdrant", _cfg(qdrant_dst), qdrant_dst.table)
 
 
 def test_pair_timeout_is_skip_never_pass(monkeypatch):
