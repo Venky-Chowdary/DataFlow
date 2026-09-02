@@ -57,6 +57,11 @@ def _try_copy_fast_path(
     ``HOLDLOCK, TABLOCK``). Proof is dest ``COUNT(*)`` vs that snapshot.
     Cross-host declines to the row path (no BCP yet).
 
+    Oracle→Oracle identity append/overwrite: same-instance ``INSERT
+    SELECT`` after ``LOCK TABLE src IN SHARE MODE``. Proof is dest
+    ``COUNT(*)`` vs that snapshot. Cross-host declines to the row path
+    (no Data Pump / DB link yet).
+
     Returning ``None`` rather than raising is deliberate — every route this
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
@@ -163,6 +168,27 @@ def _try_copy_fast_path(
         )
         if ss_fast is not None:
             return ss_fast
+        return None
+
+    from services.copy_oracle_oracle import oracle_family_name
+
+    if oracle_family_name(src_n) == "oracle" and oracle_family_name(dest_n) == "oracle":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ora_fast = _try_oracle_oracle_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or src_cfg.get("username") or "",
+            dest_schema=destination.schema or dest_cfg.get("schema") or dest_cfg.get("username") or "",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ora_fast is not None:
+            return ora_fast
         return None
 
     if not (
@@ -687,6 +713,107 @@ def _try_sqlserver_sqlserver_copy_fast_path(
     ddl_log = [
         f"COPY SQL Server {source_table} → SQL Server {dest_table} "
         f"({result.source_rows:,} rows, INSERT SELECT, {isolation})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_oracle_oracle_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Oracle→Oracle: INSERT SELECT. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_oracle_oracle import copy_oracle_to_oracle
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Oracle→Oracle copy declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    oracle_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        pairs.append((source_col, target_col))
+        oracle_ddls.append(
+            ddl_type("oracle", declared) if declared else "VARCHAR2(4000)"
+        )
+
+    try:
+        result = copy_oracle_to_oracle(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            oracle_ddls=oracle_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Oracle→Oracle copy declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Oracle→Oracle copy failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "insert_select_oracle_same_instance",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": dict(result.source_snapshot or {}),
+        "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
+        "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
+        "partitions_skipped": (result.source_snapshot or {}).get("partitions_skipped"),
+        "shard_mode": (result.source_snapshot or {}).get("shard_mode"),
+        "copy_split": (result.source_snapshot or {}).get("copy_split"),
+        "oracle_lock": (result.source_snapshot or {}).get("oracle_lock"),
+        "partition_proof": list(
+            (result.source_snapshot or {}).get("partition_proof") or []
+        ),
+    }
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+        skipped = int(dest_summary.get("partitions_skipped") or 0)
+        if skipped == len(dest_summary["partition_proof"]):
+            proof_line += f" Resume skipped {skipped} complete range(s) (COUNT only)."
+        elif skipped:
+            proof_line += f" Resume skipped {skipped} complete range(s)."
+    ddl_log = [
+        f"COPY Oracle {source_table} → Oracle {dest_table} "
+        f"({result.source_rows:,} rows, INSERT SELECT, SHARE lock)",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns

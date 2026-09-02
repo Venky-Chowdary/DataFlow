@@ -1108,3 +1108,206 @@ def run_sqlserver_sqlserver_volume(
                 raise AssertionError(f"partition dest COUNT mismatch: {part}")
     return report
 
+
+def _oracle_password() -> str:
+    env = (os.environ.get("DATAFLOW_ORACLE_PASSWORD") or "").strip()
+    if env:
+        return env
+    path = Path("/tmp/df-desktop-lab/oracle_password")
+    if path.is_file():
+        return path.read_text().strip()
+    return "dataflow"
+
+
+def _oracle_cfg() -> dict[str, Any]:
+    return {
+        "host": "127.0.0.1",
+        "port": 1521,
+        "database": "XEPDB1",
+        "schema": "DATAFLOW",
+        "username": "dataflow",
+        "password": _oracle_password(),
+    }
+
+
+def _oracle_connect():
+    import oracledb
+
+    return oracledb.connect(
+        user="dataflow",
+        password=_oracle_password(),
+        dsn="127.0.0.1:1521/XEPDB1",
+    )
+
+
+def _oracle_drop(cur: Any, table: str) -> None:
+    tbl = str(table).upper()
+    cur.execute(
+        "BEGIN EXECUTE IMMEDIATE 'DROP TABLE "
+        f"{tbl} PURGE'; EXCEPTION WHEN OTHERS THEN "
+        "IF SQLCODE != -942 THEN RAISE; END IF; END;"
+    )
+
+
+def _oracle_count(conn: Any, table: str) -> int:
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) FROM {str(table).upper()}")  # nosec B608
+    return int(cur.fetchone()[0])
+
+
+def _oracle_seed(conn: Any, table: str, rows: int) -> None:
+    tbl = str(table).upper()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM user_tables WHERE table_name = :1",
+        [tbl],
+    )
+    exists = int(cur.fetchone()[0]) > 0
+    if exists:
+        have = _oracle_count(conn, tbl)
+        if have == rows:
+            return
+        _oracle_drop(cur, tbl)
+    cur.execute(
+        f"CREATE TABLE {tbl} (ID NUMBER NOT NULL PRIMARY KEY, LABEL VARCHAR2(32))"  # nosec B608
+    )
+    cur.execute(
+        f"INSERT INTO {tbl} (ID, LABEL) "  # nosec B608
+        f"SELECT LEVEL, 'r' || LEVEL FROM dual CONNECT BY LEVEL <= {int(rows)}"
+    )
+    conn.commit()
+    have = _oracle_count(conn, tbl)
+    if have != rows:
+        raise RuntimeError(f"Oracle seed {tbl} has {have} rows, wanted {rows}")
+
+
+def run_oracle_oracle_volume(
+    *,
+    rows: int,
+    source_table: str,
+    dest_table: str,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Oracle→Oracle through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+
+    src = str(source_table).upper()
+    dest = str(dest_table).upper()
+    if src == dest:
+        raise RuntimeError("Oracle→Oracle bench refuses copy onto the same table")
+
+    job_store = ensure_memory_job_store_if_mongo_down()
+    conn = _oracle_connect()
+    try:
+        _oracle_seed(conn, src, rows)
+        if not keep_dest:
+            cur = conn.cursor()
+            _oracle_drop(cur, dest)
+            conn.commit()
+    finally:
+        conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": src}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": dest}
+    )
+    mappings = [
+        {"source": "id", "target": "id", "type": "integer", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "integer", "label": "string"}
+    job_id = f"bench-ora-ora-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = _oracle_connect()
+    try:
+        landed = _oracle_count(conn, dest)
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "oracle→oracle",
+        "sync_mode": sync_mode,
+        "source_table": src,
+        "dest_table": dest,
+        "oracle_service": "XEPDB1",
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "oracle_lock": summary.get("oracle_lock"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} oracle→oracle [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "insert_select_oracle_same_instance":
+            raise AssertionError(
+                f"expected INSERT SELECT, got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
