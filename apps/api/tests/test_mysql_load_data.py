@@ -450,12 +450,12 @@ def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
         assert first.source_snapshot.get("shard_mode") == "pk"
         victim = parts[2]
         with my.cursor() as cur:
-            clause, params = mysql_pk_range_clause(
-                "`id`", victim["lo"], victim["hi"], null_shard=bool(victim["null_shard"])
-            )
-            cur.execute(f"DELETE FROM `{dest_table}` WHERE {clause}", params)
+            # Leave a partial range (not empty, not complete) so resume must DELETE+reload.
+            lo = victim["lo"]
+            assert lo is not None
+            cur.execute(f"DELETE FROM `{dest_table}` WHERE `id` = %s", (lo,))
             cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
-            assert int(cur.fetchone()[0]) == 8000 - int(victim["source_count"])
+            assert int(cur.fetchone()[0]) == 7999
         second = copy_postgres_to_mysql(
             source_cfg=source_cfg,
             source_schema="public",
