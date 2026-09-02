@@ -191,7 +191,10 @@ def test_live_oracle_pg_varchar2_empty_is_null():
             f"CREATE TABLE {src} (ID NUMBER NOT NULL PRIMARY KEY, LABEL VARCHAR2(32))"
         )
         cur.execute(
-            f"INSERT INTO {src} (ID, LABEL) VALUES (1, NULL), (2, ''), (3, 'x')"
+            f"INSERT INTO {src} (ID, LABEL) "
+            "SELECT 1, NULL FROM dual UNION ALL "
+            "SELECT 2, '' FROM dual UNION ALL "
+            "SELECT 3, 'x' FROM dual"
         )
         ora.commit()
         with pg.cursor() as pcur:
@@ -237,7 +240,10 @@ def test_live_oracle_pg_occupied_without_pk_declines():
         cur.execute(
             f"CREATE TABLE {src} (ID NUMBER NOT NULL, LABEL VARCHAR2(32))"
         )
-        cur.execute(f"INSERT INTO {src} (ID, LABEL) VALUES (1, 'a'), (2, 'b')")
+        cur.execute(
+            f"INSERT INTO {src} (ID, LABEL) "
+            "SELECT 1, 'a' FROM dual UNION ALL SELECT 2, 'b' FROM dual"
+        )
         ora.commit()
         with pg.cursor() as pcur:
             pcur.execute(f'DROP TABLE IF EXISTS public."{dest}"')
