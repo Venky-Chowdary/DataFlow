@@ -210,6 +210,56 @@ Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench
 `test_mysql_mysql_copy` + `test_mysql_pg_copy` + `test_mysql_load_data` +
 `test_million_row_proof` **29 passed / 0 failed**.
 
+### Named 1M fixture — PostgreSQL→PostgreSQL binary COPY (2026-09-02)
+
+Same-engine identity. Binary `COPY … TO STDOUT` into `COPY … FROM STDIN`
+on `full_refresh_append` (previously overwrite-only, so append stayed on
+the row path — SCALE_MATRIX 406 rows/s at 20k). Dest missing/empty is
+CREATE + COPY. Occupied dest declines to the row path. Same-table COPY
+is refused. Proof is dest `COUNT(*)` plus the mapped-column engine
+checksum (same digest on both sides of one snapshot). Elapsed includes
+that checksum.
+
+Reproduce: `BENCH_DEST=bench_pg_clone python scripts/bench_pg_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | PostgreSQL **5432** (`bench_emp_1000000`) |
+| Destination | PostgreSQL **5432** `bench_pg_clone` |
+| Rows | **1,000,000** |
+| Elapsed | **7.205 s** |
+| rows/s | **138,784** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `copy_binary_server_to_server` |
+| Engine checksum | source = dest (`577077833021269069196831`) |
+| Spot-check | `EMP0000001` / `EMP0500000` / `EMP1000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/pg_pg_1000000_proof.json` |
+
+~342× the SCALE_MATRIX 406 rows/s overwrite row path (20k). Do not quote
+the module's 553k rows/s COPY-only figure — this 7.205 s includes the
+digest.
+
+Occupied dest with a mapped single PK now skips complete ranges and
+DELETE+reloads partial ones (parity with MySQL). Live 8_000-row integer
+PK: delete one key in the third range, resume `replace_destination=False`
+→ 3 skip + 1 reload, dest COUNT 8_000.
+Pytest: `test_pk_resume_skips_complete_and_reloads_partial`. Occupied
+dest without a mapped PK still declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.762 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_pg_1000000_resume_skip_proof.json` |
+
+Do not quote 1.3M rows/s from skip-all. Pytest: `test_copy_fast_path` +
+`test_pg_pg_copy` + copy-path suite **59 passed / 0 failed**.
+
 ### 200M named fixture — not run on this host
 
 10M source is **1.4 GB** on disk. 200M projects to **~28 GB** source plus
