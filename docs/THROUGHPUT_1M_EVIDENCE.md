@@ -58,6 +58,24 @@ coordinator pays for `percentile_disc`, per-range source COUNTs, and
 per-range dest COUNTs — those are the partition proof ctid cannot give.
 Still ~40× the 170.3 s row path. Quality held: STRICT + fail-closed COUNT.
 
+### Named 1M fixture — ctid COPY + PK dest COUNT (current empty-dest path)
+
+Empty dest now COPYs by heap `ctid` (sequential I/O) and still fail-closes
+each PK range dest COUNT. `copy_split=ctid`, `shard_mode=pk`.
+
+| Item | Value |
+|------|-------|
+| Rows | **1,000,000** |
+| Elapsed | **3.480 s** |
+| rows/s | **287,316** |
+| dest `COUNT(*)` | **1,000,000** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_ctid_pk_proof.json` |
+
+Faster than PK-range COPY (4.241 s) because LOAD is sequential heap, not
+index ranges. Still slower than proof-less ctid (2.580 s) by the COUNT
+queries. Resume into a non-empty dest still COPYs by PK (`copy_split=pk`).
+
 ### Named 10M fixture
 
 | Item | Value |
@@ -84,8 +102,9 @@ Same-host progression (dest COUNT equals source on every row):
 | Row `executemany` (2026-08-25) | 1M | 170.3 s | 5,871 | 1,000,000 | n/a |
 | COPY+LOAD DATA tempfile | 1M | 6.151 s | 162,578 | 1,000,000 | n/a |
 | FIFO + 4 ctid shards | 1M | 2.580 s | 387,619 | 1,000,000 | n/a (ctid) |
-| **FIFO + 4 PK-range shards** | **1M** | **4.241 s** | **235,786** | **1,000,000** | **4/4 match** |
-| **FIFO + 4 PK-range shards** | **10M** | **42.331 s** | **236,232** | **10,000,000** | **4/4 match** |
+| **FIFO + 4 PK-range COPY** | **1M** | **4.241 s** | **235,786** | **1,000,000** | **4/4 match** |
+| **FIFO + 4 PK-range COPY** | **10M** | **42.331 s** | **236,232** | **10,000,000** | **4/4 match** |
+| **FIFO + 4 ctid COPY + PK dest COUNT** | **1M** | **3.480 s** | **287,316** | **1,000,000** | **4/4 match** |
 
 Not an SLA. 10M stayed linear with 1M PK-range on this host (~236k rows/s).
 
