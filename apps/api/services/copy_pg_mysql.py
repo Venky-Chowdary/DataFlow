@@ -8,9 +8,11 @@ Python never materializes a row. Dest ``COUNT(*)`` in the same operator
 proof must equal the source snapshot count. Warning/Error from LOAD DATA
 rolls the destination back and raises — never silent coerce.
 
-Large tables overlap COPY and LOAD DATA on a FIFO (no full tempfile) and
-may split the heap by ``ctid`` page range across workers that share one
-``pg_export_snapshot()``. A missed or overlapping page fails dest COUNT.
+Large tables overlap COPY and LOAD DATA on a FIFO (no full tempfile).
+A mapped single PK splits by equal-height key ranges so each shard can
+prove dest ``COUNT(*)`` for that range; otherwise the heap is split by
+``ctid``. Workers share ``pg_export_snapshot()``. A missed or overlapping
+range fails dest COUNT.
 
 Declines (row path keeps quarantine): transforms that change values, jsonb,
 bytea, timestamptz, arrays, non-empty append, missing local_infile.
@@ -96,19 +98,6 @@ def pg_type_is_load_safe(declared: str) -> bool:
     return base in _SAFE_PG_BASES or raw.split("(")[0].strip() in _SAFE_PG_BASES
 
 
-def pg_mysql_copy_workers(source_count: int) -> int:
-    """Operator cap. ``auto`` (default) uses up to 4 workers at ≥50k rows."""
-    raw = (getenv_brand("PG_MYSQL_COPY_WORKERS", "auto") or "auto").strip().lower()
-    if raw in {"auto", ""}:
-        if int(source_count or 0) >= _AUTO_PARALLEL_ROWS:
-            return min(4, os.cpu_count() or 4)
-        return 1
-    try:
-        return max(1, min(int(raw), _MAX_WORKERS))
-    except ValueError:
-        return 1
-
-
 def heap_page_ranges(relpages: int, workers: int) -> list[tuple[int, int | None]]:
     """Disjoint ``[lo, hi)`` heap page ranges. Last shard is unbounded (``hi=None``)."""
     pages = max(int(relpages or 0), 0)
@@ -140,6 +129,124 @@ def ctid_predicate(lo_page: int, hi_page: int | None) -> str:
     return (
         f"ctid >= '({int(lo_page)},1)'::tid AND ctid < '({int(hi_page)},1)'::tid"
     )
+
+
+def key_ranges_from_cuts(cuts: list[Any]) -> list[tuple[Any | None, Any | None]]:
+    """Equal-height ranges from interior cuts: ``[None, c0), [c0, c1), … [cN, None)``."""
+    uniq: list[Any] = []
+    for cut in cuts:
+        if cut is None:
+            continue
+        if not uniq or uniq[-1] != cut:
+            uniq.append(cut)
+    if not uniq:
+        return [(None, None)]
+    ranges: list[tuple[Any | None, Any | None]] = [(None, uniq[0])]
+    for i in range(len(uniq) - 1):
+        ranges.append((uniq[i], uniq[i + 1]))
+    ranges.append((uniq[-1], None))
+    return ranges
+
+
+def mapped_single_pk(
+    source_pk_columns: list[str],
+    pairs: list[tuple[str, str]],
+) -> tuple[str, str] | None:
+    """``(source_pk, dest_pk)`` when exactly one source PK column is mapped."""
+    pks = [str(c) for c in (source_pk_columns or []) if str(c).strip()]
+    if len(pks) != 1:
+        return None
+    want = pks[0].lower()
+    for source_col, dest_col in pairs:
+        if source_col.lower() == want:
+            return source_col, dest_col
+    return None
+
+
+def pg_mysql_copy_workers(source_count: int) -> int:
+    """Operator cap. ``auto`` uses 4 workers at ≥50k and 8 at ≥5M."""
+    raw = (getenv_brand("PG_MYSQL_COPY_WORKERS", "auto") or "auto").strip().lower()
+    cpus = os.cpu_count() or 4
+    if raw in {"auto", ""}:
+        n = int(source_count or 0)
+        if n >= 5_000_000:
+            return min(8, cpus)
+        if n >= _AUTO_PARALLEL_ROWS:
+            return min(4, cpus)
+        return 1
+    try:
+        return max(1, min(int(raw), _MAX_WORKERS))
+    except ValueError:
+        return 1
+
+
+def _pg_quoted_literal(cur: Any, value: Any) -> str:
+    quoted = cur.mogrify("%s", (value,))
+    if isinstance(quoted, bytes):
+        return quoted.decode()
+    return str(quoted)
+
+
+def pk_range_predicate(ident: str, lo: Any, hi: Any, *, null_shard: bool = False) -> str:
+    if null_shard:
+        return f"{ident} IS NULL"
+    parts: list[str] = []
+    if lo is not None:
+        parts.append(f"{ident} >= {lo}")
+    if hi is not None:
+        parts.append(f"{ident} < {hi}")
+    return " AND ".join(parts)
+
+
+def mysql_pk_range_clause(
+    ident: str, lo: Any, hi: Any, *, null_shard: bool = False
+) -> tuple[str, list[Any]]:
+    if null_shard:
+        return f"{ident} IS NULL", []
+    parts: list[str] = []
+    params: list[Any] = []
+    if lo is not None:
+        parts.append(f"{ident} >= %s")
+        params.append(lo)
+    if hi is not None:
+        parts.append(f"{ident} < %s")
+        params.append(hi)
+    if not parts:
+        return "1=1", []
+    return " AND ".join(parts), params
+
+
+def fetch_pk_interior_cuts(
+    cur: Any, source_ref: str, pk_ident: str, workers: int
+) -> list[Any]:
+    n = max(int(workers or 1), 1)
+    if n <= 1:
+        return []
+    # Fractions are computed from worker count, not user input.
+    frac_sql = ",".join(f"{i / n:.10g}" for i in range(1, n))
+    cur.execute(
+        f"SELECT percentile_disc(ARRAY[{frac_sql}]::double precision[]) "  # nosec B608
+        f"WITHIN GROUP (ORDER BY {pk_ident}) FROM {source_ref}"  # nosec B608
+    )
+    row = cur.fetchone()
+    raw = row[0] if row else None
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    text = str(raw).strip()
+    if text.startswith("{") and text.endswith("}"):
+        inner = text[1:-1]
+        if not inner:
+            return []
+        return [part.strip() for part in inner.split(",") if part.strip()]
+    return [raw]
+
+
+def _jsonable_bound(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _pg_copy_select_expr(column: str, declared: str) -> str:
@@ -333,6 +440,54 @@ def _run_shard(
             logger.debug("shard mysql close skipped", exc_info=True)
 
 
+def _launch_copy_shards(
+    *,
+    copy_sqls: list[str],
+    src_cur: Any,
+    dst_cur: Any,
+    dest_conn: Any,
+    source_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    snapshot_id: str,
+    table_q: str,
+    target_cols: list[str],
+) -> None:
+    if not copy_sqls:
+        raise FastPathUnavailable("no COPY shards planned")
+    if len(copy_sqls) == 1:
+        _fifo_copy_into_mysql(
+            src_cur,
+            dst_cur,
+            copy_sql=copy_sqls[0],
+            table_q=table_q,
+            columns=target_cols,
+        )
+        dest_conn.commit()
+        return
+    errors: list[BaseException] = []
+    threads: list[threading.Thread] = []
+    for sql in copy_sqls:
+        t = threading.Thread(
+            target=_shard_thread,
+            kwargs={
+                "source_cfg": source_cfg,
+                "dest_cfg": dest_cfg,
+                "snapshot_id": snapshot_id,
+                "copy_sql": sql,
+                "table_q": table_q,
+                "columns": target_cols,
+                "errors": errors,
+            },
+            daemon=True,
+        )
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+
+
 def copy_postgres_to_mysql(
     *,
     source_cfg: dict[str, Any],
@@ -423,49 +578,90 @@ def copy_postgres_to_mysql(
             source_count = int(src_cur.fetchone()[0])
             src_cur.execute("SELECT pg_export_snapshot()")
             snapshot_id = str(src_cur.fetchone()[0])
-            relpages = _heap_relpages(src_cur, source_schema, source_table)
             workers = pg_mysql_copy_workers(source_count)
-            ranges = heap_page_ranges(relpages, workers)
             select_list = ", ".join(
                 _pg_copy_select_expr(col, live_l[col.lower()]) for col in source_cols
             )
+            pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
+            copy_sqls: list[str] = []
+            partitions: list[dict[str, Any]] = []
+            shard_mode = "ctid"
 
-            if len(ranges) == 1:
-                _fifo_copy_into_mysql(
-                    src_cur,
-                    dst_cur,
-                    copy_sql=_copy_select_sql(
-                        select_list, source_ref, ctid_predicate(*ranges[0])
-                    ),
-                    table_q=table_q,
-                    columns=target_cols,
-                )
-                dest_conn.commit()
-            else:
-                errors: list[BaseException] = []
-                threads: list[threading.Thread] = []
-                for lo_hi in ranges:
-                    t = threading.Thread(
-                        target=_shard_thread,
-                        kwargs={
-                            "source_cfg": source_cfg,
-                            "dest_cfg": dest_cfg,
-                            "snapshot_id": snapshot_id,
-                            "copy_sql": _copy_select_sql(
-                                select_list, source_ref, ctid_predicate(*lo_hi)
-                            ),
-                            "table_q": table_q,
-                            "columns": target_cols,
-                            "errors": errors,
-                        },
-                        daemon=True,
+            if pk_map is not None:
+                src_pk, dest_pk = pk_map
+                src_ident = _quote(src_pk)
+                shard_mode = "pk"
+                if workers <= 1:
+                    key_ranges: list[tuple[Any | None, Any | None]] = [(None, None)]
+                else:
+                    cuts = fetch_pk_interior_cuts(
+                        src_cur, source_ref, src_ident, workers
                     )
-                    threads.append(t)
-                    t.start()
-                for t in threads:
-                    t.join()
-                if errors:
-                    raise errors[0]
+                    key_ranges = key_ranges_from_cuts(cuts)
+                src_cur.execute(
+                    f"SELECT COUNT(*) FROM {source_ref} WHERE {src_ident} IS NULL"  # nosec B608
+                )
+                nulls = int(src_cur.fetchone()[0])
+                unbounded = (
+                    len(key_ranges) == 1 and key_ranges[0] == (None, None)
+                )
+                plan: list[tuple[str, Any, Any, bool]] = []
+                if nulls and not unbounded:
+                    plan.append((f"{src_ident} IS NULL", None, None, True))
+                for lo, hi in key_ranges:
+                    lo_sql = (
+                        _pg_quoted_literal(src_cur, lo) if lo is not None else None
+                    )
+                    hi_sql = (
+                        _pg_quoted_literal(src_cur, hi) if hi is not None else None
+                    )
+                    pred = pk_range_predicate(src_ident, lo_sql, hi_sql)
+                    plan.append((pred, lo, hi, False))
+                for pred, lo, hi, is_null in plan:
+                    if pred:
+                        src_cur.execute(
+                            f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
+                        )
+                    else:
+                        src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+                    expected = int(src_cur.fetchone()[0])
+                    partitions.append({
+                        "lo": lo,
+                        "hi": hi,
+                        "null_shard": is_null,
+                        "source_count": expected,
+                        "dest_pk": dest_pk,
+                    })
+                    copy_sqls.append(
+                        _copy_select_sql(select_list, source_ref, pred)
+                    )
+                accounted = sum(int(p["source_count"]) for p in partitions)
+                if accounted != source_count:
+                    raise ValueError(
+                        "PK range source COUNTs "
+                        f"{accounted} != snapshot {source_count}"
+                    )
+            else:
+                relpages = _heap_relpages(src_cur, source_schema, source_table)
+                page_ranges = heap_page_ranges(relpages, workers)
+                copy_sqls = [
+                    _copy_select_sql(
+                        select_list, source_ref, ctid_predicate(*lo_hi)
+                    )
+                    for lo_hi in page_ranges
+                ]
+
+            _launch_copy_shards(
+                copy_sqls=copy_sqls,
+                src_cur=src_cur,
+                dst_cur=dst_cur,
+                dest_conn=dest_conn,
+                source_cfg=source_cfg,
+                dest_cfg=dest_cfg,
+                snapshot_id=snapshot_id,
+                table_q=table_q,
+                target_cols=target_cols,
+            )
 
             dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             dest_count = int(dst_cur.fetchone()[0])
@@ -474,9 +670,45 @@ def copy_postgres_to_mysql(
                     "PG→MySQL COPY refused: dest COUNT(*) "
                     f"{dest_count} != source snapshot {source_count}"
                 )
+            if shard_mode == "pk" and pk_map is not None:
+                dest_ident = _mysql_ident(pk_map[1])
+                for part in partitions:
+                    clause, params = mysql_pk_range_clause(
+                        dest_ident,
+                        part["lo"],
+                        part["hi"],
+                        null_shard=bool(part["null_shard"]),
+                    )
+                    dst_cur.execute(
+                        f"SELECT COUNT(*) FROM {table_q} WHERE {clause}",  # nosec B608
+                        params,
+                    )
+                    dest_part = int(dst_cur.fetchone()[0])
+                    part["dest_count"] = dest_part
+                    if dest_part != int(part["source_count"]):
+                        raise ValueError(
+                            "PK range dest COUNT "
+                            f"{dest_part} != source {part['source_count']} "
+                            f"(lo={part['lo']!r} hi={part['hi']!r})"
+                        )
             dest_conn.commit()
             source_conn.commit()
             proof = f"dest_count:{dest_count}"
+            partition_proof = [
+                {
+                    "lo": _jsonable_bound(p.get("lo")),
+                    "hi": _jsonable_bound(p.get("hi")),
+                    "null_shard": bool(p.get("null_shard")),
+                    "source_count": int(p["source_count"]),
+                    "dest_count": int(p.get("dest_count") or 0),
+                }
+                for p in partitions
+            ]
+            proof_scope = (
+                "partition_dest_count_equals_source_snapshot"
+                if partition_proof
+                else "dest_count_equals_source_snapshot_count"
+            )
             return FastPathResult(
                 rows_copied=dest_count,
                 source_rows=source_count,
@@ -485,9 +717,11 @@ def copy_postgres_to_mysql(
                 target_checksum=proof,
                 source_snapshot={
                     "pg_snapshot": snapshot_id,
-                    "copy_workers": len(ranges),
+                    "copy_workers": len(copy_sqls),
+                    "shard_mode": shard_mode,
+                    "partition_proof": partition_proof,
                 },
-                proof_scope="dest_count_equals_source_snapshot_count",
+                proof_scope=proof_scope,
             )
     except Exception:
         if created_here:

@@ -28,9 +28,13 @@ from services.copy_pg_mysql import (  # noqa: E402
     _mysql_create_sql,
     ctid_predicate,
     heap_page_ranges,
+    key_ranges_from_cuts,
+    mapped_single_pk,
     mapping_is_plain_carry,
+    mysql_pk_range_clause,
     pg_mysql_copy_workers,
     pg_type_is_load_safe,
+    pk_range_predicate,
 )
 
 
@@ -161,6 +165,40 @@ def test_heap_page_ranges_are_disjoint_and_cover():
     assert "ctid >=" in ctid_predicate(25, None)
     assert "AND" in ctid_predicate(10, 20)
     assert pg_mysql_copy_workers(10) == 1
+
+
+def test_pk_key_ranges_from_cuts_are_half_open_and_cover():
+    ranges = key_ranges_from_cuts(["b", "b", "m"])
+    assert ranges[0] == (None, "b")
+    assert ranges[1] == ("b", "m")
+    assert ranges[-1] == ("m", None)
+    assert key_ranges_from_cuts([]) == [(None, None)]
+    assert mapped_single_pk(["id"], [("id", "id")]) == ("id", "id")
+    assert mapped_single_pk(["id", "sk"], [("id", "id")]) is None
+    assert pk_range_predicate("`id`", "'a'", "'m'") == "`id` >= 'a' AND `id` < 'm'"
+    clause, params = mysql_pk_range_clause("`id`", "a", "m")
+    assert clause == "`id` >= %s AND `id` < %s"
+    assert params == ["a", "m"]
+    unbounded, unbound_params = mysql_pk_range_clause("`id`", None, None)
+    assert unbounded == "1=1"
+    assert unbound_params == []
+    null_clause, null_params = mysql_pk_range_clause("`id`", None, None, null_shard=True)
+    assert null_clause == "`id` IS NULL"
+    assert null_params == []
+    lo_only, lo_params = mysql_pk_range_clause("`id`", "m", None)
+    assert lo_only == "`id` >= %s"
+    assert lo_params == ["m"]
+
+
+def test_auto_copy_workers_scale_with_volume(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "auto")
+    assert pg_mysql_copy_workers(10) == 1
+    mid = pg_mysql_copy_workers(50_000)
+    big = pg_mysql_copy_workers(5_000_000)
+    assert 1 <= mid <= 4
+    assert mid <= big <= 8
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "3")
+    assert pg_mysql_copy_workers(10) == 3
 
 
 def test_warning_rows_block_commit_notes_do_not():

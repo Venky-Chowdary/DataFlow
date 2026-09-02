@@ -266,13 +266,24 @@ def _try_pg_mysql_copy_fast_path(
         "proof_scope": result.proof_scope,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
+        "shard_mode": (result.source_snapshot or {}).get("shard_mode"),
+        "partition_proof": list(
+            (result.source_snapshot or {}).get("partition_proof") or []
+        ),
     }
     workers = int((result.source_snapshot or {}).get("copy_workers") or 1)
+    shard_mode = (result.source_snapshot or {}).get("shard_mode") or "ctid"
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if shard_mode == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
     ddl_log = [
         f"COPY {source_table} → MySQL {dest_table} "
         f"({result.source_rows:,} rows, text COPY + STRICT LOAD DATA, "
-        f"{workers} worker(s))",
-        "Proof: destination COUNT(*) equals source snapshot count.",
+        f"{workers} {shard_mode} worker(s))",
+        proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
 

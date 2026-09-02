@@ -59,6 +59,9 @@ REPORTED_SUMMARY_KEYS = (
     "target_rows_before",
     "load_method",
     "copy_workers",
+    "shard_mode",
+    "partition_proof",
+    "proof_scope",
 )
 
 
@@ -100,11 +103,14 @@ def seed_source(pg: dict[str, Any], table: str, rows: int) -> None:
             """
         )
         started = time.monotonic()
+        # Keep 7-digit ids for the named 1M fixture. Wider pads at 10M+ keep
+        # VARCHAR PK order aligned with the integer series for even PK shards.
+        pad = max(7, len(str(int(rows))))
         cur.execute(
             f"""
             INSERT INTO "{table}"
             SELECT
-              'EMP' || lpad(i::text, 7, '0'),
+              'EMP' || lpad(i::text, {pad}, '0'),
               'First' || (i % 9973),
               'Last' || (i % 7919),
               (ARRAY['Operations','Finance','Engineering','Sales','HR'])[1 + i % 5],
@@ -310,6 +316,10 @@ def run_pg_mysql_volume(
         "job_id": job_id,
         "mysql_local_infile": local_infile,
         "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
         "rows_requested": rows,
         "rows_transferred": transferred,
         "elapsed_seconds": round(elapsed, 3),
@@ -342,6 +352,13 @@ def run_pg_mysql_volume(
             raise AssertionError(
                 f"engine transferred {transferred}, requested {rows}"
             )
+        parts = report.get("partition_proof") or []
+        for part in parts:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(
+                    "partition dest COUNT mismatch: "
+                    f"{part}"
+                )
 
     persist_volume_history(
         pg=pg,
