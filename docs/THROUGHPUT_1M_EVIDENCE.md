@@ -9,6 +9,8 @@ BENCH_ROWS=10000000 BENCH_DEST=bench_10m python scripts/bench_pg_to_mysql_millio
 BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/bench_mysql_to_pg_million.py
 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench_mysql_to_mysql_million.py
 BENCH_DEST=bench_pg_clone python scripts/bench_pg_to_pg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_1000000 BENCH_DEST=bench_ss_clone \\
+  python scripts/bench_sqlserver_sqlserver_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -259,6 +261,59 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 1.3M rows/s from skip-all. Pytest: `test_copy_fast_path` +
 `test_pg_pg_copy` + copy-path suite **59 passed / 0 failed**.
+
+### Named 1M fixture — SQL Server→SQL Server INSERT SELECT (2026-09-02)
+
+Same-engine identity on **SQL Server 2022 :1433**. Same-instance
+`INSERT INTO dest WITH (TABLOCK) SELECT … FROM src WITH (HOLDLOCK, TABLOCK)`.
+`ALLOW_SNAPSHOT_ISOLATION` is **OFF** on `dataflow`; the path reads
+`sys.databases` and does **not** `ALTER DATABASE`. Cross-host declines
+to the row path (no BCP yet). Proof is dest `COUNT(*)` plus per-PK-range
+dest COUNT. Python does not format a row.
+
+This named fixture is **2 columns** (`id BIGINT` PK, `label NVARCHAR(32)`),
+not the 10-col employee table used for PG↔MySQL. Do not compare the
+0.766 s figure to those 10-col COPY times as the same workload.
+
+Reproduce: `BENCH_SRC=bench_ss_1000000 BENCH_DEST=bench_ss_clone python scripts/bench_sqlserver_sqlserver_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | SQL Server **1433** (`bench_ss_1000000`) |
+| Destination | SQL Server **1433** `bench_ss_clone` |
+| Rows | **1,000,000** |
+| Elapsed | **0.766 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `insert_select_sqlserver_same_instance` |
+| `sqlserver_isolation` | `holdlock` |
+| `copy_split` | `insert_select` |
+| PK partitions | 250000 × 4 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_sqlserver_1000000_proof.json` |
+
+Do not quote 1.3M rows/s as a 10-col SLA. Same-instance INSERT SELECT
+moves the engine's own pages; it is not cross-host BCP.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_sqlserver_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.393 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_sqlserver_1000000_resume_skip_proof.json` |
+
+Do not quote 2.5M rows/s from skip-all. Pytest: `test_sqlserver_sqlserver_copy`
+**7 passed / 0 failed**; with `test_mysql_mysql_copy` + `test_copy_fast_path`
++ `test_pg_pg_copy` **42 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 

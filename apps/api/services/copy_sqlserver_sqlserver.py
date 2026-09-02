@@ -1,10 +1,11 @@
 """SQL Server → SQL Server identity bulk (same-instance INSERT SELECT).
 
-``INSERT INTO dest WITH (TABLOCK) SELECT … FROM src`` on the source
-connection. Dest CREATE/DROP runs on a second connection so DDL does not
-share the read transaction. This database has ``ALLOW_SNAPSHOT_ISOLATION``
-off by default; the path tries SNAPSHOT and falls back to
-``FROM src WITH (HOLDLOCK, TABLOCK)``. It never ``ALTER DATABASE``.
+``INSERT INTO dest WITH (TABLOCK) SELECT … FROM src`` on one connection.
+Dest CREATE/DROP is committed first so DDL is not inside the read
+transaction. This database has ``ALLOW_SNAPSHOT_ISOLATION`` off by
+default; the path uses SNAPSHOT only when ``sys.databases`` already
+allows it, else ``FROM src WITH (HOLDLOCK, TABLOCK)``. It never
+``ALTER DATABASE``.
 
 Python does not format a row. Proof is dest ``COUNT(*)`` vs the source
 count taken in that transaction. A mapped single PK still proves dest
@@ -329,26 +330,45 @@ def _delete_range(
     )
 
 
-def _prepare_source_read(cur: Any) -> str:
-    """SNAPSHOT when the database allows it; else HOLDLOCK. Never ALTER DATABASE."""
+def _end_tran(cur: Any, conn: Any) -> None:
     try:
-        cur.execute("SET TRANSACTION ISOLATION LEVEL SNAPSHOT")
-        cur.execute("SELECT 1")
-        cur.fetchone()
-        return "snapshot"
+        cur.execute("IF @@TRANCOUNT > 0 COMMIT TRANSACTION")
     except Exception:
-        logger.info(
-            "SQL Server SNAPSHOT isolation is not on; using HOLDLOCK TABLOCK"
-        )
+        logger.debug("T-SQL COMMIT skipped", exc_info=True)
         try:
-            cur.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION")
+            conn.commit()
         except Exception:
-            logger.debug("SNAPSHOT rollback skipped", exc_info=True)
-        try:
-            cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
-        except Exception:
-            logger.debug("READ COMMITTED reset skipped", exc_info=True)
-        return "holdlock"
+            logger.debug("DBAPI commit skipped", exc_info=True)
+
+
+def _snapshot_allowed(cur: Any) -> bool:
+    """True only when the database already allows SNAPSHOT. Never ALTER DATABASE."""
+    cur.execute(
+        "SELECT snapshot_isolation_state FROM sys.databases WHERE database_id = DB_ID()"
+    )
+    row = cur.fetchone()
+    try:
+        state = int(row[0]) if row and row[0] is not None else 0
+    except (TypeError, ValueError):
+        state = 0
+    return state == 1
+
+
+def _prepare_source_read(cur: Any, conn: Any) -> str:
+    """SNAPSHOT when the database already allows it; else HOLDLOCK."""
+    _end_tran(cur, conn)
+    allowed = _snapshot_allowed(cur)
+    _end_tran(cur, conn)
+    if allowed:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL SNAPSHOT")
+        cur.execute("BEGIN TRANSACTION")
+        return "snapshot"
+    try:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    except Exception:
+        logger.debug("READ COMMITTED reset skipped", exc_info=True)
+    cur.execute("BEGIN TRANSACTION")
+    return "holdlock"
 
 
 def _insert_select_sql(
@@ -505,16 +525,16 @@ def copy_sqlserver_to_sqlserver(
     source_ref = _table_ref(src_schema, source_table)
     dest_ref = _table_ref(dst_schema, dest_table)
 
-    source_conn = _ss_connect(source_cfg)
-    dest_conn = _ss_connect(dest_cfg)
+    # Same instance: one session owns DDL commit, then COUNT + INSERT SELECT.
+    # Two connections deadlock on dest TABLOCK vs an open dest cursor.
+    conn = _ss_connect(dest_cfg)
     created_here = False
     existed_before = False
     pk_map: tuple[str, str] | None = None
-    src_cur = source_conn.cursor()
-    dst_cur = dest_conn.cursor()
+    cur = conn.cursor()
     try:
         pk_cols, live = _ss_table_pk_and_types(
-            src_cur, src_schema, source_table, source_cols
+            cur, src_schema, source_table, source_cols
         )
         live_l = {k.lower(): v for k, v in live.items()}
         create_ddls: list[str] = []
@@ -527,37 +547,31 @@ def copy_sqlserver_to_sqlserver(
             for src_col, rename in pairs
             if src_col.lower() == src_pk.lower()
         ]
-        # Catalog reads opened a transaction. Isolation level must be set
-        # before the snapshot/HOLDLOCK transaction that owns COUNT + INSERT.
-        try:
-            source_conn.commit()
-        except Exception:
-            logger.debug("source catalog commit skipped", exc_info=True)
 
-        exists = _table_exists(dst_cur, dst_schema, dest_table)
+        exists = _table_exists(cur, dst_schema, dest_table)
         existed_before = bool(exists)
         dest_occupied = False
         if replace_destination and exists:
-            dst_cur.execute(_drop_sql(dest_ref))
-            dest_conn.commit()
+            cur.execute(_drop_sql(dest_ref))
+            conn.commit()
             exists = False
         if exists:
-            dest_occupied = _count(dst_cur, dest_ref) > 0
+            dest_occupied = _count(cur, dest_ref) > 0
             if dest_occupied and pk_map is None:
                 raise FastPathUnavailable(
                     "append into non-empty SQL Server dest stays on the row path"
                 )
         else:
-            dst_cur.execute(
+            cur.execute(
                 _create_sql(dest_ref, dest_table, pairs, create_ddls, pk_dest)
             )
-            dest_conn.commit()
+            conn.commit()
             created_here = True
-        dest_conn.commit()
+        conn.commit()
 
-        isolation = _prepare_source_read(src_cur)
+        isolation = _prepare_source_read(cur, conn)
         source_hint = "WITH (HOLDLOCK, TABLOCK)" if isolation == "holdlock" else ""
-        source_count = _count(src_cur, source_ref, source_hint)
+        source_count = _count(cur, source_ref, source_hint)
         workers = pg_mysql_copy_workers(source_count)
         n_parts = pg_mysql_copy_partitions(source_count, workers)
         partitions: list[dict[str, Any]] = []
@@ -570,14 +584,13 @@ def copy_sqlserver_to_sqlserver(
             shard_mode = "pk"
             pk_declared = live_l.get(src_pk.lower()) or ""
             partitions = _plan_pk_partitions(
-                src_cur, source_ref, src_ident, pk_declared, n_parts, source_count
+                cur, source_ref, src_ident, pk_declared, n_parts, source_count
             )
             if dest_occupied:
                 dest_ident = _ident(dest_pk)
-                dest_conn.commit()
                 to_copy = []
                 for part in partitions:
-                    already = _range_count(dst_cur, dest_ref, dest_ident, part)
+                    already = _range_count(cur, dest_ref, dest_ident, part)
                     expected = int(part["source_count"])
                     if already == expected:
                         part["action"] = "skip"
@@ -586,16 +599,15 @@ def copy_sqlserver_to_sqlserver(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
-                        _delete_range(dst_cur, dest_ref, dest_ident, part)
-                        dest_conn.commit()
+                        _delete_range(cur, dest_ref, dest_ident, part)
                         part["action"] = "reload"
                         to_copy.append(part)
             else:
                 to_copy = [{"predicate": "", "params": []}]
 
-        identity = _has_identity(dst_cur, dst_schema, dest_table)
+        identity = _has_identity(cur, dst_schema, dest_table)
         if identity:
-            src_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
+            cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
         try:
             for item in to_copy:
                 clause = str(item.get("predicate") or "")
@@ -603,17 +615,16 @@ def copy_sqlserver_to_sqlserver(
                 sql = _insert_select_sql(
                     dest_ref, source_ref, pairs, clause, source_hint
                 )
-                _exec(src_cur, sql, params)
+                _exec(cur, sql, params)
         finally:
             if identity:
                 try:
-                    src_cur.execute(f"SET IDENTITY_INSERT {dest_ref} OFF")  # nosec B608
+                    cur.execute(f"SET IDENTITY_INSERT {dest_ref} OFF")  # nosec B608
                 except Exception:
                     logger.debug("IDENTITY_INSERT OFF skipped", exc_info=True)
-        source_conn.commit()
-        dest_conn.commit()
+        conn.commit()
 
-        dest_count = _count(dst_cur, dest_ref)
+        dest_count = _count(cur, dest_ref)
         if dest_count != source_count:
             raise ValueError(
                 "SQL Server→SQL Server copy refused: dest COUNT(*) "
@@ -621,9 +632,8 @@ def copy_sqlserver_to_sqlserver(
             )
         if shard_mode == "pk" and pk_map is not None:
             dest_ident = _ident(pk_map[1])
-            dest_conn.commit()
             for part in partitions:
-                dest_part = _range_count(dst_cur, dest_ref, dest_ident, part)
+                dest_part = _range_count(cur, dest_ref, dest_ident, part)
                 part["dest_count"] = dest_part
                 if dest_part != int(part["source_count"]):
                     raise ValueError(
@@ -631,11 +641,7 @@ def copy_sqlserver_to_sqlserver(
                         f"{dest_part} != source {part['source_count']} "
                         f"(lo={part['lo']!r} hi={part['hi']!r})"
                     )
-        dest_conn.commit()
-        try:
-            source_conn.commit()
-        except Exception:
-            logger.debug("source commit after dest COUNT skipped", exc_info=True)
+        conn.commit()
         proof = f"dest_count:{dest_count}"
         partition_proof = [
             {
@@ -675,25 +681,23 @@ def copy_sqlserver_to_sqlserver(
     except Exception:
         if created_here:
             try:
-                dst_cur.execute(_drop_sql(dest_ref))
-                dest_conn.commit()
+                cur.execute(_drop_sql(dest_ref))
+                conn.commit()
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
         elif existed_before and pk_map is None:
             try:
-                dst_cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
-                dest_conn.commit()
+                cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
+                conn.commit()
             except Exception:
                 logger.debug("dest truncate after copy failure skipped", exc_info=True)
         raise
     finally:
-        for cur in (src_cur, dst_cur):
-            try:
-                cur.close()
-            except Exception:
-                logger.debug("SQL Server cursor close skipped", exc_info=True)
-        for conn in (source_conn, dest_conn):
-            try:
-                conn.close()
-            except Exception:
-                logger.debug("SQL Server connection close skipped", exc_info=True)
+        try:
+            cur.close()
+        except Exception:
+            logger.debug("SQL Server cursor close skipped", exc_info=True)
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("SQL Server connection close skipped", exc_info=True)
