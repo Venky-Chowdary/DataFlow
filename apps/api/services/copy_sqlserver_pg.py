@@ -86,6 +86,43 @@ def _pg_ident(name: str) -> str:
     return _quote(name)
 
 
+def _close_ss(conn: Any) -> None:
+    """Commit leftover T-SQL trans, then disconnect so TABLOCK is not pooled."""
+    inner = getattr(conn, "_conn", conn)
+    try:
+        cur = inner.cursor()
+        try:
+            for _ in range(8):
+                cur.execute("IF @@TRANCOUNT > 0 COMMIT TRANSACTION")
+                cur.execute("SELECT @@TRANCOUNT")
+                row = cur.fetchone()
+                if not row or int(row[0] or 0) == 0:
+                    break
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                logger.debug("SQL Server drain cursor close skipped", exc_info=True)
+    except Exception:
+        logger.debug("SQL Server TRANCOUNT drain skipped", exc_info=True)
+    try:
+        inner.rollback()
+    except Exception:
+        logger.debug("SQL Server rollback skipped", exc_info=True)
+    for method in ("invalidate", "detach", "close"):
+        fn = getattr(inner, method, None)
+        if callable(fn):
+            try:
+                fn()
+                break
+            except Exception:
+                logger.debug("SQL Server %s skipped", method, exc_info=True)
+    try:
+        conn.close()
+    except Exception:
+        logger.debug("SQL Server wrapper close skipped", exc_info=True)
+
+
 def _select_sql(
     table_ref: str,
     source_cols: list[str],
@@ -399,7 +436,7 @@ def copy_sqlserver_to_postgres(
         except Exception:
             logger.debug("pg dest cursor close skipped", exc_info=True)
         try:
-            source_conn.close()
+            _close_ss(source_conn)
         except Exception:
             logger.debug("SQL Server source close skipped", exc_info=True)
         try:
