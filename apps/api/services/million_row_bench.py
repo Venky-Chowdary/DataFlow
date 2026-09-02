@@ -2280,5 +2280,291 @@ def run_sqlserver_mysql_volume(
     return report
 
 
+def run_mysql_oracle_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→Oracle through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MySQL 3306 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+
+    src_table = source_table or "bench_1m"
+    dest = str(dest_table).upper()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    _ensure_mysql_employee_fixture(rows, src_table)
+    if not keep_dest:
+        conn = _oracle_connect()
+        try:
+            _oracle_drop(conn.cursor(), dest)
+            conn.commit()
+        finally:
+            conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    mysql = _mysql_local_cfg()
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**mysql, "format": "mysql", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": dest}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-my-ora-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = _oracle_connect()
+    try:
+        landed = _oracle_count(conn, dest)
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→oracle",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "mysql_port": 3306,
+        "oracle_service": "XEPDB1",
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "empty_string_as_null_cells": summary.get("empty_string_as_null_cells"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mysql→oracle [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(
+        "empty_string_as_null_cells: "
+        f"{summary.get('empty_string_as_null_cells')}"
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "select_mysql_executemany_oracle":
+            raise AssertionError(
+                "expected SELECT + executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
+def run_oracle_mysql_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Oracle→MySQL through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MySQL 3306 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+
+    src_table = str(source_table or "BENCH_MY_ORA").upper()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    conn = _oracle_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = :1",
+            [src_table],
+        )
+        exists = int(cur.fetchone()[0]) > 0
+        have = _oracle_count(conn, src_table) if exists else 0
+    finally:
+        conn.close()
+    if have != rows:
+        mysql_src = _ensure_mysql_employee_fixture(rows, "bench_1m")
+        from services.copy_mysql_oracle import copy_mysql_to_oracle
+        from services.type_system import ddl_type
+
+        copy_mysql_to_oracle(
+            source_cfg=_mysql_local_cfg(),
+            source_table=mysql_src,
+            dest_cfg=_oracle_cfg(),
+            dest_table=src_table,
+            pairs=[(name, name) for name, _ddl in COLUMNS],
+            oracle_ddls=[ddl_type("oracle", ddl) for _name, ddl in COLUMNS],
+            replace_destination=True,
+        )
+    if not keep_dest:
+        reset_destination(_mysql_local_cfg(), dest_table)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    mysql = _mysql_local_cfg()
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**mysql, "format": "mysql", "table": dest_table}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-ora-my-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = destination_count(mysql, dest_table)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "oracle→mysql",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest_table,
+        "mysql_port": 3306,
+        "oracle_service": "XEPDB1",
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "oracle_lock": summary.get("oracle_lock"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} oracle→mysql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "select_oracle_load_data_mysql":
+            raise AssertionError(
+                "expected SELECT + STRICT LOAD DATA, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
 
 

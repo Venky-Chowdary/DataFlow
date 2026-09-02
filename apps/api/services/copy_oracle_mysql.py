@@ -1,33 +1,41 @@
-"""SQL Server SELECT → MySQL STRICT LOAD DATA (cross-engine bulk).
+"""Oracle SELECT → MySQL STRICT LOAD DATA (cross-engine bulk).
 
-The reverse of ``copy_mysql_sqlserver``. HOLDLOCK ``SELECT`` is encoded
-as LOAD DATA TSV on one thread into a tempfile, then STRICT
-``LOAD DATA LOCAL INFILE``. A FIFO + pyodbc pump is **not** used: that
-deadlock class was measured on SQL Server→PostgreSQL.
+The reverse of ``copy_mysql_oracle``. One ``LOCK TABLE src IN SHARE MODE``
+transaction streams ``SELECT``; each cell is encoded as LOAD DATA TSV
+into a tempfile, then STRICT ``LOAD DATA LOCAL INFILE``. A FIFO +
+oracledb pump is **not** used (same deadlock class as pyodbc FIFO).
 
-This is **not** BCP. Dest ``COUNT(*)`` must equal the source snapshot.
-Empty string stays empty string (MySQL VARCHAR and SQL Server NVARCHAR).
+Dest ``COUNT(*)`` must equal the source snapshot. Oracle VARCHAR2 stores
+``''`` as NULL, so LOAD DATA emits ``\\N``. That is engine law, surfaced
+as ``varchar2_empty_stored_as_null`` — not a row drop.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
 skips complete ranges and DELETE+reloads partial ones. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
-varbinary/xml/geography, public proxy, occupied dest without a mapped
-single PK, LOAD DATA ineligible sessions.
+BLOB/RAW/XMLTYPE/SDO_GEOMETRY, public proxy, occupied dest without a
+mapped single PK, LOAD DATA ineligible sessions.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
-from services.copy_mysql_mysql import fast_load_data_text_value
-from services.copy_mysql_pg import _FETCH_BATCH, _mysql_connect, _mysql_ident
+from services.copy_mysql_pg import _mysql_connect, _mysql_ident
+from services.copy_oracle_oracle import (
+    _count as _ora_count,
+    _ident as _ora_ident,
+    _ora_table_pk_and_types,
+    _oracle_connect,
+    _plan_pk_partitions,
+    _schema_of as _ora_schema_of,
+    _table_ref as _ora_table_ref,
+)
+from services.copy_oracle_pg import _select_sql, oracle_type_is_copy_safe
 from services.copy_pg_mysql import (
     _delete_mysql_range,
     _jsonable_bound,
@@ -37,104 +45,20 @@ from services.copy_pg_mysql import (
     pg_mysql_copy_partitions,
     pg_mysql_copy_workers,
 )
-from services.copy_sqlserver_pg import (
-    _close_ss,
-    _select_sql,
-    sqlserver_type_is_copy_safe,
-)
-from services.copy_sqlserver_sqlserver import (
-    _count as _ss_count,
-    _ident as _ss_ident,
-    _plan_pk_partitions,
-    _prepare_source_read,
-    _schema_of as _ss_schema_of,
-    _ss_connect,
-    _ss_table_pk_and_types,
-    _table_ref as _ss_table_ref,
+from services.copy_sqlserver_mysql import (
+    _mysql_table_exists,
+    _select_into_mysql_load_data,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def sqlserver_mysql_copy_enabled() -> bool:
-    raw = (getenv_brand("SQLSERVER_MYSQL_COPY", "1") or "1").strip().lower()
+def oracle_mysql_copy_enabled() -> bool:
+    raw = (getenv_brand("ORACLE_MYSQL_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
-def _mysql_table_exists(cur: Any, table: str) -> bool:
-    cur.execute(
-        "SELECT COUNT(*) FROM information_schema.tables "
-        "WHERE table_schema = DATABASE() AND table_name = %s",
-        (table,),
-    )
-    return int(cur.fetchone()[0]) > 0
-
-
-def _select_into_mysql_load_data(
-    source_conn: Any,
-    dest_conn: Any,
-    dst_cur: Any,
-    *,
-    select_sql: str,
-    params: list[Any],
-    table_q: str,
-    columns: list[str],
-    tempfile_prefix: str = "df_ss_mysql_",
-) -> None:
-    from connectors.mysql_load_data import (
-        blocking_load_data_warnings,
-        build_load_data_sql,
-        mysql_load_data_session_ready,
-        quote_load_data_path,
-    )
-
-    ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
-    if not ready:
-        raise FastPathUnavailable(why)
-
-    fd, path = tempfile.mkstemp(prefix=tempfile_prefix, suffix=".tsv")
-    os.close(fd)
-    cur = source_conn.cursor()
-    try:
-        try:
-            cur.arraysize = 8192
-        except Exception:
-            logger.debug("source arraysize skipped", exc_info=True)
-        if params:
-            cur.execute(select_sql, params)
-        else:
-            cur.execute(select_sql)
-        encode = fast_load_data_text_value
-        join = "\t".join
-        with open(path, "wb", buffering=1 << 20) as writer:
-            while True:
-                batch = cur.fetchmany(_FETCH_BATCH)
-                if not batch:
-                    break
-                payload = "\n".join(join(encode(v) for v in row) for row in batch)
-                writer.write((payload + "\n").encode("utf-8"))
-        load_sql = build_load_data_sql(
-            table_q=table_q,
-            columns=columns,
-            infile_sql=quote_load_data_path(path),
-        )
-        dst_cur.execute(load_sql)
-        dst_cur.execute("SHOW WARNINGS")
-        blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
-        if blocked:
-            raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
-    finally:
-        try:
-            cur.close()
-        except Exception:
-            logger.debug("SQL Server stream cursor close skipped", exc_info=True)
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("tempfile unlink skipped", exc_info=True)
-
-
-def copy_sqlserver_to_mysql(
+def copy_oracle_to_mysql(
     *,
     source_cfg: dict[str, Any],
     source_table: str,
@@ -145,11 +69,11 @@ def copy_sqlserver_to_mysql(
     replace_destination: bool,
     source_schema: str | None = None,
 ) -> FastPathResult:
-    """Stream SQL Server rows into MySQL LOAD DATA. Dest COUNT is the proof."""
+    """Stream Oracle rows into MySQL LOAD DATA. Dest COUNT is the proof."""
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
-    if not sqlserver_mysql_copy_enabled():
-        raise FastPathUnavailable("SQL Server→MySQL COPY disabled")
+    if not oracle_mysql_copy_enabled():
+        raise FastPathUnavailable("Oracle→MySQL COPY disabled")
 
     from connectors.write_resilience import is_public_proxy_host
 
@@ -160,11 +84,11 @@ def copy_sqlserver_to_mysql(
 
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
-    src_schema = _ss_schema_of(source_cfg, source_schema)
-    source_ref = _ss_table_ref(src_schema, source_table)
+    src_schema = _ora_schema_of(source_cfg, source_schema)
+    source_ref = _ora_table_ref(src_schema, source_table)
     dest_q = _mysql_ident(dest_table)
 
-    source_conn = _ss_connect(source_cfg)
+    source_conn = _oracle_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)
     created_here = False
     pk_map: tuple[str, str] | None = None
@@ -172,13 +96,13 @@ def copy_sqlserver_to_mysql(
     src_cur = source_conn.cursor()
     dst_cur = dest_conn.cursor()
     try:
-        pk_cols, live = _ss_table_pk_and_types(
+        pk_cols, live = _ora_table_pk_and_types(
             src_cur, src_schema, source_table, source_cols
         )
         live_l = {k.lower(): v for k, v in live.items()}
         for col in source_cols:
             declared = live_l.get(col.lower()) or ""
-            if not sqlserver_type_is_copy_safe(declared):
+            if not oracle_type_is_copy_safe(declared):
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not COPY-safe"
                 )
@@ -210,9 +134,8 @@ def copy_sqlserver_to_mysql(
             dest_conn.commit()
             created_here = True
 
-        isolation = _prepare_source_read(src_cur, source_conn)
-        source_hint = "WITH (HOLDLOCK, TABLOCK)" if isolation == "holdlock" else ""
-        source_count = _ss_count(src_cur, source_ref, source_hint)
+        src_cur.execute(f"LOCK TABLE {source_ref} IN SHARE MODE")  # nosec B608
+        source_count = _ora_count(src_cur, source_ref)
         workers = pg_mysql_copy_workers(source_count)
         n_parts = pg_mysql_copy_partitions(source_count, workers)
         partitions: list[dict[str, Any]] = []
@@ -222,7 +145,7 @@ def copy_sqlserver_to_mysql(
 
         if pk_map is not None:
             src_pk, dest_pk = pk_map
-            src_ident = _ss_ident(src_pk)
+            src_ident = _ora_ident(src_pk)
             shard_mode = "pk"
             preserve_dest_on_failure = True
             pk_declared = live_l.get(src_pk.lower()) or ""
@@ -260,12 +183,11 @@ def copy_sqlserver_to_mysql(
                 source_conn,
                 dest_conn,
                 dst_cur,
-                select_sql=_select_sql(
-                    source_ref, source_cols, clause, source_hint
-                ),
+                select_sql=_select_sql(source_ref, source_cols, clause),
                 params=params,
                 table_q=dest_q,
                 columns=target_cols,
+                tempfile_prefix="df_ora_mysql_",
             )
             dest_conn.commit()
 
@@ -273,7 +195,7 @@ def copy_sqlserver_to_mysql(
         dest_count = int(dst_cur.fetchone()[0])
         if dest_count != source_count:
             raise ValueError(
-                "SQL Server→MySQL COPY refused: dest COUNT(*) "
+                "Oracle→MySQL COPY refused: dest COUNT(*) "
                 f"{dest_count} != source snapshot {source_count}"
             )
         if shard_mode == "pk" and pk_map is not None:
@@ -292,7 +214,7 @@ def copy_sqlserver_to_mysql(
         try:
             source_conn.commit()
         except Exception:
-            logger.debug("SQL Server source commit skipped", exc_info=True)
+            logger.debug("Oracle source commit skipped", exc_info=True)
         proof = f"dest_count:{dest_count}"
         partition_proof = [
             {
@@ -313,7 +235,7 @@ def copy_sqlserver_to_mysql(
             target_rows=dest_count,
             target_checksum=proof,
             source_snapshot={
-                "sqlserver_isolation": isolation,
+                "oracle_lock": "share",
                 "copy_workers": 1,
                 "copy_split": copy_split,
                 "copy_partitions": max(len(partitions), 1),
@@ -321,6 +243,7 @@ def copy_sqlserver_to_mysql(
                 "partitions_loaded": len(to_copy),
                 "shard_mode": shard_mode,
                 "load_data": "tempfile",
+                "varchar2_empty_stored_as_null": True,
                 "partition_proof": partition_proof,
             },
             proof_scope=(
@@ -344,15 +267,19 @@ def copy_sqlserver_to_mysql(
             if src_cur is not None:
                 src_cur.close()
         except Exception:
-            logger.debug("SQL Server source cursor close skipped", exc_info=True)
+            logger.debug("Oracle source cursor close skipped", exc_info=True)
         try:
             dst_cur.close()
         except Exception:
             logger.debug("MySQL dest cursor close skipped", exc_info=True)
         try:
-            _close_ss(source_conn)
+            source_conn.rollback()
         except Exception:
-            logger.debug("SQL Server source close skipped", exc_info=True)
+            logger.debug("Oracle source rollback skipped", exc_info=True)
+        try:
+            source_conn.close()
+        except Exception:
+            logger.debug("Oracle source close skipped", exc_info=True)
         try:
             dest_conn.close()
         except Exception:
