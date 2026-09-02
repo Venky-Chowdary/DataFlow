@@ -1,17 +1,19 @@
-# 1M-row throughput: measured before / after
+# 1M / 10M-row throughput: measured before / after
 
 Reproduce with the committed harness (no mocks, production engine):
 
 ```bash
 cd apps/api
 BENCH_ROWS=1000000 BENCH_DEST=bench_1m python scripts/bench_pg_to_mysql_million.py
+BENCH_ROWS=10000000 BENCH_DEST=bench_10m python scripts/bench_pg_to_mysql_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
 `5433`/`3307`), uses the memory job store when Mongo is down, and calls
 `src.transfer.stream.stream_database_transfer` — the same entry point a UI job
 uses. It always prints destination `COUNT(*)` and fails closed unless that
-count equals the source with `rejected_rows = 0`.
+count equals the source with `rejected_rows = 0`. PK-range runs also require
+each partition dest COUNT to equal that range's source snapshot COUNT.
 
 Conservation algorithm: `services/million_row_proof.py` (`row_conservation`).
 
@@ -22,7 +24,74 @@ types are LOAD-DATA-safe. Python does not materialize a row on that path.
 source snapshot. Transforms, jsonb/bytea/timestamptz, upsert/CDC, and
 non-empty append stay on the row path (quarantine intact).
 
-## Reproduced on this workspace (2026-09-01, FIFO + 4 heap shards)
+When the source has exactly one mapped PK, shards are **equal-height PK
+ranges** (`percentile_disc`). Each range must match dest `COUNT(*)` for
+that key interval. No mapped single PK: heap `ctid` shards (total dest
+COUNT only).
+
+## Reproduced on this workspace (2026-09-02, PK-range shards)
+
+Same production entry point. `load_method=copy_text_pg_to_mysql_load_data`,
+`shard_mode=pk`, `proof_scope=partition_dest_count_equals_source_snapshot`.
+4 workers (host has 4 CPUs, so auto-8 at ≥5M is capped).
+
+### Named 1M fixture
+
+| Item | Value |
+|------|-------|
+| Host | Linux container, Python 3.12, 4 CPUs |
+| Source | PostgreSQL **5432** (`bench_emp_1000000`) |
+| Destination | MySQL **3306**, create-new `bench_1m`, `full_refresh_append` |
+| Job store | **mongo** (27017 open) |
+| Rows | **1,000,000** |
+| Elapsed | **4.241 s** |
+| rows/s | **235,786** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| Conservation | **OK** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Spot-check | `EMP0000001` / `EMP0250000` / `EMP0500000` / `EMP1000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_pk_proof.json` |
+
+PK-range 1M is slower than FIFO+ctid 2.580 s on this host because the
+coordinator pays for `percentile_disc`, per-range source COUNTs, and
+per-range dest COUNTs — those are the partition proof ctid cannot give.
+Still ~40× the 170.3 s row path. Quality held: STRICT + fail-closed COUNT.
+
+### Named 10M fixture
+
+| Item | Value |
+|------|-------|
+| Host | Linux container, Python 3.12, 4 CPUs |
+| Source | PostgreSQL **5432** (`bench_emp_10000000`, 8-digit `EMP` pad) |
+| Destination | MySQL **3306**, create-new `bench_10m`, `full_refresh_append` |
+| Job store | **mongo** (27017 open) |
+| Seed | **27.8 s** (`generate_series` INSERT) |
+| Rows | **10,000,000** |
+| Elapsed (transfer) | **42.331 s** |
+| rows/s | **236,232** |
+| dest `COUNT(*)` | **10,000,000** |
+| `rejected_rows` | **0** |
+| Conservation | **OK** |
+| PK partitions | 2499999 + 2500000 + 2500000 + 2500001 (each dest COUNT matched) |
+| Spot-check | `EMP00000001` / `EMP02500000` / `EMP05000000` / `EMP10000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_10000000_proof.json` |
+
+Same-host progression (dest COUNT equals source on every row):
+
+| Path | Rows | Elapsed | rows/s | dest COUNT(*) | partition dest COUNT |
+|------|-----:|--------:|-------:|--------------:|----------------------|
+| Row `executemany` (2026-08-25) | 1M | 170.3 s | 5,871 | 1,000,000 | n/a |
+| COPY+LOAD DATA tempfile | 1M | 6.151 s | 162,578 | 1,000,000 | n/a |
+| FIFO + 4 ctid shards | 1M | 2.580 s | 387,619 | 1,000,000 | n/a (ctid) |
+| **FIFO + 4 PK-range shards** | **1M** | **4.241 s** | **235,786** | **1,000,000** | **4/4 match** |
+| **FIFO + 4 PK-range shards** | **10M** | **42.331 s** | **236,232** | **10,000,000** | **4/4 match** |
+
+Not an SLA. Not a 200M claim. 10M stayed linear with 1M PK-range on this
+host (~236k rows/s); disk, secondary indexes, and WAL will change that
+curve at 200M.
+
+## Prior: FIFO + 4 heap shards (2026-09-01)
 
 Same named fixture. `load_method=copy_text_pg_to_mysql_load_data`,
 `copy_workers=4`. COPY and LOAD DATA overlap on a FIFO; workers share
@@ -177,13 +246,15 @@ per-cell CPU in transform/validate, not database I/O.
   so `PARALLEL_WORKERS` is GIL-bound. Identity PG→MySQL append now skips that
   path (COPY + STRICT LOAD DATA). Other sources, transforms, CDC, and upsert
   still use the row path.
-- Do **not** extrapolate 1M to 200M. Disk, indexes, tempfile size, and
+- Do **not** extrapolate 1M or 10M to 200M. Disk, indexes, tempfile size, and
   dest-side secondary indexes change the curve. 200M is a partitioned job.
 - Only PostgreSQL→MySQL identity append is measured here. Warehouse sources,
   CDC and upsert/MERGE routes are timed separately and are not covered by
   this artifact.
 - Copy-path proof is dest `COUNT(*)` vs the source snapshot, not a second
-  1M checksum reread. Unfit cells on this path fail closed (STRICT + rollback),
-  they do not silently coerce. Quarantine remains on the row path.
+  checksum reread. With `shard_mode=pk`, each key range also has dest COUNT
+  equal to that range's snapshot COUNT. Unfit cells on this path fail closed
+  (STRICT + rollback), they do not silently coerce. Quarantine remains on the
+  row path.
 - Profiled runs (`BENCH_PROFILE=1`) are ~2× slower by construction and are
   diagnostic only — never quote them as throughput.
