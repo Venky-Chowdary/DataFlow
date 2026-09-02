@@ -62,6 +62,7 @@ REPORTED_SUMMARY_KEYS = (
     "copy_partitions",
     "partitions_skipped",
     "shard_mode",
+    "copy_split",
     "partition_proof",
     "proof_scope",
 )
@@ -325,6 +326,7 @@ def run_pg_mysql_volume(
         "mysql_local_infile": local_infile,
         "load_method": summary.get("load_method"),
         "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
         "partition_proof": summary.get("partition_proof"),
         "proof_scope": summary.get("proof_scope"),
         "copy_workers": summary.get("copy_workers"),

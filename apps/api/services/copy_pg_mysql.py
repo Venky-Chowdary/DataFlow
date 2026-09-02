@@ -9,11 +9,12 @@ proof must equal the source snapshot count. Warning/Error from LOAD DATA
 rolls the destination back and raises — never silent coerce.
 
 Large tables overlap COPY and LOAD DATA on a FIFO (no full tempfile).
-A mapped single PK splits by key ranges so each shard can prove dest
-``COUNT(*)`` for that range (integer PK: Spark-style min/max arithmetic;
-else ``percentile_disc``). Otherwise the heap is split by ``ctid``.
-Workers share ``pg_export_snapshot()``. A missed or overlapping range
-fails dest COUNT.
+A mapped single PK is the dest-COUNT proof (integer: Spark-style min/max
+cuts; else ``percentile_disc``). An **empty** dest COPYs by ``ctid`` heap
+page ranges (sequential I/O). A **non-empty** dest resumes by PK range
+(skip complete, DELETE+reload partial). No mapped single PK: ctid COPY
+and total dest COUNT only. Workers share ``pg_export_snapshot()``. A
+missed PK range fails dest COUNT.
 
 PK partitions are a restartable job: a range whose dest COUNT already
 equals the source snapshot is skipped; a partial range is deleted and
@@ -702,6 +703,7 @@ def copy_postgres_to_mysql(
             copy_sqls: list[str] = []
             partitions: list[dict[str, Any]] = []
             shard_mode = "ctid"
+            copy_split = "ctid"
 
             if pk_map is not None:
                 src_pk, dest_pk = pk_map
@@ -765,6 +767,7 @@ def copy_postgres_to_mysql(
                     )
                 dest_ident = _mysql_ident(dest_pk)
                 if dest_occupied:
+                    copy_split = "pk"
                     dest_conn.commit()
                     for part in partitions:
                         already = _mysql_range_count(
@@ -782,13 +785,24 @@ def copy_postgres_to_mysql(
                             )
                             part["action"] = "reload"
                     dest_conn.commit()
-                copy_sqls = [
-                    _copy_select_sql(
-                        select_list, source_ref, str(p.get("predicate") or "")
-                    )
-                    for p in partitions
-                    if p.get("action") in {"load", "reload"}
-                ]
+                    copy_sqls = [
+                        _copy_select_sql(
+                            select_list, source_ref, str(p.get("predicate") or "")
+                        )
+                        for p in partitions
+                        if p.get("action") in {"load", "reload"}
+                    ]
+                else:
+                    # Sequential heap COPY; PK ranges are dest-COUNT proof only.
+                    copy_split = "ctid"
+                    relpages = _heap_relpages(src_cur, source_schema, source_table)
+                    page_ranges = heap_page_ranges(relpages, workers)
+                    copy_sqls = [
+                        _copy_select_sql(
+                            select_list, source_ref, ctid_predicate(*lo_hi)
+                        )
+                        for lo_hi in page_ranges
+                    ]
             else:
                 if dest_occupied:
                     raise FastPathUnavailable(
@@ -870,6 +884,7 @@ def copy_postgres_to_mysql(
                     "partitions_skipped": skipped,
                     "partitions_loaded": len(copy_sqls),
                     "shard_mode": shard_mode,
+                    "copy_split": copy_split,
                     "partition_proof": partition_proof,
                 },
                 proof_scope=proof_scope,

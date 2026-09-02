@@ -448,6 +448,7 @@ def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
         parts = first.source_snapshot["partition_proof"]
         assert len(parts) == 4
         assert first.source_snapshot.get("shard_mode") == "pk"
+        assert first.source_snapshot.get("copy_split") == "ctid"
         victim = parts[2]
         with my.cursor() as cur:
             # Leave a partial range (not empty, not complete) so resume must DELETE+reload.
@@ -472,6 +473,7 @@ def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
         assert actions.count("skip") == 3
         assert actions.count("reload") == 1
         assert second.source_snapshot.get("partitions_skipped") == 3
+        assert second.source_snapshot.get("copy_split") == "pk"
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
             assert int(cur.fetchone()[0]) == 8000
