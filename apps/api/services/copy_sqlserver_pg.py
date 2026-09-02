@@ -3,8 +3,8 @@
 The reverse of ``copy_pg_sqlserver``. SQL Server has no ``COPY TO STDOUT``
 and this host has no client ``bcp``. One HOLDLOCK (or SNAPSHOT, when the
 database already allows it) transaction streams ``SELECT``; each cell is
-encoded into PostgreSQL COPY text on a FIFO that ``COPY … FROM STDIN``
-reads. Encoder is ``fast_copy_text_value`` (same as MySQL→PG). Dest
+encoded into PostgreSQL COPY text that ``COPY … FROM STDIN`` reads on
+the same thread (``read()`` fetches the next SQL Server batch). Dest
 ``COUNT(*)`` must equal the source snapshot count.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
@@ -19,9 +19,6 @@ a mapped single PK.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
-import threading
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -53,8 +50,8 @@ from services.copy_sqlserver_sqlserver import (
 
 logger = logging.getLogger(__name__)
 
-_PIPE_CHUNK = 1 << 20
 _FETCH_BATCH = 8192
+_READ_CHUNK = 1 << 20
 
 _UNSAFE_SS_BASES = frozenset({
     "IMAGE",
@@ -101,7 +98,35 @@ def _select_sql(
     return f"SELECT {cols} FROM {table_ref}{hint}{where}"  # nosec B608
 
 
-def _fifo_sqlserver_into_pg(
+class _SelectCopyReader:
+    """Single-thread file-like: fetch SQL Server rows as COPY text on read()."""
+
+    def __init__(self, cur: Any) -> None:
+        self._cur = cur
+        self._buf = b""
+        self._done = False
+        self._encode = fast_copy_text_value
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        want = _READ_CHUNK if size is None or size < 0 else max(int(size), 1)
+        join = "\t".join
+        encode = self._encode
+        while not self._done and len(self._buf) < want:
+            batch = self._cur.fetchmany(_FETCH_BATCH)
+            if not batch:
+                self._done = True
+                break
+            payload = "\n".join(join(encode(v) for v in row) for row in batch)
+            self._buf += (payload + "\n").encode("utf-8")
+        out = self._buf[:want]
+        self._buf = self._buf[want:]
+        return out
+
+
+def _select_into_pg(
     source_conn: Any,
     dst_cur: Any,
     *,
@@ -110,63 +135,23 @@ def _fifo_sqlserver_into_pg(
     dest_ref: str,
     columns: list[str],
 ) -> None:
-    tmp = tempfile.mkdtemp(prefix="df_ss_pg_")
-    path = os.path.join(tmp, "stream.tsv")
-    os.mkfifo(path, 0o600)
     col_list = ", ".join(_pg_ident(c) for c in columns)
     copy_sql = (
         f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
         "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
     )
-    failure: list[BaseException] = []
-
-    def _pump() -> None:
-        try:
-            encode = fast_copy_text_value
-            join = "\t".join
-            cur = source_conn.cursor()
-            try:
-                if params:
-                    cur.execute(select_sql, params)
-                else:
-                    cur.execute(select_sql)
-                with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-                    while True:
-                        batch = cur.fetchmany(_FETCH_BATCH)
-                        if not batch:
-                            break
-                        payload = "\n".join(
-                            join(encode(v) for v in row) for row in batch
-                        )
-                        writer.write((payload + "\n").encode("utf-8"))
-            finally:
-                try:
-                    cur.close()
-                except Exception:
-                    logger.debug("SQL Server stream cursor close skipped", exc_info=True)
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
-            failure.append(exc)
-
-    pump = threading.Thread(target=_pump, name="ss-pg-copy-fifo", daemon=True)
-    pump.start()
+    cur = source_conn.cursor()
     try:
-        with open(path, "rb", buffering=_PIPE_CHUNK) as reader:
-            dst_cur.copy_expert(copy_sql, reader)
-    except BaseException:
-        pump.join(timeout=30)
-        raise
+        if params:
+            cur.execute(select_sql, params)
+        else:
+            cur.execute(select_sql)
+        dst_cur.copy_expert(copy_sql, _SelectCopyReader(cur))
     finally:
-        pump.join(timeout=120)
         try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("fifo unlink skipped", exc_info=True)
-        try:
-            os.rmdir(tmp)
-        except OSError:
-            logger.debug("fifo dir rmdir skipped", exc_info=True)
-    if failure:
-        raise failure[0]
+            cur.close()
+        except Exception:
+            logger.debug("SQL Server stream cursor close skipped", exc_info=True)
 
 
 def copy_sqlserver_to_postgres(
@@ -316,7 +301,7 @@ def copy_sqlserver_to_postgres(
         for item in to_copy:
             clause = str(item.get("predicate") or "")
             params = list(item.get("params") or [])
-            _fifo_sqlserver_into_pg(
+            _select_into_pg(
                 source_conn,
                 dst_cur,
                 select_sql=_select_sql(
