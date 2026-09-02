@@ -917,3 +917,194 @@ def run_pg_pg_volume(
             if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
                 raise AssertionError(f"partition dest COUNT mismatch: {part}")
     return report
+
+
+def _sqlserver_cfg() -> dict[str, Any]:
+    return {
+        "host": "127.0.0.1",
+        "port": 1433,
+        "database": "dataflow",
+        "schema": "dbo",
+        "username": "sa",
+        "password": "DataFlow_CDC_2022!",
+        "trust_server_certificate": True,
+        "encrypt": "yes",
+    }
+
+
+def _sqlserver_connect():
+    import pymssql
+
+    return pymssql.connect(
+        server="127.0.0.1",
+        port=1433,
+        user="sa",
+        password="DataFlow_CDC_2022!",
+        database="dataflow",
+        login_timeout=10,
+        autocommit=True,
+    )
+
+
+def _sqlserver_count(conn: Any, table: str) -> int:
+    cur = conn.cursor()
+    cur.execute(f"SELECT COUNT(*) FROM dbo.[{table}]")  # nosec B608
+    return int(cur.fetchone()[0])
+
+
+def _sqlserver_seed(conn: Any, table: str, rows: int) -> None:
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT OBJECT_ID(N'dbo.{table}', 'U')"  # nosec B608
+    )
+    exists = cur.fetchone()[0] is not None
+    if exists:
+        have = _sqlserver_count(conn, table)
+        if have == rows:
+            return
+        cur.execute(f"DROP TABLE IF EXISTS dbo.[{table}]")  # nosec B608
+    cur.execute(
+        f"CREATE TABLE dbo.[{table}] ("  # nosec B608
+        "id BIGINT NOT NULL PRIMARY KEY, label NVARCHAR(32) NULL)"
+    )
+    cur.execute(
+        f"""
+        WITH n AS (
+          SELECT TOP ({int(rows)}) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS seq
+          FROM sys.all_objects a CROSS JOIN sys.all_objects b
+        )
+        INSERT INTO dbo.[{table}] (id, label)
+        SELECT seq, CONCAT(N'r', seq) FROM n
+        """  # nosec B608
+    )
+    have = _sqlserver_count(conn, table)
+    if have != rows:
+        raise RuntimeError(f"SQL Server seed {table} has {have} rows, wanted {rows}")
+
+
+def run_sqlserver_sqlserver_volume(
+    *,
+    rows: int,
+    source_table: str,
+    dest_table: str,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQL Server→SQL Server through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+
+    if source_table.lower() == dest_table.lower():
+        raise RuntimeError("SQL Server→SQL Server bench refuses copy onto the same table")
+
+    job_store = ensure_memory_job_store_if_mongo_down()
+    conn = _sqlserver_connect()
+    try:
+        _sqlserver_seed(conn, source_table, rows)
+        if not keep_dest:
+            cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS dbo.[{dest_table}]")  # nosec B608
+    finally:
+        conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": source_table}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": dest_table}
+    )
+    mappings = [
+        {"source": "id", "target": "id", "type": "integer", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "integer", "label": "string"}
+    job_id = f"bench-ss-ss-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = _sqlserver_connect()
+    try:
+        landed = _sqlserver_count(conn, dest_table)
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlserver→sqlserver",
+        "sync_mode": sync_mode,
+        "source_table": source_table,
+        "dest_table": dest_table,
+        "sqlserver_port": 1433,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlserver_isolation": summary.get("sqlserver_isolation"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} sqlserver→sqlserver [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "insert_select_sqlserver_same_instance":
+            raise AssertionError(
+                f"expected INSERT SELECT, got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
