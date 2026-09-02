@@ -48,6 +48,24 @@ def test_build_weaviate_objects_maps_rows():
     uuid.UUID(objects[0]["id"])  # must be valid UUID
 
 
+def test_build_weaviate_objects_strips_reserved_id_property():
+    rows = [
+        {
+            "id": "1",
+            "content": '{"amount":"1000.00"}',
+            "source_id": "1",
+            "chunk_index": 0,
+            "embedding": [0.1, 0.2],
+            "metadata": {"id": "1", "amount": "1000.00"},
+        }
+    ]
+    objects, rejected = build_weaviate_objects(rows, class_name="PaymentsWeaviate", dimension=2)
+    assert rejected == []
+    assert "id" not in objects[0]["properties"]
+    assert objects[0]["properties"]["amount"] == "1000.00"
+    assert objects[0]["properties"]["source_id"] == "1"
+
+
 def test_build_weaviate_objects_rejects_missing_embedding():
     rows = [
         {"id": "b" * 32, "content": "ok", "embedding": [0.1, 0.2]},

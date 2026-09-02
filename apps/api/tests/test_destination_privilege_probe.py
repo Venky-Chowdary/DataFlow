@@ -23,9 +23,24 @@ from services.destination_privilege_probe import (
 )
 
 
-def test_unsupported_engine_is_unavailable_not_deny():
-    # Use a sink without a privilege catalog probe (ES/S3/Redis are supported).
-    result = probe_destination_privileges("pinecone", host="x", database="d")
+def test_create_on_write_probe_ok_when_test_succeeds():
+    with patch(
+        "src.transfer.connector_registry.run_probe",
+        return_value=(True, "Pinecone index reachable"),
+    ):
+        result = probe_destination_privileges(
+            "pinecone",
+            host="http://127.0.0.1:5081",
+            port=5081,
+            table="sku_ns",
+            password="pclocal",
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert "create-on-first-write" in result.detail
+    # Use a sink without a privilege catalog probe (vector dests now probe).
+    result = probe_destination_privileges("neo4j", host="x", database="d")
     assert result.status == "unavailable"
     assert result.can_write is None
     can_write, can_create, meta = resolve_write_flags(True, result)
@@ -241,6 +256,52 @@ def test_kafka_probe_mocked_describe_acls():
     if result.status == "ok":
         assert result.can_write is True
         assert result.method == "describe_acls"
+
+
+def test_kafka_probe_acl_describe_exception_is_create_on_produce():
+    kafka = pytest.importorskip("kafka")
+    del kafka
+    mock_admin = MagicMock()
+    mock_admin.list_topics.return_value = ["payments_kafka"]
+    mock_admin.describe_acls.side_effect = AttributeError(
+        "'NoneType' object has no attribute 'resource_pattern'"
+    )
+    with patch("kafka.admin.KafkaAdminClient", return_value=mock_admin), patch(
+        "connectors.kafka_writer._bootstrap",
+        return_value="localhost:9092",
+    ):
+        result = probe_destination_privileges(
+            "kafka",
+            host="localhost",
+            table="payments_kafka",
+            table_exists=False,
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert "create-on-produce" in result.detail
+    assert result.method == "list_topics"
+
+
+def test_kafka_probe_empty_acls_is_create_on_produce():
+    kafka = pytest.importorskip("kafka")
+    del kafka
+    mock_admin = MagicMock()
+    mock_admin.list_topics.return_value = ["orders"]
+    mock_admin.describe_acls.return_value = []
+    with patch("kafka.admin.KafkaAdminClient", return_value=mock_admin), patch(
+        "connectors.kafka_writer._bootstrap",
+        return_value="localhost:9092",
+    ):
+        result = probe_destination_privileges(
+            "kafka",
+            host="localhost",
+            table="orders",
+            table_exists=False,
+        )
+    assert result.status == "ok"
+    assert result.can_create_table is True
+    assert "create-on-produce" in result.detail
 
 
 # ── Mongo / Redis / Kafka ────────────────────────────────────────────────────

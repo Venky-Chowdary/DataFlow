@@ -54,6 +54,43 @@ def test_kafka_empty_output_keeps_pending_offsets():
     assert cursor["pending_offsets"][0]["offset"] == 42
 
 
+def test_kafka_offset_commit_assigns_partitions_instead_of_subscribe():
+    """A fresh subscribe has no assignment; kafka-python then kicks the member."""
+    from kafka import OffsetAndMetadata, TopicPartition
+
+    from connectors.kafka_reader import commit_kafka_offsets
+
+    consumer = MagicMock()
+    captured: dict = {}
+
+    def fake_consumer(**kwargs):
+        captured["kwargs"] = kwargs
+        return consumer
+
+    with patch("kafka.KafkaConsumer", side_effect=fake_consumer):
+        commit_kafka_offsets(
+            {"host": "127.0.0.1", "port": 9092, "group_id": "job-group"},
+            {
+                "group_id": "xmat-abc",
+                "topic": "payments",
+                "pending_offsets": [
+                    {"topic": "payments", "partition": 0, "offset": 2},
+                ],
+            },
+        )
+
+    consumer.assign.assert_called_once()
+    assigned = list(consumer.assign.call_args[0][0])
+    assert assigned == [TopicPartition("payments", 0)]
+    consumer.commit.assert_called_once()
+    committed = consumer.commit.call_args[0][0]
+    assert TopicPartition("payments", 0) in committed
+    assert committed[TopicPartition("payments", 0)] == OffsetAndMetadata(2, None, -1)
+    consumer.close.assert_called_once()
+    assert captured["kwargs"]["group_id"] == "xmat-abc"
+    assert captured["kwargs"]["enable_auto_commit"] is False
+
+
 def test_azure_sql_fallback_uses_offset_fetch_syntax():
     from connectors.generic_sql import _read_table_raw
 

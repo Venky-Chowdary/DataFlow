@@ -159,6 +159,8 @@ def build_weaviate_objects(
             })
             continue
         props["chunk_index"] = chunk
+        for reserved in ("id", "_id", "vector", "_additional", "class"):
+            props.pop(reserved, None)
         vector, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or vector is None:
             rejected.append({
@@ -673,6 +675,21 @@ def write_mapped_rows(
         )
 
     if not vector_rows:
+        from connectors.writer_common import refuse_empty_vectorization
+
+        empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
+        if empty_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=class_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=empty_err,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+            )
         return WriteResult(
             ok=True,
             rows_written=0,

@@ -152,7 +152,8 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
 # supporting and verifying in CI. Snowflake routes use fakesnow and BigQuery
 # routes use the goccy/bigquery-emulator, so the warehouse matrix is always-on
 # in CI without cloud credentials. Salesforce/HubSpot reverse-ETL destinations
-# remain credential-gated and are skipped when no real tenant token is present.
+# execute against a local HTTP stub on this desktop (not a customer org);
+# closed ports still skip.
 PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     # File sources
     ("file", "csv", "database", "sqlite"),

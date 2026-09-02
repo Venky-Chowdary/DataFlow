@@ -25,6 +25,7 @@ CONTINUATION_KWARG: dict[str, str] = {
     "elasticsearch": "es_search_after",
     "redis": "redis_scan_state",
     "kafka": "kafka_cursor",
+    "qdrant": "qdrant_offset",
 }
 
 
@@ -46,6 +47,7 @@ def _read_batch_impl(
     es_search_after: list | None = None,
     redis_scan_state=None,
     kafka_cursor: dict | None = None,
+    qdrant_offset: Any = None,
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
     scan_state: dict[str, Any] | None = None,
@@ -432,6 +434,17 @@ def _read_batch_impl(
             known_total_rows=known_total_rows,
             kafka_cursor=kafka_cursor,
         )
+    if src_type == "qdrant":
+        from connectors.qdrant_reader import read_points_batch
+
+        return read_points_batch(
+            cfg=cfg,
+            collection=table,
+            columns=columns,
+            limit=limit,
+            known_total_rows=known_total_rows,
+            qdrant_offset=qdrant_offset,
+        )
     if src_type == "sqlite":
         if cursor_column or cursor_key_columns:
             from connectors.generic_sql import read_table_cursor_batch as _gs_cursor
@@ -612,7 +625,7 @@ def _read_batch_impl(
             offset=offset,
             columns=columns,
         )
-    if src_type in ("salesforce", "hubspot", "stripe"):
+    if src_type in ("salesforce", "hubspot", "stripe", "rest_api", "rest"):
         from .connector_dispatch import read_via_registry
 
         if src_type == "salesforce" and cursor_column:

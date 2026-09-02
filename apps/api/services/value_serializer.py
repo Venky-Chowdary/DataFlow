@@ -525,11 +525,16 @@ def project_row_cells(
     missing sentinel keeps that distinction all the way to the writer.
     """
     out: list[str] = []
+    from services.column_case import lookup_row_value
+
     for h in headers:
-        if h not in row:
-            out.append(DF_MISSING_SENTINEL)
-            continue
-        cell = row[h]
+        if h in row:
+            cell = row[h]
+        else:
+            cell = lookup_row_value(row, str(h), DF_MISSING_SENTINEL)
+            if cell is DF_MISSING_SENTINEL:
+                out.append(DF_MISSING_SENTINEL)
+                continue
         # ``cell_to_string`` flattens the sentinel to "" so exports never leak
         # it; a reader that already marked the field absent must keep it here.
         if is_missing_sentinel(cell):

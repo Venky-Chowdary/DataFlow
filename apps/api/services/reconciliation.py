@@ -2905,25 +2905,39 @@ def verify_iceberg_table(
     table_name: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    schema: str = "",
+    database: str = "",
+    host: str = "",
+    extra: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     """Reconcile Iceberg from current-snapshot data files, not ``scan().to_arrow()``.
 
     Dest COUNT is dest-engine file footers (same leftover MERGE listing).
     Catalog ``SqlCatalog`` / ``scan().count()`` never close filesystem tables
     and never close leftover identity. Unreadable snapshot is unmeasured.
+
+    Filesystem CoW writes live at ``warehouse / namespace / table``. The
+    namespace is destination schema (SKU and cartesian bind ``default``).
+    Counting with an empty schema looks at ``warehouse / table`` and reports
+    dest=0 after a correct write — Gate-8 fail, later dest_precount=2.
     """
     try:
         from services.dest_precount import destination_row_count, iceberg_target_sample
 
-        cfg = {
-            "connection_string": connection_string or warehouse or "",
-            "database": warehouse or connection_string or "",
-            "warehouse": warehouse or "",
-            "host": "",
-            "schema": "",
+        warehouse_path = warehouse or database or connection_string or ""
+        cfg: dict[str, Any] = {
+            "connection_string": connection_string or warehouse_path,
+            "database": database or warehouse_path,
+            "warehouse": warehouse_path,
+            "host": host or "",
+            "schema": schema or "",
         }
+        if extra:
+            cfg["extra"] = extra
+            for key, value in extra.items():
+                cfg.setdefault(key, value)
         count = destination_row_count(
-            "iceberg", cfg, schema="", table_name=table_name
+            "iceberg", cfg, schema=schema or "", table_name=table_name
         )
         if count is None:
             return -1, ""
@@ -2932,7 +2946,7 @@ def verify_iceberg_table(
             return int(count), ""
         rows = iceberg_target_sample(
             cfg,
-            schema="",
+            schema=schema or "",
             table_name=table_name,
             columns=cols,
             limit=int(limit or 0) or None,
@@ -3358,12 +3372,17 @@ def verify_target(
     pk = str(pk).strip() or None
 
     if db_type == "iceberg":
+        extra = dest.get("extra") if isinstance(dest.get("extra"), dict) else None
         count, chk = verify_iceberg_table(
             connection_string=dest.get("connection_string", ""),
-            warehouse=dest.get("warehouse", ""),
+            warehouse=dest.get("warehouse", "") or dest.get("database", ""),
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            schema=schema or dest.get("schema", "") or "",
+            database=dest.get("database", ""),
+            host=dest.get("host", "") or "",
+            extra=extra,
         )
     elif db_type == "mongodb":
         count, chk = verify_mongodb_collection(

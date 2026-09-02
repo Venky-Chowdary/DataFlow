@@ -125,6 +125,8 @@ def drop_table(
         return _drop_mongodb(cfg, table_name, schema)
     if dt == "elasticsearch":
         return _drop_elasticsearch(cfg, table_name)
+    if dt == "qdrant":
+        return _drop_qdrant(cfg, table_name)
     if dt == "snowflake":
         return _drop_snowflake(cfg, table_name, schema)
     if dt == "bigquery":
@@ -357,6 +359,26 @@ def _drop_elasticsearch(cfg: dict[str, Any], table_name: str) -> bool:
         raise TableDropError(table_name, exc) from exc
 
 
+def _drop_qdrant(cfg: dict[str, Any], table_name: str) -> bool:
+    """Delete the destination collection so overwrite cannot append points."""
+    from connectors.qdrant_writer import qdrant_rest
+
+    try:
+        session, base_url, headers = qdrant_rest(cfg)
+        resp = session.delete(
+            f"{base_url}/collections/{table_name}", headers=headers, timeout=10
+        )
+        if resp.status_code in {200, 201, 404}:
+            return True
+        raise RuntimeError(
+            f"Qdrant drop failed: {resp.status_code} {resp.text[:300]}"
+        )
+    except TableDropError:
+        raise
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
 def delete_by_primary_keys(
     db_type: str,
     cfg: dict[str, Any],
@@ -370,7 +392,8 @@ def delete_by_primary_keys(
 ) -> int:
     """Delete rows from a destination by primary key values.
 
-    Supports SQL engines (PostgreSQL, MySQL, SQLite, generic_sql) and MongoDB.
+    Supports SQL engines (PostgreSQL, MySQL, SQLite, generic_sql), MongoDB,
+    Redis, Elasticsearch, DynamoDB, Iceberg, and object-store leftovers.
 
     ``primary_key_column`` may be a single column or a list / comma-joined
     composite. Composite keys arrive already joined with the unit separator
@@ -479,6 +502,30 @@ def delete_by_primary_keys(
             ) from exc
     if not work_keys:
         return 0
+    if dt == "redis":
+        from services.dest_precount import _redis_delete_keys
+
+        return _redis_delete_keys(
+            cfg, prefix=table_name, cols=pk_cols, keys=work_keys
+        )
+    if dt in {"elasticsearch", "opensearch"}:
+        from services.dest_precount import _elasticsearch_delete_keys
+
+        return _elasticsearch_delete_keys(
+            cfg, index=table_name, cols=pk_cols, keys=work_keys
+        )
+    if dt == "qdrant":
+        from services.dest_precount import _qdrant_delete_keys
+
+        return _qdrant_delete_keys(
+            cfg, collection=table_name, cols=pk_cols, keys=work_keys
+        )
+    if dt == "dynamodb":
+        from services.dest_precount import _dynamodb_delete_keys
+
+        return _dynamodb_delete_keys(
+            cfg, table_name=table_name, cols=pk_cols, keys=work_keys
+        )
     if len(pk_cols) > 1:
         return _delete_composite(dt, cfg, table_name, pk_cols, work_keys, schema)
     if dt in ("postgresql", "redshift"):

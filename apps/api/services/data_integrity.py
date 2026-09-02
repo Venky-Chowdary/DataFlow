@@ -12,6 +12,7 @@ import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
@@ -141,7 +142,7 @@ def _check_coercion_safety(
         )
         from services.type_system import resolve_mapping_target_type
 
-        src_t = str(source_types.get(src) or "")
+        src_t = str(column_type_or_none(source_types, src) or source_types.get(src) or "")
         tgt_t = resolve_mapping_target_type(
             mapping or {"target": issue.get("target")},
             target_types=target_types,
@@ -308,13 +309,17 @@ def _check_financial_precision(
         tgt = m.get("target", "")
         if not _FINANCIAL_NAME_PATTERNS.search(src) and not _FINANCIAL_NAME_PATTERNS.search(tgt):
             continue
-        src_type = source_types.get(src, "VARCHAR")
+        src_type = column_type_or_none(source_types, src) or source_types.get(src, "VARCHAR")
         transform = m.get("transform") or infer_transform_for_mapping(
             src, tgt, src_type, m.get("target_type"),
         )
         if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
-        values = [cell_to_string(row.get(src, "")).strip() for row in rows if row.get(src) not in (None, "")]
+        values = [
+            cell_to_string(lookup_row_value(row, src, "")).strip()
+            for row in rows
+            if lookup_row_value(row, src, None) not in (None, "")
+        ]
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
                 continue
@@ -410,7 +415,7 @@ def _check_required_nulls(
         if not is_pk and not is_reserved_key:
             continue
 
-        values = [row.get(src) for row in rows]
+        values = [lookup_row_value(row, src, None) for row in rows]
         if not values:
             continue
         empty = sum(1 for v in values if cell_to_string(v) == "")

@@ -39,7 +39,42 @@ NO_RELATIONAL_DDL_DESTS = frozenset({
     "avro",
     "orc",
     "xml",
+    "kafka",
+    "pinecone",
+    "milvus",
+    "qdrant",
+    "weaviate",
 })
+
+# Reverse-ETL / dest-only objects are not DROP TABLE + CREATE. Overwrite
+# upserts records against live Describe (Salesforce/HubSpot) or create-on-write
+# (Kafka / vector). Treating them as dest_recreated invented TEXT recreate
+# stamps and G19 blocked DECIMAL → TEXT on every CRM SKU route.
+DESTS_WITHOUT_SCHEMA_RECREATE = frozenset({
+    "salesforce",
+    "hubspot",
+    "stripe",
+    "rest_api",
+    "kafka",
+    "pinecone",
+    "milvus",
+    "qdrant",
+    "weaviate",
+    "iceberg",
+    "apache_iceberg",
+})
+
+
+def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
+    """True when overwrite actually drops and recreates destination DDL."""
+    kind = normalize_dest_kind(dest_db_type)
+    if not kind:
+        return True
+    if kind in DESTS_WITHOUT_SCHEMA_RECREATE:
+        return False
+    if kind in SCHEMALESS_DESTS or kind in NO_RELATIONAL_DDL_DESTS:
+        return False
+    return True
 
 
 def normalize_dest_kind(dest_db_type: str | None, default: str = "") -> str:

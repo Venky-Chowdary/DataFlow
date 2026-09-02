@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.column_case import column_type_or_none
 from services.decision_kernel import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
@@ -57,7 +58,10 @@ def validate_mapping_coercions(
     for m in write_mappings(mappings):
         src = m.get("source", "")
         tgt = m.get("target", "")
-        src_type = source_types.get(src, "VARCHAR")
+        src_type = (
+            column_type_or_none(source_types, src)
+            or source_types.get(src, "VARCHAR")
+        )
         # Create-new stamps (e.g. BQ UUID→STRING) must win over missing live DDL.
         tgt_type = resolve_mapping_target_type(
             m,

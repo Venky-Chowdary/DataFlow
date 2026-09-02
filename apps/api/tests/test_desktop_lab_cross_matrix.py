@@ -20,13 +20,20 @@ from services.desktop_lab_cross import (
 )
 
 
-def test_cross_matrix_lists_unique_engines_not_saas_twins():
+def test_cross_matrix_lists_unique_engines_not_saas_twins(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_CROSS_EXTENDED", raising=False)
     assert "postgresql" in LIVE_UNIQUE_ENGINES
     assert "mysql" in LIVE_UNIQUE_ENGINES
     assert "mongodb" in LIVE_UNIQUE_ENGINES
     assert "s3" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" in LIVE_UNIQUE_ENGINES
+    assert "kafka" in LIVE_UNIQUE_ENGINES
+    assert "duckdb" in LIVE_UNIQUE_ENGINES
+    assert "qdrant" in LIVE_UNIQUE_ENGINES
     assert "elasticsearch" not in CORE_UNIQUE_ENGINES
+    assert "kafka" not in CORE_UNIQUE_ENGINES
+    assert "duckdb" not in CORE_UNIQUE_ENGINES
+    assert "qdrant" not in CORE_UNIQUE_ENGINES
     assert "salesforce" not in LIVE_UNIQUE_ENGINES
     assert "hubspot" not in LIVE_UNIQUE_ENGINES
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
@@ -109,6 +116,17 @@ def test_pair_mappings_declare_mongo_id_omit_and_do_not_stamp_dest_types():
     es = EndpointConfig(kind="database", format="elasticsearch", table="t")
     es_omits = {m["source"] for m in _pair_mappings(es) if m.get("intentional_omit")}
     assert es_omits == {"_id", "_index"}
+    qdrant = EndpointConfig(kind="database", format="qdrant", table="t")
+    qdrant_omits = {m["source"] for m in _pair_mappings(qdrant) if m.get("intentional_omit")}
+    assert qdrant_omits == {
+        "content",
+        "source_id",
+        "chunk_index",
+        "embedding",
+        "vector",
+        "qdrant_id",
+    }
+    assert all("target_type" not in m for m in _pair_mappings(qdrant))
 
 
 def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
@@ -118,6 +136,183 @@ def test_elasticsearch_bind_skips_closed_port(tmp_path, monkeypatch):
     bound = bind_live_engine("elasticsearch", "t", tmp_path)
     assert isinstance(bound, str)
     assert "9200" in bound
+
+
+def test_kafka_bind_skips_closed_port(tmp_path, monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setattr(mod, "_reachable", lambda *a, **k: False)
+    bound = bind_live_engine("kafka", "t", tmp_path)
+    assert isinstance(bound, str)
+    assert "9092" in bound
+
+
+def test_kafka_uniqueness_is_a_payload_scan_not_sql_group_by():
+    """Kafka has no relation for GROUP BY; uniqueness is the topic payload."""
+    from services.source_duplicate_probe import (
+        PAYLOAD_SCANNED_SOURCE_TYPES,
+        READER_PAGED_SOURCE_TYPES,
+        SQLISH_SOURCE_TYPES,
+    )
+
+    assert "kafka" in READER_PAGED_SOURCE_TYPES
+    assert "kafka" in PAYLOAD_SCANNED_SOURCE_TYPES
+    assert "kafka" not in SQLISH_SOURCE_TYPES
+
+
+def test_extended_run_lists_eighteen_unique_engines(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_CROSS_EXTENDED", "1")
+    engines = engines_for_run()
+    assert "kafka" in engines
+    assert "duckdb" in engines
+    assert "qdrant" in engines
+    assert len(engines) == 18
+    assert len(engines) == len(set(engines))
+
+
+def test_kafka_uniqueness_and_sql_dest_when_reachable(tmp_path):
+    """kafka→sqlite previously fail-closed: probe did not address the topic."""
+    from services.desktop_lab_cross import _cfg, _kafka_reread, _seed, _sid, _transfer_pair
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    bound, row = _seed("kafka", tmp_path)
+    if row["status"] == "skipped":
+        pytest.skip(row["error"] or "kafka not reachable")
+    assert row["status"] == "passed", row
+    src = _kafka_reread(bound)
+    probe = probe_source_duplicate_keys_result(
+        source_config=_cfg(src),
+        source_table=bound.table,
+        primary_key="id",
+    )
+    assert probe.status == "ran", probe.message
+    assert probe.findings == []
+
+    sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+    assert not isinstance(sqlite_dst, str), sqlite_dst
+    sqlite_out = _transfer_pair(bound, sqlite_dst)
+    assert sqlite_out["status"] == "passed", sqlite_out
+
+    kafka_dst = bind_live_engine("kafka", _sid("d"), tmp_path)
+    assert not isinstance(kafka_dst, str), kafka_dst
+    kafka_out = _transfer_pair(bound, kafka_dst)
+    assert kafka_out["status"] == "passed", kafka_out
+
+
+def test_duckdb_bind_is_embedded_file_not_sqlite(tmp_path):
+    duckdb = pytest.importorskip("duckdb")
+    del duckdb
+    bound = bind_live_engine("duckdb", "t", tmp_path)
+    assert not isinstance(bound, str), bound
+    assert bound.format == "duckdb"
+    assert str(bound.database).endswith(".duckdb")
+    assert str(bound.connection_string).startswith("duckdb:///")
+    assert bound.extra.get("embedded_not_motherduck") is True
+
+
+def test_duckdb_uniqueness_and_sqlite_dest_when_reachable(tmp_path):
+    """DuckDB is SQLISH GROUP BY uniqueness, then a real dest COUNT."""
+    pytest.importorskip("duckdb")
+    from services.desktop_lab_cross import _cfg, _seed, _sid, _transfer_pair
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    bound, row = _seed("duckdb", tmp_path)
+    if row["status"] == "skipped":
+        pytest.skip(row["error"] or "duckdb not available")
+    assert row["status"] == "passed", row
+    assert row.get("dest_count") == 2
+    probe = probe_source_duplicate_keys_result(
+        source_config=_cfg(bound),
+        source_table=bound.table,
+        primary_key="id",
+    )
+    assert probe.status == "ran", probe.message
+    assert probe.findings == []
+
+    sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+    assert not isinstance(sqlite_dst, str), sqlite_dst
+    sqlite_out = _transfer_pair(bound, sqlite_dst)
+    assert sqlite_out["status"] == "passed", sqlite_out
+
+    duck_dst = bind_live_engine("duckdb", _sid("d"), tmp_path)
+    assert not isinstance(duck_dst, str), duck_dst
+    duck_out = _transfer_pair(bound, duck_dst)
+    assert duck_out["status"] == "passed", duck_out
+
+
+def test_qdrant_bind_skips_closed_port(tmp_path, monkeypatch):
+    import services.desktop_lab_cross as mod
+
+    monkeypatch.setattr(mod, "_reachable", lambda *a, **k: False)
+    bound = bind_live_engine("qdrant", "t", tmp_path)
+    assert isinstance(bound, str)
+    assert "6333" in bound
+
+
+def test_qdrant_uniqueness_is_a_payload_scan_not_sql_group_by():
+    """Qdrant has no relation for GROUP BY; uniqueness is the payload scroll."""
+    from services.source_duplicate_probe import (
+        PAYLOAD_SCANNED_SOURCE_TYPES,
+        READER_PAGED_SOURCE_TYPES,
+        SQLISH_SOURCE_TYPES,
+    )
+
+    assert "qdrant" in READER_PAGED_SOURCE_TYPES
+    assert "qdrant" in PAYLOAD_SCANNED_SOURCE_TYPES
+    assert "qdrant" not in SQLISH_SOURCE_TYPES
+
+
+def test_qdrant_bind_is_local_hash_embed_not_saas(tmp_path):
+    import services.desktop_lab_cross as mod
+
+    if not mod._reachable("127.0.0.1", 6333):
+        bound = bind_live_engine("qdrant", "t", tmp_path)
+        assert isinstance(bound, str)
+        return
+    bound = bind_live_engine("qdrant", "t", tmp_path)
+    assert not isinstance(bound, str), bound
+    assert bound.format == "qdrant"
+    assert bound.port == 6333
+    assert bound.extra.get("embedding_model") == "hash/32"
+    assert bound.extra.get("skip_chunking") is True
+    assert bound.extra.get("local_emulator_not_customer_tenant") is True
+
+
+def test_qdrant_uniqueness_and_sqlite_dest_when_reachable(tmp_path):
+    """Qdrant payload uniqueness, then a real dest COUNT on sqlite and qdrant."""
+    from services.desktop_lab_cross import _cfg, _seed, _sid, _transfer_pair
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    bound, row = _seed("qdrant", tmp_path)
+    if row["status"] == "skipped":
+        pytest.skip(row["error"] or "qdrant not reachable")
+    assert row["status"] == "passed", row
+    assert row.get("dest_count") == 2
+    qdrant_dst = None
+    try:
+        probe = probe_source_duplicate_keys_result(
+            source_config=_cfg(bound),
+            source_table=bound.table,
+            primary_key="id",
+        )
+        assert probe.status == "ran", probe.message
+        assert probe.findings == []
+
+        sqlite_dst = bind_live_engine("sqlite", _sid("d"), tmp_path)
+        assert not isinstance(sqlite_dst, str), sqlite_dst
+        sqlite_out = _transfer_pair(bound, sqlite_dst)
+        assert sqlite_out["status"] == "passed", sqlite_out
+
+        qdrant_dst = bind_live_engine("qdrant", _sid("d"), tmp_path)
+        assert not isinstance(qdrant_dst, str), qdrant_dst
+        qdrant_out = _transfer_pair(bound, qdrant_dst)
+        assert qdrant_out["status"] == "passed", qdrant_out
+    finally:
+        from connectors.table_manager import drop_table
+
+        drop_table("qdrant", _cfg(bound), bound.table)
+        if qdrant_dst is not None:
+            drop_table("qdrant", _cfg(qdrant_dst), qdrant_dst.table)
 
 
 def test_pair_timeout_is_skip_never_pass(monkeypatch):

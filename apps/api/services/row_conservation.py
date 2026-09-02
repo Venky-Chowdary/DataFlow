@@ -580,7 +580,8 @@ def apply_inferred_leftover_deletes(
     complete snapshot of ``S``.
     Dest without unique PKs, unsupported engines, or an oversized
     census stay ``None`` (unapplied); Gate-8 still *measures* extra.
-    Vector destinations own identity COUNT, not this PK anti-join.
+    Vector destinations own identity COUNT, not this PK anti-join
+    (except Qdrant, whose leftover is payload identity + point delete).
     Iceberg applies the same anti-join through dest-engine snapshot
     listing + ``delete_by_primary_keys`` (filesystem v2 equality-delete
     writes). Filesystem and catalog MoR (v2 position/equality and v3
@@ -605,7 +606,7 @@ def apply_inferred_leftover_deletes(
     if not complete_snapshot:
         return None
     engine = str(db_type or "").strip().lower()
-    if engine in {"pgvector", "pinecone", "qdrant", "weaviate", "milvus", "email"}:
+    if engine in {"pgvector", "pinecone", "weaviate", "milvus", "email"}:
         return None
     cols = [str(c).strip() for c in key_columns if str(c).strip()]
     from services.dest_precount import destination_key_list

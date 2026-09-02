@@ -5,8 +5,16 @@ Honesty
 * This is **not** 80×80 catalog aliases and not 650+ live tiles.
 * Hosted twins (Neon/RDS/CNPG) share a parent driver — they live in
   ``desktop_lab.DESKTOP_LAB_CONNECTORS``, not here.
-* Salesforce / HubSpot / Stripe / Kafka are omitted: no live SaaS tenant
-  on this desktop. Skip, never invent green.
+* Salesforce / HubSpot / Stripe are omitted: no live SaaS tenant on this
+  desktop. Skip, never invent green.
+* Kafka (Redpanda on :9092) is a unique engine: duplex JSON produce +
+  consume. Leftover MERGE on Kafka is log compaction, not a PK anti-join.
+* DuckDB is a unique engine: embedded file SQL (not SQLite affinity, not
+  MotherDuck). Leftover MERGE there is a PK anti-join.
+* Qdrant is a unique engine: duplex payload scroll + upsert. Desktop bind
+  uses hash/32 embeddings (not a customer cluster, not a semantic model).
+  Leftover MERGE is a payload-identity PK anti-join + point delete.
+  Weaviate / Pinecone / Milvus stay dest-only until they read the fixture.
 * Elasticsearch is an extended unique engine when ``:9200`` answers.
 * CDC default remains at-least-once upsert.
 * Emulators (MinIO, fake-gcs, Azurite, goccy BQ, fakesnow, DynamoDB Local)
@@ -21,6 +29,7 @@ import os
 import socket
 import tempfile
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -106,6 +115,23 @@ def _pair_mappings(src: EndpointConfig) -> list[dict[str, Any]]:
                 "intentional_omit": True,
             }
         )
+    if src.format == "qdrant":
+        for src_name in (
+            "content",
+            "source_id",
+            "chunk_index",
+            "embedding",
+            "vector",
+            "qdrant_id",
+        ):
+            maps.append(
+                {
+                    "source": src_name,
+                    "target": "",
+                    "confidence": 0.0,
+                    "intentional_omit": True,
+                }
+            )
     return maps
 
 # Create-new object/warehouse dests 404 on schema probe; Google/boto retries
@@ -121,6 +147,7 @@ _CREATE_NEW_SKIP_PREFLIGHT = frozenset({
     "elasticsearch",
     "sqlserver",
     "snowflake",
+    "qdrant",
 })
 
 AZURITE_KEY = (
@@ -147,6 +174,9 @@ EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
     "redis",
     "iceberg",
     "elasticsearch",
+    "kafka",
+    "duckdb",
+    "qdrant",
 )
 LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
 
@@ -405,22 +435,20 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             table=table,
         )
     if engine == "iceberg":
-        if not _reachable("127.0.0.1", 8181):
-            return "Iceberg REST not reachable on 127.0.0.1:8181"
+        # Filesystem CoW is the measured dest on this desktop. Iceberg REST
+        # on :8181 is up, but Docker bind-mounts of /tmp are not the agent
+        # filesystem (DinD), so REST FileIO cannot share warehouse files with
+        # pyiceberg. REST leftover MERGE stays in test_iceberg_rest_*.
+        path = root / f"iceberg_{table}"
+        path.mkdir(parents=True, exist_ok=True)
         return EndpointConfig(
             kind="database",
             format="iceberg",
-            host="127.0.0.1",
-            port=8181,
-            database="default",
-            schema="default",
-            connection_string="http://127.0.0.1:8181",
-            warehouse="file:///tmp/iceberg-rest-wh",
+            database=str(path),
             table=table,
-            extra={
-                "catalog_type": "rest",
-                "warehouse": "file:///tmp/iceberg-rest-wh",
-            },
+            schema="default",
+            warehouse=str(path),
+            extra={"catalog_type": "filesystem"},
         )
     if engine == "elasticsearch":
         if not _reachable("127.0.0.1", 9200):
@@ -433,6 +461,49 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             database="dataflow",
             table=table,
             connection_string="http://127.0.0.1:9200",
+        )
+    if engine == "kafka":
+        if not _reachable("127.0.0.1", 9092):
+            return "Kafka / Redpanda not reachable on 127.0.0.1:9092"
+        return EndpointConfig(
+            kind="database",
+            format="kafka",
+            host="127.0.0.1",
+            port=9092,
+            table=table,
+            extra={
+                "auto_offset_reset": "earliest",
+                "local_emulator_not_customer_tenant": True,
+            },
+        )
+    if engine == "duckdb":
+        try:
+            import duckdb  # noqa: F401
+        except ImportError:
+            return "duckdb package not installed"
+        path = root / f"{table}.duckdb"
+        return EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=str(path),
+            connection_string=f"duckdb:///{path}",
+            table=table,
+            extra={"embedded_not_motherduck": True},
+        )
+    if engine == "qdrant":
+        if not _reachable("127.0.0.1", 6333):
+            return "Qdrant not reachable on 127.0.0.1:6333"
+        return EndpointConfig(
+            kind="database",
+            format="qdrant",
+            host="127.0.0.1",
+            port=6333,
+            table=table,
+            extra={
+                "embedding_model": "hash/32",
+                "skip_chunking": True,
+                "local_emulator_not_customer_tenant": True,
+            },
         )
     return f"no live bind for unique engine {engine}"
 
@@ -468,6 +539,18 @@ def _dest_count(ep: EndpointConfig) -> int | None:
         )
     except Exception:
         return None
+
+
+def _kafka_reread(ep: EndpointConfig) -> EndpointConfig:
+    """Ephemeral consumer group so each pair re-reads from earliest.
+
+    Kafka offsets commit after dest apply (at-least-once). Reusing
+    ``dataflow-kafka-source`` would make kafka→mysql empty after kafka→pg.
+    """
+    extra = dict(ep.extra or {})
+    extra["group_id"] = f"xmat-{uuid.uuid4().hex[:12]}"
+    extra["auto_offset_reset"] = "earliest"
+    return replace(ep, extra=extra)
 
 
 def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any]]:
@@ -516,8 +599,9 @@ def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any
 def _payload_ok(source: EndpointConfig, root: Path) -> tuple[bool, str]:
     sqlite_path = root / f"rb_{uuid.uuid4().hex[:8]}.db"
     table = "payload"
+    src = _kafka_reread(source) if source.format == "kafka" else source
     req = TransferRequest(
-        source=source,
+        source=src,
         destination=EndpointConfig(
             kind="database",
             format="sqlite",
@@ -545,8 +629,9 @@ def _payload_ok(source: EndpointConfig, root: Path) -> tuple[bool, str]:
 
 
 def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
+    source = _kafka_reread(src) if src.format == "kafka" else src
     req = TransferRequest(
-        source=src,
+        source=source,
         destination=dst,
         mappings=_pair_mappings(src),
         sync_mode="full_refresh_overwrite",
@@ -707,6 +792,8 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "cdc_default": "at-least-once upsert",
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
             "elasticsearch_is_extended_when_9200_up": True,
+            "duckdb_is_embedded_not_motherduck": True,
+            "qdrant_is_local_hash_embed_not_customer_cluster": True,
             "map_ssot": "services.semantic_mapper.map_columns",
             "object_store_create_new_skips_preflight_probe": True,
             "payload_reconcile": "once per dest engine; every pair dest COUNT",

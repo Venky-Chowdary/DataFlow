@@ -211,3 +211,13 @@ def test_pgvector_all_embed_rejected_is_not_ok():
     assert result.ok is False
     assert result.rows_written == 0
     assert result.rejected_details
+
+
+def test_refuse_empty_vectorization_fails_closed_on_mapped_payload():
+    from connectors.writer_common import refuse_empty_vectorization
+
+    assert refuse_empty_vectorization(records=[], data_rows=[]) is None
+    err = refuse_empty_vectorization(records=[{"id": "1"}], data_rows=[])
+    assert err and "refuse silent 0-row success" in err
+    err = refuse_empty_vectorization(records=[], data_rows=[["1", "1000"]])
+    assert err and "refuse silent 0-row success" in err

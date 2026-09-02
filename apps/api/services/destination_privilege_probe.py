@@ -70,6 +70,12 @@ _SUPPORTED = frozenset({
     "generic_sql",
     "dynamodb",
     "amazon_dynamodb",
+    "iceberg",
+    "apache_iceberg",
+    "pinecone",
+    "milvus",
+    "qdrant",
+    "weaviate",
 })
 
 _MONGO_WRITE_ACTIONS = frozenset({
@@ -175,6 +181,8 @@ def _normalize_engine(db_type: str) -> str:
         return "redis"
     if engine in {"confluent_kafka", "amazon_msk", "redpanda"}:
         return "kafka"
+    if engine in {"apache_iceberg"}:
+        return "iceberg"
     if engine in {"opensearch", "amazon_elasticsearch", "elastic_cloud"}:
         return "elasticsearch"
     if engine in {"minio", "wasabi", "backblaze_b2", "digitalocean_spaces", "cloudflare_r2", "amazon_s3"}:
@@ -429,6 +437,29 @@ def probe_destination_privileges(
                 ssl=ssl,
                 key_prefix=tbl or sch,
                 table_exists=table_exists,
+            )
+        if engine in {
+            "iceberg",
+            "apache_iceberg",
+            "pinecone",
+            "milvus",
+            "qdrant",
+            "weaviate",
+        }:
+            return _probe_create_on_write(
+                engine,
+                host=host,
+                port=port,
+                database=database,
+                schema=sch,
+                table=tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                api_key=api_key,
+                ssl=ssl,
+                warehouse=warehouse,
+                extra=extra or {},
             )
         if engine == "kafka":
             return _probe_kafka(
@@ -1964,23 +1995,38 @@ def _probe_kafka(
     admin = KafkaAdminClient(**kwargs)
     try:
         exists = table_exists
+        listed_topics = False
         if topic:
             try:
                 topics = admin.list_topics()
                 exists = topic in set(topics or [])
+                listed_topics = True
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        else:
+            try:
+                admin.list_topics()
+                listed_topics = True
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         acls: list[dict[str, str]] = []
         describe = getattr(admin, "describe_acls", None)
         if describe is None:
+            # Local Redpanda / kafka-python without ACL APIs. list_topics already
+            # proved the cluster; create-on-produce is the desktop write path.
+            if listed_topics:
+                return _kafka_create_on_produce(
+                    "Kafka cluster listed topics; AdminClient has no describe_acls "
+                    "so CREATE/WRITE are create-on-produce (no ACL catalog)"
+                )
             return PrivilegeProbeResult(
                 can_write=None,
                 can_create_table=None,
                 status="unavailable",
                 detail=(
-                    "Kafka AdminClient has no describe_acls; cannot prove produce rights "
-                    "without writing — G2 falls back to connectivity"
+                    "Kafka AdminClient has no describe_acls and list_topics failed; "
+                    "cannot prove produce rights without writing"
                 ),
                 engine="kafka",
                 method="AdminClient",
@@ -2019,7 +2065,15 @@ def _probe_kafka(
                     raw_acls = describe()
             acls = normalize_kafka_acls(raw_acls, topic=topic)
         except Exception as exc:
-            # Managed Kafka often denies ACL describe to producers.
+            # Redpanda / kafka-python describe_acls often raises
+            # ``NoneType has no attribute resource_pattern`` even though
+            # produce works. list_topics is the measured cluster proof.
+            if listed_topics:
+                return _kafka_create_on_produce(
+                    f"Kafka ACL describe unavailable ({exc}); "
+                    "list_topics succeeded so CREATE/WRITE are create-on-produce",
+                    method="list_topics",
+                )
             return PrivilegeProbeResult(
                 can_write=None,
                 can_create_table=None,
@@ -2033,6 +2087,11 @@ def _probe_kafka(
             )
 
         if not acls:
+            if listed_topics:
+                return _kafka_create_on_produce(
+                    "Kafka returned no visible ACLs for this principal; "
+                    "list_topics succeeded so CREATE/WRITE are create-on-produce"
+                )
             return PrivilegeProbeResult(
                 can_write=None,
                 can_create_table=None,
@@ -2852,6 +2911,91 @@ def resolve_write_flags(
     can_create = bool(probe.can_create_table)
     meta["privilege_verified"] = True
     return can_write, can_create, meta
+
+
+def _kafka_create_on_produce(
+    detail: str, *, method: str = "list_topics"
+) -> PrivilegeProbeResult:
+    """Local Redpanda / ACL-blind clusters: produce creates the topic."""
+    return PrivilegeProbeResult(
+        can_write=True,
+        can_create_table=True,
+        status="ok",
+        detail=detail,
+        engine="kafka",
+        method=method,
+    )
+
+
+def _probe_create_on_write(
+    engine: str,
+    *,
+    host: str,
+    port: int,
+    database: str,
+    schema: str,
+    table: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    api_key: str,
+    ssl: bool,
+    warehouse: str,
+    extra: dict[str, Any],
+) -> PrivilegeProbeResult:
+    """Dest-only / lakehouse engines have no SQL GRANT catalog.
+
+    Connectivity via the same ``test_*`` the writer uses, plus create-on-first-
+    write (Iceberg CoW, vector upsert, collection create). That is the measured
+    privilege — not an invented INSERT grant.
+    """
+    from src.transfer.connector_registry import run_probe
+
+    cfg: dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "database": database or warehouse,
+        "schema": schema,
+        "table": table or "dataflow_probe",
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "api_key": api_key or password,
+        "ssl": ssl,
+        "warehouse": warehouse or database,
+        **dict(extra or {}),
+    }
+    try:
+        ok, msg = run_probe(engine, cfg)
+    except Exception as exc:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=f"{engine} privilege probe failed: {exc}"[:400],
+            engine=engine,
+            method="test",
+        )
+    if not ok:
+        return PrivilegeProbeResult(
+            can_write=False,
+            can_create_table=False,
+            status="denied",
+            detail=msg or f"{engine} not reachable",
+            engine=engine,
+            method="test",
+        )
+    return PrivilegeProbeResult(
+        can_write=True,
+        can_create_table=True,
+        status="ok",
+        detail=(
+            f"{engine} reachable; create-on-first-write "
+            f"(no SQL privilege catalog) — {msg}"
+        )[:400],
+        engine=engine,
+        method="connectivity+create_on_write",
+    )
 
 
 def _probe_sftp(

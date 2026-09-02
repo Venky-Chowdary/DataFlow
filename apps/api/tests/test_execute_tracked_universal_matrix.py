@@ -62,6 +62,9 @@ def _oracle_sku_password() -> str:
     from services.desktop_lab_cross import _oracle_password
 
     return _oracle_password()
+
+
+RECORDS = [{"id": "1", "amount": "1000.00"}, {"id": "2", "amount": "2000.50"}]
 COLUMNS = ["id", "amount"]
 SCHEMA = {"id": "INTEGER", "amount": "DECIMAL"}
 MAPPINGS = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
@@ -289,6 +292,12 @@ def _build_db_endpoint(
             "stripe": "customers",
             "rest_api": "records",
         }[driver]
+        extra = {"local_stub_not_customer_org": True}
+        if driver == "rest_api":
+            # Stub answers the whole collection in one GET. Default offset paging
+            # still works; ``none`` makes uniqueness publish an authoritative
+            # total instead of "unbounded REST".
+            extra["pagination_type"] = "none"
         return EndpointConfig(
             kind="database",
             format=driver,
@@ -298,7 +307,7 @@ def _build_db_endpoint(
             api_key="stub-token",
             table=table,
             ssl=False,
-            extra={"local_stub_not_customer_org": True},
+            extra=extra,
         )
     if driver == "pgvector":
         # Require the Postgres vector extension; homebrew PG without pgvector must skip.
@@ -350,6 +359,7 @@ def _build_db_endpoint(
             database=str(warehouse),
             table=f"t_{role}_{suffix}",
             schema="default",
+            extra={"catalog_type": "filesystem"},
         )
     if driver == "redshift":
         return EndpointConfig(
@@ -450,6 +460,32 @@ def _build_db_endpoint(
             port=8080,
             table="PaymentsWeaviate",
         ),
+        # Pinecone Local index emulator (desktop-extended). Dim 32 matches
+        # pytest ``DATAFLOW_EMBEDDING_MODEL=hash/32``. Not a customer tenant.
+        "pinecone": EndpointConfig(
+            kind="database",
+            format="pinecone",
+            host="http://127.0.0.1:5081",
+            port=5081,
+            password="pclocal",
+            api_key="pclocal",
+            connection_string="http://127.0.0.1:5081",
+            table="sku_ns",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
+        ),
+        # Milvus standalone REST (desktop-extended). Port 19530 is the
+        # documented REST v2 + gRPC mux. Not a Zilliz Cloud cluster.
+        "milvus": EndpointConfig(
+            kind="database",
+            format="milvus",
+            host="127.0.0.1",
+            port=19530,
+            username="root",
+            password="Milvus",
+            connection_string="http://127.0.0.1:19530",
+            table="payments_milvus",
+            extra={"embedding_model": "hash/32", "local_emulator_not_customer_tenant": True},
+        ),
     }
     template = _DB_TEMPLATES.get(driver) or _COMPOSE_DEFAULTS.get(driver)
     if template is None:
@@ -479,9 +515,19 @@ def _file_content(fmt: str) -> tuple[bytes, str]:
         lines = [json.dumps(r, ensure_ascii=False) for r in RECORDS]
         return ("\n".join(lines).encode(), f"data.{fmt}")
     if fmt == "parquet":
-        pd = pytest.importorskip("pandas")
+        from decimal import Decimal
+
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
         buf = BytesIO()
-        pd.DataFrame(df_data).to_parquet(buf, engine="pyarrow", index=False)
+        table = pa.table({
+            "id": pa.array([1, 2], type=pa.int64()),
+            "amount": pa.array(
+                [Decimal("1000.00"), Decimal("2000.50")],
+                type=pa.decimal128(12, 2),
+            ),
+        })
+        pq.write_table(table, buf)
         return (buf.getvalue(), "data.parquet")
     if fmt == "excel":
         pd = pytest.importorskip("pandas")

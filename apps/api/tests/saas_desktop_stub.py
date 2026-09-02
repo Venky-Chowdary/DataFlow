@@ -25,9 +25,71 @@ class _Store:
 STORE = _Store()
 
 _SAAS_FIELDS = (
-    "id", "Id", "email", "name", "Name", "description",
+    "id", "email", "name", "Name", "description",
     "amount", "code", "updated_at",
 )
+
+
+def _field_describe(col: str) -> dict[str, Any]:
+    """Typed Describe for the tabular SKU fixture — not a customer org.
+
+    ``amount`` is currency(18,2) so G19 does not treat live DECIMAL as TEXT.
+    Business ``id`` is a single ``long`` (BIGINT). A duplicate SOAP ``Id``
+    VARCHAR(18) is forbidden — Validate would stamp BIGINT while Execute
+    bound the 18-char carrier.
+    """
+    name = col
+    lower = col.lower()
+    if lower == "amount":
+        ftype, precision, scale, length = "currency", 18, 2, None
+    elif lower == "id":
+        # Tabular SKU identity — long so Validate sample BIGINT and Describe agree.
+        ftype, precision, scale, length = "long", None, None, None
+    else:
+        ftype, precision, scale, length = "string", None, None, 255
+    return {
+        "name": name,
+        "type": ftype,
+        "nillable": lower not in {"id"},
+        "length": length,
+        "precision": precision,
+        "scale": scale,
+        "updateable": True,
+        "createable": True,
+        "externalId": lower == "id",
+        "idLookup": lower == "id",
+    }
+
+
+def _hubspot_property(col: str) -> dict[str, Any]:
+    lower = col.lower()
+    if lower == "amount":
+        return {
+            "name": col,
+            "type": "number",
+            "fieldType": "number",
+            "numberDisplayHint": "currency",
+        }
+    if lower == "id":
+        return {"name": col, "type": "string", "fieldType": "text"}
+    return {"name": col, "type": "string", "fieldType": "text"}
+
+
+def _row_identity(rec: dict[str, Any]) -> str:
+    return str(rec.get("id") or rec.get("Id") or rec.get("hs_object_id") or "").strip()
+
+
+def _upsert_row(store_key: str, rec: dict[str, Any]) -> dict[str, Any]:
+    """Identity replace — overwrite must not keep leftover extra dest keys."""
+    rows = STORE.rows.setdefault(store_key, [])
+    rid = _row_identity(rec)
+    if rid:
+        for i, existing in enumerate(rows):
+            if _row_identity(existing) == rid:
+                rows[i] = rec
+                return rec
+    rows.append(rec)
+    return rec
 
 
 class SaasStubHandler(BaseHTTPRequestHandler):
@@ -58,18 +120,7 @@ class SaasStubHandler(BaseHTTPRequestHandler):
         return {key: (vals[0] if len(vals) == 1 else vals) for key, vals in parsed.items()}
 
     def _describe_fields(self, name: str) -> dict[str, Any]:
-        fields = []
-        for col in _SAAS_FIELDS:
-            fields.append({
-                "name": col,
-                "type": "string" if col.lower() != "amount" else "double",
-                "nillable": col.lower() not in {"id"},
-                "length": 255,
-                "updateable": True,
-                "createable": True,
-                "externalId": col.lower() == "id",
-                "idLookup": col.lower() == "id",
-            })
+        fields = [_field_describe(col) for col in _SAAS_FIELDS]
         return {"name": name, "fields": fields}
 
     def do_GET(self) -> None:  # noqa: N802
@@ -89,12 +140,14 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             self._json(200, {"totalSize": len(recs), "done": True, "records": recs})
             return
         if path.startswith("/crm/v3/properties/"):
-            self._json(200, {"results": [
-                {"name": col, "type": "string"} for col in _SAAS_FIELDS
-            ]})
+            self._json(200, {"results": [_hubspot_property(col) for col in _SAAS_FIELDS]})
             return
         if path.startswith("/crm/v3/objects/"):
-            self._json(200, {"results": STORE.rows.get("contacts") or []})
+            wrapped = [
+                {"id": _row_identity(r), "properties": dict(r)}
+                for r in (STORE.rows.get("contacts") or [])
+            ]
+            self._json(200, {"results": wrapped})
             return
         if path in {"/v1/account", "/v1/accounts"}:
             self._json(200, {"id": "acct_stub", "object": "account"})
@@ -115,9 +168,12 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             results = []
             for i, rec in enumerate(records):
                 rec = dict(rec)
-                rec["Id"] = rec.get("Id") or rec.get("id") or f"001STUB{i:03d}AAA"
-                STORE.rows["Account"].append(rec)
-                results.append({"id": rec["Id"], "success": True, "errors": []})
+                rec.pop("attributes", None)
+                if not rec.get("Id") and not rec.get("id"):
+                    rec["Id"] = f"001STUB{i:03d}AAA"
+                    rec["id"] = rec["Id"]
+                stored = _upsert_row("Account", rec)
+                results.append({"id": stored.get("Id") or stored.get("id"), "success": True, "errors": []})
             self._json(200, results)
             return
         if path.endswith("/batch/upsert") or path.endswith("/batch/create"):
@@ -125,16 +181,17 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             results = []
             for i, item in enumerate(inputs):
                 props = dict(item.get("properties") or {})
-                props["id"] = props.get("id") or f"hs_{i}"
-                STORE.rows["contacts"].append(props)
-                results.append({"id": props["id"], "properties": props})
+                rid = str(item.get("id") or props.get("id") or f"hs_{i}")
+                props["id"] = rid
+                stored = _upsert_row("contacts", props)
+                results.append({"id": stored["id"], "properties": stored})
             self._json(200, {"results": results, "errors": [], "status": "COMPLETE"})
             return
         if path.startswith("/v1/customers"):
             rec = dict(payload) if isinstance(payload, dict) else {}
             rec["id"] = rec.get("id") or f"cus_stub_{len(STORE.rows['customers'])}"
-            STORE.rows["customers"].append(rec)
-            self._json(200, rec)
+            stored = _upsert_row("customers", rec)
+            self._json(200, stored)
             return
         self._json(200, {"ok": True})
 
@@ -154,8 +211,8 @@ def start_saas_stub(port: int = 0) -> tuple[HTTPServer, str]:
 def seed_tabular_fixture() -> None:
     """Two id/amount rows for PRODUCTION_SKU source reads against this stub."""
     rows = [
-        {"id": "1", "Id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
-        {"id": "2", "Id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
+        {"id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
+        {"id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
     ]
     STORE.rows["Account"] = [dict(r) for r in rows]
     STORE.rows["contacts"] = [dict(r) for r in rows]

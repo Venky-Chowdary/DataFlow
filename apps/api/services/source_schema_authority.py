@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.column_case import column_type_or_none
+
 logger = logging.getLogger("datawrap.preflight")
 
 
@@ -136,7 +138,7 @@ def restamp_mapping_source_types(
     out: list[dict[str, Any]] = []
     for m in mappings or []:
         row = dict(m)
-        live = str(types.get(str(row.get("source") or "")) or "").strip()
+        live = str(column_type_or_none(types, str(row.get("source") or "")) or "").strip()
         if live:
             row["source_type"] = live
         out.append(row)

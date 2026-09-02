@@ -25,6 +25,37 @@ from preflight.risk_contract import (
 GateFn = Callable[[PreflightContext], GateResult]
 
 
+def _row_cell(row: Any, name: str, default: Any = "") -> Any:
+    """Read ``name`` from a sample row, folding Oracle/Snowflake/DB2 keys.
+
+    Peek headers are ``AMOUNT`` while Map source is ``amount``. ``row.get``
+    then looks like an empty cell and G8 reports EMPTY_VALUE_NOT_NULLABLE.
+    """
+    if not isinstance(row, dict) or not name:
+        return default
+    try:
+        from services.column_case import lookup_row_value
+
+        return lookup_row_value(row, name, default)
+    except Exception:
+        return row.get(name, default)
+
+
+def _source_column(ctx: PreflightContext, name: str) -> Any:
+    cols = list(getattr(ctx.plan.source, "columns", None) or [])
+    key = str(name or "")
+    for col in cols:
+        if str(getattr(col, "name", "") or "") == key:
+            return col
+    folded = key.casefold()
+    hits = [
+        col
+        for col in cols
+        if str(getattr(col, "name", "") or "").casefold() == folded
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _risk_cleared(m: Any) -> bool:
     """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
     return mapping_risk_cleared(m)
@@ -534,7 +565,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if _is_intentional_omit_mapping(m) or not m.target:
             continue
         target = dest_by_name.get(m.target.lower())
-        source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
+        source_col = _source_column(ctx, m.source)
         if not source_col:
             continue
         # Create-new / empty dest / ADD column: still enforce stamped target_type.
@@ -1221,7 +1252,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         target = dest_by_name.get(str(m.target).lower())
         if not target or target.nullable:
             continue
-        source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
+        source_col = _source_column(ctx, m.source)
         src_nullable = True if source_col is None else bool(source_col.nullable)
         # STOP_COLUMN / CAST+COERCE invent NULL into the primary table — refuse on
         # NOT NULL destinations even when samples look clean (Validate≠write gap).
@@ -1251,7 +1282,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         for row in sample_rows[:200]:
             if not isinstance(row, dict):
                 continue
-            val = row.get(m.source)
+            val = _row_cell(row, m.source, None)
             if _sample_is_sql_null_for_not_null(val, target.inferred_type):
                 null_samples += 1
         if null_samples:
@@ -2240,7 +2271,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for m in ctx.plan.mappings:
             if _is_intentional_omit_mapping(m) or not m.target:
                 continue
-            raw = row.get(m.source, "")
+            raw = _row_cell(row, m.source, "")
             raw_s = _serialize_for_write(raw)
             if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:
                 mapped[m.target] = None
@@ -2492,7 +2523,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # (same as mapped_rows) — never Python repr. Identity transforms must
                 # not strip whitespace (that false-failed Mongo long-text samples).
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
-                    raw = row.get(m.source, "")
+                    raw = _row_cell(row, m.source, "")
                     got = mapped.get(m.target)
                     ddl = ""
                     try:

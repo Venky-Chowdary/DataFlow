@@ -62,6 +62,21 @@ _MONGO_OBJECT_ID_OMISSION = {
     "confidence": 0.0,
     "intentional_omit": True,
 }
+# Local SaaS stub returns extra catalog fields. G13: omit, never drop silently.
+_STUB_SOURCE_OMITS = {
+    "stripe": (
+        {"source": "object", "target": "", "confidence": 1.0, "intentional_omit": True},
+        {"source": "email", "target": "", "confidence": 1.0, "intentional_omit": True},
+    ),
+    "salesforce": (
+        {"source": "Name", "target": "", "confidence": 1.0, "intentional_omit": True},
+        {"source": "email", "target": "", "confidence": 1.0, "intentional_omit": True},
+    ),
+    "hubspot": (
+        {"source": "Name", "target": "", "confidence": 1.0, "intentional_omit": True},
+        {"source": "email", "target": "", "confidence": 1.0, "intentional_omit": True},
+    ),
+}
 
 
 @pytest.mark.parametrize(
@@ -115,6 +130,8 @@ def test_production_sku_transfer(
     mappings = list(SKU_MAPPINGS_MONGODB if dst_fmt == "mongodb" else SKU_MAPPINGS)
     if src_fmt == "mongodb":
         mappings.append(dict(_MONGO_OBJECT_ID_OMISSION))
+    for omit in _STUB_SOURCE_OMITS.get(src_fmt, ()):
+        mappings.append(dict(omit))
     request = TransferRequest(
         source=source,
         destination=destination,

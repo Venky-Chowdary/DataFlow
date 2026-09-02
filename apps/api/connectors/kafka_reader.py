@@ -3,9 +3,10 @@
 Honest scope: Debezium JSON envelopes (``op`` + ``before``/``after``) and plain
 JSON object records. Requires ``kafka-python``.
 
-Durable offsets use the consumer group with **commit-after-apply**: offsets from
-batch N are committed only when batch N+1 starts (or via ``commit_kafka_offsets``
-after the final checkpoint). Crash mid-write redelivers — at-least-once.
+Durable offsets use the consumer group with **commit-after-apply**. After dest
+apply, ``commit_kafka_offsets`` assigns the pending partitions and commits —
+subscribe-then-commit on a fresh consumer is kicked out of the group.
+Crash mid-write redelivers — at-least-once.
 """
 
 from __future__ import annotations
@@ -43,27 +44,63 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
 
 
 def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> None:
-    """Commit previously applied offsets (call after durable checkpoint)."""
+    """Commit previously applied offsets (call after durable checkpoint).
+
+    Manual ``assign`` — not subscribe. A fresh subscribed consumer has no
+    partition assignment yet; kafka-python then raises CommitFailedError
+    ("kicked out of the group") even though dest apply already succeeded.
+    Assign + commit writes the group offsets without a rebalance race.
+    At-least-once: dest apply happened first; a crash before this commit
+    redelivers.
+    """
     if not cursor:
         return
     pending = cursor.get("pending_offsets") or cursor.get("offsets")
     if not pending:
         return
-    topic_name = str(
-        cursor.get("topic")
-        or cfg.get("database")
-        or cfg.get("table")
-        or ""
-    ).strip()
-    group_id = str(cursor.get("group_id") or cfg.get("group_id") or "dataflow-kafka-source")
-    consumer = KafkaDebeziumConsumer({
-        "topic": topic_name or str((pending[0] or {}).get("topic") or "unknown"),
-        "bootstrap_servers": _bootstrap(cfg),
-        "group_id": group_id,
-        "auto_offset_reset": cfg.get("auto_offset_reset") or "earliest",
-    })
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    group_id = str(
+        cursor.get("group_id")
+        or cfg.get("group_id")
+        or extra.get("group_id")
+        or "dataflow-kafka-source"
+    )
     try:
-        consumer.commit_offsets(list(pending))
+        from kafka import KafkaConsumer, OffsetAndMetadata, TopicPartition
+    except ImportError as exc:
+        raise ImportError(
+            "kafka-python is required to commit Kafka offsets"
+        ) from exc
+
+    tps: list[Any] = []
+    tps_meta: dict[Any, Any] = {}
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        topic = str(
+            item.get("topic")
+            or cursor.get("topic")
+            or cfg.get("table")
+            or cfg.get("database")
+            or ""
+        ).strip()
+        if not topic or item.get("partition") is None or item.get("offset") is None:
+            continue
+        tp = TopicPartition(topic, int(item["partition"]))
+        tps.append(tp)
+        tps_meta[tp] = OffsetAndMetadata(int(item["offset"]), None, -1)
+    if not tps_meta:
+        return
+    consumer = KafkaConsumer(
+        bootstrap_servers=_bootstrap(cfg),
+        group_id=group_id,
+        enable_auto_commit=False,
+        consumer_timeout_ms=2000,
+        request_timeout_ms=8000,
+    )
+    try:
+        consumer.assign(tps)
+        consumer.commit(tps_meta)
     finally:
         consumer.close()
 

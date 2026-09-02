@@ -89,6 +89,43 @@ def _operator_visible_objects(names, type_label: str) -> list[dict]:
     return out
 
 
+def _attach_create_on_write_dest(
+    out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
+) -> dict:
+    """Measure dest-only engines: reachable, object missing ⇒ create-new."""
+    from .connector_registry import run_probe
+
+    ok, msg = run_probe(fmt, cfg)
+    out["connected"] = bool(ok)
+    out["message"] = msg
+    if not ok:
+        return out
+    name = endpoint.table or endpoint.collection or ""
+    exists = False
+    if fmt in {"iceberg", "apache_iceberg"} and name:
+        try:
+            from connectors.iceberg_writer import _resolve_iceberg_table_dir
+
+            table_dir = _resolve_iceberg_table_dir(
+                cfg, name, endpoint.schema or cfg.get("schema")
+            )
+            meta = table_dir / "metadata"
+            exists = meta.is_dir() and any(meta.glob("v*.metadata.json"))
+        except Exception:
+            exists = False
+    out["table_exists"] = bool(exists)
+    if not exists and name:
+        out["auto_create"] = list(out.get("auto_create") or []) + [
+            f"Create `{name}` on first write"
+        ]
+        out["message"] = (
+            f"{msg} — `{name}` will be created on first write"
+            if msg
+            else f"`{name}` will be created on first write"
+        )
+    return out
+
+
 def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
     """One metadata session for dest+table. Connect failure is not create-new."""
     _attach_db_sample(out, endpoint)
@@ -152,6 +189,20 @@ def introspect_endpoint(
     resolved_fmt = cfg.get("type") or endpoint.format
     fmt = (resolved_fmt or "").lower()
     out["format"] = resolved_fmt
+
+    # Dest-only / lakehouse: no information_schema. Connectivity + missing
+    # object is create-on-first-write, not table_exists=None (that blocked G2
+    # and overwrite DDL even when the writer could create the object).
+    if fmt in {
+        "iceberg",
+        "apache_iceberg",
+        "kafka",
+        "pinecone",
+        "milvus",
+        "qdrant",
+        "weaviate",
+    }:
+        return _attach_create_on_write_dest(out, endpoint, cfg, fmt)
 
     # pgvector is an extension, not a separate engine: the destination is an
     # ordinary PostgreSQL table with a vector column, reached through the same

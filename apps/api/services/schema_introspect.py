@@ -448,6 +448,17 @@ def _introspect_schema(
             username=username,
             password=password,
         )
+    if db_type == "qdrant":
+        return _introspect_qdrant(
+            host=host,
+            port=port,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            username=username,
+            password=password,
+            ssl=ssl,
+        )
     if db_type in ("s3", "amazon_s3"):
         return _introspect_object_store("s3", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
@@ -4596,10 +4607,13 @@ def _kafka_value_to_logical(value: Any) -> str:
         try:
             from services.schema_inference import infer_column
 
-            inferred = str(infer_column([value], field_name="")["logical_type"])
-            return "TEXT" if inferred == "VARCHAR" else inferred
+            inferred = str(infer_column([value], field_name="")["logical_type"] or "")
+            # A JSON string is not a LOB. Collapsing VARCHAR → TEXT made
+            # Validate fingerprint TEXT (pass-through) while Execute
+            # rematerialized LOGICAL_TEXT → MySQL LONGTEXT / Oracle CLOB.
+            return inferred or "VARCHAR"
         except Exception:
-            return "TEXT"
+            return "VARCHAR"
     return "TEXT"
 
 
@@ -4659,3 +4673,84 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     if warning:
         out["warning"] = warning
     return out
+
+
+def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
+    """Infer Qdrant payload fields from payload_schema and a bounded scroll.
+
+    Embeddings stay out of the catalog. Missing collection is create-new
+    (empty columns, ok) so dest preflight does not invent a 404 as a schema.
+    """
+    collection = str(kwargs.get("table") or kwargs.get("database") or "").strip()
+    cfg = {
+        "host": kwargs.get("host") or "localhost",
+        "port": int(kwargs.get("port") or 6333),
+        "username": kwargs.get("username") or "",
+        "password": kwargs.get("password") or "",
+        "connection_string": kwargs.get("connection_string") or "",
+        "ssl": bool(kwargs.get("ssl", False)),
+    }
+    if not collection:
+        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+    try:
+        from connectors.qdrant_reader import QDRANT_OMIT_PAYLOAD_KEYS, read_points_batch
+        from connectors.qdrant_writer import _qdrant_live_payload_types, qdrant_rest
+        from services.schema_inference import infer_column
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
+    session, base_url, headers = qdrant_rest(cfg)
+    exists = session.get(
+        f"{base_url}/collections/{collection}", headers=headers, timeout=10
+    )
+    if exists.status_code == 404:
+        return {"ok": True, "columns": [], "tables": [collection], "schema": collection}
+    if exists.status_code != 200:
+        return {
+            "ok": False,
+            "error": f"Qdrant collection probe failed: {exists.status_code}",
+            "columns": [],
+            "tables": [collection],
+        }
+    try:
+        info = exists.json()
+    except Exception:
+        info = {}
+    declared = _qdrant_live_payload_types(info if isinstance(info, dict) else None)
+    try:
+        batch, _nxt = read_points_batch(
+            cfg=cfg, collection=collection, limit=50, qdrant_offset=None
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": [collection]}
+
+    samples: dict[str, list[str]] = {h: [] for h in (batch.headers or [])}
+    for row in batch.rows or []:
+        for i, h in enumerate(batch.headers or []):
+            if i < len(row) and row[i] is not None:
+                samples.setdefault(h, []).append(str(row[i]))
+    names = list(batch.headers or [])
+    for name in declared:
+        if name and name not in names and name not in QDRANT_OMIT_PAYLOAD_KEYS:
+            names.append(name)
+    columns: list[dict[str, Any]] = []
+    for name in names:
+        if name in QDRANT_OMIT_PAYLOAD_KEYS:
+            continue
+        carrier = str(declared.get(name) or "").strip()
+        if not carrier:
+            inferred = infer_column(samples.get(name) or [], field_name=name)
+            carrier = str(
+                (inferred.get("logical_type") if isinstance(inferred, dict) else inferred)
+                or "TEXT"
+            )
+        columns.append(
+            {
+                "name": name,
+                "inferred_type": carrier,
+                "nullable": True,
+                "data_type": carrier,
+                "source": "qdrant_payload",
+            }
+        )
+    return {"ok": True, "columns": columns, "tables": [collection], "schema": collection}
