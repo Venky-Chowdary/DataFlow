@@ -168,7 +168,7 @@ def test_live_mysql_to_mysql_fifo_escapes_and_nulls(monkeypatch):
         assert result.source_snapshot.get("copy_split") == "load_data_fifo"
         with my.cursor() as cur:
             cur.execute(f"SELECT id, label FROM `{dest}` ORDER BY id")
-            assert cur.fetchall() == rows
+            assert list(cur.fetchall()) == rows
     finally:
         with my.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{src}`")
@@ -196,6 +196,7 @@ def test_live_mysql_to_mysql_resume_skips_complete_range(monkeypatch):
             cur.execute(
                 f"CREATE TABLE `{src}` (id bigint PRIMARY KEY, label varchar(32))"
             )
+            cur.execute("SET SESSION cte_max_recursion_depth = 10000")
             cur.execute(
                 f"""
                 INSERT INTO `{src}` (id, label)
