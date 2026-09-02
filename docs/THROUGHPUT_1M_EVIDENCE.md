@@ -128,6 +128,32 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 | Elapsed | **1.172 s** (range COUNTs only — not a copy-speed figure) |
 | Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_resume_skip_proof.json` |
 
+### Named 1M fixture — MySQL→PostgreSQL COPY FROM STDIN (2026-09-02)
+
+Identity reverse of the PG→MySQL pipe. One InnoDB consistent snapshot.
+Unbuffered SELECT → FIFO TSV (canonical PG COPY text encoder) →
+`COPY FROM STDIN`. `load_method=copy_text_mysql_to_pg_stdin`. Python still
+formats TSV (MySQL has no `COPY TO STDOUT`); it does not run transform /
+quarantine / fingerprint. Parallel MySQL reads are not used.
+
+Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/bench_mysql_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`) |
+| Destination | PostgreSQL **5432** `bench_pg_from_mysql` |
+| Rows | **1,000,000** |
+| Elapsed | **12.566 s** |
+| rows/s | **79,581** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Spot-check | `EMP0000001` / `EMP0500000` / `EMP1000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/mysql_pg_1000000_proof.json` |
+
+~13× the 170.3 s row path. Slower than PG→MySQL ctid COPY because TSV is
+encoded in Python. Quality held: dest COUNT + per-range COUNT.
+
 ### 200M named fixture — not run on this host
 
 10M source is **1.4 GB** on disk. 200M projects to **~28 GB** source plus
