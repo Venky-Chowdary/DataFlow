@@ -59,6 +59,8 @@ REPORTED_SUMMARY_KEYS = (
     "target_rows_before",
     "load_method",
     "copy_workers",
+    "copy_partitions",
+    "partitions_skipped",
     "shard_mode",
     "partition_proof",
     "proof_scope",
@@ -106,23 +108,29 @@ def seed_source(pg: dict[str, Any], table: str, rows: int) -> None:
         # Keep 7-digit ids for the named 1M fixture. Wider pads at 10M+ keep
         # VARCHAR PK order aligned with the integer series for even PK shards.
         pad = max(7, len(str(int(rows))))
-        cur.execute(
-            f"""
-            INSERT INTO "{table}"
-            SELECT
-              'EMP' || lpad(i::text, {pad}, '0'),
-              'First' || (i % 9973),
-              'Last' || (i % 7919),
-              (ARRAY['Operations','Finance','Engineering','Sales','HR'])[1 + i % 5],
-              (ARRAY['Analyst','Manager','Engineer','Director','Clerk'])[1 + i % 5],
-              22 + (i % 39),
-              30000 + (i % 90000),
-              DATE '2005-01-01' + (i % 7000),
-              (ARRAY['Active','Inactive','Leave'])[1 + i % 3],
-              (ARRAY['Mumbai','Pune','Delhi','Bengaluru','Hyderabad'])[1 + i % 5]
-            FROM generate_series(1, {int(rows)}) AS s(i)
-            """
-        )
+        chunk = 10_000_000
+        inserted = 0
+        for start in range(1, int(rows) + 1, chunk):
+            end = min(start + chunk - 1, int(rows))
+            cur.execute(
+                f"""
+                INSERT INTO "{table}"
+                SELECT
+                  'EMP' || lpad(i::text, {pad}, '0'),
+                  'First' || (i % 9973),
+                  'Last' || (i % 7919),
+                  (ARRAY['Operations','Finance','Engineering','Sales','HR'])[1 + i % 5],
+                  (ARRAY['Analyst','Manager','Engineer','Director','Clerk'])[1 + i % 5],
+                  22 + (i % 39),
+                  30000 + (i % 90000),
+                  DATE '2005-01-01' + (i % 7000),
+                  (ARRAY['Active','Inactive','Leave'])[1 + i % 3],
+                  (ARRAY['Mumbai','Pune','Delhi','Bengaluru','Hyderabad'])[1 + i % 5]
+                FROM generate_series({start}, {end}) AS s(i)
+                """
+            )
+            inserted = end
+            print(f"seed: {inserted}/{rows} rows")
         print(f"seed: inserted {rows} rows in {time.monotonic() - started:.1f}s")
     conn.close()
 
@@ -320,6 +328,8 @@ def run_pg_mysql_volume(
         "partition_proof": summary.get("partition_proof"),
         "proof_scope": summary.get("proof_scope"),
         "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
         "rows_requested": rows,
         "rows_transferred": transferred,
         "elapsed_seconds": round(elapsed, 3),
