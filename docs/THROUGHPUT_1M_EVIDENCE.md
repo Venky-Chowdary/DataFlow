@@ -17,6 +17,10 @@ BENCH_ROWS=1000000 BENCH_DEST=bench_ss_from_pg \\
   python scripts/bench_pg_to_sqlserver_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_pg BENCH_DEST=bench_pg_from_ss \\
   python scripts/bench_sqlserver_to_pg_million.py
+BENCH_ROWS=1000000 BENCH_DEST=BENCH_PG_ORA \\
+  python scripts/bench_pg_to_oracle_million.py
+BENCH_ROWS=1000000 BENCH_SRC=BENCH_PG_ORA BENCH_DEST=bench_pg_from_ora \\
+  python scripts/bench_oracle_to_pg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -481,6 +485,117 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 752k rows/s from skip-all. Pytest: `test_sqlserver_pg_copy`
 **7 passed / 0 failed**; with PG→SQL Server / SQL Server / MySQL / Oracle
 copy tests **33 passed / 0 failed**.
+
+### Named 1M fixture — PostgreSQL→Oracle COPY text + executemany (2026-09-02)
+
+Cross-engine identity on the **same 10-col employee fixture** as PG→MySQL
+(`bench_emp_1000000`). PostgreSQL `COPY (SELECT …) TO STDOUT` text is
+decoded and bound with serial `oracledb.executemany`. Dest `COUNT(*)`
+plus per-PK-range dest COUNT is the proof.
+
+This is **not** SQL*Loader and **not** Data Pump. This host has no client
+`sqlldr` / `impdp`. Oracle VARCHAR2 stores `''` as NULL (engine law).
+Live 3-row fixture: PG NULL / `''` / `'x'` land as Oracle NULL / NULL /
+`x`, and `empty_string_as_null_cells >= 1`
+(`test_live_pg_oracle_empty_string_becomes_null`). Rows are not dropped.
+
+Empty dest COPYs the table once (`copy_split=serial`). Occupied dest with
+a mapped single PK skips complete ranges and DELETE+reloads partial ones.
+
+Reproduce: `BENCH_DEST=BENCH_PG_ORA python scripts/bench_pg_to_oracle_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | PostgreSQL **5432** (`bench_emp_1000000`, 10 columns, PK `employee_id`) |
+| Destination | Oracle **1521** `XEPDB1`, create-new `BENCH_PG_ORA` |
+| Rows | **1,000,000** |
+| Elapsed | **53.181 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `empty_string_as_null_cells` | **0** (this fixture has no empty strings) |
+| `load_method` | `copy_text_pg_to_oracle_executemany` |
+| `copy_split` | `serial` |
+| `copy_workers` | **1** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/pg_oracle_1000000_proof.json` |
+
+Slower than PG→SQL Server **13.335 s** on the same 10-col fixture because
+this path is array INSERT, not native bulk (`sqlldr` is absent). Quality
+held: dest COUNT 1,000,000. Empty string is NULL on VARCHAR2 and is
+surfaced, not hidden.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_pg_oracle_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.577 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_oracle_1000000_resume_skip_proof.json` |
+
+Do not quote 1.73M rows/s from skip-all. Pytest: `test_pg_oracle_copy`
+**7 passed / 0 failed**.
+
+### Named 1M fixture — Oracle→PostgreSQL SELECT + COPY FROM STDIN (2026-09-02)
+
+Reverse of PG→Oracle on the **same 10-col employee data** now sitting on
+Oracle (`BENCH_PG_ORA`). `LOCK TABLE src IN SHARE MODE` `SELECT` is
+encoded as PostgreSQL COPY text and loaded with `COPY FROM STDIN` on one
+thread. Dest `COUNT(*)` plus per-PK-range dest COUNT is the proof.
+
+Oracle VARCHAR2 empty string is already NULL at the source, so COPY
+emits `\\N`. That is engine law, not a row drop
+(`test_live_oracle_pg_varchar2_empty_is_null`).
+
+Reproduce: `BENCH_SRC=BENCH_PG_ORA BENCH_DEST=bench_pg_from_ora python scripts/bench_oracle_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Oracle **1521** `XEPDB1` (`BENCH_PG_ORA`, 10 columns, PK `employee_id`) |
+| Destination | PostgreSQL **5432**, create-new `bench_pg_from_ora` |
+| Rows | **1,000,000** |
+| Elapsed | **4.278 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_oracle_copy_from_stdin_pg` |
+| `copy_split` | `serial` |
+| `oracle_lock` | `share` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/oracle_pg_1000000_proof.json` |
+
+Faster than PG→Oracle **53.181 s** on the same 10-col population because
+PostgreSQL `COPY FROM STDIN` is native bulk. Comparable to SQL Server→PG
+**5.681 s** and MySQL→PG **7.605 s**. Quality held: dest COUNT 1,000,000.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_oracle_pg_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **1.041 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/oracle_pg_1000000_resume_skip_proof.json` |
+
+Do not quote 960k rows/s from skip-all. Pytest: `test_oracle_pg_copy`
+**7 passed / 0 failed**; combined identity-copy matrix
+(`test_pg_oracle_copy` + `test_oracle_pg_copy` + SQL Server / MySQL /
+Oracle / PG copy tests) **52 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
