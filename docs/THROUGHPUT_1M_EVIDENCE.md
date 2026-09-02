@@ -13,6 +13,8 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_ss_1000000 BENCH_DEST=bench_ss_clone \\
   python scripts/bench_sqlserver_sqlserver_million.py
 BENCH_ROWS=1000000 BENCH_SRC=BENCH_ORA_1000000 BENCH_DEST=BENCH_ORA_CLONE \\
   python scripts/bench_oracle_oracle_million.py
+BENCH_ROWS=1000000 BENCH_DEST=bench_ss_from_pg \\
+  python scripts/bench_pg_to_sqlserver_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -367,6 +369,65 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 6.4M rows/s from skip-all. Pytest: `test_oracle_oracle_copy`
 **7 passed / 0 failed**.
+
+### Named 1M fixture — PostgreSQL→SQL Server COPY text + fast_executemany (2026-09-02)
+
+Cross-engine identity on the **same 10-col employee fixture** as PG→MySQL
+(`bench_emp_1000000`). PostgreSQL `COPY (SELECT …) TO STDOUT` text is
+decoded (whole-field `\N` is NULL; empty string stays empty string) and
+bound with serial pyodbc `fast_executemany`. Dest `COUNT(*)` plus per-PK-range
+dest COUNT is the proof.
+
+This is **not** BCP and **not** `BULK INSERT FORMAT='CSV'`. This host has
+no client `bcp`; Linux SQL Server rejects `CODEPAGE`; CSV bulk collapses
+quoted empty string `""` to NULL. Live 3-row fixture: NULL / `''` / `'x'`
+land as NULL / empty string / `x` (`test_live_pg_sqlserver_empty_string_is_not_null`).
+
+Empty dest COPYs the table once (`copy_split=serial`) — no parallel INSERT
+into a PK dest. Occupied dest with a mapped single PK skips complete ranges
+and DELETE+reloads partial ones.
+
+Reproduce: `BENCH_DEST=bench_ss_from_pg python scripts/bench_pg_to_sqlserver_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | PostgreSQL **5432** (`bench_emp_1000000`, 10 columns, PK `employee_id`) |
+| Destination | SQL Server **1433**, create-new `bench_ss_from_pg` |
+| Rows | **1,000,000** |
+| Elapsed | **13.335 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `copy_text_pg_to_sqlserver_fast_executemany` |
+| `copy_split` | `serial` |
+| `copy_workers` | **1** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/pg_sqlserver_1000000_proof.json` |
+
+Slower than PG→MySQL FIFO+ctid **3.480 s** on the same 10-col fixture
+because this path decodes COPY text in Python and INSERTs — LOAD DATA /
+BCP are not available without silent empty-string loss. Quality held:
+dest COUNT 1,000,000, empty string ≠ NULL.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_pg_sqlserver_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.862 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_sqlserver_1000000_resume_skip_proof.json` |
+
+Do not quote 1.16M rows/s from skip-all. Pytest: `test_pg_sqlserver_copy`
+**7 passed / 0 failed**; with SQL Server / MySQL / Oracle copy tests
+**26 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
