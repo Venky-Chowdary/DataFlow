@@ -36,8 +36,9 @@ def _try_copy_fast_path(
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Move the whole table server-to-server, or return ``None`` to stream rows.
 
-    PostgreSQL→PostgreSQL: binary COPY when types are identical and the sync
-    replaces the destination.
+    PostgreSQL→PostgreSQL: binary COPY when types are identical. Append and
+    overwrite both qualify; a non-empty destination on append stays on the
+    row path. Proof is the mapped-column digest plus dest ``COUNT(*)``.
 
     PostgreSQL→MySQL identity append/overwrite: text COPY + STRICT
     ``LOAD DATA LOCAL INFILE`` when every mapping is a no-op carry and every
@@ -135,7 +136,9 @@ def _try_copy_fast_path(
             return mysql_mysql
         return None
 
-    if not is_overwrite_sync(effective_sync):
+    if not (
+        is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)
+    ):
         return None
 
     from services.engine_checksum import comparable_column_pairs, engines_comparable
@@ -189,7 +192,7 @@ def _try_copy_fast_path(
             dest_schema=destination.schema or "public",
             dest_table=dest_table,
             pairs=pairs,
-            replace_destination=True,
+            replace_destination=is_overwrite_sync(effective_sync),
         )
     except FastPathUnavailable as exc:
         logger.info("COPY fast path declined: %s", exc)
@@ -211,6 +214,8 @@ def _try_copy_fast_path(
         "source_row_count_source": "engine_population_in_snapshot",
         "engine_source_checksum": result.source_checksum,
         "engine_target_checksum": result.target_checksum,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
         "sync_mode": effective_sync,
         # The digest is only comparable because it was read in the same snapshot
         # as the rows, so the snapshot claim travels with the result.
@@ -218,12 +223,15 @@ def _try_copy_fast_path(
         # Secondary indexes reproduced after the load — carried, not dropped, so
         # the destination enforces the same rules and reads at the same cost.
         "indexes_carried": list(result.indexes_carried or ()),
+        "copy_split": (result.source_snapshot or {}).get("copy_split") or "binary",
+        "shard_mode": (result.source_snapshot or {}).get("shard_mode") or "serial",
         "proof_scope": result.proof_scope,
     }
     ddl_log = [
         f"COPY {source_table} → {dest_table} "
         f"({result.source_rows:,} rows, binary, server-to-server)",
-        "Gate-8: mapped-column population checksum inside the source snapshot.",
+        "Proof: mapped-column checksum inside the source snapshot; "
+        "destination COUNT(*) equals that snapshot.",
     ]
     if result.indexes_carried:
         ddl_log.append(

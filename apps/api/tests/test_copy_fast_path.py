@@ -293,11 +293,54 @@ def test_replace_destination_false_appends(pg):
     try:
         tables.insert("INSERT INTO {src} VALUES (1, 'a')")
         assert _copy(tables, [("id", "id"), ("note", "note")]).verified
-        # Appending means the destination no longer matches the source snapshot,
-        # so the verdict must say so rather than report a clean load.
-        with pytest.raises(ValueError, match="does not match the source snapshot"):
+        # Occupied dest is not a second COPY — that would duplicate then fail
+        # the digest. Decline so the row path (quarantine) owns the case.
+        with pytest.raises(FastPathUnavailable, match="non-empty"):
             _copy(
                 tables, [("id", "id"), ("note", "note")], replace_destination=False
+            )
+        assert tables.count(tables.dst) == 1
+    finally:
+        tables.drop()
+
+
+def test_append_creates_missing_dest_and_counts(pg):
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a')")
+        tables.insert("INSERT INTO {src} VALUES (2, 'b')")
+        result = _copy(
+            tables, [("id", "id"), ("note", "note")], replace_destination=False
+        )
+        assert result.verified
+        assert result.target_rows == 2
+        assert tables.count(tables.dst) == 2
+        assert result.source_snapshot.get("copy_split") == "binary"
+    finally:
+        tables.drop()
+
+
+def test_refuses_copy_onto_the_same_table(pg):
+    from services.copy_fast_path import postgres_same_relation
+
+    assert postgres_same_relation(
+        CFG, CFG, "public", "t", "public", "t"
+    ) is True
+    assert postgres_same_relation(
+        CFG, {**CFG, "port": 5433}, "public", "t", "public", "t"
+    ) is False
+    tables = _Tables(pg, "id bigint")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1)")
+        with pytest.raises(FastPathUnavailable, match="same PostgreSQL table"):
+            copy_between_postgres(
+                source_cfg=CFG,
+                source_schema="public",
+                source_table=tables.src,
+                dest_cfg=CFG,
+                dest_schema="public",
+                dest_table=tables.src,
+                pairs=[("id", "id")],
             )
     finally:
         tables.drop()

@@ -52,6 +52,8 @@ REPORTED_SUMMARY_KEYS = (
     "checksum",
     "checksum_mode",
     "checksum_note",
+    "engine_source_checksum",
+    "engine_target_checksum",
     "source_independently_reread",
     "rejected_rows",
     "coerced_null_rows",
@@ -775,4 +777,138 @@ def run_mysql_mysql_volume(
         for part in report.get("partition_proof") or []:
             if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
                 raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
+def run_pg_pg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity PostgreSQL→PostgreSQL through stream_database_transfer. Dest COUNT required."""
+    skip = skip_reason_if_unreachable()
+    if skip:
+        raise RuntimeError(skip)
+
+    pair = discover_oltp_pair()
+    assert pair is not None
+    pg, _mysql = pair
+    src_table = f"bench_emp_{rows}"
+    if src_table.lower() == dest_table.lower():
+        raise RuntimeError("PostgreSQL→PostgreSQL bench refuses copy onto the same table")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    seed_source(pg, src_table, rows)
+    if not keep_dest:
+        reset_pg_destination(pg, dest_table)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "table": src_table,
+            "schema": "public",
+        },
+    )
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "table": dest_table,
+            "schema": "public",
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-pg-pg-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = postgres_count(pg, dest_table)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "postgresql→postgresql",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest_table,
+        "pg_port": pg["port"],
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "proof_scope": summary.get("proof_scope"),
+        "engine_source_checksum": summary.get("engine_source_checksum"),
+        "engine_target_checksum": summary.get("engine_target_checksum"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} pg→pg [{sync_mode}]: {transferred} rows in {elapsed:.1f}s "
+        f"= {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        src_ck = summary.get("engine_source_checksum")
+        dst_ck = summary.get("engine_target_checksum")
+        if src_ck and dst_ck and src_ck != dst_ck:
+            raise AssertionError(f"engine checksum mismatch {src_ck} != {dst_ck}")
+        if summary.get("load_method") != "copy_binary_server_to_server":
+            raise AssertionError(
+                f"expected binary COPY, got load_method={summary.get('load_method')!r}"
+            )
     return report

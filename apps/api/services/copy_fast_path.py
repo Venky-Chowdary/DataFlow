@@ -512,6 +512,38 @@ def _stream_copy(
         raise failure[0]
 
 
+def _norm_pg_host(host: str) -> str:
+    h = (host or "").strip().lower()
+    if h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return "127.0.0.1"
+    return h
+
+
+def postgres_same_relation(
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    source_schema: str,
+    source_table: str,
+    dest_schema: str,
+    dest_table: str,
+) -> bool:
+    """True when COPY would read and write the same PostgreSQL table."""
+    src_host = _norm_pg_host(str(src_cfg.get("host") or ""))
+    dest_host = _norm_pg_host(str(dest_cfg.get("host") or ""))
+    if src_host != dest_host:
+        return False
+    if int(src_cfg.get("port") or 5432) != int(dest_cfg.get("port") or 5432):
+        return False
+    src_db = str(src_cfg.get("database") or src_cfg.get("dbname") or "").lower()
+    dest_db = str(dest_cfg.get("database") or dest_cfg.get("dbname") or "").lower()
+    if src_db and dest_db and src_db != dest_db:
+        return False
+    return (
+        (source_schema or "public").lower() == (dest_schema or "public").lower()
+        and source_table.lower() == dest_table.lower()
+    )
+
+
 def copy_between_postgres(
     *,
     source_cfg: dict[str, Any],
@@ -531,6 +563,10 @@ def copy_between_postgres(
     """
     if not pairs:
         raise FastPathUnavailable("no comparable columns")
+    if postgres_same_relation(
+        source_cfg, dest_cfg, source_schema, source_table, dest_schema, dest_table
+    ):
+        raise FastPathUnavailable("refusing COPY onto the same PostgreSQL table")
     from services.engine_checksum import postgresql_engine_checksum
 
     source_cols = [p[0] for p in pairs]
@@ -612,6 +648,13 @@ def copy_between_postgres(
                         f"cannot create destination like source: {exc}"
                     ) from exc
 
+            if not create:
+                dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+                if int(dst_cur.fetchone()[0]) > 0:
+                    raise FastPathUnavailable(
+                        "append into non-empty PostgreSQL dest stays on the row path"
+                    )
+
             source_digest = postgresql_engine_checksum(
                 src_cur, source_ref, source_cols
             )
@@ -651,7 +694,16 @@ def copy_between_postgres(
             dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
             if dest_digest is None:
                 raise FastPathUnavailable("destination digest unavailable")
+            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+            dest_count = int(dst_cur.fetchone()[0])
+            if dest_count != source_digest.row_count:
+                raise ValueError(
+                    "COPY fast path refused: dest COUNT(*) "
+                    f"{dest_count} != source snapshot {source_digest.row_count}"
+                )
 
+        snapshot["copy_split"] = "binary"
+        snapshot["shard_mode"] = "serial"
         result = FastPathResult(
             rows_copied=rows_copied,
             source_rows=source_digest.row_count,
@@ -660,6 +712,7 @@ def copy_between_postgres(
             target_checksum=dest_digest.checksum,
             source_snapshot=snapshot,
             indexes_carried=tuple(indexes_carried),
+            proof_scope="mapped_column_checksum_and_dest_count_equals_source_snapshot",
         )
         if not result.verified:
             # The destination transaction has not committed, so refusing here
