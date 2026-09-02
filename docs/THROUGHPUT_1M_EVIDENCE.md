@@ -15,6 +15,8 @@ BENCH_ROWS=1000000 BENCH_SRC=BENCH_ORA_1000000 BENCH_DEST=BENCH_ORA_CLONE \\
   python scripts/bench_oracle_oracle_million.py
 BENCH_ROWS=1000000 BENCH_DEST=bench_ss_from_pg \\
   python scripts/bench_pg_to_sqlserver_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_pg BENCH_DEST=bench_pg_from_ss \\
+  python scripts/bench_sqlserver_to_pg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -428,6 +430,57 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 1.16M rows/s from skip-all. Pytest: `test_pg_sqlserver_copy`
 **7 passed / 0 failed**; with SQL Server / MySQL / Oracle copy tests
 **26 passed / 0 failed**.
+
+### Named 1M fixture — SQL Server→PostgreSQL SELECT + COPY FROM STDIN (2026-09-02)
+
+Reverse of PG→SQL Server on the **same 10-col employee data** now sitting
+on SQL Server (`bench_ss_from_pg`). HOLDLOCK `SELECT` is encoded as
+PostgreSQL COPY text (`fast_copy_text_value`, empty string stays empty)
+and loaded with `COPY FROM STDIN` on one thread. Dest `COUNT(*)` plus
+per-PK-range dest COUNT is the proof. SNAPSHOT isolation is **off** on
+this database; the path never `ALTER DATABASE`.
+
+Reproduce: `BENCH_SRC=bench_ss_from_pg BENCH_DEST=bench_pg_from_ss python scripts/bench_sqlserver_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | SQL Server **1433** (`bench_ss_from_pg`, 10 columns, PK `employee_id`) |
+| Destination | PostgreSQL **5432**, create-new `bench_pg_from_ss` |
+| Rows | **1,000,000** |
+| Elapsed | **5.681 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_sqlserver_copy_from_stdin_pg` |
+| `copy_split` | `serial` |
+| `sqlserver_isolation` | `holdlock` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_pg_1000000_proof.json` |
+
+Faster than PG→SQL Server **13.335 s** on the same 10-col population
+because PostgreSQL `COPY FROM STDIN` is native bulk; the reverse path
+binds decoded COPY text with `fast_executemany`. Comparable to
+MySQL→PG **7.605 s**. Quality held: dest COUNT 1,000,000, empty string ≠ NULL.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_sqlserver_pg_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **1.330 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_pg_1000000_resume_skip_proof.json` |
+
+Do not quote 752k rows/s from skip-all. Pytest: `test_sqlserver_pg_copy`
+**7 passed / 0 failed**; with PG→SQL Server / SQL Server / MySQL / Oracle
+copy tests **33 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
