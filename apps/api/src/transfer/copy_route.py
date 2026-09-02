@@ -397,6 +397,7 @@ def _try_mysql_pg_copy_fast_path(
         "partitions_skipped": (result.source_snapshot or {}).get("partitions_skipped"),
         "shard_mode": (result.source_snapshot or {}).get("shard_mode"),
         "copy_split": (result.source_snapshot or {}).get("copy_split"),
+        "tsv_encoder": (result.source_snapshot or {}).get("tsv_encoder"),
         "partition_proof": list(
             (result.source_snapshot or {}).get("partition_proof") or []
         ),

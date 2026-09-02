@@ -63,6 +63,7 @@ REPORTED_SUMMARY_KEYS = (
     "partitions_skipped",
     "shard_mode",
     "copy_split",
+    "tsv_encoder",
     "partition_proof",
     "proof_scope",
 )
@@ -580,6 +581,7 @@ def run_mysql_pg_volume(
         "load_method": summary.get("load_method"),
         "shard_mode": summary.get("shard_mode"),
         "copy_split": summary.get("copy_split"),
+        "tsv_encoder": summary.get("tsv_encoder"),
         "partition_proof": summary.get("partition_proof"),
         "proof_scope": summary.get("proof_scope"),
         "copy_workers": summary.get("copy_workers"),

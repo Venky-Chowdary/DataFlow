@@ -2,9 +2,11 @@
 
 The reverse of ``copy_pg_mysql``. MySQL has no ``COPY TO STDOUT``, so one
 REPEATABLE READ transaction streams an unbuffered SELECT; each cell is encoded
-with the canonical PostgreSQL COPY text encoder (``_copy_text_value``) into a
-FIFO that ``COPY … FROM STDIN`` reads. Python never runs transform / quarantine
-/ fingerprint. Dest ``COUNT(*)`` must equal the source snapshot count.
+into PostgreSQL COPY text on a FIFO that ``COPY … FROM STDIN`` reads. The hot
+path uses a tight encoder equivalent to ``_copy_text_value`` for None / int /
+str / date / datetime / float; every other Python type falls through to the
+canonical encoder. Python never runs transform / quarantine / fingerprint.
+Dest ``COUNT(*)`` must equal the source snapshot count.
 
 A mapped single PK still proves dest ``COUNT(*)`` per key range after the
 load. Parallel MySQL reads are not used: InnoDB cannot export a snapshot id
@@ -18,6 +20,7 @@ a mapped PK.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import tempfile
@@ -133,6 +136,40 @@ def _select_sql(table_q: str, source_cols: list[str], predicate: str) -> str:
     return f"SELECT {cols} FROM {table_q}{where}"  # nosec B608
 
 
+def _escape_copy_field(text: str) -> str:
+    return (
+        text.replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def fast_copy_text_value(value: object) -> str:
+    """COPY-text for the MySQL identity hot types; else canonical encoder.
+
+    Equivalent to ``_copy_text_value`` for None, ``int``, ``str``, ``date``,
+    ``datetime``, and ``float``. Avoids the per-cell import / isinstance chain
+    and skips four ``str.replace`` calls when the string has no COPY metachars.
+    """
+    if value is None:
+        return "\\N"
+    t = type(value)
+    if t is int:
+        return str(value)
+    if t is str:
+        if "\\" not in value and "\t" not in value and "\n" not in value and "\r" not in value:
+            return value
+        return _escape_copy_field(value)
+    if t is float:
+        return str(value)
+    if t is datetime.datetime or t is datetime.date:
+        return str(value)
+    from connectors.postgresql_writer import _copy_text_value
+
+    return _copy_text_value(value)
+
+
 def _fifo_mysql_into_pg(
     source_conn: Any,
     dst_cur: Any,
@@ -141,8 +178,6 @@ def _fifo_mysql_into_pg(
     dest_ref: str,
     columns: list[str],
 ) -> None:
-    from connectors.postgresql_writer import _copy_text_value
-
     tmp = tempfile.mkdtemp(prefix="df_mysql_pg_")
     path = os.path.join(tmp, "stream.tsv")
     os.mkfifo(path, 0o600)
@@ -157,26 +192,25 @@ def _fifo_mysql_into_pg(
         try:
             from pymysql.cursors import SSCursor
 
+            encode = fast_copy_text_value
+            join = "\t".join
             conn = source_conn
             with conn.cursor(SSCursor) as stream:
                 stream.execute(select_sql)
-                with open(path, "w", encoding="utf-8", buffering=_PIPE_CHUNK, newline="") as writer:
-                    join = "\t".join
-                    encode = _copy_text_value
+                with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
                     while True:
                         batch = stream.fetchmany(_FETCH_BATCH)
                         if not batch:
                             break
-                        for row in batch:
-                            writer.write(join(encode(v) for v in row))
-                            writer.write("\n")
+                        payload = "\n".join(join(encode(v) for v in row) for row in batch)
+                        writer.write((payload + "\n").encode("utf-8"))
         except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
             failure.append(exc)
 
     pump = threading.Thread(target=_pump, name="mysql-pg-copy-fifo", daemon=True)
     pump.start()
     try:
-        with open(path, "r", encoding="utf-8", newline="") as reader:
+        with open(path, "rb", buffering=_PIPE_CHUNK) as reader:
             dst_cur.copy_expert(copy_sql, reader)
     except BaseException:
         pump.join(timeout=30)
@@ -535,6 +569,7 @@ def copy_mysql_to_postgres(
                         1 for p in partitions if p.get("action") == "skip"
                     ),
                     "shard_mode": shard_mode if partitions else "serial",
+                    "tsv_encoder": "fast_copy_text",
                     "partition_proof": partition_proof,
                 },
                 proof_scope=(
