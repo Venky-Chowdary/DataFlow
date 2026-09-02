@@ -304,6 +304,36 @@ def test_replace_destination_false_appends(pg):
         tables.drop()
 
 
+def test_pk_resume_skips_complete_and_reloads_partial(pg, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "4")
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} SELECT i, 'r' || i FROM generate_series(1, 8000) s(i)")
+        first = _copy(tables, [("id", "id"), ("note", "note")])
+        assert first.source_rows == 8000
+        parts = first.source_snapshot.get("partition_proof") or []
+        assert len(parts) == 4
+        victim = parts[2]
+        lo = victim["lo"]
+        assert lo is not None
+        with pg.cursor() as cur:
+            cur.execute(f'DELETE FROM "{tables.dst}" WHERE id = %s', (lo,))
+            cur.execute(f'SELECT COUNT(*) FROM "{tables.dst}"')
+            assert int(cur.fetchone()[0]) == 7999
+        second = _copy(
+            tables, [("id", "id"), ("note", "note")], replace_destination=False
+        )
+        assert second.source_rows == 8000
+        assert second.target_rows == 8000
+        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
+        assert actions.count("skip") == 3
+        assert actions.count("reload") == 1
+        assert second.source_snapshot.get("partitions_skipped") == 3
+        assert tables.count(tables.dst) == 8000
+    finally:
+        tables.drop()
+
+
 def test_append_creates_missing_dest_and_counts(pg):
     tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
     try:

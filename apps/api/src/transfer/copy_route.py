@@ -225,13 +225,31 @@ def _try_copy_fast_path(
         "indexes_carried": list(result.indexes_carried or ()),
         "copy_split": (result.source_snapshot or {}).get("copy_split") or "binary",
         "shard_mode": (result.source_snapshot or {}).get("shard_mode") or "serial",
+        "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
+        "partitions_skipped": (result.source_snapshot or {}).get("partitions_skipped"),
+        "partition_proof": list(
+            (result.source_snapshot or {}).get("partition_proof") or []
+        ),
         "proof_scope": result.proof_scope,
     }
+    proof_line = (
+        "Proof: mapped-column checksum inside the source snapshot; "
+        "destination COUNT(*) equals that snapshot."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+        if skipped == len(dest_summary["partition_proof"]):
+            proof_line += f" Resume skipped {skipped} complete range(s) (COUNT only)."
+        elif skipped:
+            proof_line += f" Resume skipped {skipped} complete range(s)."
     ddl_log = [
         f"COPY {source_table} → {dest_table} "
         f"({result.source_rows:,} rows, binary, server-to-server)",
-        "Proof: mapped-column checksum inside the source snapshot; "
-        "destination COUNT(*) equals that snapshot.",
+        proof_line,
     ]
     if result.indexes_carried:
         ddl_log.append(

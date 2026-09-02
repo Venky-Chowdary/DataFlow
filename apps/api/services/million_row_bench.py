@@ -872,6 +872,8 @@ def run_pg_pg_volume(
         "load_method": summary.get("load_method"),
         "shard_mode": summary.get("shard_mode"),
         "copy_split": summary.get("copy_split"),
+        "partition_proof": summary.get("partition_proof"),
+        "partitions_skipped": summary.get("partitions_skipped"),
         "proof_scope": summary.get("proof_scope"),
         "engine_source_checksum": summary.get("engine_source_checksum"),
         "engine_target_checksum": summary.get("engine_target_checksum"),
@@ -911,4 +913,7 @@ def run_pg_pg_volume(
             raise AssertionError(
                 f"expected binary COPY, got load_method={summary.get('load_method')!r}"
             )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
     return report
