@@ -6,6 +6,8 @@ Reproduce with the committed harness (no mocks, production engine):
 cd apps/api
 BENCH_ROWS=1000000 BENCH_DEST=bench_1m python scripts/bench_pg_to_mysql_million.py
 BENCH_ROWS=10000000 BENCH_DEST=bench_10m python scripts/bench_pg_to_mysql_million.py
+BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/bench_mysql_to_pg_million.py
+BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench_mysql_to_mysql_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -174,9 +176,38 @@ a COPY metachar is present; other types still use `_copy_text_value`):
 
 ~22× the 170.3 s row path; **1.65×** the prior 12.566 s encoder. Still
 slower than PG→MySQL ctid COPY because TSV is encoded in Python. Quality
-held: dest COUNT + per-range COUNT. Pytest:
-`test_mysql_pg_copy` + `test_mysql_load_data` + `test_million_row_proof`
-**24 passed / 0 failed**.
+held: dest COUNT + per-range COUNT.
+
+### Named 1M fixture — MySQL→MySQL INSERT SELECT (2026-09-02)
+
+Same-engine identity. One InnoDB consistent snapshot. Dest CREATE runs on
+a second connection so DDL does not implicit-commit the snapshot.
+`INSERT INTO dest SELECT … FROM src` on the snapshot connection.
+`load_method=insert_select_mysql_same_instance`. Python does not format
+TSV. Cross-host (or `DATAFLOW_MYSQL_MYSQL_INSERT_SELECT=0`) uses SELECT →
+FIFO TSV → STRICT `LOAD DATA LOCAL INFILE` (proven live at 4 rows with
+tab/newline/backslash/NULL; this host has one MySQL on 3306, so the named
+1M is INSERT SELECT).
+
+Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench_mysql_to_mysql_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`) |
+| Destination | MySQL **3306** `bench_mysql_clone` |
+| Rows | **1,000,000** |
+| Elapsed | **6.430 s** |
+| rows/s | **155,514** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `copy_split` | `insert_select` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Spot-check | `EMP0000001` / `EMP0500000` / `EMP1000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/mysql_mysql_1000000_proof.json` |
+
+~26× the 170.3 s row path. Dest COUNT + per-range COUNT held. Pytest:
+`test_mysql_mysql_copy` + `test_mysql_pg_copy` + `test_mysql_load_data` +
+`test_million_row_proof` **29 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
