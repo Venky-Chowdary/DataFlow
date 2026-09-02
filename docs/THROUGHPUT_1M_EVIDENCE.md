@@ -131,12 +131,16 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 ### Named 1M fixture — MySQL→PostgreSQL COPY FROM STDIN (2026-09-02)
 
 Identity reverse of the PG→MySQL pipe. One InnoDB consistent snapshot.
-Unbuffered SELECT → FIFO TSV (canonical PG COPY text encoder) →
-`COPY FROM STDIN`. `load_method=copy_text_mysql_to_pg_stdin`. Python still
-formats TSV (MySQL has no `COPY TO STDOUT`); it does not run transform /
-quarantine / fingerprint. Parallel MySQL reads are not used.
+Unbuffered SELECT → FIFO TSV → `COPY FROM STDIN`.
+`load_method=copy_text_mysql_to_pg_stdin`. Python still formats TSV (MySQL
+has no `COPY TO STDOUT`); it does not run transform / quarantine /
+fingerprint. Parallel MySQL reads are not used. `SELECT INTO OUTFILE` is
+not used: the `dataflow` user has no FILE privilege.
 
 Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/bench_mysql_to_pg_million.py`
+
+First named run used the canonical `_copy_text_value` encoder (per-cell
+import + four `str.replace` on every string):
 
 | Item | Value |
 |------|-------|
@@ -151,8 +155,28 @@ Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/ben
 | Spot-check | `EMP0000001` / `EMP0500000` / `EMP1000000` cells equal |
 | Artifact | `/opt/cursor/artifacts/mysql_pg_1000000_proof.json` |
 
-~13× the 170.3 s row path. Slower than PG→MySQL ctid COPY because TSV is
-encoded in Python. Quality held: dest COUNT + per-range COUNT.
+Re-measure with `tsv_encoder=fast_copy_text` (binary FIFO, escape only when
+a COPY metachar is present; other types still use `_copy_text_value`):
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`) |
+| Destination | PostgreSQL **5432** `bench_pg_from_mysql` |
+| Rows | **1,000,000** |
+| Elapsed | **7.605 s** |
+| rows/s | **131,484** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `tsv_encoder` | `fast_copy_text` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Spot-check | `EMP0000001` / `EMP0500000` / `EMP1000000` cells equal |
+| Artifact | `/opt/cursor/artifacts/mysql_pg_1000000_fast_tsv_proof.json` |
+
+~22× the 170.3 s row path; **1.65×** the prior 12.566 s encoder. Still
+slower than PG→MySQL ctid COPY because TSV is encoded in Python. Quality
+held: dest COUNT + per-range COUNT. Pytest:
+`test_mysql_pg_copy` + `test_mysql_load_data` + `test_million_row_proof`
+**24 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
