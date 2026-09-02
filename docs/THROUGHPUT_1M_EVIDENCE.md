@@ -87,9 +87,35 @@ Same-host progression (dest COUNT equals source on every row):
 | **FIFO + 4 PK-range shards** | **1M** | **4.241 s** | **235,786** | **1,000,000** | **4/4 match** |
 | **FIFO + 4 PK-range shards** | **10M** | **42.331 s** | **236,232** | **10,000,000** | **4/4 match** |
 
-Not an SLA. Not a 200M claim. 10M stayed linear with 1M PK-range on this
-host (~236k rows/s); disk, secondary indexes, and WAL will change that
-curve at 200M.
+Not an SLA. 10M stayed linear with 1M PK-range on this host (~236k rows/s).
+
+### Restartable PK partitions (2026-09-02)
+
+A range whose dest COUNT already equals the source snapshot is **skipped**.
+A partial range is **DELETE + LOAD**. Disjoint ranges may LOAD into a dest
+that already holds other keys. ctid shards still refuse non-empty append.
+
+Live 8_000-row integer PK: 4 partitions, delete one key in the third range,
+resume `replace_destination=False` → 3 skip + 1 reload, dest COUNT 8_000.
+Pytest: `test_live_pk_partition_resume_reloads_partial_range`.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **1.172 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_resume_skip_proof.json` |
+
+### 200M named fixture — not run on this host
+
+10M source is **1.4 GB** on disk. 200M projects to **~28 GB** source plus
+~22 GB dest. This box has **15 GiB RAM** (about 5 GiB available with the
+10M tables cached). A 200M COPY would page, not prove. The partitioned
+job (up to 32 ranges, CPU-sized waves, skip/reload) is what a larger box
+runs. Chunked seed is 10M INSERTs. Do not quote 10M × 20 as a 200M time.
 
 ## Prior: FIFO + 4 heap shards (2026-09-01)
 
@@ -246,8 +272,9 @@ per-cell CPU in transform/validate, not database I/O.
   so `PARALLEL_WORKERS` is GIL-bound. Identity PG→MySQL append now skips that
   path (COPY + STRICT LOAD DATA). Other sources, transforms, CDC, and upsert
   still use the row path.
-- Do **not** extrapolate 1M or 10M to 200M. Disk, indexes, tempfile size, and
-  dest-side secondary indexes change the curve. 200M is a partitioned job.
+- Do **not** extrapolate 1M or 10M to 200M. This host did not run 200M
+  (15 GiB RAM vs ~28 GB projected source heap). 200M is the partitioned
+  skip/reload job on a larger box.
 - Only PostgreSQL→MySQL identity append is measured here. Warehouse sources,
   CDC and upsert/MERGE routes are timed separately and are not covered by
   this artifact.
