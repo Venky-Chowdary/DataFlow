@@ -1,7 +1,8 @@
 """PostgreSQL → MySQL volume run through the production stream engine.
 
 The CLI script and pytest smoke both call ``run_pg_mysql_volume`` — one
-algorithm, dest ``COUNT(*)`` required, no invented green.
+algorithm, dest ``COUNT(*)`` required, no invented green. MySQL→PostgreSQL
+and MySQL→MySQL identity benches share the same conservation owner.
 """
 
 from __future__ import annotations
@@ -600,6 +601,162 @@ def run_mysql_pg_volume(
     }
     print(
         f"\n=== {dest_table} mysql→pg [{sync_mode}]: {transferred} rows in {elapsed:.1f}s "
+        f"= {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
+def run_mysql_mysql_volume(
+    *,
+    rows: int,
+    source_table: str,
+    dest_table: str,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→MySQL through stream_database_transfer. Dest COUNT required."""
+    skip = skip_reason_if_unreachable()
+    if skip:
+        raise RuntimeError(skip)
+
+    pair = discover_oltp_pair()
+    assert pair is not None
+    _pg, mysql = pair
+    job_store = ensure_memory_job_store_if_mongo_down()
+
+    conn = pymysql.connect(
+        host=mysql["host"],
+        port=mysql["port"],
+        user=mysql["user"],
+        password=mysql["password"],
+        database=mysql["database"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (source_table,),
+            )
+            if not cur.fetchone()[0]:
+                raise RuntimeError(
+                    f"MySQL source {source_table!r} is missing — run the PG→MySQL "
+                    "bench first so dest COUNT is a named fixture, not an invented table"
+                )
+            cur.execute(f"SELECT COUNT(*) FROM `{source_table}`")
+            have = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    if have != rows:
+        raise RuntimeError(
+            f"MySQL {source_table} has {have} rows, requested {rows}"
+        )
+    if source_table.lower() == dest_table.lower():
+        raise RuntimeError("MySQL→MySQL bench refuses copy onto the same table")
+    if not keep_dest:
+        reset_destination(mysql, dest_table)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["user"],
+            "password": mysql["password"],
+            "table": source_table,
+        },
+    )
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["user"],
+            "password": mysql["password"],
+            "table": dest_table,
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mysql-mysql-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = destination_count(mysql, dest_table)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→mysql",
+        "sync_mode": sync_mode,
+        "source_table": source_table,
+        "dest_table": dest_table,
+        "mysql_port": mysql["port"],
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} mysql→mysql [{sync_mode}]: {transferred} rows in {elapsed:.1f}s "
         f"= {rps:,.0f} rows/s"
     )
     for key in REPORTED_SUMMARY_KEYS:

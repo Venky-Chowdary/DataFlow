@@ -44,8 +44,12 @@ def _try_copy_fast_path(
     type is LOAD-DATA-safe. Proof is dest ``COUNT(*)`` vs the source snapshot.
 
     MySQL→PostgreSQL identity append/overwrite: unbuffered SELECT + FIFO TSV
-    into ``COPY FROM STDIN`` (canonical COPY text encoder). One InnoDB
-    consistent snapshot. Proof is dest ``COUNT(*)`` vs that snapshot.
+    into ``COPY FROM STDIN``. One InnoDB consistent snapshot. Proof is dest
+    ``COUNT(*)`` vs that snapshot.
+
+    MySQL→MySQL identity append/overwrite: same-instance ``INSERT SELECT``
+    under a consistent snapshot, or cross-host STRICT ``LOAD DATA LOCAL
+    INFILE``. Proof is dest ``COUNT(*)`` vs that snapshot.
 
     Returning ``None`` rather than raising is deliberate — every route this
     cannot prove belongs on the row path, which knows how to reconcile the
@@ -112,6 +116,23 @@ def _try_copy_fast_path(
         )
         if pg_fast is not None:
             return pg_fast
+        return None
+
+    if src_n in {"mysql", "mariadb"} and dest_n in {"mysql", "mariadb"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        mysql_mysql = _try_mysql_mysql_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if mysql_mysql is not None:
+            return mysql_mysql
         return None
 
     if not is_overwrite_sync(effective_sync):
@@ -411,6 +432,104 @@ def _try_mysql_pg_copy_fast_path(
     ddl_log = [
         f"COPY MySQL {source_table} → PostgreSQL {dest_table} "
         f"({result.source_rows:,} rows, SELECT + COPY FROM STDIN)",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_mysql_mysql_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity MySQL→MySQL: INSERT SELECT or STRICT LOAD DATA. Dest COUNT is the proof."""
+    from connectors.mysql_writer import mysql_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mysql_mysql import copy_mysql_to_mysql
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("MySQL→MySQL copy declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mysql_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        pairs.append((source_col, target_col))
+        mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_mysql_to_mysql(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mysql_ddls=mysql_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("MySQL→MySQL copy declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("MySQL→MySQL copy failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    split = str((result.source_snapshot or {}).get("copy_split") or "")
+    load_method = (
+        "insert_select_mysql_same_instance"
+        if split == "insert_select"
+        else "copy_text_mysql_to_mysql_load_data"
+    )
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": load_method,
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": "full_refresh_append" if not replace_destination else "full_refresh_overwrite",
+        "proof_scope": result.proof_scope,
+        "source_snapshot": dict(result.source_snapshot or {}),
+        "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
+        "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
+        "partitions_skipped": (result.source_snapshot or {}).get("partitions_skipped"),
+        "shard_mode": (result.source_snapshot or {}).get("shard_mode"),
+        "copy_split": (result.source_snapshot or {}).get("copy_split"),
+        "partition_proof": list(
+            (result.source_snapshot or {}).get("partition_proof") or []
+        ),
+    }
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+    how = (
+        "INSERT SELECT (same instance)"
+        if split == "insert_select"
+        else "SELECT + STRICT LOAD DATA"
+    )
+    ddl_log = [
+        f"COPY MySQL {source_table} → MySQL {dest_table} "
+        f"({result.source_rows:,} rows, {how})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
