@@ -432,3 +432,188 @@ def persist_volume_history(
         )
     except Exception as exc:
         print(f"load-history save_profile skipped: {exc}")
+
+
+def reset_pg_destination(pg: dict[str, Any], table: str) -> None:
+    conn = psycopg2.connect(
+        host=pg["host"],
+        port=pg["port"],
+        user=pg["user"],
+        password=pg["password"],
+        dbname=pg["dbname"],
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+    conn.close()
+
+
+def postgres_count(pg: dict[str, Any], table: str) -> int:
+    conn = psycopg2.connect(
+        host=pg["host"],
+        port=pg["port"],
+        user=pg["user"],
+        password=pg["password"],
+        dbname=pg["dbname"],
+    )
+    with conn.cursor() as cur:
+        cur.execute(f'SELECT COUNT(*) FROM public."{table}"')
+        count = int(cur.fetchone()[0])
+    conn.close()
+    return count
+
+
+def run_mysql_pg_volume(
+    *,
+    rows: int,
+    source_table: str,
+    dest_table: str,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→PostgreSQL through stream_database_transfer. Dest COUNT required."""
+    skip = skip_reason_if_unreachable()
+    if skip:
+        raise RuntimeError(skip)
+
+    pair = discover_oltp_pair()
+    assert pair is not None
+    pg, mysql = pair
+    job_store = ensure_memory_job_store_if_mongo_down()
+
+    conn = pymysql.connect(
+        host=mysql["host"],
+        port=mysql["port"],
+        user=mysql["user"],
+        password=mysql["password"],
+        database=mysql["database"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (source_table,),
+            )
+            if not cur.fetchone()[0]:
+                raise RuntimeError(
+                    f"MySQL source {source_table!r} is missing — run the PG→MySQL "
+                    "bench first so dest COUNT is a named fixture, not an invented table"
+                )
+            cur.execute(f"SELECT COUNT(*) FROM `{source_table}`")
+            have = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    if have != rows:
+        raise RuntimeError(
+            f"MySQL {source_table} has {have} rows, requested {rows}"
+        )
+    if not keep_dest:
+        reset_pg_destination(pg, dest_table)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["user"],
+            "password": mysql["password"],
+            "table": source_table,
+        },
+    )
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "table": dest_table,
+            "schema": "public",
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mysql-pg-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = postgres_count(pg, dest_table)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→postgresql",
+        "sync_mode": sync_mode,
+        "source_table": source_table,
+        "dest_table": dest_table,
+        "pg_port": pg["port"],
+        "mysql_port": mysql["port"],
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} mysql→pg [{sync_mode}]: {transferred} rows in {elapsed:.1f}s "
+        f"= {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
