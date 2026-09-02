@@ -21,6 +21,10 @@ BENCH_ROWS=1000000 BENCH_DEST=BENCH_PG_ORA \\
   python scripts/bench_pg_to_oracle_million.py
 BENCH_ROWS=1000000 BENCH_SRC=BENCH_PG_ORA BENCH_DEST=bench_pg_from_ora \\
   python scripts/bench_oracle_to_pg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=bench_ss_from_mysql \\
+  python scripts/bench_mysql_to_sqlserver_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_mysql BENCH_DEST=bench_mysql_from_ss \\
+  python scripts/bench_sqlserver_to_mysql_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -596,6 +600,112 @@ Do not quote 960k rows/s from skip-all. Pytest: `test_oracle_pg_copy`
 **7 passed / 0 failed**; combined identity-copy matrix
 (`test_pg_oracle_copy` + `test_oracle_pg_copy` + SQL Server / MySQL /
 Oracle / PG copy tests) **52 passed / 0 failed**.
+
+### Named 1M fixture — MySQL→SQL Server SELECT + fast_executemany (2026-09-02)
+
+Cross-engine identity on the **same 10-col employee fixture** now sitting
+on MySQL (`bench_1m`). InnoDB `START TRANSACTION WITH CONSISTENT SNAPSHOT`
+`SELECT` is bound with serial pyodbc `fast_executemany`. Dest `COUNT(*)`
+plus per-PK-range dest COUNT is the proof.
+
+This is **not** BCP and **not** `BULK INSERT FORMAT='CSV'`. Live 3-row
+fixture: NULL / `''` / `'x'` land as NULL / empty string / `x`.
+
+Empty dest SELECTs the table once (`copy_split=serial`). Occupied dest
+with a mapped single PK skips complete ranges and DELETE+reloads partial
+ones.
+
+Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_ss_from_mysql python scripts/bench_mysql_to_sqlserver_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`, 10 columns, PK `employee_id`) |
+| Destination | SQL Server **1433**, create-new `bench_ss_from_mysql` |
+| Rows | **1,000,000** |
+| Elapsed | **15.517 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_mysql_fast_executemany_sqlserver` |
+| `copy_split` | `serial` |
+| `copy_workers` | **1** |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/mysql_sqlserver_1000000_proof.json` |
+
+Comparable to PG→SQL Server **13.335 s** on the same 10-col population
+(same `fast_executemany` writer). Quality held: dest COUNT 1,000,000,
+empty string ≠ NULL.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_mysql_sqlserver_resume_skips_complete_range`. Occupied
+dest without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.920 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/mysql_sqlserver_1000000_resume_skip_proof.json` |
+
+Do not quote 1.09M rows/s from skip-all. Pytest: `test_mysql_sqlserver_copy`
+**6 passed / 0 failed**.
+
+### Named 1M fixture — SQL Server→MySQL SELECT + STRICT LOAD DATA (2026-09-02)
+
+Reverse of MySQL→SQL Server on the **same 10-col employee data** now
+sitting on SQL Server (`bench_ss_from_mysql`). HOLDLOCK `SELECT` is
+encoded as LOAD DATA TSV on one thread into a tempfile, then STRICT
+`LOAD DATA LOCAL INFILE`. Dest `COUNT(*)` plus per-PK-range dest COUNT
+is the proof. A FIFO + pyodbc pump is **not** used (deadlock class
+measured on SQL Server→PG).
+
+Live 3-row fixture: NULL / `''` / `'x'` land as NULL / empty string / `x`.
+
+Reproduce: `BENCH_SRC=bench_ss_from_mysql BENCH_DEST=bench_mysql_from_ss python scripts/bench_sqlserver_to_mysql_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | SQL Server **1433** (`bench_ss_from_mysql`, 10 columns, PK `employee_id`) |
+| Destination | MySQL **3306**, create-new `bench_mysql_from_ss` |
+| Rows | **1,000,000** |
+| Elapsed | **10.339 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_sqlserver_load_data_mysql` |
+| `copy_split` | `serial` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_mysql_1000000_proof.json` |
+
+Faster than MySQL→SQL Server **15.517 s** because MySQL LOAD DATA is
+native bulk; the reverse path binds with `fast_executemany`. Slower than
+PG→MySQL FIFO **3.480 s** because this path materializes a tempfile
+instead of overlapping a FIFO (pyodbc FIFO deadlocks). Quality held:
+dest COUNT 1,000,000, empty string ≠ NULL.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_sqlserver_mysql_resume_skips_complete_range`. Occupied
+dest without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.898 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_mysql_1000000_resume_skip_proof.json` |
+
+Do not quote 1.11M rows/s from skip-all. Pytest: `test_sqlserver_mysql_copy`
+**7 passed / 0 failed**; combined identity-copy matrix **65 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
