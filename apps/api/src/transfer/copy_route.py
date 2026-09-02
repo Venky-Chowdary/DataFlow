@@ -57,6 +57,10 @@ def _try_copy_fast_path(
     CSV (quoted empty string collapses to NULL on this engine). Proof
     is dest ``COUNT(*)`` vs the source snapshot.
 
+    SQL Server→PostgreSQL identity append/overwrite: HOLDLOCK SELECT
+    encoded as COPY text into ``COPY FROM STDIN``. Proof is dest
+    ``COUNT(*)`` vs that snapshot.
+
     SQL Server→SQL Server identity append/overwrite: same-instance
     ``INSERT SELECT`` (SNAPSHOT when the database allows it, else
     ``HOLDLOCK, TABLOCK``). Proof is dest ``COUNT(*)`` vs that snapshot.
@@ -195,6 +199,28 @@ def _try_copy_fast_path(
         )
         if ss_fast is not None:
             return ss_fast
+        return None
+
+    if (
+        sqlserver_family_name(src_n) == "sqlserver"
+        and dest_n in {"postgresql", "postgres"}
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ss_pg = _try_sqlserver_pg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "dbo",
+            dest_schema=destination.schema or dest_cfg.get("schema") or "public",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ss_pg is not None:
+            return ss_pg
         return None
 
     from services.copy_oracle_oracle import oracle_family_name
@@ -551,6 +577,116 @@ def _try_pg_sqlserver_copy_fast_path(
         f"COPY PostgreSQL {source_table} → SQL Server {dest_table} "
         f"({result.source_rows:,} rows, COPY text + fast_executemany, "
         f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlserver_pg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQL Server→PG: SELECT + COPY FROM STDIN. Dest COUNT is the proof."""
+    from connectors.postgresql_writer import pg_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_pg import (
+        copy_sqlserver_to_postgres,
+        sqlserver_type_is_copy_safe,
+    )
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQL Server→PG COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    pg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if not sqlserver_type_is_copy_safe(declared):
+            logger.info(
+                "SQL Server→PG COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_sqlserver_to_postgres(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_schema=dest_schema or "public",
+            dest_table=dest_table,
+            pairs=pairs,
+            pg_ddls=pg_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQL Server→PG COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQL Server→PG COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlserver_copy_from_stdin_pg",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": dict(result.source_snapshot or {}),
+        "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
+        "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
+        "partitions_skipped": (result.source_snapshot or {}).get("partitions_skipped"),
+        "shard_mode": (result.source_snapshot or {}).get("shard_mode"),
+        "copy_split": (result.source_snapshot or {}).get("copy_split"),
+        "sqlserver_isolation": (result.source_snapshot or {}).get("sqlserver_isolation"),
+        "partition_proof": list(
+            (result.source_snapshot or {}).get("partition_proof") or []
+        ),
+    }
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+        if skipped == len(dest_summary["partition_proof"]):
+            proof_line += f" Resume skipped {skipped} complete range(s) (COUNT only)."
+        elif skipped:
+            proof_line += f" Resume skipped {skipped} complete range(s)."
+    isolation = dest_summary.get("sqlserver_isolation") or "holdlock"
+    ddl_log = [
+        f"COPY SQL Server {source_table} → PostgreSQL {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + COPY FROM STDIN, {isolation})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
