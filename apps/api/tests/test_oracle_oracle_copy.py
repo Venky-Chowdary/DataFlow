@@ -122,7 +122,7 @@ def test_live_oracle_insert_select_dest_count(monkeypatch):
         )
         assert result.source_rows == 800
         assert result.target_rows == 800
-        assert result.source_snapshot.get("copy_split") == "insert_select"
+        assert result.source_snapshot.get("copy_split") == "insert_select_append"
         assert result.source_snapshot.get("same_instance") is True
         assert result.source_snapshot.get("shard_mode") == "pk"
         assert result.source_snapshot.get("oracle_lock") == "share"

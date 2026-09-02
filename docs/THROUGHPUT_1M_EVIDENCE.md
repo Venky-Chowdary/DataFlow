@@ -11,6 +11,8 @@ BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench_mysql_to_my
 BENCH_DEST=bench_pg_clone python scripts/bench_pg_to_pg_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_ss_1000000 BENCH_DEST=bench_ss_clone \\
   python scripts/bench_sqlserver_sqlserver_million.py
+BENCH_ROWS=1000000 BENCH_SRC=BENCH_ORA_1000000 BENCH_DEST=BENCH_ORA_CLONE \\
+  python scripts/bench_oracle_oracle_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -314,6 +316,57 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.5M rows/s from skip-all. Pytest: `test_sqlserver_sqlserver_copy`
 **7 passed / 0 failed**; with `test_mysql_mysql_copy` + `test_copy_fast_path`
 + `test_pg_pg_copy` **42 passed / 0 failed**.
+
+### Named 1M fixture — Oracle→Oracle INSERT APPEND (2026-09-02)
+
+Same-engine identity on **Oracle 21c XE :1521** (`XEPDB1`). Same-instance
+`LOCK TABLE src IN SHARE MODE` then `INSERT /*+ APPEND */ INTO dest
+SELECT … FROM src` when dest is empty. Range resume stays conventional
+INSERT SELECT (APPEND is empty-dest only). Cross-host declines to the
+row path (no Data Pump / DB link yet). Proof is dest `COUNT(*)` plus
+per-PK-range dest COUNT. Python does not format a row.
+
+This named fixture is **2 columns** (`ID NUMBER` PK, `LABEL VARCHAR2(32)`),
+not the 10-col employee table. Do not compare 16.312 s to PG↔MySQL 10-col
+COPY times as the same workload. Oracle XE here is slower than SQL Server
+INSERT SELECT on this host — that is a measured engine difference, not a
+claim that the algorithm is worse.
+
+Reproduce: `BENCH_SRC=BENCH_ORA_1000000 BENCH_DEST=BENCH_ORA_CLONE python scripts/bench_oracle_oracle_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Oracle **1521** `XEPDB1` (`BENCH_ORA_1000000`) |
+| Destination | Oracle **1521** `BENCH_ORA_CLONE` |
+| Rows | **1,000,000** |
+| Elapsed | **16.312 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `insert_select_oracle_same_instance` |
+| `copy_split` | `insert_select_append` |
+| `oracle_lock` | `share` |
+| PK partitions | 250000 × 4 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/oracle_oracle_1000000_proof.json` |
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_oracle_resume_skips_complete_range`. Occupied dest
+without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.155 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/oracle_oracle_1000000_resume_skip_proof.json` |
+
+Do not quote 6.4M rows/s from skip-all. Pytest: `test_oracle_oracle_copy`
+**7 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 

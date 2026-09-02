@@ -298,12 +298,15 @@ def _insert_select_sql(
     source_ref: str,
     pairs: list[tuple[str, str]],
     clause: str,
+    *,
+    append: bool = False,
 ) -> str:
     dest_cols = ", ".join(_ident(t) for _s, t in pairs)
     src_cols = ", ".join(_ident(s) for s, _t in pairs)
     where = f" WHERE {clause}" if clause and clause != "1=1" else ""
+    hint = " /*+ APPEND */" if append else ""
     return (
-        f"INSERT INTO {dest_ref} ({dest_cols}) "  # nosec B608
+        f"INSERT{hint} INTO {dest_ref} ({dest_cols}) "  # nosec B608
         f"SELECT {src_cols} FROM {source_ref}{where}"
     )
 
@@ -529,10 +532,18 @@ def copy_oracle_to_oracle(
             else:
                 to_copy = [{"predicate": "", "params": []}]
 
+        use_append = (
+            not dest_occupied
+            and len(to_copy) == 1
+            and not str(to_copy[0].get("predicate") or "")
+        )
+        copy_split = "insert_select_append" if use_append else "insert_select"
         for item in to_copy:
             clause = str(item.get("predicate") or "")
             params = list(item.get("params") or [])
-            sql = _insert_select_sql(dest_ref, source_ref, pairs, clause)
+            sql = _insert_select_sql(
+                dest_ref, source_ref, pairs, clause, append=use_append
+            )
             _exec(cur, sql, params)
         conn.commit()
 
@@ -576,7 +587,7 @@ def copy_oracle_to_oracle(
                 "oracle_lock": "share",
                 "same_instance": True,
                 "copy_workers": 1,
-                "copy_split": "insert_select",
+                "copy_split": copy_split,
                 "copy_partitions": len(partitions) or 1,
                 "partitions_skipped": sum(
                     1 for p in partitions if p.get("action") == "skip"
