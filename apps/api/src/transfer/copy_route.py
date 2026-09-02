@@ -81,6 +81,15 @@ def _try_copy_fast_path(
     encoded as COPY text into ``COPY FROM STDIN``. Proof is dest
     ``COUNT(*)`` vs that snapshot.
 
+    MySQL→SQL Server identity append/overwrite: consistent-snapshot
+    SELECT bound with pyodbc ``fast_executemany``. Not BCP / CSV
+    ``BULK INSERT``. Proof is dest ``COUNT(*)`` vs that snapshot.
+
+    SQL Server→MySQL identity append/overwrite: HOLDLOCK SELECT encoded
+    as LOAD DATA TSV into a tempfile, then STRICT ``LOAD DATA LOCAL
+    INFILE`` (no pyodbc FIFO). Proof is dest ``COUNT(*)`` vs that
+    snapshot.
+
     Returning ``None`` rather than raising is deliberate — every route this
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
@@ -214,6 +223,27 @@ def _try_copy_fast_path(
         return None
 
     if (
+        src_n in {"mysql", "mariadb"}
+        and sqlserver_family_name(dest_n) == "sqlserver"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        mysql_ss = _try_mysql_sqlserver_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or "dbo",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if mysql_ss is not None:
+            return mysql_ss
+        return None
+
+    if (
         sqlserver_family_name(src_n) == "sqlserver"
         and sqlserver_family_name(dest_n) == "sqlserver"
     ):
@@ -255,6 +285,27 @@ def _try_copy_fast_path(
         )
         if ss_pg is not None:
             return ss_pg
+        return None
+
+    if (
+        sqlserver_family_name(src_n) == "sqlserver"
+        and dest_n in {"mysql", "mariadb"}
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ss_mysql = _try_sqlserver_mysql_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "dbo",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ss_mysql is not None:
+            return ss_mysql
         return None
 
     if oracle_family_name(src_n) == "oracle" and oracle_family_name(dest_n) == "oracle":
@@ -1050,6 +1101,217 @@ def _try_mysql_mysql_copy_fast_path(
     ddl_log = [
         f"COPY MySQL {source_table} → MySQL {dest_table} "
         f"({result.source_rows:,} rows, {how})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_mysql_sqlserver_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity MySQL→SQL Server: SELECT + fast_executemany. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mysql_pg import mysql_type_is_copy_safe
+    from services.copy_mysql_sqlserver import copy_mysql_to_sqlserver
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("MySQL→SQL Server COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlserver_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if not mysql_type_is_copy_safe(declared):
+            logger.info(
+                "MySQL→SQL Server COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlserver_ddls.append(
+            ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
+        )
+
+    try:
+        result = copy_mysql_to_sqlserver(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlserver_ddls=sqlserver_ddls,
+            replace_destination=replace_destination,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("MySQL→SQL Server COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("MySQL→SQL Server COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_mysql_fast_executemany_sqlserver",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+        if skipped == len(dest_summary["partition_proof"]):
+            proof_line += f" Resume skipped {skipped} complete range(s) (COUNT only)."
+        elif skipped:
+            proof_line += f" Resume skipped {skipped} complete range(s)."
+    split = dest_summary.get("copy_split") or "serial"
+    ddl_log = [
+        f"COPY MySQL {source_table} → SQL Server {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + fast_executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlserver_mysql_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQL Server→MySQL: SELECT + STRICT LOAD DATA. Dest COUNT is the proof."""
+    from connectors.mysql_writer import mysql_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_mysql import copy_sqlserver_to_mysql
+    from services.copy_sqlserver_pg import sqlserver_type_is_copy_safe
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQL Server→MySQL COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mysql_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if not sqlserver_type_is_copy_safe(declared):
+            logger.info(
+                "SQL Server→MySQL COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_sqlserver_to_mysql(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mysql_ddls=mysql_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQL Server→MySQL COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQL Server→MySQL COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlserver_load_data_mysql",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlserver_isolation": snapshot.get("sqlserver_isolation"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+        proof_line = (
+            "Proof: destination COUNT(*) equals source snapshot count; "
+            "each PK range dest COUNT matched its source range."
+        )
+        if skipped == len(dest_summary["partition_proof"]):
+            proof_line += f" Resume skipped {skipped} complete range(s) (COUNT only)."
+        elif skipped:
+            proof_line += f" Resume skipped {skipped} complete range(s)."
+    ddl_log = [
+        f"COPY SQL Server {source_table} → MySQL {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + STRICT LOAD DATA, tempfile)",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns

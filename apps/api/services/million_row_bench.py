@@ -1940,4 +1940,345 @@ def run_oracle_pg_volume(
     return report
 
 
+def _mysql_local_cfg() -> dict[str, Any]:
+    return {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+        "user": "dataflow",
+    }
+
+
+def _mysql_has_rows(table: str, rows: int) -> bool:
+    conn = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            if not cur.fetchone()[0]:
+                return False
+            cur.execute(f"SELECT COUNT(*) FROM `{table}`")  # nosec B608
+            return int(cur.fetchone()[0]) == rows
+    finally:
+        conn.close()
+
+
+def _ensure_mysql_employee_fixture(rows: int, mysql_table: str) -> str:
+    """Use existing MySQL table or COPY the PG employee fixture into it."""
+    if _mysql_has_rows(mysql_table, rows):
+        return mysql_table
+    pg = _pg_local_cfg()
+    seed_source(pg, f"bench_emp_{rows}", rows)
+    from connectors.mysql_writer import mysql_type
+    from services.copy_pg_mysql import copy_postgres_to_mysql
+
+    copy_postgres_to_mysql(
+        source_cfg={
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "schema": "public",
+        },
+        source_schema="public",
+        source_table=f"bench_emp_{rows}",
+        dest_cfg=_mysql_local_cfg(),
+        dest_table=mysql_table,
+        pairs=[(name, name) for name, _ddl in COLUMNS],
+        mysql_ddls=[mysql_type(ddl) for _name, ddl in COLUMNS],
+        replace_destination=True,
+    )
+    return mysql_table
+
+
+def run_mysql_sqlserver_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→SQL Server through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MySQL 3306 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+
+    src_table = source_table or "bench_1m"
+    job_store = ensure_memory_job_store_if_mongo_down()
+    _ensure_mysql_employee_fixture(rows, src_table)
+    if not keep_dest:
+        conn = _sqlserver_connect()
+        try:
+            cur = conn.cursor()
+            cur.execute(f"DROP TABLE IF EXISTS dbo.[{dest_table}]")  # nosec B608
+        finally:
+            conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    mysql = _mysql_local_cfg()
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**mysql, "format": "mysql", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": dest_table}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-my-ss-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = _sqlserver_connect()
+    try:
+        landed = _sqlserver_count(conn, dest_table)
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→sqlserver",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest_table,
+        "mysql_port": 3306,
+        "sqlserver_port": 1433,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} mysql→sqlserver [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "select_mysql_fast_executemany_sqlserver":
+            raise AssertionError(
+                "expected SELECT + fast_executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
+def run_sqlserver_mysql_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQL Server→MySQL through stream_database_transfer. Dest COUNT required."""
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MySQL 3306 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+
+    src_table = source_table or "bench_ss_from_mysql"
+    job_store = ensure_memory_job_store_if_mongo_down()
+    conn = _sqlserver_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT OBJECT_ID(N'dbo.{src_table}', 'U')")  # nosec B608
+        exists = cur.fetchone()[0] is not None
+        have = _sqlserver_count(conn, src_table) if exists else 0
+    finally:
+        conn.close()
+    if have != rows:
+        mysql_src = _ensure_mysql_employee_fixture(rows, "bench_1m")
+        from services.copy_mysql_sqlserver import copy_mysql_to_sqlserver
+        from services.type_system import ddl_type
+
+        copy_mysql_to_sqlserver(
+            source_cfg=_mysql_local_cfg(),
+            source_table=mysql_src,
+            dest_cfg=_sqlserver_cfg(),
+            dest_table=src_table,
+            pairs=[(name, name) for name, _ddl in COLUMNS],
+            sqlserver_ddls=[ddl_type("sqlserver", ddl) for _name, ddl in COLUMNS],
+            replace_destination=True,
+        )
+    if not keep_dest:
+        reset_destination(_mysql_local_cfg(), dest_table)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    mysql = _mysql_local_cfg()
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict(
+        "database", {**mysql, "format": "mysql", "table": dest_table}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-ss-my-{dest_table}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = destination_count(mysql, dest_table)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlserver→mysql",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest_table,
+        "mysql_port": 3306,
+        "sqlserver_port": 1433,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlserver_isolation": summary.get("sqlserver_isolation"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest_table} sqlserver→mysql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source rows: {rows})")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        if summary.get("load_method") != "select_sqlserver_load_data_mysql":
+            raise AssertionError(
+                "expected SELECT + STRICT LOAD DATA, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+        for part in report.get("partition_proof") or []:
+            if int(part.get("source_count") or 0) != int(part.get("dest_count") or 0):
+                raise AssertionError(f"partition dest COUNT mismatch: {part}")
+    return report
+
+
+
 
