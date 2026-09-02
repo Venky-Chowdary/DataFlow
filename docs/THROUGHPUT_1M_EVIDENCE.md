@@ -8,6 +8,7 @@ BENCH_ROWS=1000000 BENCH_DEST=bench_1m python scripts/bench_pg_to_mysql_million.
 BENCH_ROWS=10000000 BENCH_DEST=bench_10m python scripts/bench_pg_to_mysql_million.py
 BENCH_SRC=bench_1m BENCH_DEST=bench_pg_from_mysql python scripts/bench_mysql_to_pg_million.py
 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_clone python scripts/bench_mysql_to_mysql_million.py
+BENCH_DEST=bench_pg_clone python scripts/bench_pg_to_pg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
