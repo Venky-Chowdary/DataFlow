@@ -8612,6 +8612,304 @@ def run_iceberg_sqlite_volume(
     return report
 
 
+def run_sqlite_sqlserver_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQLite→SQL Server through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)``. Empty dest is SELECT +
+    ``fast_executemany``, not upsert / BCP / ``BULK INSERT`` / sqlite3
+    ``.dump``. DATE ISO TEXT stays a string after PostgreSQL→SQLite.
+    DATETIME / TIMESTAMP / BLOB / JSON decline. ``:memory:`` declines.
+    Unique dest ``bench_sqlite_sqlserver`` is not reused from ``bench_1m``
+    / ``bench_ss_mongo``. Seeds from PostgreSQL→SQLite when the source
+    file/table is missing.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+
+    src_table = str(source_table or "bench_pg_sqlite")
+    dest = str(dest_table)
+    src_db = Path(source_database or (_sqlite_bench_dir() / "src.db"))
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _sqlite_count(src_db, src_table) if src_db.exists() else 0
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_sqlite_volume(
+            rows=rows,
+            dest_table=src_table,
+            dest_database=src_db,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlserver_drop_table(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict("database", _sqlite_cfg(src_db, src_table))
+    destination = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": dest}
+    )
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-sqlite-sqlserver-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlserver_dest_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlite→sqlserver",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "source_database": str(src_db),
+        "dest_table": dest,
+        "sqlserver_port": 1433,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlite_read": summary.get("sqlite_read"),
+        "sqlserver_write": summary.get("sqlserver_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "sqlserver_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} sqlite→sqlserver [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT(*): {rows})")
+    print("Not BCP / BULK INSERT / .dump. Empty dest is fast_executemany. DATE ISO TEXT stays a string.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlite_fast_executemany_sqlserver"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SQLite SELECT + SQL Server fast_executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_sqlserver_sqlite_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQL Server→SQLite through stream_database_transfer.
+
+    Source COUNT is HOLDLOCK/SNAPSHOT ``COUNT(*)``. Dest COUNT is SQLite
+    ``COUNT(*)``. Empty dest is HOLDLOCK SELECT + ``executemany``, not
+    upsert / BCP / sqlite3 ``.import``. DATE lands as SQLite TEXT (ISO
+    calendar day — no DATE affinity). DATETIMEOFFSET / varbinary decline.
+    ``:memory:`` declines. Unique dest ``bench_sqlite_from_sqlserver`` is
+    not reused from ``bench_1m`` / ``bench_pg_sqlite``. Seeds from
+    SQLite→SQL Server when the source table is missing.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+
+    ss_src = str(source_table or "bench_sqlite_sqlserver")
+    dest = str(dest_table)
+    dest_db = Path(dest_database or (_sqlite_bench_dir() / "from_sqlserver.db"))
+    dest_db.parent.mkdir(parents=True, exist_ok=True)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _sqlserver_dest_count(ss_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlite_sqlserver_volume(
+            rows=rows,
+            dest_table=ss_src,
+            source_table="bench_pg_sqlite",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlite_drop_table(dest_db, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": ss_src}
+    )
+    destination = EndpointConfig.from_dict("database", _sqlite_cfg(dest_db, dest))
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-sqlserver-sqlite-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlite_count(dest_db, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlserver→sqlite",
+        "sync_mode": sync_mode,
+        "source_table": ss_src,
+        "dest_table": dest,
+        "dest_database": str(dest_db),
+        "sqlserver_port": 1433,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlserver_read": summary.get("sqlserver_read"),
+        "sqlite_write": summary.get("sqlite_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "sqlite_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} sqlserver→sqlite [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source snapshot COUNT: {rows})")
+    print("Not BCP / .import. Empty dest is executemany. DATE lands as TEXT.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlserver_executemany_sqlite"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SQL Server HOLDLOCK SELECT + SQLite executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 

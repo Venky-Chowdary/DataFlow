@@ -293,6 +293,21 @@ def _try_copy_fast_path(
     not upsert / sqlite3 ``.import`` / ``MERGE INTO``. ``:memory:`` /
     BLOB dest DDL decline.
 
+    SQLite→SQL Server identity append/overwrite: ``BEGIN`` + ``SELECT``
+    bound with pyodbc ``fast_executemany``. Dest ``COUNT(*)`` is the
+    proof. DATE ISO/calendar day binds as SQL Server DATE when mapped
+    DATE; TEXT ISO stays a string. DATETIME / TIMESTAMP / BLOB / JSON
+    decline. Occupied dest with a different COUNT declines. Empty dest
+    is INSERT, not upsert / BCP / ``BULK INSERT`` CSV / sqlite3
+    ``.dump``. ``:memory:`` declines.
+
+    SQL Server→SQLite identity append/overwrite: HOLDLOCK ``SELECT``
+    bound with ``executemany`` INSERT. Dest ``COUNT(*)`` runs **before
+    commit**. DATE/DATETIME-NTZ land as SQLite TEXT (no DATE affinity).
+    DATETIMEOFFSET / varbinary / xml / rowversion decline. Occupied dest
+    with a different COUNT declines. Empty dest is INSERT, not upsert /
+    sqlite3 ``.import`` / BCP. ``:memory:`` / BLOB dest DDL decline.
+
     MongoDB→Iceberg identity append/overwrite: replica-set snapshot
     ``find()`` encoded as CSV into one Arrow table and one catalog
     snapshot. Source COUNT is ``count_documents``. Dest COUNT is file
@@ -755,6 +770,24 @@ def _try_copy_fast_path(
             return sqlite_ice
         return None
 
+    if src_n == "sqlite" and sqlserver_family_name(dest_n) == "sqlserver":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        sqlite_ss = _try_sqlite_sqlserver_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or "dbo",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if sqlite_ss is not None:
+            return sqlite_ss
+        return None
+
     if s3_family_name(src_n) == "s3" and s3_family_name(dest_n) == "s3":
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -1191,6 +1224,24 @@ def _try_copy_fast_path(
         )
         if ss_mysql is not None:
             return ss_mysql
+        return None
+
+    if sqlserver_family_name(src_n) == "sqlserver" and dest_n == "sqlite":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ss_sqlite = _try_sqlserver_sqlite_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "dbo",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ss_sqlite is not None:
+            return ss_sqlite
         return None
 
     if (
@@ -3635,6 +3686,121 @@ def _try_sqlite_iceberg_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_sqlite_sqlserver_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQLite→SQL Server: SELECT + fast_executemany. Dest COUNT(*) is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_pg import sqlserver_type_is_copy_safe
+    from services.copy_sqlite_sqlserver import (
+        copy_sqlite_to_sqlserver,
+        sqlite_sqlserver_type_is_copy_safe,
+    )
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQLite→SQL Server COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlserver_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not sqlite_sqlserver_type_is_copy_safe(declared):
+            logger.info(
+                "SQLite→SQL Server COPY declined: %s type %s is not SQL Server COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        dest_ddl = ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
+        if dest_ddl and not sqlserver_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "SQLite→SQL Server COPY declined: dest %s type %s is not COPY-safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlserver_ddls.append(dest_ddl)
+
+    try:
+        result = copy_sqlite_to_sqlserver(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlserver_ddls=sqlserver_ddls,
+            replace_destination=replace_destination,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQLite→SQL Server COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQLite→SQL Server COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlite_fast_executemany_sqlserver",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlite_read": snapshot.get("sqlite_read"),
+        "sqlserver_write": snapshot.get("sqlserver_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("sqlserver_write") or "insert"
+    proof_line = (
+        "Proof: SQL Server dest COUNT(*) equals SQLite source COUNT(*). "
+        "Not BCP / BULK INSERT CSV. Empty dest is INSERT, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQLite {source_table} → SQL Server {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + {write} fast_executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_s3_s3_copy_fast_path(
     *,
     source_table: str,
@@ -5500,6 +5666,119 @@ def _try_sqlserver_mysql_copy_fast_path(
     ddl_log = [
         f"COPY SQL Server {source_table} → MySQL {dest_table} "
         f"({result.source_rows:,} rows, SELECT + STRICT LOAD DATA, tempfile)",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlserver_sqlite_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQL Server→SQLite: HOLDLOCK SELECT + executemany. Dest COUNT(*) before commit is the proof."""
+    from connectors.sqlite_writer import sqlite_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_pg import sqlserver_type_is_copy_safe
+    from services.copy_sqlserver_sqlite import copy_sqlserver_to_sqlite
+    from services.copy_sqlite_common import sqlite_type_is_copy_safe
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQL Server→SQLite COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlite_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not sqlserver_type_is_copy_safe(declared):
+            logger.info(
+                "SQL Server→SQLite COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        dest_ddl = sqlite_type(declared) if declared else "TEXT"
+        if not sqlite_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "SQL Server→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlite_ddls.append(dest_ddl)
+
+    try:
+        result = copy_sqlserver_to_sqlite(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlite_ddls=sqlite_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQL Server→SQLite COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQL Server→SQLite COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlserver_executemany_sqlite",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlserver_read": snapshot.get("sqlserver_read"),
+        "sqlite_write": snapshot.get("sqlite_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("sqlite_write") or "insert"
+    proof_line = (
+        "Proof: SQLite dest COUNT(*) equals SQL Server source snapshot COUNT. "
+        "Not BCP / .import. Empty dest is INSERT, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQL Server {source_table} → SQLite {dest_table} "
+        f"({result.source_rows:,} rows, HOLDLOCK SELECT + {write} executemany, "
+        f"copy_split={split})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
