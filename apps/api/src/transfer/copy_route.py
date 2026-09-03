@@ -230,6 +230,18 @@ def _try_copy_fast_path(
     ``COUNT(*)`` runs before commit. Not sqlite3 ``.import``.
     ``:memory:`` / BLOB decline.
 
+    MongoDB→S3 identity append/overwrite: replica-set snapshot
+    ``find()`` into a CSV tempfile (HEADER, ``\\N`` = NULL), then
+    ``upload_file``. Source COUNT is ``count_documents({})``, never
+    ``estimatedDocumentCount``. Dest key must be ``.csv`` / ``.tsv``.
+    Dest COUNT is artifact COUNT (header skipped). Nested documents
+    decline. JSON dest keys decline. Not ``mongoexport`` / ``aws s3 cp``.
+
+    S3→MongoDB identity append/overwrite: GET CSV/TSV into
+    ``insert_many``. Dest COUNT is ``count_documents({})``.
+    JSON/JSONL/Parquet decline. Empty dest is insert, not upsert /
+    ``mongoimport``. DATE CSV cells become BSON Date at UTC midnight.
+
     MongoDB→Iceberg identity append/overwrite: replica-set snapshot
     ``find()`` encoded as CSV into one Arrow table and one catalog
     snapshot. Source COUNT is ``count_documents``. Dest COUNT is file
@@ -691,6 +703,23 @@ def _try_copy_fast_path(
             return s3_sqlite
         return None
 
+    if s3_family_name(src_n) == "s3" and mongo_family_name(dest_n) == "mongodb":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        s3_mongo = _try_s3_mongo_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if s3_mongo is not None:
+            return s3_mongo
+        return None
+
     if mongo_family_name(src_n) == "mongodb" and mongo_family_name(dest_n) == "mongodb":
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -795,6 +824,23 @@ def _try_copy_fast_path(
         )
         if mongo_ice is not None:
             return mongo_ice
+        return None
+
+    if mongo_family_name(src_n) == "mongodb" and s3_family_name(dest_n) == "s3":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        mongo_s3 = _try_mongo_s3_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if mongo_s3 is not None:
+            return mongo_s3
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
@@ -3391,6 +3437,110 @@ def _try_s3_sqlite_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_s3_mongo_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity S3→Mongo: GET CSV + insert_many. Dest count_documents is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mongo_pg import mongo_type_is_copy_safe
+    from services.copy_pg_mongo import pg_mongo_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_s3_mongo import copy_s3_to_mongo
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("S3→Mongo COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mongo_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "S3→Mongo COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        mongo_ddls.append(declared or "TEXT")
+
+    try:
+        result = copy_s3_to_mongo(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mongo_ddls=mongo_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("S3→Mongo COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("S3→Mongo COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "get_csv_s3_insert_many_mongo",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "s3_read": snapshot.get("s3_read"),
+        "mongo_write": snapshot.get("mongo_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("mongo_write") or "insert"
+    proof_line = (
+        "Proof: Mongo dest count_documents equals S3 source artifact COUNT. "
+        "Not estimatedDocumentCount. Not aws s3 cp / mongoimport. Empty dest is insert, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY S3 {source_table} → MongoDB {dest_table} "
+        f"({result.source_rows:,} rows, GET CSV + {write} insert_many, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_mongo_pg_copy_fast_path(
     *,
     source_table: str,
@@ -4020,6 +4170,110 @@ def _try_mongo_iceberg_copy_fast_path(
     ddl_log = [
         f"COPY MongoDB {source_table} → Iceberg {dest_table} "
         f"({result.source_rows:,} rows, snapshot find + CSV + {write} snapshot, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_mongo_s3_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Mongo→S3: snapshot find CSV + upload_file. Dest artifact COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mongo_s3 import copy_mongo_to_s3, mongo_s3_type_is_copy_safe
+    from services.copy_pg_mongo import pg_mongo_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Mongo→S3 COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    s3_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            mongo_s3_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Mongo→S3 COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        s3_ddls.append(declared or "TEXT")
+
+    try:
+        result = copy_mongo_to_s3(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            s3_ddls=s3_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Mongo→S3 COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Mongo→S3 COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("s3_key") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "snapshot_find_mongo_upload_s3",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "mongo_read": snapshot.get("mongo_read"),
+        "s3_write": snapshot.get("s3_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("s3_write") or "insert"
+    proof_line = (
+        "Proof: S3 dest artifact COUNT equals Mongo source snapshot count_documents. "
+        "Not estimatedDocumentCount. Not mongoexport / aws s3 cp. Empty dest is PUT, not upsert. "
+        "CSV HEADER is not a dest row."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY MongoDB {source_table} → S3 {dest_table} "
+        f"({result.source_rows:,} rows, snapshot find CSV + {write} upload, "
         f"copy_split={split})",
         proof_line,
     ]

@@ -155,7 +155,18 @@ def _identity(value: str | None) -> str | None:
 
 def converter_for_mongo_ddl(ddl: str) -> Callable[[str | None], Any]:
     base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
-    if base in {"BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "INT2", "INT4", "INT8"}:
+    if base in {
+        "BIGINT",
+        "INT",
+        "INTEGER",
+        "SMALLINT",
+        "TINYINT",
+        "INT2",
+        "INT4",
+        "INT8",
+        "LONG",
+        "INT64",
+    }:
         return _as_int
     if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
         return _as_float
