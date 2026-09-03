@@ -102,6 +102,7 @@ def mongo_dest_count(cfg: dict[str, Any], collection: str) -> int:
     n = destination_row_count(
         "mongodb",
         {**cfg, "database": mongo_database_name(cfg)},
+        schema="",  # unused for Mongo; destination_row_count still requires it
         table_name=collection,
     )
     if n is None:

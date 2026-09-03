@@ -113,7 +113,9 @@ def _drop_mongo(name: str) -> None:
 
 
 def _dest_count(name: str) -> int:
-    n = destination_row_count("mongodb", _mongo_cfg(name), table_name=name)
+    n = destination_row_count(
+        "mongodb", _mongo_cfg(name), schema="", table_name=name
+    )
     assert n is not None
     return int(n)
 

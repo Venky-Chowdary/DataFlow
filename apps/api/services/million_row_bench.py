@@ -4179,7 +4179,9 @@ def _mongo_drop(collection: str) -> None:
 def _mongo_count(collection: str) -> int:
     from services.dest_precount import destination_row_count
 
-    n = destination_row_count("mongodb", _mongo_cfg(collection), table_name=collection)
+    n = destination_row_count(
+        "mongodb", _mongo_cfg(collection), schema="", table_name=collection
+    )
     if n is None:
         raise RuntimeError(f"Mongo dest COUNT unmeasured for {collection}")
     return int(n)
