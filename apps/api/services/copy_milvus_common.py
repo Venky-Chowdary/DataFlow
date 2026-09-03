@@ -354,6 +354,11 @@ def milvus_create_collection_from_source(
         )
 
 
+def milvus_query_offset_cap_exceeded(entity_count: int) -> bool:
+    """Milvus REST query requires ``limit + offset < 16384`` — offset pagination caps here."""
+    return int(entity_count) >= _MILVUS_QUERY_WINDOW
+
+
 def milvus_query_upsert(
     *,
     source_cfg: dict[str, Any],
@@ -362,7 +367,8 @@ def milvus_query_upsert(
     dest_collection: str,
 ) -> int:
     """Query source entities and upsert raw rows to dest."""
-    session, base_url, headers, db_name = _milvus_session(source_cfg)
+    src_session, src_base, src_headers, src_db = _milvus_session(source_cfg)
+    dest_session, dest_base, dest_headers, dest_db = _milvus_session(dest_cfg)
     src_name = milvus_collection(src_collection, source_cfg)
     dest_name = milvus_collection(dest_collection, dest_cfg)
     milvus_load_collection(source_cfg, src_collection)
@@ -372,6 +378,11 @@ def milvus_query_upsert(
         raise ValueError("Milvus source has no output fields")
     filt = _milvus_all_filter(source_cfg, src_collection)
     total = milvus_entity_count(source_cfg, src_collection)
+    if milvus_query_offset_cap_exceeded(total):
+        raise FastPathUnavailable(
+            f"Milvus collections with >={_MILVUS_QUERY_WINDOW} entities "
+            "require PK-segmented pagination; offset COPY declines"
+        )
     copied = 0
     offset = 0
     while offset < total:
@@ -390,12 +401,12 @@ def milvus_query_upsert(
                 "limit": limit,
                 "offset": offset,
             },
-            db_name,
+            src_db,
         )
-        resp = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
+        resp = src_session.post(
+            f"{src_base}/v2/vectordb/entities/query",
             data=json.dumps(query_payload, default=json_default),
-            headers=headers,
+            headers=src_headers,
             timeout=60,
         )
         body = load_http_json(resp) if resp.content else {}
@@ -411,12 +422,12 @@ def milvus_query_upsert(
                 batch = rows[i : i + _UPSERT_BATCH]
                 upsert_payload = _with_db(
                     {"collectionName": dest_name, "data": batch},
-                    db_name,
+                    dest_db,
                 )
-                upsert = session.post(
-                    f"{base_url}/v2/vectordb/entities/upsert",
+                upsert = dest_session.post(
+                    f"{dest_base}/v2/vectordb/entities/upsert",
                     data=json.dumps(upsert_payload, default=sanitize_json_value),
-                    headers=headers,
+                    headers=dest_headers,
                     timeout=60,
                 )
                 upsert_body = upsert.json() if upsert.content else {}
