@@ -10117,3 +10117,206 @@ def run_s3_oracle_volume(
     return report
 
 
+def _require_fake_gcs() -> None:
+    import socket
+
+    host = os.environ.get("FAKE_GCS_HOST", "127.0.0.1")
+    port = int(os.environ.get("FAKE_GCS_PORT", "4443"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"fake-gcs {host}:{port} not reachable: {exc}") from exc
+
+
+def _gcs_bench_bucket() -> str:
+    return os.environ.get("BENCH_GCS_BUCKET", "dataflow-bench")
+
+
+def _gcs_local_cfg(bucket: str, key: str) -> dict[str, Any]:
+    host = os.environ.get("FAKE_GCS_HOST", "127.0.0.1")
+    port = int(os.environ.get("FAKE_GCS_PORT", "4443"))
+    return {
+        "type": "gcs",
+        "format": "gcs",
+        "host": host,
+        "port": port,
+        "database": bucket,
+        "table": key,
+        "connection_string": f"http://{host}:{port}",
+        "ssl": False,
+    }
+
+
+def _gcs_count(cfg: dict[str, Any], key: str) -> int:
+    from services.copy_gcs_common import gcs_dest_count
+
+    return gcs_dest_count(cfg, key)
+
+
+def _gcs_delete_key(cfg: dict[str, Any], key: str) -> None:
+    from services.copy_gcs_common import gcs_delete_keys, gcs_list_keys
+
+    gcs_delete_keys(cfg, gcs_list_keys(cfg, key))
+
+
+def _gcs_seed_jsonl(cfg: dict[str, Any], key: str, rows: int) -> None:
+    """Source setup only — not the identity COPY path."""
+    import tempfile
+
+    from connectors.gcs_common import gcs_client, gcs_emulator_kwargs
+    from services.copy_gcs_common import gcs_bucket, gcs_ensure_bucket
+
+    gcs_ensure_bucket(cfg)
+    fd, path = tempfile.mkstemp(prefix="df-gcs-seed-", suffix=".jsonl")
+    os.close(fd)
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            for i in range(1, int(rows) + 1):
+                handle.write(
+                    json.dumps({"id": i, "label": f"r{i}"}, separators=(",", ":"))
+                    + "\n"
+                )
+        client = gcs_client(cfg)
+        kw = gcs_emulator_kwargs(cfg)
+        client.bucket(gcs_bucket(cfg)).blob(key).upload_from_filename(path, **kw)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def run_gcs_gcs_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_bucket: str | None = None,
+    source_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity GCS→GCS through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT, never ListObjects length.
+    Empty dest is server-side copy_blob / rewrite, not GET+PUT /
+    ``gsutil cp``. Seeds JSONL upload when the source object is missing
+    (seed is not the COPY path). Unique dest ``bench_gcs_clone.jsonl`` is
+    not reused from ``bench_s3_clone.csv`` / ``bench_1m``. fake-gcs is
+    not a customer-tenant PRODUCTION_SKU.
+    """
+    _require_fake_gcs()
+    src_key = str(source_table or "bench_gcs_src.jsonl")
+    dest = str(dest_table)
+    bucket = dest_bucket or _gcs_bench_bucket()
+    src_bucket = source_bucket or bucket
+    src_cfg = _gcs_local_cfg(src_bucket, src_key)
+    dest_cfg = _gcs_local_cfg(bucket, dest)
+    if src_cfg["host"] == dest_cfg["host"] and src_bucket == bucket and src_key == dest:
+        raise AssertionError("GCS→GCS bench refuses the same endpoint+bucket+object")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _gcs_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        _gcs_seed_jsonl(src_cfg, src_key, rows)
+    if not keep_dest:
+        from services.copy_gcs_common import gcs_ensure_bucket
+
+        gcs_ensure_bucket(dest_cfg)
+        _gcs_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "long", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "long", "label": "string"}
+    job_id = f"bench-gcs-gcs-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _gcs_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "gcs→gcs",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "source_bucket": src_bucket,
+        "dest_table": dest,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "gcs_read": summary.get("gcs_read"),
+        "gcs_write": summary.get("gcs_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "gcs_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} gcs→gcs [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source artifact COUNT: {rows})")
+    print("Not gsutil cp / GET+PUT. Empty dest is copy_blob. fake-gcs is not PRODUCTION_SKU.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_blob_gcs_gcs"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected GCS copy_blob / rewrite, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+

@@ -85,6 +85,8 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_sqlite_oracle BENCH_DEST=bench_oracle_s3.csv 
   python scripts/bench_oracle_to_s3_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_oracle_s3.csv BENCH_DEST=bench_ora_from_s3 \\
   python scripts/bench_s3_to_oracle_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_gcs_src.jsonl BENCH_DEST=bench_gcs_clone.jsonl \\
+  python scripts/bench_gcs_to_gcs_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1590,7 +1592,7 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 — wired, not measured
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1607,7 +1609,8 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_sqlite_to_oracle_million.py`, `bench_oracle_to_sqlite_million.py`,
 `bench_s3_to_iceberg_million.py`, `bench_iceberg_to_s3_million.py`,
 `bench_sqlserver_to_s3_million.py`, `bench_s3_to_sqlserver_million.py`,
-`bench_oracle_to_s3_million.py`, `bench_s3_to_oracle_million.py`, plus SQL
+`bench_oracle_to_s3_million.py`, `bench_s3_to_oracle_million.py`,
+`bench_gcs_to_gcs_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1620,7 +1623,8 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_sqlite_oracle` / `bench_sqlite_from_oracle` /
 `bench_s3_iceberg` / `bench_s3_from_iceberg.csv` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
-`bench_oracle_s3.csv` / `bench_ora_from_s3`
+`bench_oracle_s3.csv` / `bench_ora_from_s3` /
+`bench_gcs_clone.jsonl`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
@@ -1656,10 +1660,13 @@ S3→SQL Server empty dest is GET CSV + `fast_executemany`, not BCP /
 `BULK INSERT` / `aws s3 cp`. Oracle→S3 empty dest is SHARE-lock SELECT
 CSV + `upload_file`, not sqlldr / Data Pump / `aws s3 cp`. S3→Oracle
 empty dest is GET CSV + `executemany`, not sqlldr / Data Pump /
-`aws s3 cp`. Iceberg→Iceberg writes **new** dest
+`aws s3 cp`. GCS→GCS empty dest is server-side `copy_blob` / rewrite, not
+`gsutil cp` / GET+PUT (this host's proof is fake-gcs, not a customer-tenant
+PRODUCTION_SKU). Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
-endpoint+bucket+key declines. Cross-endpoint CopyObject declines. JSON
+endpoint+bucket+key declines. Cross-endpoint CopyObject declines. GCS same
+endpoint+bucket+object declines. Cross-endpoint GCS copy_blob declines. JSON
 dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, Iceberg→S3, SQL Server→S3, and Oracle→S3 (row path keeps JSON export).
 JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, S3→Iceberg, S3→SQL Server, and S3→Oracle (CSV is the
 COPY-native wire).
