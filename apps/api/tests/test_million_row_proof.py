@@ -79,3 +79,10 @@ def test_live_pg_mysql_stream_conservation_smoke(tmp_path):
     assert report["dest_count"] == rows
     assert report["rejected_rows"] == 0
     assert proof.exists()
+    # Named fixture has a single mapped PK, so shards prove dest COUNT per range.
+    assert report.get("shard_mode") == "pk"
+    assert report.get("copy_split") == "ctid"
+    parts = report.get("partition_proof") or []
+    assert parts
+    assert sum(int(p["source_count"]) for p in parts) == rows
+    assert all(int(p["source_count"]) == int(p["dest_count"]) for p in parts)

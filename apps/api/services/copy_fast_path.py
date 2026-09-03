@@ -512,6 +512,124 @@ def _stream_copy(
         raise failure[0]
 
 
+def _norm_pg_host(host: str) -> str:
+    h = (host or "").strip().lower()
+    if h in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return "127.0.0.1"
+    return h
+
+
+def postgres_same_relation(
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    source_schema: str,
+    source_table: str,
+    dest_schema: str,
+    dest_table: str,
+) -> bool:
+    """True when COPY would read and write the same PostgreSQL table."""
+    src_host = _norm_pg_host(str(src_cfg.get("host") or ""))
+    dest_host = _norm_pg_host(str(dest_cfg.get("host") or ""))
+    if src_host != dest_host:
+        return False
+    if int(src_cfg.get("port") or 5432) != int(dest_cfg.get("port") or 5432):
+        return False
+    src_db = str(src_cfg.get("database") or src_cfg.get("dbname") or "").lower()
+    dest_db = str(dest_cfg.get("database") or dest_cfg.get("dbname") or "").lower()
+    if src_db and dest_db and src_db != dest_db:
+        return False
+    return (
+        (source_schema or "public").lower() == (dest_schema or "public").lower()
+        and source_table.lower() == dest_table.lower()
+    )
+
+
+def _pg_dest_range_count(
+    cur: Any, dest_ref: str, dest_ident: str, part: dict[str, Any]
+) -> int:
+    from services.copy_pg_mysql import _pg_quoted_literal, pk_range_predicate
+
+    if part.get("null_shard"):
+        pred = f"{dest_ident} IS NULL"
+    else:
+        lo_sql = (
+            _pg_quoted_literal(cur, part["lo"]) if part.get("lo") is not None else None
+        )
+        hi_sql = (
+            _pg_quoted_literal(cur, part["hi"]) if part.get("hi") is not None else None
+        )
+        pred = pk_range_predicate(dest_ident, lo_sql, hi_sql)
+    if not pred:
+        cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+    else:
+        cur.execute(f"SELECT COUNT(*) FROM {dest_ref} WHERE {pred}")  # nosec B608
+    return int(cur.fetchone()[0])
+
+
+def _plan_pg_pk_partitions(
+    src_cur: Any,
+    source_ref: str,
+    src_ident: str,
+    pk_declared: str,
+    n_parts: int,
+    source_count: int,
+) -> list[dict[str, Any]]:
+    from services.copy_pg_mysql import (
+        _INTEGER_PK_BASES,
+        _pg_base,
+        _pg_quoted_literal,
+        fetch_integer_pk_cuts,
+        fetch_pk_interior_cuts,
+        key_ranges_from_cuts,
+        pk_range_predicate,
+    )
+
+    if n_parts <= 1:
+        key_ranges: list[tuple[Any | None, Any | None]] = [(None, None)]
+    elif _pg_base(pk_declared) in _INTEGER_PK_BASES:
+        cuts = fetch_integer_pk_cuts(src_cur, source_ref, src_ident, n_parts)
+        key_ranges = key_ranges_from_cuts(cuts)
+    else:
+        cuts = fetch_pk_interior_cuts(src_cur, source_ref, src_ident, n_parts)
+        key_ranges = key_ranges_from_cuts(cuts)
+    src_cur.execute(
+        f"SELECT COUNT(*) FROM {source_ref} WHERE {src_ident} IS NULL"  # nosec B608
+    )
+    nulls = int(src_cur.fetchone()[0])
+    unbounded = len(key_ranges) == 1 and key_ranges[0] == (None, None)
+    plan: list[tuple[str, Any, Any, bool]] = []
+    if nulls and not unbounded:
+        plan.append((f"{src_ident} IS NULL", None, None, True))
+    for lo, hi in key_ranges:
+        lo_sql = _pg_quoted_literal(src_cur, lo) if lo is not None else None
+        hi_sql = _pg_quoted_literal(src_cur, hi) if hi is not None else None
+        pred = pk_range_predicate(src_ident, lo_sql, hi_sql)
+        plan.append((pred, lo, hi, False))
+    partitions: list[dict[str, Any]] = []
+    for pred, lo, hi, is_null in plan:
+        if pred:
+            src_cur.execute(
+                f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
+            )
+        else:
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+        expected = int(src_cur.fetchone()[0])
+        partitions.append({
+            "lo": lo,
+            "hi": hi,
+            "null_shard": is_null,
+            "source_count": expected,
+            "predicate": pred,
+            "action": "load",
+        })
+    accounted = sum(int(p["source_count"]) for p in partitions)
+    if accounted != source_count:
+        raise ValueError(
+            f"PK range source COUNTs {accounted} != snapshot {source_count}"
+        )
+    return partitions
+
+
 def copy_between_postgres(
     *,
     source_cfg: dict[str, Any],
@@ -531,6 +649,10 @@ def copy_between_postgres(
     """
     if not pairs:
         raise FastPathUnavailable("no comparable columns")
+    if postgres_same_relation(
+        source_cfg, dest_cfg, source_schema, source_table, dest_schema, dest_table
+    ):
+        raise FastPathUnavailable("refusing COPY onto the same PostgreSQL table")
     from services.engine_checksum import postgresql_engine_checksum
 
     source_cols = [p[0] for p in pairs]
@@ -612,29 +734,128 @@ def copy_between_postgres(
                         f"cannot create destination like source: {exc}"
                     ) from exc
 
-            source_digest = postgresql_engine_checksum(
-                src_cur, source_ref, source_cols
-            )
-            if source_digest is None:
-                raise FastPathUnavailable("source digest unavailable")
+            dest_occupied = False
+            if not create:
+                dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+                dest_occupied = int(dst_cur.fetchone()[0]) > 0
 
-            _stream_copy(
-                src_cur,
-                dst_cur,
-                f"COPY (SELECT {source_list} FROM {source_ref}) "  # nosec B608
-                "TO STDOUT (FORMAT binary)",
-                f"COPY {dest_ref} ({target_list}) FROM STDIN (FORMAT binary)",  # nosec B608
+            from services.copy_pg_mysql import (
+                _jsonable_bound,
+                mapped_single_pk,
+                pg_mysql_copy_partitions,
+                pg_mysql_copy_workers,
+                pk_range_predicate,
             )
-            # Driver rowcount is operational; the digest count is the proof.
-            # A positive disagreement means we cannot say what landed.
-            driver_rows = int(dst_cur.rowcount or 0)
-            if driver_rows > 0 and driver_rows != source_digest.row_count:
-                raise ValueError(
-                    "COPY fast path refused: driver rowcount "
-                    f"{driver_rows} disagrees with the source snapshot "
-                    f"({source_digest.row_count} rows)"
+
+            pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
+            if dest_occupied and pk_map is None:
+                raise FastPathUnavailable(
+                    "append into non-empty PostgreSQL dest stays on the row path"
                 )
-            rows_copied = source_digest.row_count
+
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+            source_count = int(src_cur.fetchone()[0])
+            workers = pg_mysql_copy_workers(source_count)
+            n_parts = pg_mysql_copy_partitions(source_count, workers)
+            partitions: list[dict[str, Any]] = []
+            shard_mode = "serial"
+            copy_split = "binary"
+            predicates: list[str] = [""]
+            skip_all = False
+
+            if pk_map is not None:
+                src_pk, dest_pk = pk_map
+                src_ident = _quote(src_pk)
+                dest_ident = _quote(dest_pk)
+                shard_mode = "pk"
+                pk_declared = shape.types.get(src_pk) or ""
+                if not pk_declared:
+                    live_l = {k.lower(): v for k, v in shape.types.items()}
+                    pk_declared = live_l.get(src_pk.lower()) or ""
+                partitions = _plan_pg_pk_partitions(
+                    src_cur, source_ref, src_ident, pk_declared, n_parts, source_count
+                )
+                if dest_occupied:
+                    copy_split = "pk"
+                    for part in partitions:
+                        already = _pg_dest_range_count(
+                            dst_cur, dest_ref, dest_ident, part
+                        )
+                        expected = int(part["source_count"])
+                        if already == expected:
+                            part["action"] = "skip"
+                            part["dest_count"] = already
+                        elif already == 0:
+                            part["action"] = "load"
+                        else:
+                            from services.copy_pg_mysql import _pg_quoted_literal
+
+                            pred = pk_range_predicate(
+                                dest_ident,
+                                _pg_quoted_literal(dst_cur, part["lo"])
+                                if part.get("lo") is not None
+                                else None,
+                                _pg_quoted_literal(dst_cur, part["hi"])
+                                if part.get("hi") is not None
+                                else None,
+                                null_shard=bool(part.get("null_shard")),
+                            )
+                            if not pred:
+                                raise FastPathUnavailable(
+                                    "refusing unbounded dest DELETE on resume"
+                                )
+                            dst_cur.execute(
+                                f"DELETE FROM {dest_ref} WHERE {pred}"  # nosec B608
+                            )
+                            part["action"] = "reload"
+                    predicates = [
+                        str(p.get("predicate") or "")
+                        for p in partitions
+                        if p.get("action") in {"load", "reload"}
+                    ]
+                    skip_all = not predicates
+                else:
+                    predicates = [""]
+
+            need_checksum = not skip_all
+            source_digest = None
+            if need_checksum:
+                source_digest = postgresql_engine_checksum(
+                    src_cur, source_ref, source_cols
+                )
+                if source_digest is None:
+                    raise FastPathUnavailable("source digest unavailable")
+                if int(source_digest.row_count) != source_count:
+                    raise ValueError(
+                        "COPY fast path refused: digest count "
+                        f"{source_digest.row_count} != snapshot {source_count}"
+                    )
+
+            dest_copy_sql = (
+                f"COPY {dest_ref} ({target_list}) FROM STDIN (FORMAT binary)"  # nosec B608
+            )
+            copied_any = False
+            for pred in predicates:
+                where = f" WHERE {pred}" if pred else ""
+                _stream_copy(
+                    src_cur,
+                    dst_cur,
+                    f"COPY (SELECT {source_list} FROM {source_ref}{where}) "  # nosec B608
+                    "TO STDOUT (FORMAT binary)",
+                    dest_copy_sql,
+                )
+                copied_any = True
+            if copied_any:
+                driver_rows = int(dst_cur.rowcount or 0)
+                if driver_rows > 0 and len(predicates) == 1 and not predicates[0]:
+                    if driver_rows != source_count:
+                        raise ValueError(
+                            "COPY fast path refused: driver rowcount "
+                            f"{driver_rows} disagrees with the source snapshot "
+                            f"({source_count} rows)"
+                        )
+
+            rows_copied = source_count
 
             # Build indexes after the bulk load, not before: on an empty table
             # each COPYed row would pay index maintenance, and building once over
@@ -648,18 +869,76 @@ def copy_between_postgres(
                     dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
                     indexes_carried.append(index_name)
 
-            dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
-            if dest_digest is None:
-                raise FastPathUnavailable("destination digest unavailable")
+            dest_digest = None
+            if need_checksum:
+                dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
+                if dest_digest is None:
+                    raise FastPathUnavailable("destination digest unavailable")
+            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+            dest_count = int(dst_cur.fetchone()[0])
+            if dest_count != source_count:
+                raise ValueError(
+                    "COPY fast path refused: dest COUNT(*) "
+                    f"{dest_count} != source snapshot {source_count}"
+                )
+            if shard_mode == "pk" and pk_map is not None:
+                dest_ident = _quote(pk_map[1])
+                for part in partitions:
+                    dest_part = _pg_dest_range_count(
+                        dst_cur, dest_ref, dest_ident, part
+                    )
+                    part["dest_count"] = dest_part
+                    if dest_part != int(part["source_count"]):
+                        raise ValueError(
+                            "PK range dest COUNT "
+                            f"{dest_part} != source {part['source_count']} "
+                            f"(lo={part['lo']!r} hi={part['hi']!r})"
+                        )
 
+        proof_count = f"dest_count:{dest_count}"
+        source_checksum = (
+            source_digest.checksum if source_digest is not None else proof_count
+        )
+        target_checksum = (
+            dest_digest.checksum if dest_digest is not None else proof_count
+        )
+        partition_proof = [
+            {
+                "lo": _jsonable_bound(p.get("lo")),
+                "hi": _jsonable_bound(p.get("hi")),
+                "null_shard": bool(p.get("null_shard")),
+                "source_count": int(p["source_count"]),
+                "dest_count": int(p.get("dest_count") or 0),
+                "action": str(p.get("action") or "load"),
+            }
+            for p in partitions
+        ]
+        snapshot["copy_split"] = copy_split
+        snapshot["shard_mode"] = shard_mode if partitions else "serial"
+        snapshot["copy_workers"] = 1
+        snapshot["copy_partitions"] = len(partitions) or 1
+        snapshot["partitions_skipped"] = sum(
+            1 for p in partitions if p.get("action") == "skip"
+        )
+        snapshot["partition_proof"] = partition_proof
+        proof_scope = (
+            "partition_dest_count_equals_source_snapshot"
+            if skip_all
+            else (
+                "mapped_column_checksum_and_dest_count_equals_source_snapshot"
+                if not partition_proof
+                else "mapped_column_checksum_and_partition_dest_count"
+            )
+        )
         result = FastPathResult(
             rows_copied=rows_copied,
-            source_rows=source_digest.row_count,
-            source_checksum=source_digest.checksum,
-            target_rows=dest_digest.row_count,
-            target_checksum=dest_digest.checksum,
+            source_rows=source_count,
+            source_checksum=source_checksum,
+            target_rows=dest_count,
+            target_checksum=target_checksum,
             source_snapshot=snapshot,
             indexes_carried=tuple(indexes_carried),
+            proof_scope=proof_scope,
         )
         if not result.verified:
             # The destination transaction has not committed, so refusing here

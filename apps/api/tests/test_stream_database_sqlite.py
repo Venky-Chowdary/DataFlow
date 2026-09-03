@@ -80,9 +80,10 @@ def test_stream_sqlite_to_sqlite_basic():
 
         assert rows_written == 250
         assert "id" in columns
-        # Phase F1 — write-pass fingerprints; no second source scan by default.
-        assert summary.get("checksum_mode") == "inline_write_pass"
-        assert isinstance(summary.get("checksum"), str) and len(summary["checksum"]) == 64
+        assert summary.get("load_method") == "attach_insert_select_sqlite"
+        assert summary.get("checksum") == "dest_count:250"
+        assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
+        assert int(summary.get("rejected_rows") or 0) == 0
 
         conn = sqlite3.connect(dst)
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
@@ -95,6 +96,7 @@ def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
     population (committed_offset), never the last batch's writer-stamped count."""
     import src.transfer.stream as stream_mod
 
+    monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
     monkeypatch.setattr(stream_mod, "CHUNK_SIZE", 40)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -274,12 +276,17 @@ def test_stream_sqlite_includes_ddl_log_and_summary():
         )
 
         assert rows_written == 5
-        assert any("STREAM" in line for line in ddl_log)
+        assert any("COPY SQLite" in line for line in ddl_log)
         assert summary["type"] == "sqlite"
         assert summary["table"] == "orders_out"
+        assert summary.get("load_method") == "attach_insert_select_sqlite"
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        conn.close()
+        assert count == 5
 
 
-def test_stream_hard_fails_when_checkpoint_save_rejected():
+def test_stream_hard_fails_when_checkpoint_save_rejected(monkeypatch):
     """Fail-closed: a rejected checkpoint write must abort the transfer job."""
     from services.checkpoint_service import CheckpointPersistenceError
 
@@ -305,6 +312,7 @@ def test_stream_hard_fails_when_checkpoint_save_rejected():
         ]
         schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
 
+        monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
         with pytest.raises(CheckpointPersistenceError, match="refusing to continue"):
             stream_database_transfer(
                 source,

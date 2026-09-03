@@ -28,9 +28,15 @@ from services.copy_pg_mysql import (  # noqa: E402
     _mysql_create_sql,
     ctid_predicate,
     heap_page_ranges,
+    key_ranges_from_cuts,
+    mapped_single_pk,
     mapping_is_plain_carry,
+    mysql_pk_range_clause,
+    integer_pk_cuts,
+    pg_mysql_copy_partitions,
     pg_mysql_copy_workers,
     pg_type_is_load_safe,
+    pk_range_predicate,
 )
 
 
@@ -70,6 +76,22 @@ def test_load_data_sql_is_tab_delimited_local_infile():
     assert r"ESCAPED BY '\\'" in sql
     assert "(`id`, `amount`)" in sql
     assert "IGNORE" not in sql
+    assert "OPTIONALLY ENCLOSED" not in sql
+
+
+def test_load_data_sql_csv_header_ignore():
+    sql = build_load_data_sql(
+        table_q="`orders`",
+        columns=["id", "amount"],
+        infile_sql="'/tmp/df_mysql_ld_x.csv'",
+        field_terminator=",",
+        optionally_enclosed=True,
+        ignore_lines=1,
+    )
+    assert r"FIELDS TERMINATED BY ','" in sql
+    assert "OPTIONALLY ENCLOSED BY '\"'" in sql
+    assert "IGNORE 1 LINES" in sql
+    assert r"ESCAPED BY '\\'" in sql
 
 
 def test_quote_load_data_path_refuses_quote():
@@ -161,6 +183,55 @@ def test_heap_page_ranges_are_disjoint_and_cover():
     assert "ctid >=" in ctid_predicate(25, None)
     assert "AND" in ctid_predicate(10, 20)
     assert pg_mysql_copy_workers(10) == 1
+
+
+def test_pk_key_ranges_from_cuts_are_half_open_and_cover():
+    ranges = key_ranges_from_cuts(["b", "b", "m"])
+    assert ranges[0] == (None, "b")
+    assert ranges[1] == ("b", "m")
+    assert ranges[-1] == ("m", None)
+    assert key_ranges_from_cuts([]) == [(None, None)]
+    assert mapped_single_pk(["id"], [("id", "id")]) == ("id", "id")
+    assert mapped_single_pk(["id", "sk"], [("id", "id")]) is None
+    assert pk_range_predicate("`id`", "'a'", "'m'") == "`id` >= 'a' AND `id` < 'm'"
+    clause, params = mysql_pk_range_clause("`id`", "a", "m")
+    assert clause == "`id` >= %s AND `id` < %s"
+    assert params == ["a", "m"]
+    unbounded, unbound_params = mysql_pk_range_clause("`id`", None, None)
+    assert unbounded == "1=1"
+    assert unbound_params == []
+    null_clause, null_params = mysql_pk_range_clause("`id`", None, None, null_shard=True)
+    assert null_clause == "`id` IS NULL"
+    assert null_params == []
+    lo_only, lo_params = mysql_pk_range_clause("`id`", "m", None)
+    assert lo_only == "`id` >= %s"
+    assert lo_params == ["m"]
+
+
+def test_auto_copy_workers_scale_with_volume(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "auto")
+    assert pg_mysql_copy_workers(10) == 1
+    mid = pg_mysql_copy_workers(50_000)
+    big = pg_mysql_copy_workers(5_000_000)
+    assert 1 <= mid <= 4
+    assert mid <= big <= 8
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "3")
+    assert pg_mysql_copy_workers(10) == 3
+
+
+def test_integer_pk_cuts_and_partition_count():
+    cuts = integer_pk_cuts(1, 8000, 4)
+    assert cuts == [2001, 4001, 6001]
+    ranges = key_ranges_from_cuts(cuts)
+    assert ranges[0] == (None, 2001)
+    assert ranges[1] == (2001, 4001)
+    assert ranges[2] == (4001, 6001)
+    assert ranges[3] == (6001, None)
+    assert integer_pk_cuts(1, 1, 8) == []
+    assert pg_mysql_copy_partitions(10, 1) == 1
+    assert pg_mysql_copy_partitions(8_000, 4) == 4
+    assert pg_mysql_copy_partitions(200_000_000, 4) == 32
+    assert pg_mysql_copy_partitions(10_000_000, 4) == 4
 
 
 def test_warning_rows_block_commit_notes_do_not():
@@ -323,3 +394,109 @@ def test_live_env_off_uses_insert_and_still_counts(monkeypatch):
         conn.commit()
     finally:
         conn.close()
+
+
+def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
+    """Completed PK ranges are skipped; a partial range is deleted and reloaded."""
+    _mysql_live_or_skip()
+    _ensure_local_infile()
+    try:
+        with socket.create_connection(("localhost", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL not reachable on localhost:5432")
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "4")
+    psycopg2 = pytest.importorskip("psycopg2")
+    pymysql = pytest.importorskip("pymysql")
+    from services.copy_pg_mysql import copy_postgres_to_mysql
+
+    tag = uuid.uuid4().hex[:8]
+    src_table = f"pk_resume_src_{tag}"
+    dest_table = f"pk_resume_dst_{tag}"
+    source_cfg = {
+        "host": "localhost",
+        "port": 5432,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+    dest_cfg = {
+        "host": "localhost",
+        "port": 3306,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+    pg = psycopg2.connect(
+        host="localhost", port=5432, user="dataflow", password="dataflow", dbname="dataflow"
+    )
+    pg.autocommit = True
+    my = pymysql.connect(
+        host="localhost", port=3306, user="dataflow", password="dataflow",
+        database="dataflow", autocommit=True,
+    )
+    try:
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src_table}"')
+            cur.execute(
+                f'CREATE TABLE "{src_table}" (id bigint PRIMARY KEY, label varchar(32))'
+            )
+            cur.execute(
+                f"""
+                INSERT INTO "{src_table}"
+                SELECT i, 'r' || i FROM generate_series(1, 8000) AS s(i)
+                """
+            )
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dest_table}`")
+        first = copy_postgres_to_mysql(
+            source_cfg=source_cfg,
+            source_schema="public",
+            source_table=src_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=[("id", "id"), ("label", "label")],
+            mysql_ddls=["BIGINT", "VARCHAR(32)"],
+            replace_destination=True,
+        )
+        assert first.source_rows == 8000
+        assert first.target_rows == 8000
+        parts = first.source_snapshot["partition_proof"]
+        assert len(parts) == 4
+        assert first.source_snapshot.get("shard_mode") == "pk"
+        assert first.source_snapshot.get("copy_split") == "ctid"
+        victim = parts[2]
+        with my.cursor() as cur:
+            # Leave a partial range (not empty, not complete) so resume must DELETE+reload.
+            lo = victim["lo"]
+            assert lo is not None
+            cur.execute(f"DELETE FROM `{dest_table}` WHERE `id` = %s", (lo,))
+            cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
+            assert int(cur.fetchone()[0]) == 7999
+        second = copy_postgres_to_mysql(
+            source_cfg=source_cfg,
+            source_schema="public",
+            source_table=src_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=[("id", "id"), ("label", "label")],
+            mysql_ddls=["BIGINT", "VARCHAR(32)"],
+            replace_destination=False,
+        )
+        assert second.source_rows == 8000
+        assert second.target_rows == 8000
+        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
+        assert actions.count("skip") == 3
+        assert actions.count("reload") == 1
+        assert second.source_snapshot.get("partitions_skipped") == 3
+        assert second.source_snapshot.get("copy_split") == "pk"
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
+            assert int(cur.fetchone()[0]) == 8000
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src_table}"')
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dest_table}`")
+        pg.close()
+        my.close()

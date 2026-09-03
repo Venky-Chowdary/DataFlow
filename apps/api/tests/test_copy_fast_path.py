@@ -293,11 +293,84 @@ def test_replace_destination_false_appends(pg):
     try:
         tables.insert("INSERT INTO {src} VALUES (1, 'a')")
         assert _copy(tables, [("id", "id"), ("note", "note")]).verified
-        # Appending means the destination no longer matches the source snapshot,
-        # so the verdict must say so rather than report a clean load.
-        with pytest.raises(ValueError, match="does not match the source snapshot"):
+        # Occupied dest is not a second COPY — that would duplicate then fail
+        # the digest. Decline so the row path (quarantine) owns the case.
+        with pytest.raises(FastPathUnavailable, match="non-empty"):
             _copy(
                 tables, [("id", "id"), ("note", "note")], replace_destination=False
+            )
+        assert tables.count(tables.dst) == 1
+    finally:
+        tables.drop()
+
+
+def test_pk_resume_skips_complete_and_reloads_partial(pg, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "4")
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} SELECT i, 'r' || i FROM generate_series(1, 8000) s(i)")
+        first = _copy(tables, [("id", "id"), ("note", "note")])
+        assert first.source_rows == 8000
+        parts = first.source_snapshot.get("partition_proof") or []
+        assert len(parts) == 4
+        victim = parts[2]
+        lo = victim["lo"]
+        assert lo is not None
+        with pg.cursor() as cur:
+            cur.execute(f'DELETE FROM "{tables.dst}" WHERE id = %s', (lo,))
+            cur.execute(f'SELECT COUNT(*) FROM "{tables.dst}"')
+            assert int(cur.fetchone()[0]) == 7999
+        second = _copy(
+            tables, [("id", "id"), ("note", "note")], replace_destination=False
+        )
+        assert second.source_rows == 8000
+        assert second.target_rows == 8000
+        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
+        assert actions.count("skip") == 3
+        assert actions.count("reload") == 1
+        assert second.source_snapshot.get("partitions_skipped") == 3
+        assert tables.count(tables.dst) == 8000
+    finally:
+        tables.drop()
+
+
+def test_append_creates_missing_dest_and_counts(pg):
+    tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a')")
+        tables.insert("INSERT INTO {src} VALUES (2, 'b')")
+        result = _copy(
+            tables, [("id", "id"), ("note", "note")], replace_destination=False
+        )
+        assert result.verified
+        assert result.target_rows == 2
+        assert tables.count(tables.dst) == 2
+        assert result.source_snapshot.get("copy_split") == "binary"
+    finally:
+        tables.drop()
+
+
+def test_refuses_copy_onto_the_same_table(pg):
+    from services.copy_fast_path import postgres_same_relation
+
+    assert postgres_same_relation(
+        CFG, CFG, "public", "t", "public", "t"
+    ) is True
+    assert postgres_same_relation(
+        CFG, {**CFG, "port": 5433}, "public", "t", "public", "t"
+    ) is False
+    tables = _Tables(pg, "id bigint")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1)")
+        with pytest.raises(FastPathUnavailable, match="same PostgreSQL table"):
+            copy_between_postgres(
+                source_cfg=CFG,
+                source_schema="public",
+                source_table=tables.src,
+                dest_cfg=CFG,
+                dest_schema="public",
+                dest_table=tables.src,
+                pairs=[("id", "id")],
             )
     finally:
         tables.drop()
