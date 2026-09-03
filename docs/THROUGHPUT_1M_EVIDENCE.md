@@ -57,6 +57,20 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_mongo \\
   python scripts/bench_mysql_to_mongo_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_mongo BENCH_DEST=bench_mysql_from_mongo \\
   python scripts/bench_mongo_to_mysql_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_mysql BENCH_DEST=bench_ss_mongo \\
+  python scripts/bench_sqlserver_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_mongo BENCH_DEST=bench_ss_from_mongo \\
+  python scripts/bench_mongo_to_sqlserver_million.py
+BENCH_ROWS=1000000 BENCH_SRC=BENCH_MY_ORA BENCH_DEST=bench_ora_mongo \\
+  python scripts/bench_oracle_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ora_mongo BENCH_DEST=BENCH_ORA_FROM_MONGO \\
+  python scripts/bench_mongo_to_oracle_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_mongo BENCH_DEST=bench_mongo_clone \\
+  python scripts/bench_mongo_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_iceberg BENCH_DEST=bench_ice_mongo \\
+  python scripts/bench_iceberg_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ice_mongo BENCH_DEST=bench_ice_from_mongo \\
+  python scripts/bench_mongo_to_iceberg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1561,6 +1575,21 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
+
+### Named 1M fixture — Iceberg↔Mongo / SQL Server↔Mongo / Oracle↔Mongo — wired, not measured
+
+Harnesses exist (`bench_iceberg_to_mongo_million.py`,
+`bench_mongo_to_iceberg_million.py`, plus SQL Server/Oracle/Mongo↔Mongo
+scripts). Unique dest names: `bench_ice_mongo` /
+`bench_ice_from_mongo` (not reused from `bench_pg_mongo` /
+`bench_ss_mongo`). Iceberg times are **local** warehouse
+(`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest proof is
+`count_documents({})` (Mongo) or file footers (Iceberg). Empty Mongo dest
+is `insert_many`, not upsert. Empty Iceberg dest is CoW snapshot append,
+not `MERGE INTO`. TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date
+would invent UTC). Nested BSON declines Mongo→Iceberg. Named 1M dest
+COUNT for these pairs is **not recorded on this host yet** — do not
+invent times.
 
 ### 200M named fixture — not run on this host
 

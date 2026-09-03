@@ -21,6 +21,7 @@ occupied dest with dest COUNT ≠ source.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -148,6 +149,8 @@ def _iceberg_source_count(endpoint: dict[str, Any]) -> int:
 def _arrow_from_iceberg_files(
     endpoint: dict[str, Any],
     source_cols: list[str],
+    *,
+    type_is_copy_safe: Callable[[str], bool] | None = None,
 ) -> Any:
     """Current-snapshot data files as Arrow. Never ``scan().to_arrow()``."""
     import pyarrow as pa
@@ -160,6 +163,7 @@ def _arrow_from_iceberg_files(
         _iceberg_local_path,
     )
 
+    check = type_is_copy_safe or iceberg_type_is_copy_safe
     parsed = parse_iceberg_catalog_config(endpoint)
     catalog = load_catalog(endpoint)
     identifier = parsed["namespace"] + (parsed["table_name"],)
@@ -179,9 +183,9 @@ def _arrow_from_iceberg_files(
             raise FastPathUnavailable(f"Iceberg source column {col!r} absent")
         field = next(f for f in tbl.schema().fields if str(f.name) == name)
         declared = str(getattr(field, "field_type", None) or "")
-        if not iceberg_type_is_copy_safe(declared):
+        if not check(declared):
             raise FastPathUnavailable(
-                f"source column {col!r} type {declared} is not Iceberg COPY-safe"
+                f"source column {col!r} type {declared} is not COPY-safe"
             )
         selected.append(name)
 
