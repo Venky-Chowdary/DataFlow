@@ -84,7 +84,7 @@ def copy_mongo_to_oracle(
 
     from connectors.write_resilience import is_public_proxy_host
 
-    if is_public_proxy_host(dest_cfg.get("host") or "") or is_public_proxy_host(
+    if is_public_proxy_host(dest_cfg.get("host") or dest_cfg.get("connection_string") or "") or is_public_proxy_host(
         source_cfg.get("host") or source_cfg.get("connection_string") or ""
     ):
         raise FastPathUnavailable("public proxy: Mongo bulk copy not assumed")

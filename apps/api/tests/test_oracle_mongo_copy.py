@@ -210,7 +210,10 @@ def test_live_oracle_mongo_varchar2_empty_is_null():
             f"CREATE TABLE {src} (ID NUMBER NOT NULL PRIMARY KEY, LABEL VARCHAR2(32))"
         )
         cur.execute(
-            f"INSERT INTO {src} (ID, LABEL) VALUES (1, NULL), (2, ''), (3, 'x')"
+            f"INSERT INTO {src} (ID, LABEL) "
+            "SELECT 1, NULL FROM dual UNION ALL "
+            "SELECT 2, '' FROM dual UNION ALL "
+            "SELECT 3, 'x' FROM dual"
         )
         ora.commit()
         _drop_mongo(dest)

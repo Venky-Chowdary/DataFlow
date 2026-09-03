@@ -341,7 +341,11 @@ def test_live_mongo_oracle_occupied_mismatch_declines():
         cur.execute(
             f"CREATE TABLE {dest} (ID NUMBER NOT NULL PRIMARY KEY, LABEL VARCHAR2(32))"
         )
-        cur.execute(f"INSERT INTO {dest} (ID, LABEL) VALUES (1, 'ghost'), (2, 'ghost')")
+        cur.execute(
+            f"INSERT INTO {dest} (ID, LABEL) "
+            "SELECT 1, 'ghost' FROM dual UNION ALL "
+            "SELECT 2, 'ghost' FROM dual"
+        )
         ora.commit()
         with pytest.raises(FastPathUnavailable, match="occupied Oracle dest"):
             copy_mongo_to_oracle(

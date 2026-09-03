@@ -159,12 +159,15 @@ def _seed_mongo_from_ss(ss, src: str, mongo: str, rows: int) -> None:
 def test_mongo_sqlserver_copy_safe_types():
     assert mongo_type_is_copy_safe("string") is True
     assert mongo_type_is_copy_safe("long") is True
-    assert mongo_type_is_copy_safe("NVARCHAR(32)") is True
     assert mongo_type_is_copy_safe("BIGINT") is True
     assert mongo_type_is_copy_safe("object") is False
     assert mongo_type_is_copy_safe("array") is False
     assert mongo_type_is_copy_safe("bindata") is False
     assert mongo_type_is_copy_safe("timestamptz") is False
+    from services.copy_sqlserver_mongo import sqlserver_mongo_type_is_copy_safe
+
+    assert sqlserver_mongo_type_is_copy_safe("NVARCHAR(32)") is True
+    assert sqlserver_mongo_type_is_copy_safe("BIGINT") is True
 
 
 def test_mongo_sqlserver_copy_kill_switch(monkeypatch):
