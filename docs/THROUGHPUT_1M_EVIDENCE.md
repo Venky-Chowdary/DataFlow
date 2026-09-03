@@ -1636,6 +1636,13 @@ Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_adls_src.jsonl BENCH_DEST=bench_a
 Pytest: `test_adls_adls_copy` **12 passed / 0 failed** in 1.10s
 (`/opt/cursor/artifacts/adls_adls_identity_pytest.log`).
 
+Pytest: `test_snowflake_snowflake_copy` **12 passed / 0 failed** in 27.49s
+(`/opt/cursor/artifacts/snowflake_snowflake_identity_pytest.log`). Dest
+`COUNT(*)` via `destination_row_count`. Empty dest is CTAS / INSERT SELECT,
+not `COPY INTO` / `CLONE` / leftover MERGE. NULL vs `''` preserved on VARCHAR.
+Named 1M is **wired, not measured** (queue still had continue-with-next).
+fakesnow is not a customer-tenant PRODUCTION_SKU.
+
 ### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / Snowflake identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
