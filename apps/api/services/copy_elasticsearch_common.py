@@ -72,7 +72,7 @@ def elasticsearch_index(table: str) -> str:
     name = (table or "").strip()
     if not name:
         raise FastPathUnavailable("Elasticsearch index required")
-    if any(ch in name for ch in "*, ?\\/"):
+    if any(ch in name for ch in "*,?\\/ "):
         raise FastPathUnavailable("Elasticsearch COPY refuses glob characters in the index")
     if name != name.lower():
         raise FastPathUnavailable("Elasticsearch COPY requires a lowercase index name")
@@ -150,16 +150,38 @@ def elasticsearch_delete_index(cfg: dict[str, Any], index: str) -> None:
         _close_quiet(client)
 
 
+def elasticsearch_dest_can_read_source(dest_cfg: dict[str, Any], src_index: str) -> None:
+    """Dest connector must be able to read the source index on this cluster.
+
+    ``_reindex`` is issued with dest credentials so dest write ACL is the
+    boundary (same as the row-path writer). If dest cannot read source,
+    identity COPY declines to the row path instead of using broader source
+    credentials to write dest.
+    """
+    from connectors.elasticsearch_reader import _client
+
+    name = elasticsearch_index(src_index)
+    client = _client(dest_cfg)
+    try:
+        client.count(index=name)
+    except Exception as exc:
+        raise FastPathUnavailable(
+            "dest credentials cannot read Elasticsearch source index for _reindex"
+        ) from exc
+    finally:
+        _close_quiet(client)
+
+
 def elasticsearch_reindex(
     *,
-    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
     src_index: str,
     dest_index: str,
 ) -> None:
-    """Cluster ``_reindex``. Never scroll+bulk / helpers.reindex the payload."""
+    """Cluster ``_reindex`` using dest credentials. Never scroll+bulk."""
     from connectors.elasticsearch_reader import _client
 
-    client = _client(src_cfg)
+    client = _client(dest_cfg)
     try:
         resp = client.reindex(
             source={"index": elasticsearch_index(src_index)},

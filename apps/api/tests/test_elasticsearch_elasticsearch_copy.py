@@ -182,6 +182,15 @@ def test_elasticsearch_elasticsearch_column_rename_declines(monkeypatch):
         )
 
 
+def test_elasticsearch_index_rejects_comma_and_system_names():
+    from services.copy_elasticsearch_common import elasticsearch_index
+
+    with pytest.raises(FastPathUnavailable, match="glob"):
+        elasticsearch_index("a,b")
+    with pytest.raises(FastPathUnavailable, match="system"):
+        elasticsearch_index(".security")
+
+
 def test_live_elasticsearch_elasticsearch_dest_count(monkeypatch):
     monkeypatch.delenv("DATAFLOW_ELASTICSEARCH_ELASTICSEARCH_COPY", raising=False)
     client = _client()

@@ -24,6 +24,7 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.copy_elasticsearch_common import (
     elasticsearch_delete_index,
+    elasticsearch_dest_can_read_source,
     elasticsearch_dest_count,
     elasticsearch_endpoint_key,
     elasticsearch_index,
@@ -91,6 +92,7 @@ def copy_elasticsearch_to_elasticsearch(
         )
     if not elasticsearch_index_exists(source_cfg, src_index):
         raise FastPathUnavailable("Elasticsearch source index missing")
+    elasticsearch_dest_can_read_source(dest_cfg, src_index)
 
     source_count = elasticsearch_dest_count(source_cfg, src_index)
     if source_count <= 0:
@@ -119,7 +121,7 @@ def copy_elasticsearch_to_elasticsearch(
 
     try:
         elasticsearch_reindex(
-            src_cfg=source_cfg,
+            dest_cfg=dest_cfg,
             src_index=src_index,
             dest_index=dest_index,
         )
