@@ -1362,7 +1362,9 @@ def _bigquery_row_count(
             host=str(cfg.get("host") or ""),
             port=int(cfg.get("port") or 0),
         )
-        table_id = f"`{project}`.`{dataset}`.`{table_name}`"
+        from services.copy_bigquery_common import bigquery_table_ref
+
+        table_id = bigquery_table_ref(project, dataset, table_name)
         rows = _bigquery_run_query(client, f"SELECT COUNT(*) AS n FROM {table_id}")  # nosec B608
         return int(rows[0][0]) if rows else 0
     except NotFound:
