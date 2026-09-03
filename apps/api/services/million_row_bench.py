@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,8 @@ REPORTED_SUMMARY_KEYS = (
     "s3_read",
     "kafka_write",
     "kafka_read",
+    "duckdb_write",
+    "duckdb_read",
     "dynamodb_write",
     "dynamodb_read",
     "elasticsearch_write",
@@ -11776,3 +11779,196 @@ def run_kafka_kafka_volume(
 
 
 
+def _require_duckdb() -> None:
+    try:
+        import duckdb  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(f"duckdb required for DuckDB identity bench: {exc}") from exc
+
+
+def _duckdb_bench_path(name: str) -> str:
+    base = os.environ.get("BENCH_DUCKDB_DIR", tempfile.gettempdir())
+    return str(Path(base) / f"{name}.duckdb")
+
+
+def _duckdb_local_cfg(path: str, table: str) -> dict[str, Any]:
+    return {
+        "type": "duckdb",
+        "format": "duckdb",
+        "database": path,
+        "schema": "main",
+        "table": table,
+    }
+
+
+def _duckdb_count(cfg: dict[str, Any], table: str) -> int:
+    from services.copy_duckdb_common import duckdb_dest_count
+
+    return duckdb_dest_count(cfg, table)
+
+
+def _duckdb_seed(cfg: dict[str, Any], table: str, rows: int) -> None:
+    """Seed INTEGER+VARCHAR with a PK. Seed INSERT is not the COPY path."""
+    from services.copy_duckdb_common import duckdb_engine, duckdb_ident
+
+    engine = duckdb_engine(cfg)
+    ref = duckdb_ident(table)
+    with engine.connect() as conn:
+        conn.exec_driver_sql(f"DROP TABLE IF EXISTS {ref}")
+        conn.exec_driver_sql(
+            f"CREATE TABLE {ref} (id INTEGER PRIMARY KEY, label VARCHAR NOT NULL)"
+        )
+        conn.exec_driver_sql(
+            f"INSERT INTO {ref} (id, label) "
+            "SELECT i, 'r' || i FROM range(1, ? + 1) t(i)",
+            (int(rows),),
+        )
+        conn.commit()
+    print(f"seed: DuckDB {table} wrote {rows} rows (seed is not the COPY path)")
+
+
+def _duckdb_drop(cfg: dict[str, Any], table: str) -> None:
+    from services.copy_duckdb_common import duckdb_engine, duckdb_ident
+
+    engine = duckdb_engine(cfg)
+    with engine.connect() as conn:
+        conn.exec_driver_sql(f"DROP TABLE IF EXISTS {duckdb_ident(table)}")
+        conn.commit()
+
+
+def run_duckdb_duckdb_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_path: str | None = None,
+    dest_path: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity DuckDB→DuckDB through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)`` via ``destination_row_count``, never
+    ``duckdb_tables()`` metadata. Empty dest is ``ATTACH … (READ_ONLY)`` +
+    ``INSERT SELECT``, not ``EXPORT DATABASE`` / ``read_parquet`` staging /
+    a pandas round trip. Dest DDL is the source catalog's types and keys.
+    Seeds INTEGER+VARCHAR with a PK when the source table is missing (seed
+    is not the COPY path). Unique dest ``bench_duckdb_clone`` is not reused
+    from ``bench_1m`` / ``bench_kafka_clone`` / ``bench_redis_clone``.
+    """
+    _require_duckdb()
+    src_table = str(source_table or "bench_duckdb_src")
+    dest = str(dest_table)
+    src_file = source_path or _duckdb_bench_path("bench_duckdb_src")
+    dest_file = dest_path or _duckdb_bench_path("bench_duckdb_dest")
+    src_cfg = _duckdb_local_cfg(src_file, src_table)
+    dest_cfg = _duckdb_local_cfg(dest_file, dest)
+    if (
+        Path(src_file).resolve(strict=False) == Path(dest_file).resolve(strict=False)
+        and src_table.strip().lower() == dest.strip().lower()
+    ):
+        raise AssertionError("DuckDB→DuckDB bench refuses the same file+table")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _duckdb_count(src_cfg, src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _duckdb_seed(src_cfg, src_table, rows)
+    if not keep_dest:
+        _duckdb_drop(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "label", "target": "label", "type": "VARCHAR", "transform": "none"},
+    ]
+    schema = {"id": "INTEGER", "label": "VARCHAR"}
+    job_id = f"bench-duckdb-duckdb-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _duckdb_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "duckdb→duckdb",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "source_path": src_file,
+        "dest_path": dest_file,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "duckdb_read": summary.get("duckdb_read"),
+        "duckdb_write": summary.get("duckdb_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "duckdb_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} duckdb→duckdb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT(*): {rows})")
+    print(
+        "Not EXPORT DATABASE / read_parquet staging / pandas round trip. "
+        "Empty dest is ATTACH READ_ONLY + INSERT SELECT."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "attach_insert_select_duckdb_duckdb"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected DuckDB ATTACH + INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
