@@ -21,12 +21,18 @@ dest with dest COUNT ≠ source.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_mongo_sink import (
+    abort_created_mongo,
+    insert_many_documents,
+    mongo_copy_batch,
+    prepare_mongo_dest,
+    prove_mongo_dest,
+    sql_value_to_bson,
+)
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_base,
@@ -36,7 +42,6 @@ from services.copy_mysql_pg import (
     _select_sql,
     mysql_type_is_copy_safe,
 )
-from services.copy_pg_mongo import mongo_collection, mongo_dest_count
 from services.copy_pg_mysql import mapping_is_plain_carry
 
 logger = logging.getLogger(__name__)
@@ -48,11 +53,7 @@ def mysql_mongo_copy_enabled() -> bool:
 
 
 def mysql_mongo_copy_batch() -> int:
-    raw = (getenv_brand("MYSQL_MONGO_COPY_BATCH", "5000") or "5000").strip()
-    try:
-        return max(1, min(int(raw), 20_000))
-    except ValueError:
-        return 5000
+    return mongo_copy_batch("MYSQL_MONGO_COPY_BATCH")
 
 
 def mysql_mongo_type_is_copy_safe(declared: str) -> bool:
@@ -63,23 +64,7 @@ def mysql_mongo_type_is_copy_safe(declared: str) -> bool:
 
 
 def mysql_value_to_bson(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        if value.hour or value.minute or value.second or value.microsecond:
-            raise FastPathUnavailable(
-                "MySQL DATETIME/TIMESTAMP is not Mongo COPY-safe"
-            )
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    if isinstance(value, date):
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    if isinstance(value, Decimal):
-        from bson.decimal128 import Decimal128
-
-        return Decimal128(value)
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        raise FastPathUnavailable("binary MySQL field is not Mongo COPY-safe")
-    return value
+    return sql_value_to_bson(value)
 
 
 def _select_insert_many(
@@ -109,24 +94,10 @@ def _select_insert_many(
                     }
                 )
                 if len(batch) >= batch_size:
-                    result = coll.insert_many(batch, ordered=False)
-                    got = len(result.inserted_ids)
-                    if got != len(batch):
-                        raise ValueError(
-                            "MySQL→Mongo COPY refused: insert_many "
-                            f"{got} != batch {len(batch)}"
-                        )
-                    inserted += got
+                    inserted += insert_many_documents(coll, batch)
                     batch.clear()
         if batch:
-            result = coll.insert_many(batch, ordered=False)
-            got = len(result.inserted_ids)
-            if got != len(batch):
-                raise ValueError(
-                    "MySQL→Mongo COPY refused: insert_many "
-                    f"{got} != batch {len(batch)}"
-                )
-            inserted += got
+            inserted += insert_many_documents(coll, batch)
         return inserted
     finally:
         try:
@@ -165,19 +136,14 @@ def copy_mysql_to_mongo(
     ):
         raise FastPathUnavailable("public proxy: Mongo bulk copy not assumed")
 
-    try:
-        import pymongo  # noqa: F401
-    except Exception as exc:
-        raise FastPathUnavailable(f"pymongo required for Mongo COPY: {exc}") from exc
-
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
     table_q = _mysql_ident(source_table)
     select_sql = _select_sql(table_q, source_cols, "")
 
-    _client, coll = mongo_collection(dest_cfg, dest_table)
     source_conn = _mysql_connect(source_cfg)
     created_here = False
+    coll = None
     try:
         with source_conn.cursor() as src_cur:
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -193,39 +159,15 @@ def copy_mysql_to_mongo(
             src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
 
-        dest_count_before = mongo_dest_count(dest_cfg, dest_table)
-        dest_occupied = dest_count_before > 0
-        if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                proof = f"dest_count:{dest_count_before}"
-                return FastPathResult(
-                    rows_copied=source_count,
-                    source_rows=source_count,
-                    source_checksum=proof,
-                    target_rows=dest_count_before,
-                    target_checksum=proof,
-                    source_snapshot={
-                        "copy_workers": 1,
-                        "copy_split": "skip",
-                        "copy_partitions": 1,
-                        "partitions_skipped": 1,
-                        "partitions_loaded": 0,
-                        "shard_mode": "table",
-                        "mongo_write": "skip",
-                    },
-                    proof_scope="dest_count_equals_source_snapshot_count",
-                )
-            raise FastPathUnavailable(
-                "append into occupied Mongo dest stays on the row path "
-                "(identity COPY would duplicate)"
-            )
-
-        mongo_write = "overwrite" if replace_destination and dest_occupied else "insert"
-        if replace_destination and dest_occupied:
-            coll.drop()
-            dest_count_before = 0
-        created_here = dest_count_before == 0
-
+        prepared = prepare_mongo_dest(
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            source_count=source_count,
+            replace_destination=replace_destination,
+        )
+        if isinstance(prepared, FastPathResult):
+            return prepared
+        coll, created_here, mongo_write = prepared
         inserted = _select_insert_many(
             source_conn,
             coll,
@@ -233,42 +175,15 @@ def copy_mysql_to_mongo(
             target_cols=target_cols,
             batch_size=mysql_mongo_copy_batch(),
         )
-        if inserted != source_count:
-            raise ValueError(
-                "MySQL→Mongo COPY refused: inserted "
-                f"{inserted} != source snapshot {source_count}"
-            )
-
-        dest_count = mongo_dest_count(dest_cfg, dest_table)
-        if dest_count != source_count:
-            raise ValueError(
-                "MySQL→Mongo COPY refused: dest count_documents "
-                f"{dest_count} != source snapshot {source_count}"
-            )
-        proof = f"dest_count:{dest_count}"
-        return FastPathResult(
-            rows_copied=dest_count,
-            source_rows=source_count,
-            source_checksum=proof,
-            target_rows=dest_count,
-            target_checksum=proof,
-            source_snapshot={
-                "copy_workers": 1,
-                "copy_split": "serial",
-                "copy_partitions": 1,
-                "partitions_skipped": 0,
-                "partitions_loaded": 1,
-                "shard_mode": "table",
-                "mongo_write": mongo_write,
-            },
-            proof_scope="dest_count_equals_source_snapshot_count",
+        return prove_mongo_dest(
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            source_count=source_count,
+            inserted=inserted,
+            mongo_write=mongo_write,
         )
     except Exception:
-        if created_here:
-            try:
-                coll.drop()
-            except Exception:
-                logger.debug("Mongo dest drop after copy failure skipped", exc_info=True)
+        abort_created_mongo(coll, created_here)
         raise
     finally:
         try:

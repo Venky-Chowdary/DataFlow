@@ -4765,6 +4765,713 @@ def run_mongo_mysql_volume(
     return report
 
 
+def _sqlserver_drop_table(table: str) -> None:
+    conn = _sqlserver_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"DROP TABLE IF EXISTS dbo.[{table}]")  # nosec B608
+    finally:
+        conn.close()
+
+
+def _sqlserver_dest_count(table: str) -> int:
+    conn = _sqlserver_connect()
+    try:
+        return _sqlserver_count(conn, table)
+    finally:
+        conn.close()
+
+
+def _oracle_drop_table(table: str) -> None:
+    conn = _oracle_connect()
+    try:
+        _oracle_drop(conn.cursor(), str(table).upper())
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _oracle_dest_count(table: str) -> int:
+    conn = _oracle_connect()
+    try:
+        return _oracle_count(conn, str(table).upper())
+    finally:
+        conn.close()
+
+
+def run_sqlserver_mongo_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQL Server→MongoDB through stream_database_transfer.
+
+    Dest COUNT is ``count_documents({})``, never ``estimatedDocumentCount``.
+    Empty dest is insert_many, not upsert. Not BCP / mongoimport.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    src_table = source_table or "bench_ss_from_mysql"
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    _ensure_sqlserver_employee_fixture(rows, src_table)
+    if not keep_dest:
+        _mongo_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict("database", _mongo_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-ss-mongo-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _mongo_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlserver→mongodb",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "sqlserver_port": 1433,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_write": summary.get("mongo_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} sqlserver→mongodb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination count_documents: {landed} (source rows: {rows})")
+    print(f"mongo_write: {summary.get('mongo_write')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlserver_insert_many_mongo"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SELECT + insert_many, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_mongo_sqlserver_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MongoDB→SQL Server through stream_database_transfer.
+
+    Source COUNT is ``count_documents`` in a replica-set snapshot. Dest
+    proof is SQL Server ``COUNT(*)``. Payload is snapshot find +
+    fast_executemany, never BCP / mongoexport.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"SQL Server 1433 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    mongo_src = str(source_table or "bench_ss_mongo")
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _mongo_count(mongo_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlserver_mongo_volume(
+            rows=rows,
+            dest_table=mongo_src,
+            source_table="bench_ss_from_mysql",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlserver_drop_table(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ss = _sqlserver_cfg()
+    source = EndpointConfig.from_dict("database", _mongo_cfg(mongo_src))
+    destination = EndpointConfig.from_dict(
+        "database", {**ss, "format": "sqlserver", "table": dest}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mongo-ss-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlserver_dest_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mongodb→sqlserver",
+        "sync_mode": sync_mode,
+        "source_table": mongo_src,
+        "dest_table": dest,
+        "sqlserver_port": 1433,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_read": summary.get("mongo_read"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "source_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mongodb→sqlserver [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source count_documents: {rows})")
+    print(f"mongo_read: {summary.get('mongo_read')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "mongo_snapshot_find_fast_executemany_sqlserver"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Mongo snapshot find + fast_executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_oracle_mongo_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Oracle→MongoDB through stream_database_transfer.
+
+    Dest COUNT is ``count_documents({})``, never ``estimatedDocumentCount``.
+    Empty dest is insert_many, not upsert. Not sqlldr / mongoimport.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    src_table = _ensure_oracle_employee_fixture(rows, source_table or "BENCH_MY_ORA")
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    if not keep_dest:
+        _mongo_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict("database", _mongo_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-ora-mongo-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _mongo_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "oracle→mongodb",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "oracle_port": 1521,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_write": summary.get("mongo_write"),
+        "oracle_lock": summary.get("oracle_lock"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} oracle→mongodb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination count_documents: {landed} (source rows: {rows})")
+    print(f"mongo_write: {summary.get('mongo_write')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_oracle_insert_many_mongo"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SHARE-lock SELECT + insert_many, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_mongo_oracle_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MongoDB→Oracle through stream_database_transfer.
+
+    Source COUNT is ``count_documents`` in a replica-set snapshot. Dest
+    proof is Oracle ``COUNT(*)``. Payload is snapshot find + executemany,
+    never sqlldr / mongoexport. VARCHAR2 ``''`` → NULL is engine law.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    mongo_src = str(source_table or "bench_ora_mongo")
+    dest = str(dest_table).upper()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _mongo_count(mongo_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_oracle_mongo_volume(
+            rows=rows,
+            dest_table=mongo_src,
+            source_table="BENCH_MY_ORA",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _oracle_drop_table(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict("database", _mongo_cfg(mongo_src))
+    destination = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": dest}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mongo-ora-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _oracle_dest_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mongodb→oracle",
+        "sync_mode": sync_mode,
+        "source_table": mongo_src,
+        "dest_table": dest,
+        "oracle_port": 1521,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_read": summary.get("mongo_read"),
+        "empty_string_as_null_cells": summary.get("empty_string_as_null_cells"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "source_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mongodb→oracle [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source count_documents: {rows})")
+    print(f"mongo_read: {summary.get('mongo_read')}")
+    print(
+        "empty_string_as_null_cells: "
+        f"{summary.get('empty_string_as_null_cells')}"
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "mongo_snapshot_find_executemany_oracle"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Mongo snapshot find + executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_mongo_mongo_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MongoDB→MongoDB through stream_database_transfer.
+
+    Source and dest COUNT are ``count_documents``, never
+    ``estimatedDocumentCount``. Empty dest is insert_many, not upsert /
+    ``$out``. Nested BSON is identity-safe. Same collection declines.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    mongo_src = str(source_table or "bench_mysql_mongo")
+    dest = str(dest_table)
+    if mongo_src == dest:
+        raise AssertionError("Mongo→Mongo bench refuses the same collection")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _mongo_count(mongo_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_mysql_mongo_volume(
+            rows=rows,
+            dest_table=mongo_src,
+            source_table="bench_1m",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _mongo_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _mongo_cfg(mongo_src))
+    destination = EndpointConfig.from_dict("database", _mongo_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mongo-mongo-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _mongo_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mongodb→mongodb",
+        "sync_mode": sync_mode,
+        "source_table": mongo_src,
+        "dest_table": dest,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_read": summary.get("mongo_read"),
+        "mongo_write": summary.get("mongo_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mongodb→mongodb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination count_documents: {landed} (source count_documents: {rows})")
+    print(f"mongo_write: {summary.get('mongo_write')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "mongo_snapshot_find_insert_many_mongo"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Mongo snapshot find + insert_many, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+
 
 
 
