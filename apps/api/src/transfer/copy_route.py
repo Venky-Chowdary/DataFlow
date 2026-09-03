@@ -6197,8 +6197,9 @@ def _try_pgvector_pgvector_copy_fast_path(
         "Proof: pgvector dest COUNT(*) equals source COUNT(*) inside the "
         "PostgreSQL snapshot. Not scan_source_ids DISTINCT source_id / upsert "
         "ack / writer rows_written / vectorize re-embed. Empty dest is binary "
-        "COPY of raw columns including vector payloads. Desktop-lab pgvector "
-        "is not a customer-tenant PRODUCTION_SKU."
+        "COPY of raw columns including vector payloads. Identity COPY requires "
+        "the full source column set (unmapped columns decline). Desktop-lab "
+        "pgvector is not a customer-tenant PRODUCTION_SKU."
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:

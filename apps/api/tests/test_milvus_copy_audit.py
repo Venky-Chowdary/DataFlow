@@ -12,7 +12,13 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
-from services.copy_milvus_common import _milvus_all_filter, _milvus_pk_info  # noqa: E402
+from services.copy_milvus_common import (  # noqa: E402
+    _milvus_all_filter,
+    _milvus_assert_schema_matches,
+    _milvus_assert_upsert_ok,
+    _milvus_pk_info,
+    _milvus_upsert_ack_count,
+)
 
 
 def test_milvus_pk_info_int_primary_key():
@@ -92,4 +98,111 @@ def test_milvus_milvus_copy_declines_large_collection(monkeypatch):
             pairs=[("id", "id")],
             milvus_ddls=["varchar"],
             replace_destination=True,
+        )
+
+
+def test_milvus_upsert_ack_count_from_data():
+    assert _milvus_upsert_ack_count({"code": 0, "data": {"upsertCount": 7}}) == 7
+    assert _milvus_upsert_ack_count({"data": {"insertCount": 3}}) == 3
+    assert _milvus_upsert_ack_count({"data": {"upsertIds": ["a", "b"]}}) == 2
+    assert _milvus_upsert_ack_count({"code": 0}) is None
+
+
+def test_milvus_upsert_ok_accepts_matching_count():
+    _milvus_assert_upsert_ok({"code": 0, "data": {"upsertCount": 2}}, 200, 2)
+
+
+def test_milvus_upsert_rejects_partial_count():
+    with pytest.raises(ValueError, match="upsertCount 1 != batch 2"):
+        _milvus_assert_upsert_ok({"code": 0, "data": {"upsertCount": 1}}, 200, 2)
+
+
+def test_milvus_upsert_rejects_missing_count():
+    with pytest.raises(ValueError, match="missing upsertCount"):
+        _milvus_assert_upsert_ok({"code": 0, "data": {}}, 200, 2)
+
+
+def test_milvus_schema_mismatch_on_exists(monkeypatch):
+    src = {
+        "fields": [
+            {"fieldName": "id", "dataType": "VarChar"},
+            {"fieldName": "vector", "dataType": "FloatVector"},
+        ]
+    }
+    dest = {
+        "fields": [
+            {"fieldName": "id", "dataType": "Int64"},
+            {"fieldName": "vector", "dataType": "FloatVector"},
+        ]
+    }
+
+    def _describe(cfg, _coll):
+        return dest if cfg.get("_dest") else src
+
+    monkeypatch.setattr(
+        "services.copy_milvus_common._milvus_describe_raw",
+        _describe,
+    )
+    with pytest.raises(FastPathUnavailable, match="schema does not match"):
+        _milvus_assert_schema_matches(
+            dest_cfg={"_dest": True},
+            dest_collection="d",
+            source_cfg={},
+            source_collection="s",
+        )
+
+
+def test_milvus_skip_complete_when_counts_match(monkeypatch):
+    from services.copy_milvus_milvus import copy_milvus_to_milvus
+
+    monkeypatch.delenv("DATAFLOW_MILVUS_MILVUS_COPY", raising=False)
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_collection_exists",
+        lambda _cfg, _coll: True,
+    )
+
+    def _count(_cfg, coll):
+        return 40
+
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_entity_count",
+        _count,
+    )
+    result = copy_milvus_to_milvus(
+        source_cfg={"host": "127.0.0.1", "port": 19530},
+        source_table="src_coll",
+        dest_cfg={"host": "127.0.0.1", "port": 19530},
+        dest_table="dest_coll",
+        pairs=[("id", "id")],
+        milvus_ddls=["varchar"],
+        replace_destination=False,
+    )
+    assert result.source_snapshot.get("copy_split") == "skip"
+
+
+def test_milvus_occupied_mismatch_declines(monkeypatch):
+    from services.copy_milvus_milvus import copy_milvus_to_milvus
+
+    monkeypatch.delenv("DATAFLOW_MILVUS_MILVUS_COPY", raising=False)
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_collection_exists",
+        lambda _cfg, _coll: True,
+    )
+
+    def _count(_cfg, coll):
+        return 2 if "dest" in coll else 80
+
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_entity_count",
+        _count,
+    )
+    with pytest.raises(FastPathUnavailable, match="occupied Milvus dest"):
+        copy_milvus_to_milvus(
+            source_cfg={"host": "127.0.0.1", "port": 19530},
+            source_table="src_coll",
+            dest_cfg={"host": "127.0.0.1", "port": 19530},
+            dest_table="dest_coll",
+            pairs=[("id", "id")],
+            milvus_ddls=["varchar"],
+            replace_destination=False,
         )

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
 _PINECONE_FAMILY = frozenset({
@@ -170,6 +170,53 @@ def _pinecone_list_supported(session: Any, index_url: str, headers: dict[str, st
     return resp.status_code == 200
 
 
+def _pinecone_copy_vector(vid: str, vector: dict[str, Any]) -> dict[str, Any]:
+    """Copy dense values and sparseValues. Neither present → fail closed."""
+    values = vector.get("values")
+    sparse = vector.get("sparseValues")
+    if sparse is None:
+        sparse = vector.get("sparse_values")
+    has_dense = isinstance(values, list)
+    has_sparse = isinstance(sparse, dict) and bool(sparse)
+    if not has_dense and not has_sparse:
+        raise ValueError(
+            f"Pinecone vector {vid!r} has neither values nor sparseValues; "
+            "refuse silent drop"
+        )
+    entry: dict[str, Any] = {"id": vid}
+    if has_dense:
+        entry["values"] = sanitize_json_value(values)
+    else:
+        entry["values"] = []
+    if has_sparse:
+        entry["sparseValues"] = sanitize_json_value(sparse)
+    if isinstance(vector.get("metadata"), dict):
+        entry["metadata"] = sanitize_json_value(vector.get("metadata"))
+    return entry
+
+
+def _pinecone_assert_upsert_ok(resp: Any, expected: int) -> None:
+    """Fail closed when HTTP ok but upsertedCount ≠ batch (partial write)."""
+    if resp.status_code not in {200, 201}:
+        raise ValueError(
+            f"Pinecone upsert failed: {resp.status_code} {getattr(resp, 'text', '')[:200]}"
+        )
+    body = load_http_json(resp) if resp.content else {}
+    if not isinstance(body, dict):
+        raise ValueError("Pinecone upsert returned non-JSON response")
+    raw = body.get("upsertedCount")
+    if raw is None:
+        raise ValueError("Pinecone upsert missing upsertedCount; refuse silent ack")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Pinecone upsertedCount unreadable") from exc
+    if n != expected:
+        raise ValueError(
+            f"Pinecone upsertedCount {n} != batch {expected}; refuse partial copy"
+        )
+
+
 def pinecone_list_fetch_upsert(
     *,
     source_cfg: dict[str, Any],
@@ -181,9 +228,12 @@ def pinecone_list_fetch_upsert(
     from connectors.pinecone_writer import _pinecone_vector_id
 
     session, index_url, headers = _pinecone_session(source_cfg)
+    dest_session, dest_url, dest_headers = _pinecone_session(dest_cfg)
     src_ns = pinecone_namespace(src_namespace, source_cfg)
     dest_ns = pinecone_namespace(dest_namespace, dest_cfg)
     if pinecone_endpoint_key(source_cfg) != pinecone_endpoint_key(dest_cfg):
+        raise ValueError("Pinecone COPY requires the same index host")
+    if dest_url.rstrip("/").lower() != index_url.rstrip("/").lower():
         raise ValueError("Pinecone COPY requires the same index host")
     if not _pinecone_list_supported(session, index_url, headers, src_ns):
         raise FastPathUnavailable(
@@ -244,12 +294,7 @@ def pinecone_list_fetch_upsert(
                     if not isinstance(vector, dict):
                         missing.append(vid)
                         continue
-                    entry: dict[str, Any] = {
-                        "id": vid,
-                        "values": sanitize_json_value(vector.get("values")),
-                    }
-                    if isinstance(vector.get("metadata"), dict):
-                        entry["metadata"] = sanitize_json_value(vector.get("metadata"))
+                    entry = _pinecone_copy_vector(vid, vector)
                     batch_vectors.append(entry)
                 if missing:
                     raise ValueError(
@@ -261,16 +306,13 @@ def pinecone_list_fetch_upsert(
                     payload: dict[str, Any] = {"vectors": upsert_batch}
                     if dest_ns:
                         payload["namespace"] = dest_ns
-                    upsert = session.post(
-                        f"{index_url}/vectors/upsert",
+                    upsert = dest_session.post(
+                        f"{dest_url}/vectors/upsert",
                         data=json.dumps(payload, default=sanitize_json_value),
-                        headers=headers,
+                        headers=dest_headers,
                         timeout=60,
                     )
-                    if upsert.status_code not in {200, 201}:
-                        raise ValueError(
-                            f"Pinecone upsert failed: {upsert.status_code} {upsert.text[:200]}"
-                        )
+                    _pinecone_assert_upsert_ok(upsert, len(upsert_batch))
                     copied += len(upsert_batch)
         pagination = page.get("pagination") if isinstance(page, dict) else None
         nxt = ""
@@ -287,23 +329,10 @@ def skip_complete_pinecone(
     source_count: int,
     dest_count: int,
     extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "namespace",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
+):
+    return skip_complete_identity_copy(
+        source_count=source_count,
+        dest_count=dest_count,
+        shard_mode="namespace",
+        extra_snapshot=extra_snapshot,
     )

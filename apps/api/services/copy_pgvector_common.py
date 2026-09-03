@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
 
 _PGVECTOR_FAMILY = frozenset({
     "pgvector",
@@ -165,28 +165,54 @@ def pgvector_row_count(cfg: dict[str, Any], table: str) -> int:
         conn.close()
 
 
+def pgvector_column_names(cfg: dict[str, Any], table: str) -> list[str]:
+    """Source catalog column names in ordinal order — identity COPY must cover all."""
+    schema = pgvector_schema(cfg)
+    name = pgvector_table(table, cfg)
+    conn = _pgvector_connection(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (schema, name),
+            )
+            return [str(row[0]) for row in cur.fetchall() if row and row[0]]
+    finally:
+        conn.close()
+
+
+def pgvector_require_full_column_mapping(
+    cfg: dict[str, Any],
+    table: str,
+    pairs: list[tuple[str, str]],
+) -> None:
+    """Identity COPY cannot omit source columns (vector payloads would silently drop)."""
+    catalog = pgvector_column_names(cfg, table)
+    if not catalog:
+        raise FastPathUnavailable("pgvector source catalog has no columns")
+    mapped = {src for src, _tgt in pairs}
+    missing = [col for col in catalog if col not in mapped]
+    if missing:
+        raise FastPathUnavailable(
+            "pgvector identity COPY requires all source columns; "
+            f"unmapped: {', '.join(missing)}"
+        )
+
+
 def skip_complete_pgvector(
     *,
     source_count: int,
     dest_count: int,
     extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "table",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
+):
+    return skip_complete_identity_copy(
+        source_count=source_count,
+        dest_count=dest_count,
+        shard_mode="table",
+        extra_snapshot=extra_snapshot,
     )

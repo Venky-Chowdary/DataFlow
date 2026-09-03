@@ -9,8 +9,9 @@ declines. Same host+port+database+schema+table declines. Cross-endpoint
 declines. Desktop-lab pgvector is not a customer-tenant PRODUCTION_SKU.
 
 Declines (row path keeps quarantine): transforms that change values,
-column renames, unsupported source structure, occupied dest with dest
-COUNT ≠ source, copy onto the same table, public proxy.
+column renames, unmapped source columns (identity COPY is the full table,
+including vector/halfvec), unsupported source structure, occupied dest
+with dest COUNT ≠ source, copy onto the same table, public proxy.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from services.copy_pgvector_common import (
     pgvector_endpoint_key,
     pgvector_object_id,
     pgvector_proxy_fail_closed,
+    pgvector_require_full_column_mapping,
     pgvector_row_count,
     pgvector_schema,
     pgvector_table,
@@ -85,6 +87,7 @@ def copy_pgvector_to_pgvector(
         )
     if not pgvector_table_exists(source_cfg, src_table):
         raise FastPathUnavailable("pgvector source table missing")
+    pgvector_require_full_column_mapping(source_cfg, src_table, pairs)
 
     source_count = pgvector_row_count(source_cfg, src_table)
     if source_count <= 0:

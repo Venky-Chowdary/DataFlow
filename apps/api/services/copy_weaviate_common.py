@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
 _WEAVIATE_FAMILY = frozenset({
@@ -317,23 +317,10 @@ def skip_complete_weaviate(
     source_count: int,
     dest_count: int,
     extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "class",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
+):
+    return skip_complete_identity_copy(
+        source_count=source_count,
+        dest_count=dest_count,
+        shard_mode="class",
+        extra_snapshot=extra_snapshot,
     )

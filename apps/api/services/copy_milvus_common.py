@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
 from connectors.milvus_writer import _MILVUS_QUERY_WINDOW
@@ -348,6 +348,12 @@ def milvus_create_collection_from_source(
     body = resp.json() if resp.content else {}
     if not _ok(body if isinstance(body, dict) else {}, resp.status_code):
         if milvus_collection_exists(dest_cfg, dest_collection):
+            _milvus_assert_schema_matches(
+                dest_cfg=dest_cfg,
+                dest_collection=dest_collection,
+                source_cfg=source_cfg,
+                source_collection=source_collection,
+            )
             return
         raise ValueError(
             f"Milvus create collection failed: {resp.status_code} {str(body)[:200]}"
@@ -357,6 +363,71 @@ def milvus_create_collection_from_source(
 def milvus_query_offset_cap_exceeded(entity_count: int) -> bool:
     """Milvus REST query requires ``limit + offset < 16384`` — offset pagination caps here."""
     return int(entity_count) >= _MILVUS_QUERY_WINDOW
+
+
+def _milvus_field_signature(describe: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    fields = describe.get("fields") or describe.get("schema", {}).get("fields") or []
+    sig: list[tuple[str, str]] = []
+    if not isinstance(fields, list):
+        return tuple()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("fieldName") or field.get("name") or "").strip()
+        dtype = str(field.get("dataType") or field.get("type") or "").strip().upper()
+        if name:
+            sig.append((name, dtype))
+    return tuple(sorted(sig))
+
+
+def _milvus_assert_schema_matches(
+    *,
+    dest_cfg: dict[str, Any],
+    dest_collection: str,
+    source_cfg: dict[str, Any],
+    source_collection: str,
+) -> None:
+    src_sig = _milvus_field_signature(_milvus_describe_raw(source_cfg, source_collection))
+    dest_sig = _milvus_field_signature(_milvus_describe_raw(dest_cfg, dest_collection))
+    if not src_sig or src_sig != dest_sig:
+        raise FastPathUnavailable(
+            "Milvus dest schema does not match source; refuse silent create-on-exists"
+        )
+
+
+def _milvus_upsert_ack_count(body: Any) -> int | None:
+    """Parse REST v2 upsertCount / insertCount / upsertIds length. None = unmeasured."""
+    if not isinstance(body, dict):
+        return None
+    data = body.get("data") if isinstance(body.get("data"), dict) else body
+    if not isinstance(data, dict):
+        return None
+    for key in ("upsertCount", "insertCount", "upsert_count", "insert_count"):
+        raw = data.get(key)
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return None
+    ids = data.get("upsertIds") or data.get("insertIds") or data.get("IDs")
+    if isinstance(ids, list):
+        return len(ids)
+    return None
+
+
+def _milvus_assert_upsert_ok(body: Any, status_code: int, expected: int) -> None:
+    """Fail closed when HTTP ok but upsertCount ≠ batch (partial write)."""
+    if not _ok(body if isinstance(body, dict) else {}, status_code):
+        raise ValueError(
+            f"Milvus upsert failed: {status_code} {str(body)[:200]}"
+        )
+    n = _milvus_upsert_ack_count(body)
+    if n is None:
+        raise ValueError("Milvus upsert missing upsertCount; refuse silent ack")
+    if n != expected:
+        raise ValueError(
+            f"Milvus upsertCount {n} != batch {expected}; refuse partial copy"
+        )
 
 
 def milvus_query_upsert(
@@ -431,13 +502,11 @@ def milvus_query_upsert(
                     timeout=60,
                 )
                 upsert_body = upsert.json() if upsert.content else {}
-                if not _ok(
+                _milvus_assert_upsert_ok(
                     upsert_body if isinstance(upsert_body, dict) else {},
                     upsert.status_code,
-                ):
-                    raise ValueError(
-                        f"Milvus upsert failed: {upsert.status_code} {str(upsert_body)[:200]}"
-                    )
+                    len(batch),
+                )
                 copied += len(batch)
         if len(rows) < limit:
             break
@@ -450,23 +519,10 @@ def skip_complete_milvus(
     source_count: int,
     dest_count: int,
     extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "collection",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
+):
+    return skip_complete_identity_copy(
+        source_count=source_count,
+        dest_count=dest_count,
+        shard_mode="collection",
+        extra_snapshot=extra_snapshot,
     )

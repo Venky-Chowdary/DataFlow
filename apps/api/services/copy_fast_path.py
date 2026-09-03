@@ -90,6 +90,39 @@ class FastPathUnavailable(Exception):
     """Raised when the route cannot be proven identical — caller falls back."""
 
 
+def skip_complete_identity_copy(
+    *,
+    source_count: int,
+    dest_count: int,
+    shard_mode: str,
+    extra_snapshot: dict[str, Any] | None = None,
+) -> FastPathResult:
+    """Occupied dest whose COUNT already equals source COUNT — skip write, keep proof.
+
+    Identity COPY engines share this result shape so skip-complete cannot drift
+    per connector. Proof remains dest COUNT, never upsert ack.
+    """
+    proof = f"dest_count:{dest_count}"
+    snapshot = {
+        "copy_workers": 1,
+        "copy_split": "skip",
+        "copy_partitions": 1,
+        "partitions_skipped": 1,
+        "partitions_loaded": 0,
+        "shard_mode": shard_mode,
+        **(extra_snapshot or {}),
+    }
+    return FastPathResult(
+        rows_copied=source_count,
+        source_rows=source_count,
+        source_checksum=proof,
+        target_rows=dest_count,
+        target_checksum=proof,
+        source_snapshot=snapshot,
+        proof_scope="dest_count_equals_source_snapshot_count",
+    )
+
+
 def _quote(name: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 

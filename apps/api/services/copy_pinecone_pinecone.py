@@ -11,8 +11,9 @@ customer-tenant PRODUCTION_SKU.
 
 Declines (row path keeps quarantine): transforms that change values,
 column renames, occupied dest with dest COUNT ≠ source, copy onto the
-same namespace, public proxy, leftover upsert.
-This is **not** Pinecone backup/restore.
+same namespace, public proxy, leftover upsert. Sparse/hybrid
+``sparseValues`` are copied with dense ``values``. Pod indexes without
+list API decline. This is **not** Pinecone backup/restore.
 """
 
 from __future__ import annotations

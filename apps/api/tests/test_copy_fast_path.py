@@ -28,6 +28,7 @@ import pytest
 from services.copy_fast_path import (
     FastPathUnavailable,
     copy_between_postgres,
+    skip_complete_identity_copy,
 )
 
 CFG = {
@@ -37,6 +38,22 @@ CFG = {
     "username": "dataflow",
     "password": "dataflow",
 }
+
+
+def test_skip_complete_identity_copy_shape():
+    result = skip_complete_identity_copy(
+        source_count=40,
+        dest_count=40,
+        shard_mode="collection",
+        extra_snapshot={"milvus_write": "skip"},
+    )
+    assert result.verified
+    assert result.source_snapshot["copy_split"] == "skip"
+    assert result.source_snapshot["shard_mode"] == "collection"
+    assert result.source_snapshot["milvus_write"] == "skip"
+    assert result.proof_scope == "dest_count_equals_source_snapshot_count"
+    assert result.source_checksum == "dest_count:40"
+
 
 
 def _pg_reachable() -> bool:
