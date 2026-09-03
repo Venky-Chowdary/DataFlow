@@ -261,6 +261,23 @@ def _try_copy_fast_path(
     declines. Empty dest is INSERT, not upsert / BCP / ``BULK INSERT``
     / ``aws s3 cp``.
 
+    Oracle→S3 identity append/overwrite: SHARE-lock ``SELECT`` into a
+    CSV tempfile (HEADER, ``\\N`` = NULL), then ``upload_file``. Dest
+    key must be ``.csv`` / ``.tsv``. Dest COUNT is artifact COUNT
+    (header skipped). BLOB/RAW/XMLTYPE/CLOB/JSON decline. JSON dest
+    keys decline. Occupied dest with a different COUNT declines. Empty
+    dest is PUT, not sqlldr / Data Pump / ``aws s3 cp``. Oracle
+    ``VARCHAR2`` ``''`` already arrives as NULL and CSV ``\\N``.
+
+    S3→Oracle identity append/overwrite: GET CSV/TSV into
+    ``executemany`` INSERT. Dest ``COUNT(*)`` runs **before commit**.
+    JSON/JSONL/Parquet decline. DATE ISO binds as Oracle DATE when
+    mapped DATE. SQLite TEXT identity lands as VARCHAR2(4000), not
+    CLOB. Occupied dest with a different COUNT declines. Empty dest is
+    INSERT, not upsert / sqlldr / Data Pump / ``aws s3 cp``. Oracle
+    VARCHAR2 stores ``''`` as NULL (engine law,
+    ``empty_string_as_null_cells``).
+
     MongoDB→S3 identity append/overwrite: replica-set snapshot
     ``find()`` into a CSV tempfile (HEADER, ``\\N`` = NULL), then
     ``upload_file``. Source COUNT is ``count_documents({})``, never
@@ -994,6 +1011,24 @@ def _try_copy_fast_path(
             return s3_ss
         return None
 
+    if s3_family_name(src_n) == "s3" and oracle_family_name(dest_n) == "oracle":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        s3_ora = _try_s3_oracle_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or dest_cfg.get("username") or "DATAFLOW",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if s3_ora is not None:
+            return s3_ora
+        return None
+
     if mongo_family_name(src_n) == "mongodb" and mongo_family_name(dest_n) == "mongodb":
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -1525,6 +1560,24 @@ def _try_copy_fast_path(
         )
         if ora_sqlite is not None:
             return ora_sqlite
+        return None
+
+    if oracle_family_name(src_n) == "oracle" and s3_family_name(dest_n) == "s3":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ora_s3 = _try_oracle_s3_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or src_cfg.get("username") or "",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ora_s3 is not None:
+            return ora_s3
         return None
 
     if (
@@ -4907,6 +4960,130 @@ def _try_s3_sqlserver_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_s3_oracle_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity S3→Oracle: GET CSV + executemany. Dest COUNT(*) before commit is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_oracle_pg import oracle_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_s3_oracle import copy_s3_to_oracle
+    from services.copy_sqlite_oracle import (
+        sqlite_declared_to_oracle_ddl,
+        sqlite_oracle_type_is_copy_safe,
+    )
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("S3→Oracle COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    oracle_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            sqlite_oracle_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "S3→Oracle COPY declined: %s type %s is not Oracle COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        dest_ddl = sqlite_declared_to_oracle_ddl(declared)
+        if dest_ddl and not oracle_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "S3→Oracle COPY declined: dest %s type %s is not COPY-safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        oracle_ddls.append(dest_ddl)
+
+    try:
+        result = copy_s3_to_oracle(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            oracle_ddls=oracle_ddls,
+            replace_destination=replace_destination,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("S3→Oracle COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("S3→Oracle COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "get_csv_s3_executemany_oracle",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "empty_string_as_null_cells": snapshot.get("empty_string_as_null_cells") or 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "s3_read": snapshot.get("s3_read"),
+        "oracle_write": snapshot.get("oracle_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("oracle_write") or "insert"
+    proof_line = (
+        "Proof: Oracle dest COUNT(*) equals S3 source artifact COUNT. "
+        "Not sqlldr / Data Pump / aws s3 cp. Empty dest is INSERT, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    empty_cells = int(dest_summary.get("empty_string_as_null_cells") or 0)
+    if empty_cells:
+        proof_line += (
+            f" Oracle VARCHAR2 stored {empty_cells} empty string(s) as NULL "
+            "(engine law, not a row drop)."
+        )
+    ddl_log = [
+        f"COPY S3 {source_table} → Oracle {dest_table} "
+        f"({result.source_rows:,} rows, GET CSV + {write} executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_mongo_pg_copy_fast_path(
     *,
     source_table: str,
@@ -7651,6 +7828,111 @@ def _try_oracle_sqlite_copy_fast_path(
     ddl_log = [
         f"COPY Oracle {source_table} → SQLite {dest_table} "
         f"({result.source_rows:,} rows, SHARE-lock SELECT + {write} executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_oracle_s3_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Oracle→S3: SHARE-lock SELECT CSV + upload. Dest artifact COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_oracle_pg import oracle_type_is_copy_safe
+    from services.copy_oracle_s3 import copy_oracle_to_s3
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Oracle→S3 COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    s3_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not oracle_type_is_copy_safe(declared):
+            logger.info(
+                "Oracle→S3 COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        s3_ddls.append(declared or "VARCHAR2(4000)")
+
+    try:
+        result = copy_oracle_to_s3(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            s3_ddls=s3_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Oracle→S3 COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Oracle→S3 COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("s3_key") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_oracle_upload_s3",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "oracle_lock": snapshot.get("oracle_lock"),
+        "oracle_read": snapshot.get("oracle_read"),
+        "s3_write": snapshot.get("s3_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("s3_write") or "insert"
+    proof_line = (
+        "Proof: S3 dest artifact COUNT equals Oracle source snapshot COUNT. "
+        "Not sqlldr / Data Pump / aws s3 cp. Empty dest is PUT, not upsert. "
+        "CSV HEADER is not a dest row."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Oracle {source_table} → S3 {dest_table} "
+        f"({result.source_rows:,} rows, SHARE-lock SELECT CSV + {write} upload, "
         f"copy_split={split})",
         proof_line,
     ]

@@ -9814,3 +9814,306 @@ def run_s3_sqlserver_volume(
     return report
 
 
+def run_oracle_s3_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Oracle→S3 through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT of the CSV (header skipped),
+    never ListObjects length, never writer PUT ack. Empty dest is SHARE-
+    lock SELECT CSV + ``upload_file``, not sqlldr / Data Pump /
+    ``aws s3 cp``. Dest key must be ``.csv`` / ``.tsv``. BLOB/CLOB/JSON
+    decline. Unique dest ``bench_oracle_s3.csv`` is not reused from
+    ``bench_mysql_s3.csv`` / ``bench_pg_s3.csv`` / ``bench_sqlite_s3.csv``
+    / ``bench_sqlserver_s3.csv``. Seeds from SQLite→Oracle when the
+    source table is missing.
+    """
+    import socket
+
+    _require_minio()
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+
+    src_table = str(source_table or "bench_sqlite_oracle")
+    dest = str(dest_table)
+    bucket = dest_bucket or _s3_bench_bucket()
+    dest_cfg = _s3_local_cfg(bucket, dest)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _oracle_dest_count(src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlite_oracle_volume(
+            rows=rows,
+            dest_table=src_table,
+            source_table="bench_pg_sqlite",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        from services.copy_s3_common import s3_ensure_bucket
+
+        s3_ensure_bucket(dest_cfg)
+        _s3_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-oracle-s3-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _s3_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "oracle→s3",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "oracle_read": summary.get("oracle_read"),
+        "s3_write": summary.get("s3_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "s3_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} oracle→s3 [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source snapshot COUNT: {rows})")
+    print(
+        "Not sqlldr / Data Pump / aws s3 cp. Empty dest is SHARE-lock SELECT CSV + upload. "
+        "CSV HEADER is not a dest row."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_oracle_upload_s3"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Oracle SHARE-lock SELECT CSV + S3 upload, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_s3_oracle_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity S3→Oracle through stream_database_transfer.
+
+    Source COUNT is object-store artifact COUNT of the CSV (header
+    skipped). Dest COUNT is ``SELECT COUNT(*)``. Empty dest is GET CSV +
+    ``executemany``, not sqlldr / Data Pump / ``aws s3 cp``.
+    JSON/JSONL/Parquet decline. Unique dest ``bench_ora_from_s3`` is not
+    reused from ``bench_1m`` / ``bench_sqlite_oracle``. Seeds from
+    Oracle→S3 when the source object is missing. VARCHAR2 stores ``''``
+    as NULL (engine law, counted in ``empty_string_as_null_cells``).
+    """
+    import socket
+
+    _require_minio()
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+
+    src_key = str(source_table or "bench_oracle_s3.csv")
+    dest = str(dest_table)
+    bucket = source_bucket or _s3_bench_bucket()
+    src_cfg = _s3_local_cfg(bucket, src_key)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _s3_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_oracle_s3_volume(
+            rows=rows,
+            dest_table=src_key,
+            dest_bucket=bucket,
+            source_table="bench_sqlite_oracle",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _oracle_drop_table(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": dest}
+    )
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-s3-oracle-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _oracle_dest_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "s3→oracle",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "source_bucket": bucket,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_read": summary.get("s3_read"),
+        "oracle_write": summary.get("oracle_write"),
+        "empty_string_as_null_cells": summary.get("empty_string_as_null_cells") or 0,
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "oracle_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} s3→oracle [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source artifact COUNT: {rows})")
+    print("Not sqlldr / Data Pump / aws s3 cp. Empty dest is GET CSV + executemany.")
+    print(
+        "empty_string_as_null_cells: "
+        f"{summary.get('empty_string_as_null_cells') or 0}"
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "get_csv_s3_executemany_oracle"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected S3 GET CSV + Oracle executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
