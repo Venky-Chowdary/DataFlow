@@ -53,6 +53,10 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_mongo \\
   python scripts/bench_pg_to_mongo_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_pg_mongo BENCH_DEST=bench_pg_from_mongo \\
   python scripts/bench_mongo_to_pg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_mongo \\
+  python scripts/bench_mysql_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_mongo BENCH_DEST=bench_mysql_from_mongo \\
+  python scripts/bench_mongo_to_mysql_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1457,6 +1461,106 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 2.88M rows/s from skip-all. Pytest: `test_mongo_pg_copy`
 **9 passed / 0 failed**. Combined PostgreSQL↔Mongo **18 passed / 0 failed**.
+
+### Named 1M fixture — MySQL→Mongo SELECT + insert_many (2026-09-03)
+
+MySQL has no `COPY TO STDOUT`. Identity bulk is one
+`START TRANSACTION WITH CONSISTENT SNAPSHOT` that streams `SELECT`
+(SSCursor); Python values become BSON documents and `insert_many`
+(unordered, batch 5000) loads them. Dest COUNT is `count_documents({})`
+— never `estimatedDocumentCount`. Empty dest is insert, **not** upsert /
+`ReplaceOne`. `_id` is not invented from row bytes. This is **not**
+`mongoimport`.
+
+DATE is BSON Date at **UTC midnight**. DATETIME / TIME / TIMESTAMP
+decline (BSON Date would invent UTC or a calendar day). SQL NULL is
+BSON null (field present); `''` is preserved.
+
+Do not mix this 16.101 s with PostgreSQL→Mongo 11.105 s (server COPY
+text vs Python SELECT decode). Do not mix either with Iceberg snapshot
+times.
+
+Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_mongo python scripts/bench_mysql_to_mongo_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`, 10 columns, PK `employee_id`) |
+| Destination | MongoDB **27017** replica set `rs0`, create-new `dataflow.bench_mysql_mongo` |
+| Rows | **1,000,000** |
+| Elapsed | **16.101 s** |
+| dest `count_documents({})` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_mysql_insert_many_mongo` |
+| `copy_split` | `serial` |
+| `mongo_write` | `insert` |
+| `shard_mode` | `table` |
+| Artifact | `/opt/cursor/artifacts/mysql_mongo_1000000_proof.json` |
+
+Occupied dest whose COUNT already equals the source snapshot is
+skip-complete. Occupied dest with a different COUNT declines.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `count_documents({})` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `mongo_write` | skip |
+| Elapsed | **0.363 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/mysql_mongo_1000000_resume_skip_proof.json` |
+
+Do not quote 2.75M rows/s from skip-all. Pytest: `test_mysql_mongo_copy`
+**9 passed / 0 failed**.
+
+### Named 1M fixture — Mongo→MySQL snapshot find + STRICT LOAD DATA (2026-09-03)
+
+Reverse of MySQL→Mongo on the **same 10-col employee data** now sitting
+in `dataflow.bench_mysql_mongo`. Source COUNT is `count_documents({})`
+inside a replica-set snapshot transaction (`ReadConcern("snapshot")`);
+payload is `find()` in that same session encoded as LOAD DATA TSV into
+a tempfile, then STRICT `LOAD DATA LOCAL INFILE`. Dest proof is MySQL
+`COUNT(*)`. This is **not** `mongoexport`. Standalone Mongo declines.
+Nested documents / arrays / binary decline. `_id` is omitted unless
+mapped. BSON Date stored as UTC midnight (from MySQL DATE) round-trips
+as DATE.
+
+Do not mix this 14.665 s with Mongo→PostgreSQL 10.633 s (COPY FROM
+STDIN vs LOAD DATA tempfile). Do not mix either with Iceberg→MySQL
+Parquet times.
+
+Reproduce: `BENCH_SRC=bench_mysql_mongo BENCH_DEST=bench_mysql_from_mongo python scripts/bench_mongo_to_mysql_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MongoDB **27017** replica set `rs0` (`dataflow.bench_mysql_mongo`) |
+| Destination | MySQL **3306**, create-new `bench_mysql_from_mongo` |
+| Rows | **1,000,000** |
+| Elapsed | **14.665 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| Mongo source COUNT (`count_documents`) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `mongo_snapshot_find_load_data_mysql` |
+| `copy_split` | `serial` |
+| `mongo_read` | `snapshot_find` |
+| Artifact | `/opt/cursor/artifacts/mongo_mysql_1000000_proof.json` |
+
+Occupied dest whose `COUNT(*)` already equals the source snapshot COUNT
+is skip-complete. Occupied dest with a different COUNT declines.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `mongo_read` | skip |
+| Elapsed | **0.341 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/mongo_mysql_1000000_resume_skip_proof.json` |
+
+Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
+**9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
