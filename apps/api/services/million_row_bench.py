@@ -5759,6 +5759,146 @@ def run_mongo_iceberg_volume(
     return report
 
 
+def run_iceberg_iceberg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Iceberg→Iceberg through stream_database_transfer.
+
+    Source and dest COUNT are Iceberg file footers, never ``scan().count()``.
+    Payload is snapshot Parquet + CoW append/overwrite, never
+    ``scan().to_arrow()`` / ``MERGE INTO``. Same table declines. Empty dest
+    is CoW snapshot append.
+    """
+    from urllib.request import urlopen
+
+    rest = _iceberg_rest_uri()
+    try:
+        with urlopen(f"{rest}/v1/config", timeout=2) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                raise RuntimeError(f"Iceberg REST {rest}/v1/config not 200")
+    except Exception as exc:
+        raise RuntimeError(f"Iceberg REST not reachable at {rest}: {exc}") from exc
+
+    ice_src = str(source_table or "bench_mysql_iceberg")
+    dest = str(dest_table)
+    if ice_src.strip().lower() == dest.strip().lower():
+        raise RuntimeError("Iceberg→Iceberg bench refuses the same table")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _iceberg_count(ice_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_mysql_iceberg_volume(
+            rows=rows,
+            dest_table=ice_src,
+            source_table="bench_1m",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _iceberg_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _iceberg_rest_cfg(ice_src))
+    destination = EndpointConfig.from_dict("database", _iceberg_rest_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-iceberg-iceberg-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _iceberg_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "iceberg→iceberg",
+        "sync_mode": sync_mode,
+        "source_table": ice_src,
+        "dest_table": dest,
+        "iceberg_rest": rest,
+        "iceberg_warehouse": _iceberg_rest_warehouse(),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "iceberg_read": summary.get("iceberg_read"),
+        "iceberg_write": summary.get("iceberg_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "source_count_source": "iceberg_file_footers",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} iceberg→iceberg [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination footer COUNT: {landed} (source footer COUNT: {rows})")
+    print(f"iceberg_read: {summary.get('iceberg_read')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "iceberg_snapshot_parquet_cow_iceberg"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Iceberg snapshot Parquet + CoW snapshot, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 
