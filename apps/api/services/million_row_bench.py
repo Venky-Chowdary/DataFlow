@@ -76,6 +76,12 @@ REPORTED_SUMMARY_KEYS = (
     "s3_read",
     "elasticsearch_write",
     "elasticsearch_read",
+    "redis_write",
+    "redis_read",
+    "bigquery_write",
+    "bigquery_read",
+    "snowflake_write",
+    "snowflake_read",
     "tsv_encoder",
     "partition_proof",
     "proof_scope",
@@ -10538,6 +10544,816 @@ def run_adls_adls_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected ADLS start_copy_from_url, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _require_dynamodb_local() -> None:
+    import socket
+
+    host = os.environ.get("DYNAMODB_LOCAL_HOST", "127.0.0.1")
+    port = int(os.environ.get("DYNAMODB_LOCAL_PORT", "8000"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"DynamoDB Local {host}:{port} not reachable: {exc}") from exc
+
+
+def _dynamodb_local_cfg(table: str) -> dict[str, Any]:
+    host = os.environ.get("DYNAMODB_LOCAL_HOST", "127.0.0.1")
+    port = int(os.environ.get("DYNAMODB_LOCAL_PORT", "8000"))
+    return {
+        "type": "dynamodb",
+        "format": "dynamodb",
+        "host": host,
+        "port": port,
+        "database": table,
+        "table": table,
+        "username": os.environ.get("DYNAMODB_LOCAL_ACCESS_KEY", "local"),
+        "password": os.environ.get("DYNAMODB_LOCAL_SECRET_KEY", "local"),
+        "ssl": False,
+    }
+
+
+def _dynamodb_count(cfg: dict[str, Any], table: str) -> int:
+    from services.copy_dynamodb_common import dynamodb_dest_count
+
+    return dynamodb_dest_count(cfg, table)
+
+
+def _dynamodb_seed_items(cfg: dict[str, Any], table: str, rows: int) -> None:
+    """Source setup only — not the identity COPY path."""
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_writer import _batch_write_with_retry
+    from services.copy_dynamodb_common import dynamodb_ensure_table_like_source
+
+    source_info = {
+        "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "N"}],
+    }
+    dynamodb_ensure_table_like_source(cfg, table, source_info)
+    client = boto3_client("dynamodb", cfg)
+    pending: list[dict[str, Any]] = []
+    for i in range(1, int(rows) + 1):
+        pending.append(
+            {
+                "PutRequest": {
+                    "Item": {"id": {"N": str(i)}, "label": {"S": f"r{i}"}}
+                }
+            }
+        )
+        if len(pending) == 25:
+            _batch_write_with_retry(client, table, pending)
+            pending = []
+    if pending:
+        _batch_write_with_retry(client, table, pending)
+
+
+def run_dynamodb_dynamodb_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity DynamoDB→DynamoDB through stream_database_transfer.
+
+    Dest COUNT is Scan Select=COUNT, never DescribeTable.ItemCount.
+    Empty dest is BatchWriteItem of raw AttributeValues, not export-table
+    / ImportTable / PutItem one-by-one. Seeds BatchWriteItem when the
+    source table is missing (seed is not the COPY path). Unique dest
+    ``bench_dynamodb_clone`` is not reused from ``bench_1m`` /
+    ``bench_mongo_mongo``. DynamoDB Local is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_dynamodb_local()
+    src_name = str(source_table or "bench_dynamodb_src")
+    dest = str(dest_table)
+    src_cfg = _dynamodb_local_cfg(src_name)
+    dest_cfg = _dynamodb_local_cfg(dest)
+    if src_name == dest:
+        raise AssertionError("DynamoDB→DynamoDB bench refuses the same table")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _dynamodb_count(src_cfg, src_name)
+    except Exception:
+        have = 0
+    if have != rows:
+        _dynamodb_seed_items(src_cfg, src_name, rows)
+    if not keep_dest:
+        from services.copy_dynamodb_common import dynamodb_delete_table
+
+        dynamodb_delete_table(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "long", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "long", "label": "string"}
+    job_id = f"bench-ddb-ddb-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _dynamodb_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "dynamodb→dynamodb",
+        "sync_mode": sync_mode,
+        "source_table": src_name,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "dynamodb_read": summary.get("dynamodb_read"),
+        "dynamodb_write": summary.get("dynamodb_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "dynamodb_scan_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} dynamodb→dynamodb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination Scan COUNT: {landed} (source Scan COUNT: {rows})")
+    print(
+        "Not DescribeTable.ItemCount / ListTables / export-table / PutItem. "
+        "Empty dest is BatchWriteItem. DynamoDB Local is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "scan_batch_write_dynamodb_dynamodb"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected DynamoDB Scan + BatchWriteItem, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _snowflake_local_cfg(table: str) -> dict[str, Any]:
+    return {
+        "type": "snowflake",
+        "format": "snowflake",
+        "host": "localhost",
+        "port": 443,
+        "database": "dataflow",
+        "schema": "public",
+        "table": table,
+        "username": "test",
+        "password": "test",
+    }
+
+
+def _require_fakesnow() -> None:
+    try:
+        import fakesnow  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(f"fakesnow required for Snowflake identity bench: {exc}") from exc
+
+
+def _snowflake_connect_bench():
+    from connectors.snowflake_conn import get_connection
+
+    return get_connection(
+        account="localhost",
+        username="test",
+        password="test",
+        database="dataflow",
+        schema="public",
+        warehouse="",
+        connection_string="",
+    )
+
+
+def _snowflake_count(table: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count(
+        "snowflake",
+        _snowflake_local_cfg(table),
+        schema="public",
+        table_name=table,
+    )
+    if n is None:
+        raise RuntimeError(f"Snowflake dest COUNT(*) unknowable for {table!r}")
+    return int(n)
+
+
+def _snowflake_drop(table: str) -> None:
+    conn = _snowflake_connect_bench()
+    try:
+        cur = conn.cursor()
+        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _snowflake_seed(table: str, rows: int) -> None:
+    """Seed INTEGER id + VARCHAR label. Seed INSERT is not the COPY path."""
+    _snowflake_drop(table)
+    conn = _snowflake_connect_bench()
+    try:
+        cur = conn.cursor()
+        cur.execute(f'CREATE TABLE "{table}" (id INTEGER, label VARCHAR)')
+        batch_size = 5000
+        for start in range(1, rows + 1, batch_size):
+            end = min(start + batch_size - 1, rows)
+            batch = [(i, f"r{i}") for i in range(start, end + 1)]
+            cur.executemany(
+                f'INSERT INTO "{table}" (id, label) VALUES (%s, %s)',
+                batch,
+            )
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def run_snowflake_snowflake_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Snowflake→Snowflake through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)`` via ``destination_row_count``, never
+    writer ack / ``COPY INTO`` stage ack. Empty dest is CTAS / INSERT
+    SELECT of mapped columns, not ``CLONE`` / leftover MERGE. Same
+    account+database+schema+table declines. Seeds INTEGER+VARCHAR when
+    the source table is missing (seed is not the COPY path). Unique dest
+    ``bench_snowflake_clone`` is not reused from ``bench_1m`` /
+    ``bench_adls_clone.jsonl``. fakesnow is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_fakesnow()
+    src_table = str(source_table or "bench_snowflake_src")
+    dest = str(dest_table)
+    src_cfg = _snowflake_local_cfg(src_table)
+    dest_cfg = _snowflake_local_cfg(dest)
+    if src_table.strip().lower() == dest.strip().lower():
+        raise AssertionError(
+            "Snowflake→Snowflake bench refuses the same account+database+schema+table"
+        )
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _snowflake_count(src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _snowflake_seed(src_table, rows)
+    if not keep_dest:
+        _snowflake_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "label", "target": "label", "type": "VARCHAR", "transform": "none"},
+    ]
+    schema = {"id": "INTEGER", "label": "VARCHAR"}
+    job_id = f"bench-snowflake-snowflake-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _snowflake_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "snowflake→snowflake",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "snowflake_read": summary.get("snowflake_read"),
+        "snowflake_write": summary.get("snowflake_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "snowflake_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} snowflake→snowflake [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT: {rows})")
+    print(
+        "Not COPY INTO / CLONE / leftover MERGE. Empty dest is INSERT SELECT. "
+        "fakesnow is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "insert_select_snowflake_snowflake"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Snowflake INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _bigquery_local_cfg(table: str) -> dict[str, Any]:
+    return {
+        "type": "bigquery",
+        "format": "bigquery",
+        "host": "127.0.0.1",
+        "port": 9050,
+        "database": "dataflow-test",
+        "schema": "dataflow",
+        "table": table,
+        "connection_string": "http://127.0.0.1:9050",
+    }
+
+
+def _require_goccy() -> None:
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 9050), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"BigQuery emulator 9050 not reachable: {exc}") from exc
+
+
+def _bigquery_run_bench(sql: str) -> None:
+    from connectors.bigquery_conn import get_client
+    from services.dest_precount import _bigquery_run_job
+
+    client = get_client(
+        project_id="dataflow-test",
+        host="127.0.0.1",
+        port=9050,
+        connection_string="http://127.0.0.1:9050",
+    )
+    try:
+        _bigquery_run_job(client, sql)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _bigquery_count(table: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count(
+        "bigquery",
+        _bigquery_local_cfg(table),
+        schema="dataflow",
+        table_name=table,
+    )
+    if n is None:
+        raise RuntimeError(f"BigQuery dest COUNT(*) unknowable for {table!r}")
+    return int(n)
+
+
+def _bigquery_drop(table: str) -> None:
+    _bigquery_run_bench(
+        f"DROP TABLE IF EXISTS `dataflow-test`.`dataflow`.`{table}`"
+    )
+
+
+def _bigquery_seed(table: str, rows: int) -> None:
+    """Seed INT64 id + STRING label. Seed INSERT is not the COPY path."""
+    _bigquery_drop(table)
+    _bigquery_run_bench(
+        f"CREATE TABLE `dataflow-test`.`dataflow`.`{table}` (id INT64, label STRING)"
+    )
+    batch_size = 500
+    for start in range(1, rows + 1, batch_size):
+        end = min(start + batch_size - 1, rows)
+        values = ", ".join(f"({i}, 'r{i}')" for i in range(start, end + 1))
+        _bigquery_run_bench(
+            f"INSERT INTO `dataflow-test`.`dataflow`.`{table}` (id, label) VALUES {values}"
+        )
+
+
+def run_bigquery_bigquery_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity BigQuery→BigQuery through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)`` via ``destination_row_count``, never
+    ``Table.num_rows`` / ``insert_rows_json`` ack. Empty dest is CTAS /
+    INSERT SELECT of mapped columns, not ``CLONE`` / leftover MERGE. Same
+    project+dataset+table declines. Seeds INT64+STRING when the source
+    table is missing (seed is not the COPY path). Unique dest
+    ``bench_bq_clone`` is not reused from ``bench_1m`` /
+    ``bench_adls_clone.jsonl``. goccy is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_goccy()
+    src_table = str(source_table or "bench_bq_src")
+    dest = str(dest_table)
+    src_cfg = _bigquery_local_cfg(src_table)
+    dest_cfg = _bigquery_local_cfg(dest)
+    if src_table.strip().lower() == dest.strip().lower():
+        raise AssertionError(
+            "BigQuery→BigQuery bench refuses the same project+dataset+table"
+        )
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _bigquery_count(src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _bigquery_seed(src_table, rows)
+    if not keep_dest:
+        _bigquery_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INT64", "transform": "none"},
+        {"source": "label", "target": "label", "type": "STRING", "transform": "none"},
+    ]
+    schema = {"id": "INT64", "label": "STRING"}
+    job_id = f"bench-bigquery-bigquery-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _bigquery_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "bigquery→bigquery",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "bigquery_read": summary.get("bigquery_read"),
+        "bigquery_write": summary.get("bigquery_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "bigquery_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} bigquery→bigquery [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT: {rows})")
+    print(
+        "Not insert_rows_json / CLONE / leftover MERGE. Never Table.num_rows. "
+        "Empty dest is INSERT SELECT. goccy is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "insert_select_bigquery_bigquery"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected BigQuery INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _require_redis() -> None:
+    import socket
+
+    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Redis {host}:{port} not reachable: {exc}") from exc
+
+
+def _redis_local_cfg(prefix: str) -> dict[str, Any]:
+    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
+    db = os.environ.get("DATAFLOW_REDIS_DB", "0")
+    return {
+        "type": "redis",
+        "format": "redis",
+        "host": host,
+        "port": port,
+        "database": db,
+        "table": prefix,
+    }
+
+
+def _redis_count(cfg: dict[str, Any], prefix: str) -> int:
+    from services.copy_redis_common import redis_dest_count
+
+    return redis_dest_count(cfg, prefix)
+
+
+def _redis_delete_prefix(cfg: dict[str, Any], prefix: str) -> None:
+    from services.copy_redis_common import redis_delete_keys, redis_list_keys
+
+    redis_delete_keys(cfg, redis_list_keys(cfg, prefix))
+
+
+def _redis_seed(cfg: dict[str, Any], prefix: str, rows: int) -> None:
+    """Source setup only — not the identity COPY path."""
+    from connectors.redis_reader import _redis_client
+
+    client = _redis_client(cfg)
+    try:
+        pipe = client.pipeline(transaction=False)
+        for i in range(1, int(rows) + 1):
+            pipe.set(
+                f"{prefix}:{i}",
+                json.dumps({"id": i, "label": f"r{i}"}, separators=(",", ":")),
+            )
+            if i % 1000 == 0:
+                pipe.execute()
+                pipe = client.pipeline(transaction=False)
+        pipe.execute()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def run_redis_redis_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Redis→Redis through stream_database_transfer.
+
+    Dest COUNT is prefix SCAN cardinality, never ``DBSIZE``. Empty dest
+    is server-side ``COPY``, not GET+SET / DUMP+RESTORE. Seeds JSON SET
+    when the source prefix is missing (seed is not the COPY path). Unique
+    dest ``bench_redis_clone`` is not reused from ``bench_1m`` /
+    ``bench_gcs_clone.jsonl`` / ``bench_adls_clone.jsonl``. Desktop-lab
+    Redis is not a customer-tenant PRODUCTION_SKU.
+    """
+    _require_redis()
+    src_prefix = str(source_table or "bench_redis_src")
+    dest = str(dest_table)
+    src_cfg = _redis_local_cfg(src_prefix)
+    dest_cfg = _redis_local_cfg(dest)
+    if (
+        src_cfg["host"] == dest_cfg["host"]
+        and src_cfg["port"] == dest_cfg["port"]
+        and src_cfg["database"] == dest_cfg["database"]
+        and src_prefix == dest
+    ):
+        raise AssertionError("Redis→Redis bench refuses the same host+port+db+prefix")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _redis_count(src_cfg, src_prefix)
+    except Exception:
+        have = 0
+    if have != rows:
+        _redis_seed(src_cfg, src_prefix, rows)
+    if not keep_dest:
+        _redis_delete_prefix(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "long", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "long", "label": "string"}
+    job_id = f"bench-redis-redis-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _redis_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "redis→redis",
+        "sync_mode": sync_mode,
+        "source_table": src_prefix,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "redis_read": summary.get("redis_read"),
+        "redis_write": summary.get("redis_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "redis_prefix_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} redis→redis [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination prefix COUNT: {landed} (source prefix COUNT: {rows})")
+    print(
+        "Not GET+SET / DUMP+RESTORE / DBSIZE. Empty dest is COPY. "
+        "Desktop-lab Redis is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_redis_redis"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Redis COPY, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
