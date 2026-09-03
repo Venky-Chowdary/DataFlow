@@ -122,6 +122,39 @@ def test_classify_and_gate_append_only_sink() -> None:
     gate_cdc_destination(dest_type="sqlserver", has_primary_key=True)
 
 
+def test_vector_pk_upsert_is_at_least_once_not_exactly_once() -> None:
+    from services.cdc_effectively_once import (
+        CdcAppendOnlySinkError,
+        SINK_PK_UPSERT_AT_LEAST_ONCE,
+        classify_sink_delivery,
+        gate_cdc_destination,
+    )
+
+    for dest in ("qdrant", "milvus", "weaviate", "pinecone"):
+        posture = classify_sink_delivery(
+            dest_type=dest, has_primary_key=True, write_mode="upsert"
+        )
+        assert posture["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE, dest
+        assert posture["exactly_once"] is False
+        assert posture["delivery_class"] == "at_least_once"
+        assert posture["duplicates_on_redelivery"] is False
+        assert posture["effectively_once_pk_sink"] is False
+        allowed = gate_cdc_destination(
+            dest_type=dest, has_primary_key=True, write_mode="upsert"
+        )
+        assert allowed["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE
+        try:
+            gate_cdc_destination(
+                dest_type=dest,
+                has_primary_key=True,
+                write_mode="upsert",
+                require_effectively_once=True,
+            )
+            raise AssertionError("expected CdcAppendOnlySinkError")
+        except CdcAppendOnlySinkError as exc:
+            assert "exactly-once" in str(exc).lower() or "least-once" in str(exc).lower()
+
+
 def test_should_apply_rejects_stale_lsn() -> None:
     ok = should_apply_pk_row(existing_lsn="0/200", incoming_lsn="0/100")
     assert ok.applied is False

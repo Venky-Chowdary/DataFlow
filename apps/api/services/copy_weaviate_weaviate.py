@@ -29,7 +29,6 @@ from services.copy_weaviate_common import (
     weaviate_delete_class,
     weaviate_endpoint_key,
     weaviate_list_batch_upsert,
-    weaviate_list_offset_cap_exceeded,
     weaviate_object_count,
     weaviate_object_id,
     weaviate_proxy_fail_closed,
@@ -92,11 +91,6 @@ def copy_weaviate_to_weaviate(
     source_count = weaviate_object_count(source_cfg, src_class)
     if source_count <= 0:
         raise FastPathUnavailable("Weaviate source class empty")
-    if weaviate_list_offset_cap_exceeded(source_count):
-        raise FastPathUnavailable(
-            "Weaviate classes with >10000 objects require cursor pagination; "
-            "offset COPY declines"
-        )
     dest_existed = weaviate_class_exists(dest_cfg, dest_class)
     dest_count_before = (
         weaviate_object_count(dest_cfg, dest_class) if dest_existed else 0
@@ -160,9 +154,12 @@ def copy_weaviate_to_weaviate(
             "partitions_skipped": 0,
             "partitions_loaded": 1,
             "shard_mode": "class",
-            "weaviate_read": "list",
+            "weaviate_read": "cursor_list",
             "weaviate_write": w_write,
             "weaviate_class": dest_class,
+            "delivery_class": "at_least_once_upsert",
+            "cdc_exactly_once_claimed": False,
+            "production_sku": False,
         },
         proof_scope="dest_count_equals_source_snapshot_count",
     )

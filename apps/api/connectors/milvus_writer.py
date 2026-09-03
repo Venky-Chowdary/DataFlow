@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -289,14 +289,13 @@ def _milvus_dtype_to_carrier(data_type: Any) -> str:
     return mapping.get(u, u)
 
 
-def _milvus_describe_collection(
+def _milvus_describe_data(
     session: Any,
     base_url: str,
     headers: dict[str, str],
     collection_name: str,
     db_name: str = "",
-) -> tuple[dict[str, str], int | None]:
-    """POST /collections/describe → (non-vector field carriers, vector dim)."""
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"collectionName": collection_name}
     if db_name:
         payload["dbName"] = db_name
@@ -308,9 +307,41 @@ def _milvus_describe_collection(
     )
     body = resp.json() if resp.content else {}
     if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
-        return {}, None
+        return {}
     data = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else {}
+
+
+def milvus_pk_info_from_describe_data(data: dict[str, Any]) -> tuple[str, str]:
+    """Primary-key field name and Milvus data type from a describe payload."""
+    fields = data.get("fields") or data.get("schema", {}).get("fields") or []
+    pk_name = "id"
+    pk_type = "VarChar"
+    if isinstance(fields, list):
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            if field.get("isPrimary") or field.get("primaryKey"):
+                pk_name = str(
+                    field.get("fieldName") or field.get("name") or "id"
+                ).strip() or "id"
+                pk_type = str(field.get("dataType") or field.get("type") or "VarChar")
+                break
+    return pk_name, pk_type
+
+
+def _milvus_describe_collection(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> tuple[dict[str, str], int | None]:
+    """POST /collections/describe → (non-vector field carriers, vector dim)."""
+    data = _milvus_describe_data(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    if not data:
         return {}, None
     fields = data.get("fields") or data.get("schema", {}).get("fields") or []
     if not isinstance(fields, list):
@@ -464,7 +495,359 @@ def _ensure_collection(
 
 
 # REST query offset+limit must stay below this (Milvus v2 entities/query).
+# Identity COPY does not use offset past this window: PK keyset / INT range
+# split keeps every request at offset 0.
 _MILVUS_QUERY_WINDOW = 16384
+_MILVUS_INT64_MIN = -9223372036854775808
+_MILVUS_INT64_MAX = 9223372036854775807
+_MILVUS_QUERY_PAGE = 1000
+
+
+class MilvusUnorderedPkPage(Exception):
+    """Query page was not strictly increasing on PK — refuse keyset skip/dup."""
+
+
+def _milvus_ident(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "", (name or "").strip())
+    if not cleaned:
+        raise ValueError("Milvus field name empty after sanitise")
+    return cleaned
+
+
+def milvus_pk_is_int(pk_type: str) -> bool:
+    return "INT" in str(pk_type or "").upper()
+
+
+def milvus_quote_pk_expr(value: Any, *, integer: bool) -> str:
+    if integer:
+        return str(int(value))
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+def milvus_all_pk_filter(pk_name: str, pk_type: str) -> str:
+    """Always-true PK predicate — includes negative Int64 (never ``pk >= 0``)."""
+    ident = _milvus_ident(pk_name)
+    if milvus_pk_is_int(pk_type):
+        return f"{ident} >= {_MILVUS_INT64_MIN}"
+    return f'{ident} != ""'
+
+
+def milvus_pk_gt_filter(pk_name: str, pk_type: str, last: Any) -> str:
+    ident = _milvus_ident(pk_name)
+    return f"{ident} > {milvus_quote_pk_expr(last, integer=milvus_pk_is_int(pk_type))}"
+
+
+def milvus_pk_range_filter(pk_name: str, lo: int, hi: int) -> str:
+    ident = _milvus_ident(pk_name)
+    return f"{ident} >= {int(lo)} and {ident} <= {int(hi)}"
+
+
+def milvus_normalize_pk(value: Any, *, integer: bool) -> Any:
+    if integer:
+        return int(value)
+    return str(value)
+
+
+def milvus_pks_strictly_increasing(values: list[Any], *, integer: bool) -> bool:
+    prev: Any = None
+    for raw in values:
+        if raw is None or raw == "":
+            return False
+        cur = milvus_normalize_pk(raw, integer=integer)
+        if prev is not None and not (cur > prev):
+            return False
+        prev = cur
+    return True
+
+
+def milvus_int_pk_split_windows(
+    lo: int,
+    hi: int,
+    count_in_range: Callable[[int, int], int],
+    page_size: int,
+    *,
+    _depth: int = 0,
+) -> Iterator[tuple[int, int, int]]:
+    """Inclusive ``[lo, hi]`` windows each with ``0 < count <= page_size``.
+
+    Binary range split — pymilvus QueryIterator's REST-compatible form.
+    Offset stays 0 so ``limit + offset`` never hits ``_MILVUS_QUERY_WINDOW``.
+    Int64 depth is ≤ 64; a single PK with count > page_size fails closed.
+    """
+    if lo > hi:
+        return
+    if _depth > 64:
+        raise ValueError("Milvus INT PK range split exceeded Int64 depth")
+    size = int(page_size)
+    if size <= 0:
+        raise ValueError("Milvus query page_size must be > 0")
+    n = int(count_in_range(int(lo), int(hi)))
+    if n <= 0:
+        return
+    if n <= size:
+        yield (int(lo), int(hi), n)
+        return
+    if lo == hi:
+        raise ValueError(
+            f"Milvus PK {lo} reports count {n} > page {size}; refuse silent loss"
+        )
+    mid = lo + (hi - lo) // 2
+    yield from milvus_int_pk_split_windows(
+        lo, mid, count_in_range, size, _depth=_depth + 1
+    )
+    yield from milvus_int_pk_split_windows(
+        mid + 1, hi, count_in_range, size, _depth=_depth + 1
+    )
+
+
+def _milvus_with_db(payload: dict[str, Any], db_name: str) -> dict[str, Any]:
+    if db_name:
+        payload = dict(payload)
+        payload["dbName"] = db_name
+    return payload
+
+
+def _milvus_order_by_rejected(body: Any, status_code: int) -> bool:
+    if _ok_response(body if isinstance(body, dict) else {}, status_code):
+        return False
+    text = json.dumps(body if body is not None else {}, default=str).lower()
+    return any(token in text for token in ("orderby", "order_by", "order-by", "sort"))
+
+
+def milvus_query_entities_page(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    filt: str,
+    output_fields: list[str],
+    limit: int,
+    order_by_pk: str | None = None,
+) -> list[dict[str, Any]]:
+    """One entities/query page at offset 0 (never walks the 16,384 window)."""
+    payload: dict[str, Any] = {
+        "collectionName": collection,
+        "filter": filt,
+        "outputFields": output_fields,
+        "limit": int(limit),
+        "offset": 0,
+    }
+    if order_by_pk:
+        payload["orderByFields"] = [f"{_milvus_ident(order_by_pk)}:asc"]
+    payload = _milvus_with_db(payload, db_name)
+    resp = session.post(
+        f"{base_url}/v2/vectordb/entities/query",
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=60,
+    )
+    body = load_http_json(resp) if resp.content else {}
+    if order_by_pk and _milvus_order_by_rejected(body, resp.status_code):
+        raise MilvusUnorderedPkPage("orderByFields rejected by this Milvus")
+    if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
+        raise ValueError(
+            f"Milvus query failed: {resp.status_code} {str(body)[:200]}"
+        )
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("Milvus query returned no data")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def milvus_count_in_filter(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    filt: str,
+) -> int:
+    payload = _milvus_with_db(
+        {
+            "collectionName": collection,
+            "filter": filt,
+            "outputFields": ["count(*)"],
+        },
+        db_name,
+    )
+    resp = session.post(
+        f"{base_url}/v2/vectordb/entities/query",
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=30,
+    )
+    body = resp.json() if resp.content else {}
+    if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
+        raise ValueError(
+            f"Milvus count(*) failed: {resp.status_code} {str(body)[:200]}"
+        )
+    n = _milvus_count_star(body.get("data") if isinstance(body, dict) else body)
+    if n is None:
+        raise ValueError("Milvus count(*) unmeasured")
+    return int(n)
+
+
+def iter_milvus_query_pages(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    pk_type: str,
+    output_fields: list[str],
+    page_size: int = _MILVUS_QUERY_PAGE,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield entity pages covering the collection without offset pagination.
+
+    Prefer PK keyset (``pk > last`` + ``orderByFields``). INT PK falls back to
+    binary range split when this Milvus ignores/rejects ORDER BY. VarChar
+    collections without ordered pages fail closed rather than skip keys.
+    """
+    ident = _milvus_ident(pk_name)
+    integer = milvus_pk_is_int(pk_type)
+    page = max(1, min(int(page_size), _MILVUS_QUERY_PAGE))
+    base_filt = milvus_all_pk_filter(ident, pk_type)
+    keyset = _iter_milvus_pk_keyset(
+        session=session,
+        base_url=base_url,
+        headers=headers,
+        collection=collection,
+        db_name=db_name,
+        pk_name=ident,
+        integer=integer,
+        base_filt=base_filt,
+        output_fields=output_fields,
+        page_size=page,
+    )
+    try:
+        first = next(keyset)
+    except StopIteration:
+        return
+    except MilvusUnorderedPkPage:
+        if integer:
+            yield from _iter_milvus_int_ranges(
+                session=session,
+                base_url=base_url,
+                headers=headers,
+                collection=collection,
+                db_name=db_name,
+                pk_name=ident,
+                output_fields=output_fields,
+                page_size=page,
+            )
+            return
+        raise ValueError(
+            "Milvus VarChar PK COPY requires ordered query (orderByFields); "
+            "refuse offset past the 16,384 window"
+        )
+    yield first
+    try:
+        yield from keyset
+    except MilvusUnorderedPkPage as exc:
+        raise ValueError(
+            "Milvus PK keyset lost order mid-copy; refuse silent skip"
+        ) from exc
+
+
+def _iter_milvus_pk_keyset(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    integer: bool,
+    base_filt: str,
+    output_fields: list[str],
+    page_size: int,
+) -> Iterator[list[dict[str, Any]]]:
+    last: Any = None
+    seen: set[Any] = set()
+    while True:
+        filt = base_filt
+        if last is not None:
+            gt = milvus_pk_gt_filter(pk_name, "Int64" if integer else "VarChar", last)
+            filt = f"({base_filt}) and ({gt})"
+        rows = milvus_query_entities_page(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=filt,
+            output_fields=output_fields,
+            limit=page_size,
+            order_by_pk=pk_name,
+        )
+        if not rows:
+            break
+        pks = [row.get(pk_name) for row in rows]
+        if any(pk is None or pk == "" for pk in pks):
+            raise ValueError("Milvus query page missing PK; refuse silent loss")
+        if not milvus_pks_strictly_increasing(pks, integer=integer):
+            raise MilvusUnorderedPkPage("query page not strictly increasing on PK")
+        for pk in pks:
+            key = milvus_normalize_pk(pk, integer=integer)
+            if key in seen:
+                raise ValueError("Milvus keyset returned duplicate PK; refuse silent dup")
+            seen.add(key)
+        yield rows
+        if len(rows) < page_size:
+            break
+        last = milvus_normalize_pk(pks[-1], integer=integer)
+
+
+def _iter_milvus_int_ranges(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection: str,
+    db_name: str,
+    pk_name: str,
+    output_fields: list[str],
+    page_size: int,
+) -> Iterator[list[dict[str, Any]]]:
+    def _count(lo: int, hi: int) -> int:
+        return milvus_count_in_filter(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=milvus_pk_range_filter(pk_name, lo, hi),
+        )
+
+    for lo, hi, n in milvus_int_pk_split_windows(
+        _MILVUS_INT64_MIN,
+        _MILVUS_INT64_MAX,
+        _count,
+        page_size,
+    ):
+        rows = milvus_query_entities_page(
+            session=session,
+            base_url=base_url,
+            headers=headers,
+            collection=collection,
+            db_name=db_name,
+            filt=milvus_pk_range_filter(pk_name, lo, hi),
+            output_fields=output_fields,
+            limit=n,
+            order_by_pk=None,
+        )
+        if len(rows) != n:
+            raise ValueError(
+                f"Milvus range [{lo}, {hi}] count(*) {n} != query {len(rows)}; "
+                "refuse partial copy"
+            )
+        yield rows
 
 
 def _milvus_count_star(data: Any) -> int | None:
@@ -553,63 +936,42 @@ def scan_source_ids(
             return "unmeasured", []
         if "source_id" not in {str(k).lower() for k in carriers}:
             return "no_field", []
-        cap = min(int(max_entities), _MILVUS_QUERY_WINDOW)
-        count_payload: dict[str, Any] = {
-            "collectionName": collection,
-            "filter": 'id != ""',
-            "outputFields": ["count(*)"],
-        }
-        if db_name:
-            count_payload["dbName"] = db_name
-        count_resp = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
-            data=json.dumps(count_payload),
-            headers=hdrs,
-            timeout=30,
+        cap = int(max_entities)
+        describe = _milvus_describe_data(
+            session, base_url, hdrs, collection, db_name=db_name
         )
-        count_body = count_resp.json() if count_resp.content else {}
-        physical: int | None = None
-        if _ok_response(
-            count_body if isinstance(count_body, dict) else {}, count_resp.status_code
-        ):
-            physical = _milvus_count_star(
-                count_body.get("data") if isinstance(count_body, dict) else count_body
-            )
-        if physical is None:
-            return "unmeasured", []
+        pk_name, pk_type = milvus_pk_info_from_describe_data(describe)
+        filt = milvus_all_pk_filter(pk_name, pk_type)
+        physical = milvus_count_in_filter(
+            session=session,
+            base_url=base_url,
+            headers=hdrs,
+            collection=collection,
+            db_name=db_name,
+            filt=filt,
+        )
         if physical == 0:
             return "complete", []
         if physical > cap:
             return "truncated", []
-        query_payload: dict[str, Any] = {
-            "collectionName": collection,
-            "filter": 'id != ""',
-            "outputFields": ["source_id"],
-            "limit": physical,
-            "offset": 0,
-        }
-        if db_name:
-            query_payload["dbName"] = db_name
-        query_resp = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
-            data=json.dumps(query_payload),
+        values: list[Any] = []
+        for page in iter_milvus_query_pages(
+            session=session,
+            base_url=base_url,
             headers=hdrs,
-            timeout=60,
-        )
-        query_body = load_http_json(query_resp) if query_resp.content else {}
-        if not _ok_response(
-            query_body if isinstance(query_body, dict) else {}, query_resp.status_code
+            collection=collection,
+            db_name=db_name,
+            pk_name=pk_name,
+            pk_type=pk_type,
+            output_fields=["source_id", pk_name],
         ):
-            return "unmeasured", []
-        rows = query_body.get("data") if isinstance(query_body, dict) else None
-        if not isinstance(rows, list):
-            return "unmeasured", []
-        if len(rows) > cap:
+            for row in page:
+                values.append(_entity_source_id(row))
+                if len(values) > cap:
+                    return "truncated", []
+        if len(values) > physical:
             return "truncated", []
-        # Fewer rows than count(*) can be a concurrent delete; more is a lie.
-        if len(rows) > physical:
-            return "truncated", []
-        return "complete", [_entity_source_id(row) for row in rows]
+        return "complete", values
     except Exception:
         return "unmeasured", []
 

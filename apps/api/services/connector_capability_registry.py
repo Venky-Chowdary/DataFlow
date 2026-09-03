@@ -1041,6 +1041,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": ["Point id + vector required; payload schema is soft."],
         "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
     },
     "weaviate": {
         "transfer_ready": True,
@@ -1056,6 +1057,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": ["Class schema must exist or be auto-created with explicit vectorizer config."],
         "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
     },
     "pinecone": {
         "transfer_ready": True,
@@ -1072,6 +1074,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["Index dimension is fixed at create time — mismatch fails closed."],
         "recommended_batch_size": 100,
         "rate_limit_notes": "Respect Pinecone upsert QPS; batch under recommended_batch_size.",
+        "supports_lsn_guard": False,
     },
     "milvus": {
         "transfer_ready": True,
@@ -1087,6 +1090,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": ["Collection schema + index required before search-quality loads."],
         "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
     },
 }
 

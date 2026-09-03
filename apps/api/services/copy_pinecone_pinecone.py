@@ -148,6 +148,9 @@ def copy_pinecone_to_pinecone(
             "pinecone_read": "list_fetch",
             "pinecone_write": p_write,
             "pinecone_namespace": dest_ns,
+            "delivery_class": "at_least_once_upsert",
+            "cdc_exactly_once_claimed": False,
+            "production_sku": False,
         },
         proof_scope="dest_count_equals_source_snapshot_count",
     )

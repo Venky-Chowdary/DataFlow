@@ -18,6 +18,26 @@ from .models import EndpointConfig
 logger = logging.getLogger(__name__)
 
 
+def _stamp_vector_identity_honesty(
+    dest_summary: dict[str, Any],
+    *,
+    engine: str,
+    dest_cfg: dict[str, Any],
+    proof_line: str,
+) -> str:
+    """Identity COPY is TRANSFER_READY, never a customer-tenant PRODUCTION_SKU."""
+    from services.vector_copy_honesty import (
+        vector_identity_cdc_proof_clause,
+        vector_identity_copy_honesty,
+    )
+
+    dest_summary.update(vector_identity_copy_honesty(engine=engine, cfg=dest_cfg))
+    clause = vector_identity_cdc_proof_clause()
+    if clause not in proof_line:
+        proof_line = f"{proof_line.rstrip('.')} {clause}"
+    return proof_line
+
+
 def _try_copy_fast_path(
     *,
     source: EndpointConfig,
@@ -215,6 +235,7 @@ def _try_copy_fast_path(
     vectorize / re-embed / backup restore. Occupied dest with a different
     COUNT declines. Occupancy is counted **before** delete. Desktop-lab
     Milvus on ``:19530`` is not a customer-tenant PRODUCTION_SKU.
+    Collections ≥16,384 use PK-segmented query (offset stays 0).
 
     Weaviate→Weaviate identity append/overwrite: list raw
     id/properties/vector and batch-upsert to the dest class. Dest COUNT
@@ -224,7 +245,8 @@ def _try_copy_fast_path(
     list+batch, not vectorize / re-embed / backup restore. Occupied dest
     with a different COUNT declines. Occupancy is counted **before**
     delete. Desktop-lab Weaviate on ``:8080`` is not a customer-tenant
-    PRODUCTION_SKU.
+    PRODUCTION_SKU. Classes >10,000 use UUID ``after`` cursor list
+    (not offset).
 
     PostgreSQL→SQLite identity append/overwrite: text COPY decoded into
     ``executemany``. DATE lands as SQLite TEXT (ISO calendar day —
@@ -5732,6 +5754,9 @@ def _try_qdrant_qdrant_copy_fast_path(
         "is scroll+upsert of raw id/vector/payload. Desktop-lab Qdrant is "
         "not a customer-tenant PRODUCTION_SKU."
     )
+    proof_line = _stamp_vector_identity_honesty(
+        dest_summary, engine="qdrant", dest_cfg=dest_cfg, proof_line=proof_line
+    )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:
         proof_line += " Resume skipped complete dest (COUNT only)."
@@ -5832,13 +5857,17 @@ def _try_milvus_milvus_copy_fast_path(
     }
     split = dest_summary.get("copy_split") or "serial"
     write = dest_summary.get("milvus_write") or "insert"
-    read = dest_summary.get("milvus_read") or "query"
+    read = dest_summary.get("milvus_read") or "pk_query"
     proof_line = (
         "Proof: Milvus dest count(*) equals source count(*). "
         "Not scan_source_ids DISTINCT source_id / upsert ack / writer "
         "rows_written / vectorize re-embed / backup restore. Empty dest "
-        "is query+upsert of raw entity fields. Desktop-lab Milvus is "
-        "not a customer-tenant PRODUCTION_SKU."
+        "is PK-segmented query+upsert of raw entity fields (offset stays 0; "
+        "collections >=16,384 do not fall to the row path). Desktop-lab "
+        "Milvus is not a customer-tenant PRODUCTION_SKU."
+    )
+    proof_line = _stamp_vector_identity_honesty(
+        dest_summary, engine="milvus", dest_cfg=dest_cfg, proof_line=proof_line
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:
@@ -5940,13 +5969,17 @@ def _try_weaviate_weaviate_copy_fast_path(
     }
     split = dest_summary.get("copy_split") or "serial"
     write = dest_summary.get("weaviate_write") or "insert"
-    read = dest_summary.get("weaviate_read") or "list"
+    read = dest_summary.get("weaviate_read") or "cursor_list"
     proof_line = (
         "Proof: Weaviate dest Aggregate meta.count equals source meta.count. "
         "Not scan_source_ids DISTINCT source_id / batch ack / writer "
         "rows_written / vectorize re-embed / backup restore. Empty dest "
-        "is list+batch of raw id/properties/vector. Desktop-lab Weaviate is "
-        "not a customer-tenant PRODUCTION_SKU."
+        "is UUID-cursor list+batch of raw id/properties/vector (after=, not "
+        "offset; classes >10,000 do not fall to the row path). Desktop-lab "
+        "Weaviate is not a customer-tenant PRODUCTION_SKU."
+    )
+    proof_line = _stamp_vector_identity_honesty(
+        dest_summary, engine="weaviate", dest_cfg=dest_cfg, proof_line=proof_line
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:
@@ -6056,6 +6089,9 @@ def _try_pinecone_pinecone_copy_fast_path(
         "is list+fetch+upsert of raw id/values/metadata. Pod indexes without "
         "list API decline. Fetch misses fail closed. Desktop-lab Pinecone is "
         "not a customer-tenant PRODUCTION_SKU."
+    )
+    proof_line = _stamp_vector_identity_honesty(
+        dest_summary, engine="pinecone", dest_cfg=dest_cfg, proof_line=proof_line
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:
@@ -6200,6 +6236,9 @@ def _try_pgvector_pgvector_copy_fast_path(
         "COPY of raw columns including vector payloads. Identity COPY requires "
         "the full source column set (unmapped columns decline). Desktop-lab "
         "pgvector is not a customer-tenant PRODUCTION_SKU."
+    )
+    proof_line = _stamp_vector_identity_honesty(
+        dest_summary, engine="pgvector", dest_cfg=dest_cfg, proof_line=proof_line
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
     if split == "skip" and skipped:

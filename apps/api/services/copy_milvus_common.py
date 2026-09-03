@@ -15,7 +15,12 @@ from typing import Any
 from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
-from connectors.milvus_writer import _MILVUS_QUERY_WINDOW
+from connectors.milvus_writer import (
+    _MILVUS_QUERY_WINDOW,
+    iter_milvus_query_pages,
+    milvus_all_pk_filter,
+    milvus_pk_info_from_describe_data,
+)
 
 _MILVUS_FAMILY = frozenset({
     "milvus",
@@ -224,28 +229,13 @@ def _milvus_field_names(describe: dict[str, Any]) -> list[str]:
 
 def _milvus_pk_info(describe: dict[str, Any]) -> tuple[str, str]:
     """Return primary-key field name and Milvus data type from describe payload."""
-    fields = describe.get("fields") or describe.get("schema", {}).get("fields") or []
-    pk_name = "id"
-    pk_type = "VarChar"
-    if isinstance(fields, list):
-        for field in fields:
-            if not isinstance(field, dict):
-                continue
-            if field.get("isPrimary") or field.get("primaryKey"):
-                pk_name = str(
-                    field.get("fieldName") or field.get("name") or "id"
-                ).strip() or "id"
-                pk_type = str(field.get("dataType") or field.get("type") or "VarChar")
-                break
-    return pk_name, pk_type
+    return milvus_pk_info_from_describe_data(describe)
 
 
 def _milvus_all_filter(cfg: dict[str, Any], collection: str) -> str:
     describe = _milvus_describe_raw(cfg, collection)
     pk_name, pk_type = _milvus_pk_info(describe)
-    if "INT" in pk_type.upper():
-        return f"{pk_name} >= 0"
-    return f'{pk_name} != ""'
+    return milvus_all_pk_filter(pk_name, pk_type)
 
 
 def _milvus_index_params(
@@ -361,7 +351,11 @@ def milvus_create_collection_from_source(
 
 
 def milvus_query_offset_cap_exceeded(entity_count: int) -> bool:
-    """Milvus REST query requires ``limit + offset < 16384`` — offset pagination caps here."""
+    """True when offset pagination would violate ``limit + offset < 16384``.
+
+    Identity COPY no longer declines here — PK keyset / INT range split keeps
+    offset at 0. Kept so census / docs can name the REST window.
+    """
     return int(entity_count) >= _MILVUS_QUERY_WINDOW
 
 
@@ -437,80 +431,49 @@ def milvus_query_upsert(
     src_collection: str,
     dest_collection: str,
 ) -> int:
-    """Query source entities and upsert raw rows to dest."""
+    """Query source entities (PK pages) and upsert raw rows to dest."""
     src_session, src_base, src_headers, src_db = _milvus_session(source_cfg)
     dest_session, dest_base, dest_headers, dest_db = _milvus_session(dest_cfg)
     src_name = milvus_collection(src_collection, source_cfg)
     dest_name = milvus_collection(dest_collection, dest_cfg)
     milvus_load_collection(source_cfg, src_collection)
     milvus_load_collection(dest_cfg, dest_collection)
-    output_fields = _milvus_field_names(_milvus_describe_raw(source_cfg, src_collection))
+    src_desc = _milvus_describe_raw(source_cfg, src_collection)
+    output_fields = _milvus_field_names(src_desc)
     if not output_fields:
         raise ValueError("Milvus source has no output fields")
-    filt = _milvus_all_filter(source_cfg, src_collection)
-    total = milvus_entity_count(source_cfg, src_collection)
-    if milvus_query_offset_cap_exceeded(total):
-        raise FastPathUnavailable(
-            f"Milvus collections with >={_MILVUS_QUERY_WINDOW} entities "
-            "require PK-segmented pagination; offset COPY declines"
-        )
+    pk_name, pk_type = _milvus_pk_info(src_desc)
     copied = 0
-    offset = 0
-    while offset < total:
-        limit = min(
-            _QUERY_BATCH,
-            total - offset,
-            _MILVUS_QUERY_WINDOW - 1 - offset,
-        )
-        if limit <= 0:
-            break
-        query_payload = _with_db(
-            {
-                "collectionName": src_name,
-                "filter": filt,
-                "outputFields": output_fields,
-                "limit": limit,
-                "offset": offset,
-            },
-            src_db,
-        )
-        resp = src_session.post(
-            f"{src_base}/v2/vectordb/entities/query",
-            data=json.dumps(query_payload, default=json_default),
-            headers=src_headers,
-            timeout=60,
-        )
-        body = load_http_json(resp) if resp.content else {}
-        if not _ok(body if isinstance(body, dict) else {}, resp.status_code):
-            raise ValueError(
-                f"Milvus query failed: {resp.status_code} {str(body)[:200]}"
+    for rows in iter_milvus_query_pages(
+        session=src_session,
+        base_url=src_base,
+        headers=src_headers,
+        collection=src_name,
+        db_name=src_db,
+        pk_name=pk_name,
+        pk_type=pk_type,
+        output_fields=output_fields,
+        page_size=_QUERY_BATCH,
+    ):
+        for i in range(0, len(rows), _UPSERT_BATCH):
+            batch = rows[i : i + _UPSERT_BATCH]
+            upsert_payload = _with_db(
+                {"collectionName": dest_name, "data": batch},
+                dest_db,
             )
-        rows = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError("Milvus query returned no data")
-        if rows:
-            for i in range(0, len(rows), _UPSERT_BATCH):
-                batch = rows[i : i + _UPSERT_BATCH]
-                upsert_payload = _with_db(
-                    {"collectionName": dest_name, "data": batch},
-                    dest_db,
-                )
-                upsert = dest_session.post(
-                    f"{dest_base}/v2/vectordb/entities/upsert",
-                    data=json.dumps(upsert_payload, default=sanitize_json_value),
-                    headers=dest_headers,
-                    timeout=60,
-                )
-                upsert_body = upsert.json() if upsert.content else {}
-                _milvus_assert_upsert_ok(
-                    upsert_body if isinstance(upsert_body, dict) else {},
-                    upsert.status_code,
-                    len(batch),
-                )
-                copied += len(batch)
-        if len(rows) < limit:
-            break
-        offset += len(rows)
+            upsert = dest_session.post(
+                f"{dest_base}/v2/vectordb/entities/upsert",
+                data=json.dumps(upsert_payload, default=sanitize_json_value),
+                headers=dest_headers,
+                timeout=60,
+            )
+            upsert_body = upsert.json() if upsert.content else {}
+            _milvus_assert_upsert_ok(
+                upsert_body if isinstance(upsert_body, dict) else {},
+                upsert.status_code,
+                len(batch),
+            )
+            copied += len(batch)
     return copied
 
 

@@ -58,7 +58,7 @@ def test_milvus_all_filter_uses_pk_field_name(monkeypatch):
         "services.copy_milvus_common._milvus_describe_raw",
         _fake_describe,
     )
-    assert _milvus_all_filter({}, "coll") == "entity_key >= 0"
+    assert _milvus_all_filter({}, "coll") == "entity_key >= -9223372036854775808"
 
 
 def test_milvus_query_window_respects_limit_plus_offset():
@@ -77,28 +77,54 @@ def test_milvus_large_collection_declines():
     assert milvus_query_offset_cap_exceeded(_MILVUS_QUERY_WINDOW - 1) is False
 
 
-def test_milvus_milvus_copy_declines_large_collection(monkeypatch):
+def test_milvus_large_collection_uses_pk_pagination(monkeypatch):
     from services.copy_milvus_milvus import copy_milvus_to_milvus
 
     monkeypatch.delenv("DATAFLOW_MILVUS_MILVUS_COPY", raising=False)
     monkeypatch.setattr(
         "services.copy_milvus_milvus.milvus_collection_exists",
-        lambda _cfg, _coll: True,
+        lambda _cfg, coll: True,
     )
+    counts = {"src_coll": 20000, "dest_coll": 0}
+
+    def _count(_cfg, coll):
+        return counts["dest_coll" if "dest" in coll else "src_coll"]
+
     monkeypatch.setattr(
         "services.copy_milvus_milvus.milvus_entity_count",
-        lambda _cfg, _coll: 20000,
+        _count,
     )
-    with pytest.raises(FastPathUnavailable, match="PK-segmented pagination"):
-        copy_milvus_to_milvus(
-            source_cfg={"host": "127.0.0.1", "port": 19530},
-            source_table="src_coll",
-            dest_cfg={"host": "127.0.0.1", "port": 19530},
-            dest_table="dest_coll",
-            pairs=[("id", "id")],
-            milvus_ddls=["varchar"],
-            replace_destination=True,
-        )
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_delete_collection",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_create_collection_from_source",
+        lambda **_k: None,
+    )
+
+    def _upsert(**_k):
+        counts["dest_coll"] = 20000
+        return 20000
+
+    monkeypatch.setattr(
+        "services.copy_milvus_milvus.milvus_query_upsert",
+        _upsert,
+    )
+    result = copy_milvus_to_milvus(
+        source_cfg={"host": "127.0.0.1", "port": 19530},
+        source_table="src_coll",
+        dest_cfg={"host": "127.0.0.1", "port": 19530},
+        dest_table="dest_coll",
+        pairs=[("id", "id")],
+        milvus_ddls=["varchar"],
+        replace_destination=True,
+    )
+    assert result.source_rows == 20000
+    assert result.target_rows == 20000
+    assert result.source_snapshot.get("milvus_read") == "pk_query"
+    assert result.source_snapshot.get("cdc_exactly_once_claimed") is False
+    assert result.source_snapshot.get("production_sku") is False
 
 
 def test_milvus_upsert_ack_count_from_data():
@@ -206,3 +232,85 @@ def test_milvus_occupied_mismatch_declines(monkeypatch):
             milvus_ddls=["varchar"],
             replace_destination=False,
         )
+
+
+def test_milvus_int_pk_windows_cover_large_collection_without_offset():
+    from connectors.milvus_writer import milvus_int_pk_split_windows
+
+    occupied = list(range(0, 20_000))
+
+    def count_in_range(lo: int, hi: int) -> int:
+        return sum(1 for x in occupied if lo <= x <= hi)
+
+    windows = list(milvus_int_pk_split_windows(0, 19_999, count_in_range, 1000))
+    assert windows
+    assert all(0 < n <= 1000 for _lo, _hi, n in windows)
+    assert sum(n for _lo, _hi, n in windows) == 20_000
+    covered: set[int] = set()
+    for lo, hi, _n in windows:
+        covered.update(x for x in occupied if lo <= x <= hi)
+    assert covered == set(occupied)
+
+
+def test_milvus_pk_gt_and_all_filter_int_includes_negatives():
+    from connectors.milvus_writer import milvus_all_pk_filter, milvus_pk_gt_filter
+
+    assert milvus_all_pk_filter("pk", "Int64") == "pk >= -9223372036854775808"
+    assert milvus_pk_gt_filter("pk", "Int64", 16383) == "pk > 16383"
+    assert milvus_pk_gt_filter("doc_id", "VarChar", 'a"b') == 'doc_id > "a\\"b"'
+
+
+def test_milvus_pks_strictly_increasing():
+    from connectors.milvus_writer import milvus_pks_strictly_increasing
+
+    assert milvus_pks_strictly_increasing([1, 2, 3], integer=True) is True
+    assert milvus_pks_strictly_increasing([1, 1], integer=True) is False
+    assert milvus_pks_strictly_increasing(["a", "b"], integer=False) is True
+    assert milvus_pks_strictly_increasing(["b", "a"], integer=False) is False
+
+
+def test_milvus_query_upsert_keyset_pages(monkeypatch):
+    import json
+    from connectors.milvus_writer import iter_milvus_query_pages
+
+    pages = {
+        None: [{"pk": i, "vector": [0.1]} for i in range(0, 3)],
+        2: [{"pk": i, "vector": [0.1]} for i in range(3, 5)],
+    }
+
+    class _Resp:
+        def __init__(self, payload, status=200):
+            self.status_code = status
+            self.content = b"x"
+            self.text = json.dumps(payload)
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def post(self, url, data=None, headers=None, timeout=None):
+            body = json.loads(data)
+            filt = str(body.get("filter") or "")
+            last = None
+            if "pk > " in filt:
+                last = int(filt.split("pk > ")[-1].split(")")[0].strip())
+            rows = pages.get(last, [])
+            if body.get("outputFields") == ["count(*)"]:
+                return _Resp({"code": 0, "data": [{"count(*)": 5}]})
+            return _Resp({"code": 0, "data": rows})
+
+    got = list(
+        iter_milvus_query_pages(
+            session=_Session(),
+            base_url="http://127.0.0.1:19530",
+            headers={},
+            collection="c",
+            db_name="",
+            pk_name="pk",
+            pk_type="Int64",
+            output_fields=["pk", "vector"],
+            page_size=3,
+        )
+    )
+    assert [row["pk"] for page in got for row in page] == [0, 1, 2, 3, 4]

@@ -133,6 +133,9 @@ def copy_pgvector_to_pgvector(
         "pgvector_read": "binary_copy",
         "pgvector_write": p_write,
         "pgvector_table": dest_table_name,
+        "delivery_class": "at_least_once_upsert",
+        "cdc_exactly_once_claimed": False,
+        "production_sku": False,
     })
     return FastPathResult(
         rows_copied=dest_count,
