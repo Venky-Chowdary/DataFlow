@@ -11,7 +11,7 @@ import importlib.util
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -287,6 +287,87 @@ def _weaviate_live_property_types(schema_doc: dict[str, Any] | None) -> dict[str
 
 
 _WEAVIATE_OBJECT_PAGE = 100
+# Offset list is capped by QUERY_MAXIMUM_RESULTS (~10_000). Cursor ``after``
+# is the identity-COPY / census path and is not bound by that window.
+_WEAVIATE_QUERY_MAXIMUM_RESULTS = 10_000
+
+
+def weaviate_cursor_list_params(
+    *,
+    class_name: str,
+    limit: int,
+    after: str | None = None,
+    include: str = "",
+) -> dict[str, Any]:
+    """GET /v1/objects params. Never combine ``after`` with ``offset``."""
+    params: dict[str, Any] = {
+        "class": class_name,
+        "limit": int(limit),
+    }
+    if include:
+        params["include"] = include
+    if after:
+        params["after"] = after
+    return params
+
+
+def iter_weaviate_objects_after(
+    *,
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    class_name: str,
+    page_size: int = _WEAVIATE_OBJECT_PAGE,
+    include: str = "vector",
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield object pages via UUID ``after`` cursor (not offset).
+
+    Weaviate docs: ``after`` walks a whole class past QUERY_MAXIMUM_RESULTS.
+    Incompatible with filters/sort — identity COPY lists the class as-is.
+    """
+    after: str | None = None
+    seen: set[str] = set()
+    page = max(1, int(page_size))
+    while True:
+        params = weaviate_cursor_list_params(
+            class_name=class_name,
+            limit=page,
+            after=after,
+            include=include,
+        )
+        listed = session.get(
+            f"{base_url}/v1/objects",
+            headers=headers,
+            params=params,
+            timeout=60,
+        )
+        if listed.status_code != 200:
+            raise ValueError(
+                f"Weaviate list objects failed: {listed.status_code} {listed.text[:200]}"
+            )
+        body = load_http_json(listed) if listed.content else {}
+        objects = body.get("objects") if isinstance(body, dict) else None
+        if not isinstance(objects, list):
+            raise ValueError("Weaviate list returned no objects")
+        if not objects:
+            break
+        typed = [obj for obj in objects if isinstance(obj, dict)]
+        for obj in typed:
+            oid = str(obj.get("id") or "").strip()
+            if not oid:
+                raise ValueError("Weaviate object missing id; refuse cursor")
+            if oid in seen:
+                raise ValueError(
+                    "Weaviate cursor returned duplicate id; refuse silent dup"
+                )
+            seen.add(oid)
+        yield typed
+        if len(typed) < page:
+            break
+        nxt = str(typed[-1].get("id") or "").strip()
+        if not nxt or nxt == after:
+            raise ValueError("Weaviate cursor did not advance")
+        after = nxt
 
 
 def _weaviate_object_source_id(obj: Any) -> Any:
@@ -396,32 +477,19 @@ def scan_source_ids(
         if physical > cap:
             return "truncated", []
         values: list[Any] = []
-        offset = 0
-        while offset < physical:
-            page = min(_WEAVIATE_OBJECT_PAGE, physical - offset)
-            listed = session.get(
-                f"{base_url}/v1/objects",
-                headers=hdrs,
-                params={"class": class_name, "limit": page, "offset": offset},
-                timeout=30,
-            )
-            if listed.status_code != 200:
-                return "unmeasured", []
-            try:
-                body = load_http_json(listed)
-            except Exception:
-                return "unmeasured", []
-            objects = body.get("objects") if isinstance(body, dict) else None
-            if not isinstance(objects, list):
-                return "unmeasured", []
-            if not objects:
-                break
+        for objects in iter_weaviate_objects_after(
+            session=session,
+            base_url=base_url,
+            headers=hdrs,
+            class_name=class_name,
+            page_size=_WEAVIATE_OBJECT_PAGE,
+            include="",
+        ):
             for obj in objects:
                 values.append(_weaviate_object_source_id(obj))
                 if len(values) > cap:
                     return "truncated", []
-            offset += len(objects)
-        if len(values) > physical:
+        if len(values) != physical:
             return "truncated", []
         return "complete", values
     except Exception:

@@ -28,6 +28,7 @@ DELIVERY_CLASS_AT_LEAST_ONCE = "at_least_once"
 DELIVERY_CLASS_AT_MOST_ONCE = "at_most_once"
 
 SINK_EFFECTIVELY_ONCE_ELIGIBLE = "effectively_once_eligible"
+SINK_PK_UPSERT_AT_LEAST_ONCE = "pk_upsert_at_least_once"
 SINK_APPEND_ONLY = "append_only_at_least_once"
 
 DUPLICATE_SCENARIO_APPEND_REDELIVERY = "append_only_redelivery_duplicates_rows"
@@ -308,6 +309,27 @@ def classify_sink_delivery(
                 "At-most-once is not offered (would allow silent loss).",
             ],
         }
+    pk_upsert_no_lsn = bool(has_primary_key and upsert_capable and upsert_mode)
+    if pk_upsert_no_lsn:
+        return {
+            "class": SINK_PK_UPSERT_AT_LEAST_ONCE,
+            "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
+            "exactly_once": False,
+            "at_least_once": True,
+            "at_most_once": False,
+            "effectively_once_pk_sink": False,
+            "duplicates_on_redelivery": False,
+            "duplicate_scenario": DUPLICATE_SCENARIO_ALO_WITHOUT_LSN,
+            "dest_type": dest,
+            "supports_upsert": upsert_capable,
+            "has_lsn_guard": False,
+            "notes": [
+                "PK upsert is last-write-wins under at-least-once CDC.",
+                "No _df_lsn guard — stale redelivery can overwrite newer state.",
+                "Same PK does not insert a duplicate row.",
+                "Not exactly-once. Not append-only row duplication.",
+            ],
+        }
     return {
         "class": SINK_APPEND_ONLY,
         "delivery_class": DELIVERY_CLASS_AT_LEAST_ONCE,
@@ -351,6 +373,15 @@ def gate_cdc_destination(
     )
     if posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE:
         return posture
+    if posture["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE:
+        if require_effectively_once:
+            raise CdcAppendOnlySinkError(
+                "CDC destination "
+                f"'{dest_type or 'unknown'}' upserts by PK without _df_lsn. "
+                "Delivery is at-least-once last-write-wins, not LSN-guarded "
+                "effectively-once. Not exactly-once."
+            )
+        return posture
     if require_effectively_once or not allow_append_only:
         raise CdcAppendOnlySinkError(
             "CDC destination "
@@ -393,8 +424,9 @@ def honesty_dict() -> dict[str, Any]:
                 "default": True,
                 "available": True,
                 "note": (
-                    "Default CDC delivery: peek→apply→ack may redeliver. "
-                    "PK upsert sinks with _df_lsn reject stale tokens; append sinks can duplicate."
+                "Default CDC delivery: peek→apply→ack may redeliver. "
+                "PK upsert sinks with _df_lsn reject stale tokens; "
+                "PK upsert without LSN is last-write-wins; append sinks can duplicate."
                 ),
             },
             DELIVERY_CLASS_AT_MOST_ONCE: {

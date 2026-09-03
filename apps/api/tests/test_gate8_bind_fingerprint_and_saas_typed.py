@@ -246,8 +246,8 @@ def test_rejected_detail_stamps_primary_key():
 
 def test_cdc_classify_requires_lsn_guard_engine():
     from services.cdc_effectively_once import (
-        SINK_APPEND_ONLY,
         SINK_EFFECTIVELY_ONCE_ELIGIBLE,
+        SINK_PK_UPSERT_AT_LEAST_ONCE,
         classify_sink_delivery,
     )
 
@@ -257,11 +257,13 @@ def test_cdc_classify_requires_lsn_guard_engine():
     assert pg["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE
     assert pg.get("has_lsn_guard") is True
 
-    # Explicit missing LSN column → not eligible.
+    # Explicit missing LSN column → PK upsert last-write-wins, not append-only.
     no_lsn = classify_sink_delivery(
         dest_type="postgresql",
         has_primary_key=True,
         write_mode="upsert",
         has_lsn_column=False,
     )
-    assert no_lsn["class"] == SINK_APPEND_ONLY
+    assert no_lsn["class"] == SINK_PK_UPSERT_AT_LEAST_ONCE
+    assert no_lsn["exactly_once"] is False
+    assert no_lsn["duplicates_on_redelivery"] is False

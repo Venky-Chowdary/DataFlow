@@ -1136,6 +1136,7 @@ def build_mapping_proof(
         try:
             from services.cdc_effectively_once import (
                 SINK_APPEND_ONLY,
+                SINK_PK_UPSERT_AT_LEAST_ONCE,
                 classify_sink_delivery,
             )
 
@@ -1154,6 +1155,17 @@ def build_mapping_proof(
                         f"Destination '{destination_db_type}' does not support upsert — "
                         "CDC redelivery will duplicate rows (not LSN-guarded idempotent upsert). "
                         "Use a PK upsert sink or set allow_append_only=true."
+                    ),
+                })
+            if sink.get("class") == SINK_PK_UPSERT_AT_LEAST_ONCE and not any(
+                r["code"] == "cdc_pk_upsert_at_least_once" for r in global_risks
+            ):
+                global_risks.insert(0, {
+                    "code": "cdc_pk_upsert_at_least_once",
+                    "severity": "info",
+                    "message": (
+                        f"Destination '{destination_db_type}' is PK upsert without "
+                        "_df_lsn — at-least-once last-write-wins, not exactly-once."
                     ),
                 })
         except Exception as exc:

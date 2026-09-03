@@ -14,7 +14,9 @@ import json
 from typing import Any
 
 from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
-from services.value_serializer import json_default, load_http_json, sanitize_json_value
+from services.value_serializer import json_default, sanitize_json_value
+
+from connectors.weaviate_writer import iter_weaviate_objects_after
 
 _WEAVIATE_FAMILY = frozenset({
     "weaviate",
@@ -41,7 +43,8 @@ _WEAVIATE_COPY_SAFE_TYPES = frozenset({
 
 _LIST_PAGE = 100
 _BATCH_SIZE = 100
-# Weaviate default QUERY_MAXIMUM_RESULTS — offset list pagination cannot exceed this.
+# Weaviate default QUERY_MAXIMUM_RESULTS — offset list cannot exceed this.
+# Identity COPY uses ``after`` cursor and is not bound by this window.
 _WEAVIATE_LIST_MAX = 10_000
 
 
@@ -227,7 +230,10 @@ def _weaviate_assert_batch_ok(batch: list[dict[str, Any]], response_items: Any) 
 
 
 def weaviate_list_offset_cap_exceeded(object_count: int) -> bool:
-    """Weaviate REST list uses offset pagination capped at QUERY_MAXIMUM_RESULTS."""
+    """True when offset list would exceed QUERY_MAXIMUM_RESULTS.
+
+    Identity COPY no longer declines here — ``after`` cursor walks the class.
+    """
     return int(object_count) > _WEAVIATE_LIST_MAX
 
 
@@ -257,37 +263,15 @@ def weaviate_list_batch_upsert(
     dest_session, dest_base, dest_headers = _weaviate_session(dest_cfg)
     src_name = weaviate_class(src_class, source_cfg)
     dest_name = weaviate_class(dest_class, dest_cfg)
-    total = weaviate_object_count(source_cfg, src_class)
-    if weaviate_list_offset_cap_exceeded(total):
-        raise FastPathUnavailable(
-            f"Weaviate classes with >{_WEAVIATE_LIST_MAX} objects "
-            "require cursor pagination; offset COPY declines"
-        )
     copied = 0
-    offset = 0
-    while offset < total:
-        page = min(_LIST_PAGE, total - offset)
-        resp = src_session.get(
-            f"{src_base}/v1/objects",
-            headers=src_headers,
-            params={
-                "class": src_name,
-                "limit": page,
-                "offset": offset,
-                "include": "vector",
-            },
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            raise ValueError(
-                f"Weaviate list objects failed: {resp.status_code} {resp.text[:200]}"
-            )
-        body = load_http_json(resp) if resp.content else {}
-        objects = body.get("objects") if isinstance(body, dict) else None
-        if not isinstance(objects, list):
-            raise ValueError("Weaviate list returned no objects")
-        if not objects:
-            break
+    for objects in iter_weaviate_objects_after(
+        session=src_session,
+        base_url=src_base,
+        headers=src_headers,
+        class_name=src_name,
+        page_size=_LIST_PAGE,
+        include="vector",
+    ):
         for i in range(0, len(objects), _BATCH_SIZE):
             batch_raw = objects[i : i + _BATCH_SIZE]
             batch = [_batch_object(obj, dest_name) for obj in batch_raw if isinstance(obj, dict)]
@@ -306,9 +290,6 @@ def weaviate_list_batch_upsert(
             response_items = upsert.json() if upsert.content else []
             _weaviate_assert_batch_ok(batch, response_items)
             copied += len(batch)
-        if len(objects) < page:
-            break
-        offset += len(objects)
     return copied
 
 
