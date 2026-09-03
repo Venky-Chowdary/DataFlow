@@ -1651,7 +1651,7 @@ Desktop-lab Elasticsearch is not a customer-tenant PRODUCTION_SKU.
 
 Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_es_src BENCH_DEST=bench_es_clone python scripts/bench_elasticsearch_to_elasticsearch_million.py`
 
-Pytest: `test_elasticsearch_elasticsearch_copy` **14 passed / 0 failed** in 20.70s
+Pytest: `test_elasticsearch_elasticsearch_copy` **15 passed / 0 failed** in 20.33s
 (`/opt/cursor/artifacts/elasticsearch_elasticsearch_identity_pytest.log`). Named
 1M is **wired, not measured** (queue still had continue-with-next).
 
