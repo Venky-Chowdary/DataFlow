@@ -178,9 +178,10 @@ def _arrow_from_iceberg_files(
         if not name:
             raise FastPathUnavailable(f"Iceberg source column {col!r} absent")
         field = next(f for f in tbl.schema().fields if str(f.name) == name)
-        if not iceberg_type_is_copy_safe(str(field.type)):
+        declared = str(getattr(field, "field_type", None) or "")
+        if not iceberg_type_is_copy_safe(declared):
             raise FastPathUnavailable(
-                f"source column {col!r} type {field.type} is not Iceberg COPY-safe"
+                f"source column {col!r} type {declared} is not Iceberg COPY-safe"
             )
         selected.append(name)
 
