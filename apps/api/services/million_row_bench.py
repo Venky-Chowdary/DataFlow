@@ -74,6 +74,10 @@ REPORTED_SUMMARY_KEYS = (
     "sqlite_read",
     "s3_write",
     "s3_read",
+    "kafka_write",
+    "kafka_read",
+    "dynamodb_write",
+    "dynamodb_read",
     "elasticsearch_write",
     "elasticsearch_read",
     "redis_write",
@@ -11568,5 +11572,207 @@ def run_elasticsearch_elasticsearch_volume(
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
+
+
+def _require_kafka() -> None:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 9092), timeout=2):
+            pass
+    except OSError as exc:
+        raise RuntimeError(f"Kafka 9092 not reachable: {exc}") from exc
+
+
+def _kafka_local_cfg(topic: str) -> dict[str, Any]:
+    return {
+        "type": "kafka",
+        "format": "kafka",
+        "host": "127.0.0.1",
+        "port": 9092,
+        "database": topic,
+        "table": topic,
+    }
+
+
+def _kafka_count(cfg: dict[str, Any], topic: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count("kafka", cfg, schema="", table_name=topic)
+    if n is None:
+        raise RuntimeError(f"Kafka dest COUNT unmeasured for {topic}")
+    return int(n)
+
+
+def _kafka_seed(cfg: dict[str, Any], topic: str, rows: int) -> None:
+    from services.copy_kafka_common import (
+        kafka_byte_producer,
+        kafka_create_topic,
+        kafka_delete_topic,
+        kafka_topic_exists,
+    )
+
+    have = 0
+    try:
+        if kafka_topic_exists(cfg, topic):
+            have = _kafka_count(cfg, topic)
+    except Exception:
+        have = 0
+    if have == int(rows):
+        print(f"seed: Kafka {topic} already has {rows} records")
+        return
+    kafka_delete_topic(cfg, topic)
+    kafka_create_topic(cfg, topic, num_partitions=1)
+    producer = kafka_byte_producer(cfg)
+    try:
+        for i in range(1, int(rows) + 1):
+            payload = json.dumps({"id": i, "label": f"r{i}"}, separators=(",", ":"))
+            producer.send(
+                topic, key=str(i).encode("utf-8"), value=payload.encode("utf-8")
+            )
+        producer.flush(timeout=120)
+    finally:
+        producer.close()
+    print(f"seed: Kafka {topic} wrote {rows} records (seed is not the COPY path)")
+
+
+def _kafka_delete_topic(cfg: dict[str, Any], topic: str) -> None:
+    from services.copy_kafka_common import kafka_delete_topic
+
+    kafka_delete_topic(cfg, topic)
+
+
+def run_kafka_kafka_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Kafka→Kafka through stream_database_transfer.
+
+    Dest COUNT is log-end minus log-start watermarks, never producer
+    ack. Empty dest is consume+produce of raw bytes, not JSON decode /
+    MirrorMaker 2. Seeds JSON bytes when the source topic is missing
+    (seed is not the COPY path). Unique dest ``bench_kafka_clone`` is
+    not reused from ``bench_1m`` / ``bench_redis_clone`` /
+    ``bench_es_clone``. Desktop-lab Kafka is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_kafka()
+    src_topic = str(source_table or "bench_kafka_src")
+    dest = str(dest_table)
+    src_cfg = _kafka_local_cfg(src_topic)
+    dest_cfg = _kafka_local_cfg(dest)
+    if (
+        src_cfg["host"] == dest_cfg["host"]
+        and src_cfg["port"] == dest_cfg["port"]
+        and src_topic == dest
+    ):
+        raise AssertionError("Kafka→Kafka bench refuses the same bootstrap+topic")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _kafka_count(src_cfg, src_topic)
+    except Exception:
+        have = 0
+    if have != rows:
+        _kafka_seed(src_cfg, src_topic, rows)
+    if not keep_dest:
+        _kafka_delete_topic(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "long", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "long", "label": "string"}
+    job_id = f"bench-kafka-kafka-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _kafka_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "kafka→kafka",
+        "sync_mode": sync_mode,
+        "source_table": src_topic,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "kafka_read": summary.get("kafka_read"),
+        "kafka_write": summary.get("kafka_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "kafka_watermark_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} kafka→kafka [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination watermark COUNT: {landed} (source watermark COUNT: {rows})")
+    print(
+        "Not producer ack / json.loads / MirrorMaker 2. Empty dest is "
+        "consume+produce of bytes. Desktop-lab Kafka is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "consume_produce_bytes_kafka_kafka"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Kafka consume-produce bytes, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
 
 

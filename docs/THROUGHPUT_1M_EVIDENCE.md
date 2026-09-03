@@ -1655,6 +1655,13 @@ NULL vs `''` preserved on STRING. Local scan total is `list_rows` length.
 Named 1M is **wired, not measured** (queue still had continue-with-next).
 goccy is not a customer-tenant PRODUCTION_SKU.
 
+goccy `v0.8.1` panics (`googlesqlite: panic runtime error: slice bounds
+out of range`) once a long-lived process has accumulated tables, so this
+suite is measured against a **freshly started** emulator. A stale
+emulator produces `500 InternalServerError` failures that are the
+emulator's, not the engine's — restart `bigquery-emulator` before
+quoting a number.
+
 ### Redis→Redis COPY — dest prefix COUNT (2026-09-03)
 
 Identity bulk on desktop-lab Redis (`127.0.0.1:6379`) is server-side
@@ -1697,7 +1704,32 @@ Pytest: `test_elasticsearch_elasticsearch_copy` **15 passed / 0 failed** in 20.3
 (`/opt/cursor/artifacts/elasticsearch_elasticsearch_identity_pytest.log`). Named
 1M is **wired, not measured** (queue still had continue-with-next).
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity — wired, not measured
+### Kafka→Kafka consume-produce bytes — wired, not a named 1M on this host (2026-09-03)
+
+Identity bulk on desktop-lab Kafka (`127.0.0.1:9092`) is consume of raw
+bytes (no deserializer / no `json.loads`) and produce of identical
+key/value/headers/timestamp with dest credentials. Dest COUNT is
+log-end minus log-start watermarks via `destination_row_count` — never
+producer ack, never poll count, never leftover compaction MERGE. Empty
+dest is consume+produce of bytes, **not** `kafka_json_payload` /
+MirrorMaker 2 / Cluster Linking / `kafka-mirror-maker`. Source seed
+(`bench_kafka_src`) is a JSON-bytes produce; that seed is **not** the
+COPY path. Unique dest `bench_kafka_clone` is not reused from
+`bench_1m` / `bench_redis_clone` / `bench_es_clone`. Same
+bootstrap+topic declines. Cross-endpoint declines. Occupied dest
+matching COUNT skip-completes. Occupied dest with a COUNT mismatch
+declines. Occupancy is counted **before** delete. Desktop-lab Kafka /
+Redpanda on `:9092` is **not** a customer-tenant PRODUCTION_SKU.
+
+Named 1M dest COUNT for Kafka→Kafka is **not recorded on this host
+yet** — do not invent times. Reproduce later:
+`BENCH_ROWS=1000000 BENCH_SRC=bench_kafka_src BENCH_DEST=bench_kafka_clone python scripts/bench_kafka_to_kafka_million.py`
+
+Pytest: `test_kafka_kafka_copy` **15 passed / 0 failed** in 11.22s
+(`/opt/cursor/artifacts/kafka_kafka_identity_pytest.log`) on Kafka 3.8.1
+KRaft `127.0.0.1:9092`. Dest COUNT is watermarks, never producer ack.
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1718,7 +1750,8 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_gcs_to_gcs_million.py`, `bench_dynamodb_to_dynamodb_million.py`,
 `bench_snowflake_to_snowflake_million.py`,
 `bench_bigquery_to_bigquery_million.py`, `bench_redis_to_redis_million.py`,
-`bench_elasticsearch_to_elasticsearch_million.py`, plus SQL
+`bench_elasticsearch_to_elasticsearch_million.py`,
+`bench_kafka_to_kafka_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1733,15 +1766,16 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
 `bench_oracle_s3.csv` / `bench_ora_from_s3` /
 `bench_gcs_clone.jsonl` / `bench_dynamodb_clone` /
-`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone` / `bench_es_clone`
+`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone` / `bench_es_clone` / `bench_kafka_clone`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
 proof is `count_documents({})` (Mongo), file footers (Iceberg),
 `COUNT(*)` (SQLite / PostgreSQL / Snowflake / BigQuery), object-store artifact COUNT (S3 —
 GET streams / Parquet footers, never ListObjects length, never writer
-PUT ack), or DynamoDB `Scan Select=COUNT` (never `DescribeTable.ItemCount`,
-never ListTables length). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
+PUT ack), DynamoDB `Scan Select=COUNT` (never `DescribeTable.ItemCount`,
+never ListTables length), or Kafka log-end minus log-start watermarks
+(never producer ack). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
 dest is CoW snapshot append, not `MERGE INTO`. Empty SQLite dest is
 `INSERT SELECT` / `executemany`, not `.dump` / `.import`. Empty S3 dest
 is `CopyObject` (S3→S3) or COPY/SELECT CSV + `upload_file`
@@ -1793,7 +1827,11 @@ DUMP+RESTORE / `DBSIZE` (this host's proof is desktop-lab Redis
 Elasticsearch→Elasticsearch empty dest is cluster `_reindex`, not
 scroll+bulk / `helpers.reindex` / `_cat/indices` `docs.count` (this
 host's proof is desktop-lab Elasticsearch `127.0.0.1:9200`; dest COUNT is
-`_count` after refresh via `destination_row_count`). Iceberg→Iceberg writes **new** dest
+`_count` after refresh via `destination_row_count`). Kafka→Kafka empty
+dest is consume+produce of raw bytes, not `kafka_json_payload` /
+MirrorMaker 2 / Cluster Linking (this host's proof is desktop-lab Kafka
+on `:9092`; dest COUNT is log-end minus log-start watermarks, never
+producer ack). Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. GCS same
@@ -1803,7 +1841,8 @@ endpoint+table declines. Snowflake same
 account+database+schema+table declines. Cross-account Snowflake INSERT SELECT declines. BigQuery same
 project+dataset+table declines. Cross-project BigQuery INSERT SELECT declines. Redis same
 host+port+db+prefix declines. Cross-endpoint Redis COPY declines. Elasticsearch same
-host+port+index declines. Cross-endpoint Elasticsearch `_reindex` declines. JSON
+host+port+index declines. Cross-endpoint Elasticsearch `_reindex` declines. Kafka same
+bootstrap+topic declines. Cross-endpoint Kafka consume+produce declines. JSON
 dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, Iceberg→S3, SQL Server→S3, and Oracle→S3 (row path keeps JSON export).
 JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, S3→Iceberg, S3→SQL Server, and S3→Oracle (CSV is the
 COPY-native wire).
