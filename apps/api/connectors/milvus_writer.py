@@ -969,7 +969,7 @@ def scan_source_ids(
                 values.append(_entity_source_id(row))
                 if len(values) > cap:
                     return "truncated", []
-        if len(values) > physical:
+        if len(values) != physical:
             return "truncated", []
         return "complete", values
     except Exception:

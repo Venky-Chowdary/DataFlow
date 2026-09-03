@@ -130,16 +130,16 @@ def test_milvus_scan_source_ids_missing_collection_is_zero(monkeypatch):
 
 def test_milvus_scan_source_ids_distinct_not_rowcount(monkeypatch):
     fields = [
-        {"fieldName": "id", "dataType": "VarChar"},
+        {"fieldName": "id", "dataType": "VarChar", "isPrimary": True},
         {"fieldName": "source_id", "dataType": "VarChar"},
         {"fieldName": "vector", "dataType": "FloatVector"},
     ]
     entities = [
-        {"source_id": "doc-1"},
-        {"source_id": "doc-1"},
-        {"source_id": "doc-1"},
-        {"source_id": "doc-2"},
-        {"source_id": "doc-2"},
+        {"id": "a", "source_id": "doc-1"},
+        {"id": "b", "source_id": "doc-1"},
+        {"id": "c", "source_id": "doc-1"},
+        {"id": "d", "source_id": "doc-2"},
+        {"id": "e", "source_id": "doc-2"},
     ]
     monkeypatch.setattr(
         "connectors.milvus_writer._requests_session",
@@ -171,14 +171,15 @@ def test_milvus_scan_source_ids_no_source_id_field(monkeypatch):
     assert values == []
 
 
-def test_milvus_scan_source_ids_truncated_past_rest_window(monkeypatch):
+def test_milvus_scan_source_ids_truncated_past_census_cap(monkeypatch):
+    """PK pagination is not the 16,384 offset window; census still caps at max_entities."""
     fields = [
-        {"fieldName": "id", "dataType": "VarChar"},
+        {"fieldName": "id", "dataType": "VarChar", "isPrimary": True},
         {"fieldName": "source_id", "dataType": "VarChar"},
     ]
     monkeypatch.setattr(
         "connectors.milvus_writer._requests_session",
-        lambda: _MilvusSession(has=True, fields=fields, physical=20_000, entities=[]),
+        lambda: _MilvusSession(has=True, fields=fields, physical=20_001, entities=[]),
     )
     state, values = scan_source_ids(
         {"host": "127.0.0.1", "port": 19530}, table_name="chunks", max_entities=20_000
