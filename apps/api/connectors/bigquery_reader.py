@@ -68,18 +68,6 @@ def read_table_batch(
             bigquery.DatasetReference(project_id, dataset_id), table
         )
 
-        if known_total_rows is not None:
-            total = known_total_rows
-        elif is_local:
-            # Emulator path: `query().result()` can hang on some fake-BigQuery
-            # implementations (e.g. goccy/bigquery-emulator), while `get_table`
-            # and `list_rows` are reliable.
-            bq_table = client.get_table(api_ref)
-            total = bq_table.num_rows or 0
-        else:
-            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
-            total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
-
         # Determine columns/ordering.
         if columns:
             order_cols = list(columns)
@@ -90,21 +78,19 @@ def read_table_batch(
             raise RuntimeError("BigQuery table has no columns for stable pagination")
 
         if is_local:
-            rows_iter = client.list_rows(
-                api_ref,
-                max_results=limit,
-                start_index=offset,
-            )
-            rows_list = list(rows_iter)
-            # Local emulators may ignore max_results/start_index; sort and slice
-            # defensively so pagination/resume stays deterministic.
-            if len(rows_list) > limit or offset:
+            from connectors.google_emulator import google_emulator_retry
 
-                def _row_key(row):
-                    values = row if isinstance(row, dict) else dict(row.items())
-                    return tuple(values.get(c) for c in order_cols)
+            no_retry = google_emulator_retry()
+            all_rows = list(client.list_rows(api_ref, retry=no_retry, timeout=8.0))
 
-                rows_list = sorted(rows_list, key=_row_key)[offset : offset + limit]
+            def _row_key(row):
+                values = row if isinstance(row, dict) else dict(row.items())
+                return tuple(values.get(c) for c in order_cols)
+
+            all_rows = sorted(all_rows, key=_row_key)
+            # Snapshot size is the materialized list — never Table.num_rows.
+            total = len(all_rows)
+            rows_list = all_rows[offset : offset + max(1, int(limit))]
             headers = columns or order_cols
             rows = [
                 [cell_to_string(row.get(c) if isinstance(row, dict) else row[c], preserve_sql_null=True) for c in headers]
@@ -112,6 +98,11 @@ def read_table_batch(
             ]
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
+            total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
         col_sql = (
             quote_column_list(
                 [require_safe_identifier(c, preserve_case=True) for c in columns],
@@ -296,23 +287,27 @@ def read_table_scan_batch(
         api_ref = bigquery.TableReference(
             bigquery.DatasetReference(project_id, dataset_id), table
         )
-        if known_total_rows is not None:
-            total = known_total_rows
-        elif is_local:
-            bq_table = client.get_table(api_ref)
-            total = bq_table.num_rows or 0
-        else:
-            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
-            total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
+        from connectors.google_emulator import google_emulator_retry
+
+        no_retry = google_emulator_retry() if is_local else None
         if columns:
             order_cols = list(columns)
         else:
-            bq_table = client.get_table(api_ref)
+            bq_table = (
+                client.get_table(api_ref, retry=no_retry, timeout=8.0)
+                if is_local
+                else client.get_table(api_ref)
+            )
             order_cols = [field.name for field in (bq_table.schema or [])]
         if not order_cols:
             raise RuntimeError("BigQuery table has no columns for stable pagination")
         if is_local:
-            rows_list = list(client.list_rows(api_ref))
+            # Snapshot size is the materialized list_rows population — never
+            # Table.num_rows (lags the streaming buffer; goccy often reports 0,
+            # which truncates the transfer after the first page).
+            rows_list = list(
+                client.list_rows(api_ref, retry=no_retry, timeout=8.0)
+            )
 
             def _row_key(row):
                 values = row if isinstance(row, dict) else dict(row.items())
@@ -325,9 +320,14 @@ def read_table_scan_batch(
                 local_rows=rows_list,
                 idx=0,
                 headers=headers,
-                total=total,
+                total=len(rows_list),
             )
         else:
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
+                total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
             col_sql = (
                 quote_column_list(
                     [require_safe_identifier(c, preserve_case=True) for c in columns],
