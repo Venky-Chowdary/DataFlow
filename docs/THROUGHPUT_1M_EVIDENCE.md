@@ -37,6 +37,8 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_iceberg \\
   python scripts/bench_pg_to_iceberg_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_pg_iceberg BENCH_DEST=bench_pg_from_iceberg \\
   python scripts/bench_iceberg_to_pg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_iceberg \\
+  python scripts/bench_mysql_to_iceberg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1034,6 +1036,58 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 | Artifact | `/opt/cursor/artifacts/iceberg_pg_1000000_resume_skip_proof.json` |
 
 Do not quote 19.3M rows/s from skip-all. Pytest: `test_iceberg_pg_copy`
+**9 passed / 0 failed**.
+
+### Named 1M fixture — MySQL→Iceberg SELECT + CSV + snapshot (2026-09-03)
+
+MySQL has no `COPY TO STDOUT`. Identity bulk is one
+`START TRANSACTION WITH CONSISTENT SNAPSHOT` + SSCursor `SELECT`
+encoded as CSV into one Arrow table and one Iceberg catalog snapshot.
+Dest COUNT is Parquet file footers via `destination_row_count` /
+`iceberg_mor`, never `scan().count()`. Empty dest is CoW snapshot
+append — **not** `MERGE INTO`. Warehouse is still **local files**, not
+S3.
+
+Do not mix this 9.219 s with PostgreSQL→Iceberg 1.344 s: PostgreSQL
+emits CSV in the server; MySQL pays a Python CSV encode. Do not mix
+either with network SQL engine times.
+
+Reproduce: `BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_iceberg python scripts/bench_mysql_to_iceberg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MySQL **3306** (`bench_1m`, 10 columns, PK `employee_id`) |
+| Destination | Iceberg REST **8181**, create-new `default.bench_mysql_iceberg` |
+| Warehouse | `file:///tmp/iceberg-rest-wh` (local files, not S3) |
+| Rows | **1,000,000** |
+| Elapsed | **9.219 s** |
+| dest COUNT (file footers) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_mysql_csv_iceberg_snapshot` |
+| `copy_split` | `serial` |
+| `iceberg_write` | `append` |
+| `shard_mode` | `table` |
+| Artifact | `/opt/cursor/artifacts/mysql_iceberg_1000000_proof.json` |
+
+Live 3-row NULL / `''` / `'x'` on Iceberg string lands as NULL / `''` /
+`x` — empty string is preserved (unlike Oracle VARCHAR2). Occupied dest
+whose footer COUNT already equals the source snapshot is skip-complete.
+Occupied dest with a different COUNT declines (leftover MERGE stays on
+the row path). Iceberg catalog commits are snapshot-isolated, so this
+COPY is serial.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest COUNT (file footers) | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `iceberg_write` | skip |
+| Elapsed | **0.683 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/mysql_iceberg_1000000_resume_skip_proof.json` |
+
+Do not quote 1.46M rows/s from skip-all. Pytest: `test_mysql_iceberg_copy`
 **9 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
