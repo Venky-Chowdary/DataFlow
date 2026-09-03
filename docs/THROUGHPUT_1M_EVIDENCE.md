@@ -1817,7 +1817,17 @@ yet** — do not invent times.
 Pytest: `test_milvus_milvus_copy` — live tests skip when `:19530` is
 unreachable; unit declines always run.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity — wired, not measured
+### pgvector→pgvector identity COPY (binary COPY)
+
+Dest COUNT is ``COUNT(*)`` — never ``scan_source_ids`` DISTINCT
+``source_id``, never upsert ack, never writer ``rows_written``. Delegates
+to PostgreSQL binary ``copy_between_postgres`` (raw columns including
+``vector(n)`` payloads). Same table declines. Cross-endpoint declines.
+
+Pytest: `test_pgvector_pgvector_copy` — live test skips when `:5432` or
+pgvector extension unavailable.
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity / pgvector identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,

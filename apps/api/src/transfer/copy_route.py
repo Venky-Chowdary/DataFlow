@@ -619,6 +619,7 @@ def _try_copy_fast_path(
     from services.copy_duckdb_common import duckdb_family_name
     from services.copy_qdrant_common import qdrant_family_name
     from services.copy_milvus_common import milvus_family_name
+    from services.copy_pgvector_common import pgvector_family_name
     from services.copy_kafka_common import kafka_family_name
     from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_redis_common import redis_family_name
@@ -1230,6 +1231,27 @@ def _try_copy_fast_path(
         )
         if milvus_milvus is not None:
             return milvus_milvus
+        return None
+
+    if (
+        pgvector_family_name(src_n) == "pgvector"
+        and pgvector_family_name(dest_n) == "pgvector"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        pgvector_pgvector = _try_pgvector_pgvector_copy_fast_path(
+            source=source,
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if pgvector_pgvector is not None:
+            return pgvector_pgvector
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -5775,6 +5797,151 @@ def _try_milvus_milvus_copy_fast_path(
         f"copy_split={split})",
         proof_line,
     ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_pgvector_pgvector_copy_fast_path(
+    *,
+    source: EndpointConfig,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity pgvector→pgvector: binary COPY. Dest COUNT(*) is the proof."""
+    from services.copy_fast_path import FastPathUnavailable, source_column_types
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_pgvector_common import pgvector_type_is_copy_safe
+    from services.copy_pgvector_pgvector import copy_pgvector_to_pgvector
+    from services.engine_checksum import comparable_column_pairs
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("pgvector→pgvector COPY declined: %s", reason)
+        return None
+
+    pgvector_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if source_col != target_col:
+            logger.info("pgvector→pgvector COPY declined: column rename")
+            return None
+        if declared and not pgvector_type_is_copy_safe(declared):
+            logger.info(
+                "pgvector→pgvector COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pgvector_ddls.append(declared or "text")
+
+    try:
+        conn = _pg_connect_for_probe(src_cfg)
+    except Exception as exc:
+        logger.info("pgvector→pgvector COPY declined (source probe): %s", exc)
+        return None
+    try:
+        with conn.cursor() as cur:
+            declared = source_column_types(
+                cur,
+                source.schema or "public",
+                source_table,
+                [str(m.get("source") or "") for m in mappings if m.get("source")],
+            )
+    except Exception as exc:
+        logger.info("pgvector→pgvector COPY declined (source catalog): %s", exc)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:  # nosec B110
+            pass
+
+    pairs = comparable_column_pairs(
+        mappings, declared, declared, engine="postgresql"
+    )
+    if not pairs:
+        logger.info("pgvector→pgvector COPY declined: columns not comparable")
+        return None
+
+    try:
+        result = copy_pgvector_to_pgvector(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            pgvector_ddls=pgvector_ddls,
+            replace_destination=replace_destination,
+            source_schema=source.schema or "public",
+        )
+    except FastPathUnavailable as exc:
+        logger.info("pgvector→pgvector COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("pgvector→pgvector COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("pgvector_table") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "copy_binary_pgvector_pgvector",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "engine_source_checksum": result.source_checksum,
+        "engine_target_checksum": result.target_checksum,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "pgvector_read": snapshot.get("pgvector_read"),
+        "pgvector_write": snapshot.get("pgvector_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+        "indexes_carried": list(result.indexes_carried or ()),
+    }
+    split = dest_summary.get("copy_split") or "binary"
+    write = dest_summary.get("pgvector_write") or "insert"
+    read = dest_summary.get("pgvector_read") or "binary_copy"
+    proof_line = (
+        "Proof: pgvector dest COUNT(*) equals source COUNT(*) inside the "
+        "PostgreSQL snapshot. Not scan_source_ids DISTINCT source_id / upsert "
+        "ack / writer rows_written / vectorize re-embed. Empty dest is binary "
+        "COPY of raw columns including vector payloads. Desktop-lab pgvector "
+        "is not a customer-tenant PRODUCTION_SKU."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY pgvector {source_table} → pgvector {dest_table} "
+        f"({result.source_rows:,} rows, {read} + {write}, copy_split={split})",
+        proof_line,
+    ]
+    if result.indexes_carried:
+        ddl_log.append(
+            f"Carried {len(result.indexes_carried)} secondary index(es) "
+            f"after load: {', '.join(result.indexes_carried)}"
+        )
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
