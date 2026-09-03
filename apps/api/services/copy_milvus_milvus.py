@@ -20,6 +20,8 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from connectors.milvus_writer import _MILVUS_QUERY_WINDOW
+
 from services.copy_milvus_common import (
     milvus_collection,
     milvus_collection_exists,
@@ -29,6 +31,7 @@ from services.copy_milvus_common import (
     milvus_entity_count,
     milvus_object_id,
     milvus_proxy_fail_closed,
+    milvus_query_offset_cap_exceeded,
     milvus_query_upsert,
     milvus_type_is_copy_safe,
     skip_complete_milvus,
@@ -91,6 +94,11 @@ def copy_milvus_to_milvus(
     source_count = milvus_entity_count(source_cfg, src_collection)
     if source_count <= 0:
         raise FastPathUnavailable("Milvus source collection empty")
+    if milvus_query_offset_cap_exceeded(source_count):
+        raise FastPathUnavailable(
+            f"Milvus collections with >={_MILVUS_QUERY_WINDOW} entities "
+            "require PK-segmented pagination; offset COPY declines"
+        )
     dest_existed = milvus_collection_exists(dest_cfg, dest_collection)
     dest_count_before = (
         milvus_entity_count(dest_cfg, dest_collection) if dest_existed else 0

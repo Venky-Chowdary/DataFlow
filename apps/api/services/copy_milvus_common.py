@@ -15,6 +15,8 @@ from typing import Any
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
+from connectors.milvus_writer import _MILVUS_QUERY_WINDOW
+
 _MILVUS_FAMILY = frozenset({
     "milvus",
     "zilliz",
@@ -42,7 +44,6 @@ _MILVUS_COPY_SAFE_TYPES = frozenset({
 
 _QUERY_BATCH = 1000
 _UPSERT_BATCH = 100
-_QUERY_WINDOW = 16384
 
 
 def milvus_family_name(name: str) -> str:
@@ -221,20 +222,48 @@ def _milvus_field_names(describe: dict[str, Any]) -> list[str]:
     return names
 
 
-def _milvus_all_filter(cfg: dict[str, Any], collection: str) -> str:
-    describe = _milvus_describe_raw(cfg, collection)
+def _milvus_pk_info(describe: dict[str, Any]) -> tuple[str, str]:
+    """Return primary-key field name and Milvus data type from describe payload."""
     fields = describe.get("fields") or describe.get("schema", {}).get("fields") or []
+    pk_name = "id"
     pk_type = "VarChar"
     if isinstance(fields, list):
         for field in fields:
             if not isinstance(field, dict):
                 continue
             if field.get("isPrimary") or field.get("primaryKey"):
+                pk_name = str(
+                    field.get("fieldName") or field.get("name") or "id"
+                ).strip() or "id"
                 pk_type = str(field.get("dataType") or field.get("type") or "VarChar")
                 break
+    return pk_name, pk_type
+
+
+def _milvus_all_filter(cfg: dict[str, Any], collection: str) -> str:
+    describe = _milvus_describe_raw(cfg, collection)
+    pk_name, pk_type = _milvus_pk_info(describe)
     if "INT" in pk_type.upper():
-        return "id >= 0"
-    return 'id != ""'
+        return f"{pk_name} >= 0"
+    return f'{pk_name} != ""'
+
+
+def _milvus_index_params(
+    src_desc: dict[str, Any],
+    vector_field: str,
+) -> list[dict[str, Any]]:
+    """Prefer source collection index params; fall back to AUTOINDEX/COSINE."""
+    raw = src_desc.get("indexParams") or src_desc.get("index_params")
+    if isinstance(raw, list) and raw:
+        return raw
+    return [
+        {
+            "fieldName": vector_field,
+            "indexName": f"{vector_field}_idx",
+            "metricType": "COSINE",
+            "params": {"index_type": "AUTOINDEX"},
+        }
+    ]
 
 
 def milvus_load_collection(cfg: dict[str, Any], collection: str) -> None:
@@ -307,14 +336,7 @@ def milvus_create_collection_from_source(
             ),
             "fields": fields,
         },
-        "indexParams": [
-            {
-                "fieldName": vector_field,
-                "indexName": f"{vector_field}_idx",
-                "metricType": "COSINE",
-                "params": {"index_type": "AUTOINDEX"},
-            }
-        ],
+        "indexParams": _milvus_index_params(src_desc, vector_field),
     }
     payload = _with_db(payload, dest_db)
     resp = session.post(
@@ -332,6 +354,11 @@ def milvus_create_collection_from_source(
         )
 
 
+def milvus_query_offset_cap_exceeded(entity_count: int) -> bool:
+    """Milvus REST query requires ``limit + offset < 16384`` — offset pagination caps here."""
+    return int(entity_count) >= _MILVUS_QUERY_WINDOW
+
+
 def milvus_query_upsert(
     *,
     source_cfg: dict[str, Any],
@@ -340,7 +367,8 @@ def milvus_query_upsert(
     dest_collection: str,
 ) -> int:
     """Query source entities and upsert raw rows to dest."""
-    session, base_url, headers, db_name = _milvus_session(source_cfg)
+    src_session, src_base, src_headers, src_db = _milvus_session(source_cfg)
+    dest_session, dest_base, dest_headers, dest_db = _milvus_session(dest_cfg)
     src_name = milvus_collection(src_collection, source_cfg)
     dest_name = milvus_collection(dest_collection, dest_cfg)
     milvus_load_collection(source_cfg, src_collection)
@@ -350,10 +378,19 @@ def milvus_query_upsert(
         raise ValueError("Milvus source has no output fields")
     filt = _milvus_all_filter(source_cfg, src_collection)
     total = milvus_entity_count(source_cfg, src_collection)
+    if milvus_query_offset_cap_exceeded(total):
+        raise FastPathUnavailable(
+            f"Milvus collections with >={_MILVUS_QUERY_WINDOW} entities "
+            "require PK-segmented pagination; offset COPY declines"
+        )
     copied = 0
     offset = 0
     while offset < total:
-        limit = min(_QUERY_BATCH, total - offset, _QUERY_WINDOW - offset)
+        limit = min(
+            _QUERY_BATCH,
+            total - offset,
+            _MILVUS_QUERY_WINDOW - 1 - offset,
+        )
         if limit <= 0:
             break
         query_payload = _with_db(
@@ -364,12 +401,12 @@ def milvus_query_upsert(
                 "limit": limit,
                 "offset": offset,
             },
-            db_name,
+            src_db,
         )
-        resp = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
+        resp = src_session.post(
+            f"{src_base}/v2/vectordb/entities/query",
             data=json.dumps(query_payload, default=json_default),
-            headers=headers,
+            headers=src_headers,
             timeout=60,
         )
         body = load_http_json(resp) if resp.content else {}
@@ -385,12 +422,12 @@ def milvus_query_upsert(
                 batch = rows[i : i + _UPSERT_BATCH]
                 upsert_payload = _with_db(
                     {"collectionName": dest_name, "data": batch},
-                    db_name,
+                    dest_db,
                 )
-                upsert = session.post(
-                    f"{base_url}/v2/vectordb/entities/upsert",
+                upsert = dest_session.post(
+                    f"{dest_base}/v2/vectordb/entities/upsert",
                     data=json.dumps(upsert_payload, default=sanitize_json_value),
-                    headers=headers,
+                    headers=dest_headers,
                     timeout=60,
                 )
                 upsert_body = upsert.json() if upsert.content else {}
