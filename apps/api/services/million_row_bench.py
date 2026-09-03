@@ -74,6 +74,8 @@ REPORTED_SUMMARY_KEYS = (
     "sqlite_read",
     "s3_write",
     "s3_read",
+    "redis_write",
+    "redis_read",
     "bigquery_write",
     "bigquery_read",
     "snowflake_write",
@@ -11157,6 +11159,199 @@ def run_bigquery_bigquery_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected BigQuery INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _require_redis() -> None:
+    import socket
+
+    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Redis {host}:{port} not reachable: {exc}") from exc
+
+
+def _redis_local_cfg(prefix: str) -> dict[str, Any]:
+    host = os.environ.get("DATAFLOW_REDIS_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_REDIS_PORT", "6379"))
+    db = os.environ.get("DATAFLOW_REDIS_DB", "0")
+    return {
+        "type": "redis",
+        "format": "redis",
+        "host": host,
+        "port": port,
+        "database": db,
+        "table": prefix,
+    }
+
+
+def _redis_count(cfg: dict[str, Any], prefix: str) -> int:
+    from services.copy_redis_common import redis_dest_count
+
+    return redis_dest_count(cfg, prefix)
+
+
+def _redis_delete_prefix(cfg: dict[str, Any], prefix: str) -> None:
+    from services.copy_redis_common import redis_delete_keys, redis_list_keys
+
+    redis_delete_keys(cfg, redis_list_keys(cfg, prefix))
+
+
+def _redis_seed(cfg: dict[str, Any], prefix: str, rows: int) -> None:
+    """Source setup only — not the identity COPY path."""
+    from connectors.redis_reader import _redis_client
+
+    client = _redis_client(cfg)
+    try:
+        pipe = client.pipeline(transaction=False)
+        for i in range(1, int(rows) + 1):
+            pipe.set(
+                f"{prefix}:{i}",
+                json.dumps({"id": i, "label": f"r{i}"}, separators=(",", ":")),
+            )
+            if i % 1000 == 0:
+                pipe.execute()
+                pipe = client.pipeline(transaction=False)
+        pipe.execute()
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def run_redis_redis_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Redis→Redis through stream_database_transfer.
+
+    Dest COUNT is prefix SCAN cardinality, never ``DBSIZE``. Empty dest
+    is server-side ``COPY``, not GET+SET / DUMP+RESTORE. Seeds JSON SET
+    when the source prefix is missing (seed is not the COPY path). Unique
+    dest ``bench_redis_clone`` is not reused from ``bench_1m`` /
+    ``bench_gcs_clone.jsonl`` / ``bench_adls_clone.jsonl``. Desktop-lab
+    Redis is not a customer-tenant PRODUCTION_SKU.
+    """
+    _require_redis()
+    src_prefix = str(source_table or "bench_redis_src")
+    dest = str(dest_table)
+    src_cfg = _redis_local_cfg(src_prefix)
+    dest_cfg = _redis_local_cfg(dest)
+    if (
+        src_cfg["host"] == dest_cfg["host"]
+        and src_cfg["port"] == dest_cfg["port"]
+        and src_cfg["database"] == dest_cfg["database"]
+        and src_prefix == dest
+    ):
+        raise AssertionError("Redis→Redis bench refuses the same host+port+db+prefix")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _redis_count(src_cfg, src_prefix)
+    except Exception:
+        have = 0
+    if have != rows:
+        _redis_seed(src_cfg, src_prefix, rows)
+    if not keep_dest:
+        _redis_delete_prefix(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "long", "transform": "none"},
+        {"source": "label", "target": "label", "type": "string", "transform": "none"},
+    ]
+    schema = {"id": "long", "label": "string"}
+    job_id = f"bench-redis-redis-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _redis_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "redis→redis",
+        "sync_mode": sync_mode,
+        "source_table": src_prefix,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "redis_read": summary.get("redis_read"),
+        "redis_write": summary.get("redis_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "redis_prefix_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} redis→redis [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination prefix COUNT: {landed} (source prefix COUNT: {rows})")
+    print(
+        "Not GET+SET / DUMP+RESTORE / DBSIZE. Empty dest is COPY. "
+        "Desktop-lab Redis is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_redis_redis"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Redis COPY, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
