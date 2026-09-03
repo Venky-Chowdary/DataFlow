@@ -73,6 +73,10 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_ice_mongo BENCH_DEST=bench_ice_from_mongo \\
   python scripts/bench_mongo_to_iceberg_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_iceberg BENCH_DEST=bench_ice_clone \\
   python scripts/bench_iceberg_to_iceberg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_sqlite_s3.csv BENCH_DEST=bench_s3_iceberg \\
+  python scripts/bench_s3_to_iceberg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_s3_iceberg BENCH_DEST=bench_s3_from_iceberg.csv \\
+  python scripts/bench_iceberg_to_s3_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1578,7 +1582,7 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle — wired, not measured
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1592,7 +1596,8 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_sqlite_to_mysql_million.py`, `bench_mysql_to_sqlite_million.py`,
 `bench_sqlite_to_iceberg_million.py`, `bench_iceberg_to_sqlite_million.py`,
 `bench_sqlite_to_sqlserver_million.py`, `bench_sqlserver_to_sqlite_million.py`,
-`bench_sqlite_to_oracle_million.py`, `bench_oracle_to_sqlite_million.py`, plus SQL
+`bench_sqlite_to_oracle_million.py`, `bench_oracle_to_sqlite_million.py`,
+`bench_s3_to_iceberg_million.py`, `bench_iceberg_to_s3_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1602,7 +1607,8 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_sqlite_from_mongo` / `bench_sqlite_mysql` / `bench_sqlite_from_mysql` /
 `bench_sqlite_iceberg` / `bench_sqlite_from_iceberg` /
 `bench_sqlite_sqlserver` / `bench_sqlite_from_sqlserver` /
-`bench_sqlite_oracle` / `bench_sqlite_from_oracle`
+`bench_sqlite_oracle` / `bench_sqlite_from_oracle` /
+`bench_s3_iceberg` / `bench_s3_from_iceberg.csv`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
@@ -1613,7 +1619,7 @@ PUT ack). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
 dest is CoW snapshot append, not `MERGE INTO`. Empty SQLite dest is
 `INSERT SELECT` / `executemany`, not `.dump` / `.import`. Empty S3 dest
 is `CopyObject` (S3→S3) or COPY/SELECT CSV + `upload_file`
-(PostgreSQL→S3 / MySQL→S3 / SQLite→S3 / Mongo→S3), not `aws s3 cp` / `aws s3 sync` / GET+PUT.
+(PostgreSQL→S3 / MySQL→S3 / SQLite→S3 / Mongo→S3 / Iceberg→S3), not `aws s3 cp` / `aws s3 sync` / GET+PUT.
 S3→MySQL empty dest is STRICT `LOAD DATA LOCAL INFILE`. S3→SQLite empty
 dest is `executemany` insert, not sqlite3 `.import`. S3→Mongo empty dest
 is `insert_many`, not `mongoimport`. SQLite→Mongo empty dest is
@@ -1630,16 +1636,18 @@ Server→SQLite empty dest is HOLDLOCK SELECT + `executemany`, not BCP /
 sqlldr / Data Pump / `.dump`. Oracle VARCHAR2 stores `''` as NULL
 (engine law, counted in `empty_string_as_null_cells` — not a row drop).
 Oracle→SQLite empty dest is SHARE-lock SELECT + `executemany`, not
-sqlldr / `.import`. Iceberg→Iceberg writes **new** dest
+sqlldr / `.import`. S3→Iceberg empty dest is GET CSV + CoW snapshot
+append, not `aws s3 cp` / `MERGE INTO`. Iceberg→S3 empty dest is snapshot
+Parquet + `upload_file`, not `MERGE INTO` / `aws s3 cp`. Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. JSON
-dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, and Mongo→S3 (row path keeps JSON export).
-JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, and S3→Mongo (CSV is the
+dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, and Iceberg→S3 (row path keeps JSON export).
+JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, and S3→Iceberg (CSV is the
 COPY-native wire).
 TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date would invent UTC).
 Nested BSON declines Mongo→Iceberg and Mongo→S3. Nested list/map/struct decline
-Iceberg→Iceberg and Iceberg→SQLite. SQLite DATE affinity declines SQLite→PostgreSQL (would
+Iceberg→Iceberg, Iceberg→SQLite, and Iceberg→S3. SQLite DATE affinity declines SQLite→PostgreSQL (would
 invent a PG type); SQLite→S3 allows DATE as stored TEXT (identity of
 SQLite storage). SQLite→Mongo DATE ISO/calendar day becomes BSON Date at
 UTC midnight when the mapping/pragma is DATE; TEXT ISO stays a string.

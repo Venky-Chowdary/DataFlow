@@ -230,6 +230,23 @@ def _try_copy_fast_path(
     ``COUNT(*)`` runs before commit. Not sqlite3 ``.import``.
     ``:memory:`` / BLOB decline.
 
+    S3→Iceberg identity append/overwrite: GET CSV/TSV re-encoded into
+    one Arrow table and one catalog snapshot. Source COUNT is object-
+    store artifact COUNT (header skipped), never ListObjects length.
+    Dest COUNT is file footers, never ``scan().count()``. JSON/JSONL/
+    Parquet decline. Occupied dest with a different COUNT declines.
+    Empty dest is CoW snapshot append, not ``MERGE INTO``. Filesystem
+    CoW declines. Not ``aws s3 cp``.
+
+    Iceberg→S3 identity append/overwrite: current-snapshot Parquet
+    encoded as CSV (HEADER, ``\\N`` = NULL), then ``upload_file``.
+    Source COUNT is file footers, never ``scan().count()``. Dest COUNT
+    is artifact COUNT (header skipped), never PUT ack. Dest key must
+    be ``.csv`` / ``.tsv``. Nested list/map/struct / MoR / binary /
+    uuid / timestamptz decline. JSON dest keys decline. Occupied dest
+    with a different COUNT declines. Empty dest is PUT, not ``MERGE
+    INTO`` / ``aws s3 cp``.
+
     MongoDB→S3 identity append/overwrite: replica-set snapshot
     ``find()`` into a CSV tempfile (HEADER, ``\\N`` = NULL), then
     ``upload_file``. Source COUNT is ``count_documents({})``, never
@@ -664,6 +681,24 @@ def _try_copy_fast_path(
             return ice_sqlite
         return None
 
+    if src_n in {"iceberg", "apache_iceberg"} and s3_family_name(dest_n) == "s3":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ice_s3 = _try_iceberg_s3_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "default",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ice_s3 is not None:
+            return ice_s3
+        return None
+
     if src_n in {"iceberg", "apache_iceberg"} and dest_n in {"iceberg", "apache_iceberg"}:
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -907,6 +942,24 @@ def _try_copy_fast_path(
         )
         if s3_mongo is not None:
             return s3_mongo
+        return None
+
+    if s3_family_name(src_n) == "s3" and dest_n in {"iceberg", "apache_iceberg"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        s3_ice = _try_s3_iceberg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or "default",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if s3_ice is not None:
+            return s3_ice
         return None
 
     if mongo_family_name(src_n) == "mongodb" and mongo_family_name(dest_n) == "mongodb":
@@ -3003,6 +3056,109 @@ def _try_iceberg_sqlite_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_iceberg_s3_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Iceberg→S3: snapshot Parquet + CSV upload. Dest artifact COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_iceberg_s3 import copy_iceberg_to_s3
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Iceberg→S3 COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    s3_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not iceberg_type_is_copy_safe(declared):
+            logger.info(
+                "Iceberg→S3 COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        s3_ddls.append(declared or "string")
+
+    try:
+        result = copy_iceberg_to_s3(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            s3_ddls=s3_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Iceberg→S3 COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Iceberg→S3 COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "iceberg_parquet_upload_s3",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "iceberg_file_footers",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_read": snapshot.get("iceberg_read"),
+        "s3_write": snapshot.get("s3_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("s3_write") or "insert"
+    proof_line = (
+        "Proof: S3 dest artifact COUNT equals Iceberg source footer COUNT. "
+        "Not scan().count() / ListObjects / PUT ack. Empty dest is upload, not aws s3 cp / MERGE INTO."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Iceberg {source_table} → S3 {dest_table} "
+        f"({result.source_rows:,} rows, snapshot Parquet + {write} CSV upload, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_iceberg_iceberg_copy_fast_path(
     *,
     source_table: str,
@@ -4470,6 +4626,118 @@ def _try_s3_mongo_copy_fast_path(
     ddl_log = [
         f"COPY S3 {source_table} → MongoDB {dest_table} "
         f"({result.source_rows:,} rows, GET CSV + {write} insert_many, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_s3_iceberg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity S3→Iceberg: GET CSV + snapshot. Dest footer COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_s3_iceberg import copy_s3_to_iceberg
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("S3→Iceberg COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    iceberg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        dest_ddl = ddl_type("iceberg", declared) if declared else "string"
+        if declared and not iceberg_type_is_copy_safe(declared) and not iceberg_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "S3→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        if dest_ddl and not iceberg_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "S3→Iceberg COPY declined: dest %s type %s is not Iceberg COPY-safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        iceberg_ddls.append(dest_ddl)
+
+    try:
+        result = copy_s3_to_iceberg(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            iceberg_ddls=iceberg_ddls,
+            replace_destination=replace_destination,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("S3→Iceberg COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("S3→Iceberg COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "get_csv_s3_iceberg_snapshot",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "s3_read": snapshot.get("s3_read"),
+        "iceberg_write": snapshot.get("iceberg_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("iceberg_write") or "append"
+    proof_line = (
+        "Proof: Iceberg dest COUNT (file footers) equals S3 source artifact COUNT. "
+        "Not scan().count() / ListObjects. Empty dest is CoW snapshot append, not MERGE INTO."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY S3 {source_table} → Iceberg {dest_table} "
+        f"({result.source_rows:,} rows, GET CSV + {write} snapshot, "
         f"copy_split={split})",
         proof_line,
     ]
