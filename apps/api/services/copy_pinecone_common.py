@@ -190,7 +190,7 @@ def pinecone_list_fetch_upsert(
             "Pinecone index does not support /vectors/list (pod indexes decline identity COPY)"
         )
 
-    ids: list[str] = []
+    copied = 0
     token = ""
     while True:
         params: dict[str, Any] = {"limit": _LIST_PAGE}
@@ -212,10 +212,66 @@ def pinecone_list_fetch_upsert(
         rows = page.get("vectors") if isinstance(page, dict) else None
         if not isinstance(rows, list):
             raise ValueError("Pinecone list returned no vectors")
+        page_ids: list[str] = []
         for entry in rows:
             vid = _pinecone_vector_id(entry)
             if vid:
-                ids.append(vid)
+                page_ids.append(vid)
+        if page_ids:
+            for i in range(0, len(page_ids), _FETCH_BATCH):
+                chunk = page_ids[i : i + _FETCH_BATCH]
+                fetch_body: dict[str, Any] = {"ids": chunk}
+                if src_ns:
+                    fetch_body["namespace"] = src_ns
+                fetched = session.post(
+                    f"{index_url}/vectors/fetch",
+                    data=json.dumps(fetch_body, default=json_default),
+                    headers=headers,
+                    timeout=60,
+                )
+                if fetched.status_code != 200:
+                    raise ValueError(
+                        f"Pinecone fetch failed: {fetched.status_code} {fetched.text[:200]}"
+                    )
+                fetched_body = load_http_json(fetched) if fetched.content else {}
+                vectors_map = fetched_body.get("vectors") if isinstance(fetched_body, dict) else None
+                if not isinstance(vectors_map, dict):
+                    raise ValueError("Pinecone fetch returned no vectors map")
+                batch_vectors: list[dict[str, Any]] = []
+                missing: list[str] = []
+                for vid in chunk:
+                    vector = vectors_map.get(vid)
+                    if not isinstance(vector, dict):
+                        missing.append(vid)
+                        continue
+                    entry: dict[str, Any] = {
+                        "id": vid,
+                        "values": sanitize_json_value(vector.get("values")),
+                    }
+                    if isinstance(vector.get("metadata"), dict):
+                        entry["metadata"] = sanitize_json_value(vector.get("metadata"))
+                    batch_vectors.append(entry)
+                if missing:
+                    raise ValueError(
+                        f"Pinecone fetch missing {len(missing)} vector(s); "
+                        "refuse silent partial copy"
+                    )
+                for j in range(0, len(batch_vectors), _UPSERT_BATCH):
+                    upsert_batch = batch_vectors[j : j + _UPSERT_BATCH]
+                    payload: dict[str, Any] = {"vectors": upsert_batch}
+                    if dest_ns:
+                        payload["namespace"] = dest_ns
+                    upsert = session.post(
+                        f"{index_url}/vectors/upsert",
+                        data=json.dumps(payload, default=sanitize_json_value),
+                        headers=headers,
+                        timeout=60,
+                    )
+                    if upsert.status_code not in {200, 201}:
+                        raise ValueError(
+                            f"Pinecone upsert failed: {upsert.status_code} {upsert.text[:200]}"
+                        )
+                    copied += len(upsert_batch)
         pagination = page.get("pagination") if isinstance(page, dict) else None
         nxt = ""
         if isinstance(pagination, dict):
@@ -223,67 +279,6 @@ def pinecone_list_fetch_upsert(
         if not nxt:
             break
         token = nxt
-
-    if not ids:
-        return 0
-
-    copied = 0
-    for i in range(0, len(ids), _FETCH_BATCH):
-        chunk = ids[i : i + _FETCH_BATCH]
-        fetch_body: dict[str, Any] = {"ids": chunk}
-        if src_ns:
-            fetch_body["namespace"] = src_ns
-        fetched = session.post(
-            f"{index_url}/vectors/fetch",
-            data=json.dumps(fetch_body, default=json_default),
-            headers=headers,
-            timeout=60,
-        )
-        if fetched.status_code != 200:
-            raise ValueError(
-                f"Pinecone fetch failed: {fetched.status_code} {fetched.text[:200]}"
-            )
-        fetched_body = load_http_json(fetched) if fetched.content else {}
-        vectors_map = fetched_body.get("vectors") if isinstance(fetched_body, dict) else None
-        if not isinstance(vectors_map, dict):
-            raise ValueError("Pinecone fetch returned no vectors map")
-        batch_vectors: list[dict[str, Any]] = []
-        missing: list[str] = []
-        for vid in chunk:
-            vector = vectors_map.get(vid)
-            if not isinstance(vector, dict):
-                missing.append(vid)
-                continue
-            entry: dict[str, Any] = {
-                "id": vid,
-                "values": sanitize_json_value(vector.get("values")),
-            }
-            if isinstance(vector.get("metadata"), dict):
-                entry["metadata"] = sanitize_json_value(vector.get("metadata"))
-            batch_vectors.append(entry)
-        if missing:
-            raise ValueError(
-                f"Pinecone fetch missing {len(missing)} vector(s); "
-                "refuse silent partial copy"
-            )
-        if not batch_vectors:
-            continue
-        for j in range(0, len(batch_vectors), _UPSERT_BATCH):
-            upsert_batch = batch_vectors[j : j + _UPSERT_BATCH]
-            payload: dict[str, Any] = {"vectors": upsert_batch}
-            if dest_ns:
-                payload["namespace"] = dest_ns
-            upsert = session.post(
-                f"{index_url}/vectors/upsert",
-                data=json.dumps(payload, default=sanitize_json_value),
-                headers=headers,
-                timeout=60,
-            )
-            if upsert.status_code not in {200, 201}:
-                raise ValueError(
-                    f"Pinecone upsert failed: {upsert.status_code} {upsert.text[:200]}"
-                )
-            copied += len(upsert_batch)
     return copied
 
 
