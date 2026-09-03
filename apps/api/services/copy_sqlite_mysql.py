@@ -181,27 +181,27 @@ def copy_sqlite_to_mysql(
         )
 
         exists = _mysql_table_exists(dst_cur, dest_table)
-        dest_occupied = False
-        if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
-            dest_conn.commit()
-            exists = False
+        dest_count_before = 0
         if exists:
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
-            dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
+        dest_occupied = dest_count_before > 0
+        if dest_occupied and not replace_destination:
+            if dest_count_before == source_count:
                 return skip_complete_sqlite(
                     source_count=source_count,
                     dest_count=dest_count_before,
                     extra_snapshot={"sqlite_read": "skip", "load_data": "skip"},
                 )
-            if dest_occupied:
-                raise FastPathUnavailable(
-                    "append into occupied MySQL dest stays on the row path "
-                    "(identity COPY would duplicate)"
-                )
-        else:
+            raise FastPathUnavailable(
+                "append into occupied MySQL dest stays on the row path "
+                "(identity COPY would duplicate)"
+            )
+        if replace_destination and exists:
+            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
+            dest_conn.commit()
+            exists = False
+        if not exists:
             dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
             dest_conn.commit()
             created_here = True
