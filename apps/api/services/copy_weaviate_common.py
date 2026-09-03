@@ -41,6 +41,8 @@ _WEAVIATE_COPY_SAFE_TYPES = frozenset({
 
 _LIST_PAGE = 100
 _BATCH_SIZE = 100
+# Weaviate default QUERY_MAXIMUM_RESULTS — offset list pagination cannot exceed this.
+_WEAVIATE_LIST_MAX = 10_000
 
 
 def weaviate_family_name(name: str) -> str:
@@ -185,7 +187,7 @@ def weaviate_create_class_from_source(
         "vectorizer": src_schema.get("vectorizer") or "none",
         "properties": props,
     }
-    for key in ("vectorIndexType", "vectorIndexConfig", "invertedIndexConfig"):
+    for key in ("vectorIndexType", "vectorIndexConfig", "invertedIndexConfig", "vectorConfig"):
         if key in src_schema:
             payload[key] = src_schema[key]
     session, base_url, headers = _weaviate_session(dest_cfg)
@@ -224,6 +226,11 @@ def _weaviate_assert_batch_ok(batch: list[dict[str, Any]], response_items: Any) 
         )
 
 
+def weaviate_list_offset_cap_exceeded(object_count: int) -> bool:
+    """Weaviate REST list uses offset pagination capped at QUERY_MAXIMUM_RESULTS."""
+    return int(object_count) > _WEAVIATE_LIST_MAX
+
+
 def _batch_object(obj: dict[str, Any], dest_class: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "class": dest_class,
@@ -232,6 +239,9 @@ def _batch_object(obj: dict[str, Any], dest_class: str) -> dict[str, Any]:
     }
     if "vector" in obj:
         out["vector"] = sanitize_json_value(obj.get("vector"))
+    vectors = obj.get("vectors")
+    if isinstance(vectors, dict) and vectors:
+        out["vectors"] = sanitize_json_value(vectors)
     return out
 
 
@@ -243,17 +253,23 @@ def weaviate_list_batch_upsert(
     dest_class: str,
 ) -> int:
     """List source objects (with vectors) and batch-upsert to dest."""
-    session, base_url, headers = _weaviate_session(source_cfg)
+    src_session, src_base, src_headers = _weaviate_session(source_cfg)
+    dest_session, dest_base, dest_headers = _weaviate_session(dest_cfg)
     src_name = weaviate_class(src_class, source_cfg)
     dest_name = weaviate_class(dest_class, dest_cfg)
     total = weaviate_object_count(source_cfg, src_class)
+    if weaviate_list_offset_cap_exceeded(total):
+        raise FastPathUnavailable(
+            f"Weaviate classes with >{_WEAVIATE_LIST_MAX} objects "
+            "require cursor pagination; offset COPY declines"
+        )
     copied = 0
     offset = 0
     while offset < total:
         page = min(_LIST_PAGE, total - offset)
-        resp = session.get(
-            f"{base_url}/v1/objects",
-            headers=headers,
+        resp = src_session.get(
+            f"{src_base}/v1/objects",
+            headers=src_headers,
             params={
                 "class": src_name,
                 "limit": page,
@@ -277,10 +293,10 @@ def weaviate_list_batch_upsert(
             batch = [_batch_object(obj, dest_name) for obj in batch_raw if isinstance(obj, dict)]
             if not batch:
                 continue
-            upsert = session.post(
-                f"{base_url}/v1/batch/objects",
+            upsert = dest_session.post(
+                f"{dest_base}/v1/batch/objects",
                 data=json.dumps({"objects": batch}, default=sanitize_json_value),
-                headers=headers,
+                headers=dest_headers,
                 timeout=60,
             )
             if upsert.status_code not in {200, 201}:
