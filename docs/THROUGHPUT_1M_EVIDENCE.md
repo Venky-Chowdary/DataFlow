@@ -1651,6 +1651,10 @@ is not a customer-tenant PRODUCTION_SKU.
 
 Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_redis_src BENCH_DEST=bench_redis_clone python scripts/bench_redis_to_redis_million.py`
 
+Pytest: `test_redis_redis_copy` **14 passed / 0 failed** in 0.90s
+(`/opt/cursor/artifacts/redis_redis_identity_pytest.log`). Named 1M is
+**wired, not measured** (queue still had continue-with-next).
+
 ### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / Redis identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
