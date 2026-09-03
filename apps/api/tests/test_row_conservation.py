@@ -7223,48 +7223,82 @@ def test_snowflake_auth_failure_is_unmeasured_not_empty(monkeypatch: pytest.Monk
 
 
 class _ScriptedBigQueryClient:
+    """Records the SQL and the retry policy the dest COUNT job was given.
+
+    ``retry`` / ``timeout`` / ``job_retry`` are part of the contract, not
+    incidental: goccy answers a missing table as InternalServerError 500, and
+    the google client's default retry would sleep until the operator's timeout
+    instead of letting dest-missing settle at 0.
+    """
+
     def __init__(self, sql: list[str], count: int, error=None):
         self._sql = sql
         self._count = count
         self._error = error
+        self.job_kwargs: list[dict] = []
+        self.result_kwargs: list[dict] = []
 
-    def query(self, sql):
+    def query(self, sql, **kwargs):
         self._sql.append(sql)
+        self.job_kwargs.append(kwargs)
         if self._error is not None:
             raise self._error
-        return self
+        return _ScriptedBigQueryJob(self._count, self.result_kwargs)
 
-    def result(self):
+
+class _ScriptedBigQueryJob:
+    """A QueryJob is iterable over its rows once ``result()`` has run."""
+
+    def __init__(self, count: int, result_kwargs: list[dict]):
+        self._count = count
+        self._result_kwargs = result_kwargs
+
+    def result(self, **kwargs):
+        self._result_kwargs.append(kwargs)
         return [(self._count,)]
+
+    def __iter__(self):
+        return iter([(self._count,)])
 
 
 def _patch_bigquery_native(
     monkeypatch: pytest.MonkeyPatch, *, count: int = 0, error: Exception | None = None
-) -> list[str]:
+) -> tuple[list[str], list[_ScriptedBigQueryClient]]:
     import connectors.bigquery_conn as bq
 
     sql: list[str] = []
-    monkeypatch.setattr(
-        bq, "get_client", lambda **_kwargs: _ScriptedBigQueryClient(sql, count, error)
-    )
-    return sql
+    clients: list[_ScriptedBigQueryClient] = []
+
+    def _client(**_kwargs):
+        client = _ScriptedBigQueryClient(sql, count, error)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(bq, "get_client", _client)
+    return sql, clients
 
 
 def test_bigquery_dest_count_queries_not_table_metadata(monkeypatch: pytest.MonkeyPatch):
     from google.api_core.exceptions import NotFound
 
     cfg = {"database": "proj", "schema": "ds"}
-    missing = _patch_bigquery_native(monkeypatch, error=NotFound("Table proj:ds.fresh"))
+    missing, _ = _patch_bigquery_native(monkeypatch, error=NotFound("Table proj:ds.fresh"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 0
     assert any("`proj`.`ds`.`fresh`" in sql for sql in missing)
 
-    sql = _patch_bigquery_native(monkeypatch, count=7)
+    sql, clients = _patch_bigquery_native(monkeypatch, count=7)
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 7
     # Table.num_rows lags the streaming buffer; a stale estimate is not a count.
     assert all("__TABLES__" not in s.upper() for s in sql)
     assert any("COUNT(*)" in s.upper() for s in sql)
+    # A missing-table 500 must settle at 0 rather than retry-sleep to timeout.
+    job_kwargs = [kw for client in clients for kw in client.job_kwargs]
+    assert job_kwargs, "dest COUNT must pass an explicit retry policy"
+    assert all(kw.get("job_retry") is None for kw in job_kwargs)
+    assert all(float(kw.get("timeout") or 0) > 0 for kw in job_kwargs)
+    assert all(kw.get("retry") is not None for kw in job_kwargs)
 
-    denied = _patch_bigquery_native(monkeypatch, error=RuntimeError("403 Access Denied"))
+    denied, _ = _patch_bigquery_native(monkeypatch, error=RuntimeError("403 Access Denied"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") is None
     assert denied
 
