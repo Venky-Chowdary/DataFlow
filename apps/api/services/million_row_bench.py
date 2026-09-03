@@ -8008,6 +8008,306 @@ def run_mongo_sqlite_volume(
     return report
 
 
+def run_sqlite_mysql_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQLite→MySQL through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)``. Empty dest is SELECT TSV + STRICT
+    ``LOAD DATA LOCAL INFILE``, not upsert / sqlite3 ``.dump`` / sqlldr.
+    DATE ISO TEXT stays a string after PostgreSQL→SQLite. DATETIME /
+    TIMESTAMP / BLOB / JSON decline. ``:memory:`` declines. Unique dest
+    ``bench_sqlite_mysql`` is not reused from ``bench_1m`` /
+    ``bench_mysql_mongo``. Seeds from PostgreSQL→SQLite when the source
+    file/table is missing.
+    """
+    _require_mysql()
+
+    src_table = str(source_table or "bench_pg_sqlite")
+    dest = str(dest_table)
+    src_db = Path(source_database or (_sqlite_bench_dir() / "src.db"))
+    mysql = _mysql_local_cfg()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _sqlite_count(src_db, src_table) if src_db.exists() else 0
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_sqlite_volume(
+            rows=rows,
+            dest_table=src_table,
+            dest_database=src_db,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        reset_destination(mysql, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _sqlite_cfg(src_db, src_table))
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["username"],
+            "password": mysql["password"],
+            "table": dest,
+        },
+    )
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-sqlite-mysql-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = destination_count(mysql, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlite→mysql",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "source_database": str(src_db),
+        "dest_table": dest,
+        "mysql_port": 3306,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlite_read": summary.get("sqlite_read"),
+        "load_data": summary.get("load_data"),
+        "mysql_write": summary.get("mysql_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "mysql_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} sqlite→mysql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT(*): {rows})")
+    print("Not .dump / sqlldr. Empty dest is STRICT LOAD DATA. DATE ISO TEXT stays a string.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlite_load_data_mysql"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SQLite SELECT TSV + MySQL LOAD DATA, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_mysql_sqlite_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→SQLite through stream_database_transfer.
+
+    Source COUNT is InnoDB consistent-snapshot ``COUNT(*)``. Dest COUNT
+    is SQLite ``COUNT(*)``. Empty dest is snapshot SELECT +
+    ``executemany``, not upsert / mysqldump / sqlite3 ``.import``. DATE
+    lands as SQLite TEXT (ISO calendar day — no DATE affinity). TIMESTAMP
+    / BLOB / JSON decline. ``:memory:`` declines. Unique dest
+    ``bench_sqlite_from_mysql`` is not reused from ``bench_1m`` /
+    ``bench_pg_sqlite``. Seeds from SQLite→MySQL when the source table is
+    missing.
+    """
+    _require_mysql()
+
+    mysql_src = str(source_table or "bench_sqlite_mysql")
+    dest = str(dest_table)
+    dest_db = Path(dest_database or (_sqlite_bench_dir() / "from_mysql.db"))
+    dest_db.parent.mkdir(parents=True, exist_ok=True)
+    mysql = _mysql_local_cfg()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = destination_count(mysql, mysql_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlite_mysql_volume(
+            rows=rows,
+            dest_table=mysql_src,
+            source_table="bench_pg_sqlite",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlite_drop_table(dest_db, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["username"],
+            "password": mysql["password"],
+            "table": mysql_src,
+        },
+    )
+    destination = EndpointConfig.from_dict("database", _sqlite_cfg(dest_db, dest))
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-mysql-sqlite-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlite_count(dest_db, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→sqlite",
+        "sync_mode": sync_mode,
+        "source_table": mysql_src,
+        "dest_table": dest,
+        "dest_database": str(dest_db),
+        "mysql_port": 3306,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mysql_read": summary.get("mysql_read"),
+        "sqlite_write": summary.get("sqlite_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "sqlite_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mysql→sqlite [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source snapshot COUNT: {rows})")
+    print("Not mysqldump / .import. Empty dest is executemany. DATE lands as TEXT.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_mysql_executemany_sqlite"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected MySQL snapshot SELECT + SQLite executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 

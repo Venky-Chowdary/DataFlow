@@ -261,6 +261,21 @@ def _try_copy_fast_path(
     not upsert / sqlite3 ``.import`` / ``mongoexport``. ``:memory:`` /
     BLOB dest DDL decline.
 
+    SQLite→MySQL identity append/overwrite: ``BEGIN`` + ``SELECT``
+    encoded as LOAD DATA TSV into a tempfile, then STRICT
+    ``LOAD DATA LOCAL INFILE``. Dest ``COUNT(*)`` runs **before commit**.
+    DATE ISO/calendar day loads as MySQL DATE when mapped DATE; TEXT ISO
+    stays a string. DATETIME / TIMESTAMP / BLOB / JSON decline. Occupied
+    dest with a different COUNT declines. Empty dest is LOAD DATA, not
+    upsert / sqlite3 ``.dump`` / sqlldr. ``:memory:`` declines.
+
+    MySQL→SQLite identity append/overwrite: consistent-snapshot SELECT
+    bound with ``executemany`` INSERT. Dest ``COUNT(*)`` runs **before
+    commit**. DATE/DATETIME land as SQLite TEXT (no DATE affinity).
+    TIMESTAMP / BLOB / JSON decline. Occupied dest with a different
+    COUNT declines. Empty dest is INSERT, not upsert / sqlite3
+    ``.import`` / mysqldump. ``:memory:`` declines.
+
     MongoDB→Iceberg identity append/overwrite: replica-set snapshot
     ``find()`` encoded as CSV into one Arrow table and one catalog
     snapshot. Source COUNT is ``count_documents``. Dest COUNT is file
@@ -670,6 +685,23 @@ def _try_copy_fast_path(
             return sqlite_mongo
         return None
 
+    if src_n == "sqlite" and dest_n in {"mysql", "mariadb"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        sqlite_mysql = _try_sqlite_mysql_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if sqlite_mysql is not None:
+            return sqlite_mysql
+        return None
+
     if s3_family_name(src_n) == "s3" and s3_family_name(dest_n) == "s3":
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -1024,6 +1056,23 @@ def _try_copy_fast_path(
         )
         if mysql_s3 is not None:
             return mysql_s3
+        return None
+
+    if src_n in {"mysql", "mariadb"} and dest_n == "sqlite":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        mysql_sqlite = _try_mysql_sqlite_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if mysql_sqlite is not None:
+            return mysql_sqlite
         return None
 
     if (
@@ -3188,6 +3237,117 @@ def _try_sqlite_mongo_copy_fast_path(
     ddl_log = [
         f"COPY SQLite {source_table} → MongoDB {dest_table} "
         f"({result.source_rows:,} rows, SELECT + {write} insert_many, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlite_mysql_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQLite→MySQL: SELECT TSV + STRICT LOAD DATA. Dest COUNT(*) before commit is the proof."""
+    from connectors.mysql_writer import mysql_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mysql_pg import mysql_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlite_mysql import copy_sqlite_to_mysql, sqlite_mysql_type_is_copy_safe
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQLite→MySQL COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mysql_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not sqlite_mysql_type_is_copy_safe(declared):
+            logger.info(
+                "SQLite→MySQL COPY declined: %s type %s is not MySQL COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        dest_ddl = mysql_type(declared) if declared else "TEXT"
+        if not mysql_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "SQLite→MySQL COPY declined: dest %s type %s is not LOAD DATA safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        mysql_ddls.append(dest_ddl)
+
+    try:
+        result = copy_sqlite_to_mysql(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mysql_ddls=mysql_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQLite→MySQL COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQLite→MySQL COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlite_load_data_mysql",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlite_read": snapshot.get("sqlite_read"),
+        "load_data": snapshot.get("load_data"),
+        "mysql_write": snapshot.get("mysql_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("mysql_write") or "insert"
+    proof_line = (
+        "Proof: MySQL dest COUNT(*) equals SQLite source COUNT(*). "
+        "Not .dump / sqlldr. Empty dest is STRICT LOAD DATA, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQLite {source_table} → MySQL {dest_table} "
+        f"({result.source_rows:,} rows, SELECT TSV + {write} LOAD DATA, "
         f"copy_split={split})",
         proof_line,
     ]
@@ -5473,6 +5633,117 @@ def _try_mysql_s3_copy_fast_path(
     ddl_log = [
         f"COPY MySQL {source_table} → S3 {dest_table} "
         f"({result.source_rows:,} rows, SELECT CSV + {write} upload, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_mysql_sqlite_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity MySQL→SQLite: snapshot SELECT + executemany. Dest COUNT(*) before commit is the proof."""
+    from connectors.sqlite_writer import sqlite_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mysql_pg import mysql_type_is_copy_safe
+    from services.copy_mysql_sqlite import copy_mysql_to_sqlite
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlite_common import sqlite_type_is_copy_safe
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("MySQL→SQLite COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlite_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not mysql_type_is_copy_safe(declared):
+            logger.info(
+                "MySQL→SQLite COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        dest_ddl = sqlite_type(declared) if declared else "TEXT"
+        if not sqlite_type_is_copy_safe(dest_ddl):
+            logger.info(
+                "MySQL→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
+                target_col,
+                dest_ddl,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlite_ddls.append(dest_ddl)
+
+    try:
+        result = copy_mysql_to_sqlite(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlite_ddls=sqlite_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("MySQL→SQLite COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("MySQL→SQLite COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_mysql_executemany_sqlite",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "mysql_read": snapshot.get("mysql_read"),
+        "sqlite_write": snapshot.get("sqlite_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("sqlite_write") or "insert"
+    proof_line = (
+        "Proof: SQLite dest COUNT(*) equals MySQL source snapshot COUNT(*). "
+        "Not mysqldump / .import. Empty dest is executemany insert, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY MySQL {source_table} → SQLite {dest_table} "
+        f"({result.source_rows:,} rows, snapshot SELECT + {write} executemany, "
         f"copy_split={split})",
         proof_line,
     ]
