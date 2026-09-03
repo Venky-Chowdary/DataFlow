@@ -29,6 +29,10 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=BENCH_MY_ORA \\
   python scripts/bench_mysql_to_oracle_million.py
 BENCH_ROWS=1000000 BENCH_SRC=BENCH_MY_ORA BENCH_DEST=bench_mysql_from_ora \\
   python scripts/bench_oracle_to_mysql_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_mysql BENCH_DEST=BENCH_SS_ORA \\
+  python scripts/bench_sqlserver_to_oracle_million.py
+BENCH_ROWS=1000000 BENCH_SRC=BENCH_SS_ORA BENCH_DEST=bench_ss_from_ora \\
+  python scripts/bench_oracle_to_sqlserver_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -819,6 +823,115 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 1.31M rows/s from skip-all. Pytest: `test_oracle_mysql_copy`
 **7 passed / 0 failed**; combined identity-copy matrix **79 passed / 0 failed**.
+
+### Named 1M fixture — SQL Server→Oracle SELECT + executemany (2026-09-02)
+
+SQL Server has no `COPY TO STDOUT` and this host has no client `bcp`.
+One HOLDLOCK (or SNAPSHOT) `SELECT` is bound with `oracledb.executemany`
+(`:1,:2` binds, 50k batches). Not `sqlldr` / Data Pump / BCP. Dest
+`COUNT(*)` plus per-PK-range dest COUNT is the proof.
+
+Oracle VARCHAR2 stores `''` as NULL (engine law). Empty-string cells
+from NVARCHAR are bound as NULL and counted in
+`empty_string_as_null_cells`. Live 3-row fixture: NULL / `''` / `'x'`
+land as NULL / NULL / `x` with `empty_string_as_null_cells >= 1`. Do
+not claim VARCHAR2 cell identity for empty string. This 1M employee
+fixture has no empty strings (`empty_string_as_null_cells=0`).
+
+Reproduce: `BENCH_SRC=bench_ss_from_mysql BENCH_DEST=BENCH_SS_ORA python scripts/bench_sqlserver_to_oracle_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | SQL Server **1433** (`bench_ss_from_mysql`, 10 columns, PK `employee_id`) |
+| Destination | Oracle **1521/XEPDB1**, create-new `BENCH_SS_ORA` |
+| Rows | **1,000,000** |
+| Elapsed | **44.732 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_sqlserver_executemany_oracle` |
+| `copy_split` | `serial` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| `empty_string_as_null_cells` | **0** |
+| Artifact | `/opt/cursor/artifacts/sqlserver_oracle_1000000_proof.json` |
+
+Faster than MySQL→Oracle **51.974 s** and PG→Oracle **53.181 s** on the
+same bind path (pyodbc fetch into executemany vs MySQL SSCursor / PG
+COPY-text decode). Quality held: dest COUNT 1,000,000, empty-string law
+surfaced.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_sqlserver_oracle_resume_skips_complete_range`. Occupied
+dest without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.634 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_oracle_1000000_resume_skip_proof.json` |
+
+Do not quote 1.58M rows/s from skip-all. Pytest: `test_sqlserver_oracle_copy`
+**7 passed / 0 failed**.
+
+### Named 1M fixture — Oracle→SQL Server SELECT + fast_executemany (2026-09-02)
+
+Reverse of SQL Server→Oracle on the **same 10-col employee data** now
+sitting on Oracle (`BENCH_SS_ORA`). SHARE-lock `SELECT` is bound with
+pyodbc `fast_executemany` (`INSERT … WITH (TABLOCK)`). Dest `COUNT(*)`
+plus per-PK-range dest COUNT is the proof. Not BCP / CSV `BULK INSERT`
+(quoted empty string collapses to NULL on Linux SQL Server). Dest
+connection is `_close_ss`'d so TABLOCK is not pooled.
+
+Oracle `''` is already NULL at source, so SQL Server NVARCHAR stores
+NULL. Live 3-row fixture: NULL / `''` / `'x'` land as NULL / NULL / `x`
+with `varchar2_empty_stored_as_null=true`. That is engine law, not a
+row drop.
+
+Reproduce: `BENCH_SRC=BENCH_SS_ORA BENCH_DEST=bench_ss_from_ora python scripts/bench_oracle_to_sqlserver_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Oracle **1521/XEPDB1** (`BENCH_SS_ORA`, 10 columns, PK `employee_id`) |
+| Destination | SQL Server **1433**, create-new `bench_ss_from_ora` |
+| Rows | **1,000,000** |
+| Elapsed | **11.94 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_oracle_fast_executemany_sqlserver` |
+| `copy_split` | `serial` |
+| PK partitions | 249999 + 250000 + 250000 + 250001 (each dest COUNT matched) |
+| Artifact | `/opt/cursor/artifacts/oracle_sqlserver_1000000_proof.json` |
+
+Faster than SQL Server→Oracle **44.732 s** because SQL Server
+`fast_executemany` + TABLOCK is cheaper than Oracle array INSERT
+VALUES. Close to MySQL→SQL Server **15.517 s** on the same bind path.
+Quality held: dest COUNT 1,000,000.
+
+Occupied dest with a mapped single PK skips complete ranges and
+DELETE+reloads partial ones. Live 8_000-row integer PK: delete one key
+in the third range, resume `replace_destination=False` → 3 skip + 1
+reload, dest COUNT 8_000.
+Pytest: `test_live_oracle_sqlserver_resume_skips_complete_range`. Occupied
+dest without a mapped PK declines to the row path.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **4 / 4** |
+| `action` | skip, skip, skip, skip |
+| Elapsed | **0.704 s** (range COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/oracle_sqlserver_1000000_resume_skip_proof.json` |
+
+Do not quote 1.42M rows/s from skip-all. Pytest: `test_oracle_sqlserver_copy`
+**6 passed / 0 failed**; combined identity-copy matrix **92 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
