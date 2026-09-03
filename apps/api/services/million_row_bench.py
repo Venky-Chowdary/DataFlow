@@ -74,6 +74,8 @@ REPORTED_SUMMARY_KEYS = (
     "sqlite_read",
     "s3_write",
     "s3_read",
+    "snowflake_write",
+    "snowflake_read",
     "tsv_encoder",
     "partition_proof",
     "proof_scope",
@@ -10728,6 +10730,223 @@ def run_dynamodb_dynamodb_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected DynamoDB Scan + BatchWriteItem, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _snowflake_local_cfg(table: str) -> dict[str, Any]:
+    return {
+        "type": "snowflake",
+        "format": "snowflake",
+        "host": "localhost",
+        "port": 443,
+        "database": "dataflow",
+        "schema": "public",
+        "table": table,
+        "username": "test",
+        "password": "test",
+    }
+
+
+def _require_fakesnow() -> None:
+    try:
+        import fakesnow  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(f"fakesnow required for Snowflake identity bench: {exc}") from exc
+
+
+def _snowflake_connect_bench():
+    from connectors.snowflake_conn import get_connection
+
+    return get_connection(
+        account="localhost",
+        username="test",
+        password="test",
+        database="dataflow",
+        schema="public",
+        warehouse="",
+        connection_string="",
+    )
+
+
+def _snowflake_count(table: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count(
+        "snowflake",
+        _snowflake_local_cfg(table),
+        schema="public",
+        table_name=table,
+    )
+    if n is None:
+        raise RuntimeError(f"Snowflake dest COUNT(*) unknowable for {table!r}")
+    return int(n)
+
+
+def _snowflake_drop(table: str) -> None:
+    conn = _snowflake_connect_bench()
+    try:
+        cur = conn.cursor()
+        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _snowflake_seed(table: str, rows: int) -> None:
+    """Seed INTEGER id + VARCHAR label. Seed INSERT is not the COPY path."""
+    _snowflake_drop(table)
+    conn = _snowflake_connect_bench()
+    try:
+        cur = conn.cursor()
+        cur.execute(f'CREATE TABLE "{table}" (id INTEGER, label VARCHAR)')
+        batch_size = 5000
+        for start in range(1, rows + 1, batch_size):
+            end = min(start + batch_size - 1, rows)
+            batch = [(i, f"r{i}") for i in range(start, end + 1)]
+            cur.executemany(
+                f'INSERT INTO "{table}" (id, label) VALUES (%s, %s)',
+                batch,
+            )
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def run_snowflake_snowflake_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Snowflake→Snowflake through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)`` via ``destination_row_count``, never
+    writer ack / ``COPY INTO`` stage ack. Empty dest is CTAS / INSERT
+    SELECT of mapped columns, not ``CLONE`` / leftover MERGE. Same
+    account+database+schema+table declines. Seeds INTEGER+VARCHAR when
+    the source table is missing (seed is not the COPY path). Unique dest
+    ``bench_snowflake_clone`` is not reused from ``bench_1m`` /
+    ``bench_adls_clone.jsonl``. fakesnow is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_fakesnow()
+    src_table = str(source_table or "bench_snowflake_src")
+    dest = str(dest_table)
+    src_cfg = _snowflake_local_cfg(src_table)
+    dest_cfg = _snowflake_local_cfg(dest)
+    if src_table.strip().lower() == dest.strip().lower():
+        raise AssertionError(
+            "Snowflake→Snowflake bench refuses the same account+database+schema+table"
+        )
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _snowflake_count(src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _snowflake_seed(src_table, rows)
+    if not keep_dest:
+        _snowflake_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "label", "target": "label", "type": "VARCHAR", "transform": "none"},
+    ]
+    schema = {"id": "INTEGER", "label": "VARCHAR"}
+    job_id = f"bench-snowflake-snowflake-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _snowflake_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "snowflake→snowflake",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "snowflake_read": summary.get("snowflake_read"),
+        "snowflake_write": summary.get("snowflake_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "snowflake_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} snowflake→snowflake [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT: {rows})")
+    print(
+        "Not COPY INTO / CLONE / leftover MERGE. Empty dest is INSERT SELECT. "
+        "fakesnow is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "insert_select_snowflake_snowflake"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Snowflake INSERT SELECT, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
