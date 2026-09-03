@@ -15,6 +15,8 @@ from typing import Any
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.value_serializer import json_default, load_http_json, sanitize_json_value
 
+from connectors.milvus_writer import _MILVUS_QUERY_WINDOW
+
 _MILVUS_FAMILY = frozenset({
     "milvus",
     "zilliz",
@@ -42,7 +44,6 @@ _MILVUS_COPY_SAFE_TYPES = frozenset({
 
 _QUERY_BATCH = 1000
 _UPSERT_BATCH = 100
-_QUERY_WINDOW = 16384
 
 
 def milvus_family_name(name: str) -> str:
@@ -221,20 +222,48 @@ def _milvus_field_names(describe: dict[str, Any]) -> list[str]:
     return names
 
 
-def _milvus_all_filter(cfg: dict[str, Any], collection: str) -> str:
-    describe = _milvus_describe_raw(cfg, collection)
+def _milvus_pk_info(describe: dict[str, Any]) -> tuple[str, str]:
+    """Return primary-key field name and Milvus data type from describe payload."""
     fields = describe.get("fields") or describe.get("schema", {}).get("fields") or []
+    pk_name = "id"
     pk_type = "VarChar"
     if isinstance(fields, list):
         for field in fields:
             if not isinstance(field, dict):
                 continue
             if field.get("isPrimary") or field.get("primaryKey"):
+                pk_name = str(
+                    field.get("fieldName") or field.get("name") or "id"
+                ).strip() or "id"
                 pk_type = str(field.get("dataType") or field.get("type") or "VarChar")
                 break
+    return pk_name, pk_type
+
+
+def _milvus_all_filter(cfg: dict[str, Any], collection: str) -> str:
+    describe = _milvus_describe_raw(cfg, collection)
+    pk_name, pk_type = _milvus_pk_info(describe)
     if "INT" in pk_type.upper():
-        return "id >= 0"
-    return 'id != ""'
+        return f"{pk_name} >= 0"
+    return f'{pk_name} != ""'
+
+
+def _milvus_index_params(
+    src_desc: dict[str, Any],
+    vector_field: str,
+) -> list[dict[str, Any]]:
+    """Prefer source collection index params; fall back to AUTOINDEX/COSINE."""
+    raw = src_desc.get("indexParams") or src_desc.get("index_params")
+    if isinstance(raw, list) and raw:
+        return raw
+    return [
+        {
+            "fieldName": vector_field,
+            "indexName": f"{vector_field}_idx",
+            "metricType": "COSINE",
+            "params": {"index_type": "AUTOINDEX"},
+        }
+    ]
 
 
 def milvus_load_collection(cfg: dict[str, Any], collection: str) -> None:
@@ -307,14 +336,7 @@ def milvus_create_collection_from_source(
             ),
             "fields": fields,
         },
-        "indexParams": [
-            {
-                "fieldName": vector_field,
-                "indexName": f"{vector_field}_idx",
-                "metricType": "COSINE",
-                "params": {"index_type": "AUTOINDEX"},
-            }
-        ],
+        "indexParams": _milvus_index_params(src_desc, vector_field),
     }
     payload = _with_db(payload, dest_db)
     resp = session.post(
@@ -353,7 +375,11 @@ def milvus_query_upsert(
     copied = 0
     offset = 0
     while offset < total:
-        limit = min(_QUERY_BATCH, total - offset, _QUERY_WINDOW - offset)
+        limit = min(
+            _QUERY_BATCH,
+            total - offset,
+            _MILVUS_QUERY_WINDOW - 1 - offset,
+        )
         if limit <= 0:
             break
         query_payload = _with_db(
