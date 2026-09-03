@@ -1729,7 +1729,54 @@ Pytest: `test_kafka_kafka_copy` **15 passed / 0 failed** in 11.22s
 (`/opt/cursor/artifacts/kafka_kafka_identity_pytest.log`) on Kafka 3.8.1
 KRaft `127.0.0.1:9092`. Dest COUNT is watermarks, never producer ack.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity — wired, not measured
+### DuckDB→DuckDB ATTACH + INSERT SELECT — dest `COUNT(*)` (2026-09-03)
+
+Identity bulk on local DuckDB 1.5.5 files is `ATTACH '<src>' AS
+dataflow_src (READ_ONLY)` then `INSERT INTO dest (cols) SELECT cols FROM
+dataflow_src.main.src`, in-engine. Dest COUNT is `SELECT COUNT(*)` via
+`destination_row_count` — never `duckdb_tables()` metadata, never a
+writer ack. Empty dest is INSERT SELECT, **not** `EXPORT DATABASE` /
+`IMPORT DATABASE`, not `read_parquet` staging, not a pandas / Arrow round
+trip. Source seed is an `INSERT`; that seed is **not** the COPY path.
+Unique dest `bench_duckdb_clone` is not reused from `bench_1m` /
+`bench_kafka_clone` / `bench_redis_clone`. Same file + same table
+declines. `:memory:` declines. MotherDuck (`md:`) declines — a cloud
+catalog is not a local file to ATTACH. Occupied dest matching COUNT
+skip-completes. Occupied dest with a COUNT mismatch declines. Occupancy
+is counted **before** `DROP TABLE`. Local DuckDB files are not a
+customer-tenant PRODUCTION_SKU.
+
+Two measured properties, not claims:
+
+**The READ_ONLY attach is the snapshot.** DuckDB's file lock admits many
+readers or one writer, so while this path holds the source for reading no
+other process can open it for writing — the source population cannot move
+mid-copy. Both directions are covered: a same-process holder is refused
+with a file-handle conflict, a foreign process is refused the reader lock,
+and each declines to the row path with the dest untouched (both happen
+before any dest mutation, so they are not job failures).
+
+**Structure travels with the values.** Dest DDL is rebuilt from the
+source catalog (`duckdb_columns()` / `duckdb_constraints()`): exact
+`data_type` text, `NOT NULL`, `DEFAULT`, `PRIMARY KEY`, `UNIQUE`. Measured
+row-path baseline for the same route is `id BIGINT … meta VARCHAR,
+PRIMARY KEY(id)` — it widens `INTEGER`→`BIGINT`, downgrades `JSON`→
+`VARCHAR`, and drops `NOT NULL` and `DEFAULT`. This path reproduces
+`INTEGER`, `DECIMAL(10,2)`, `BLOB`, `VARCHAR[]`, `DEFAULT('x')` and
+`NOT NULL` exactly; ENUM/STRUCT/LIST/MAP/UNION come back from the catalog
+fully expanded (`ENUM('a', 'b')`) so they reproduce without inventing a
+type. A `CHECK` / `FOREIGN KEY` source declines, as does a `PRIMARY KEY` /
+`UNIQUE` over an unmapped column: a dest that enforces fewer rules than
+its source is not an identity copy.
+
+Named 1M dest COUNT for DuckDB→DuckDB is **not recorded on this host
+yet** — do not invent times. Reproduce later:
+`BENCH_ROWS=1000000 BENCH_SRC=bench_duckdb_src BENCH_DEST=bench_duckdb_clone python scripts/bench_duckdb_to_duckdb_million.py`
+
+Pytest: `test_duckdb_duckdb_copy` **19 passed / 0 failed**
+(`/opt/cursor/artifacts/duckdb_duckdb_identity_pytest.log`).
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1751,7 +1798,7 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_snowflake_to_snowflake_million.py`,
 `bench_bigquery_to_bigquery_million.py`, `bench_redis_to_redis_million.py`,
 `bench_elasticsearch_to_elasticsearch_million.py`,
-`bench_kafka_to_kafka_million.py`, plus SQL
+`bench_kafka_to_kafka_million.py`, `bench_duckdb_to_duckdb_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1766,7 +1813,7 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
 `bench_oracle_s3.csv` / `bench_ora_from_s3` /
 `bench_gcs_clone.jsonl` / `bench_dynamodb_clone` /
-`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone` / `bench_es_clone` / `bench_kafka_clone`
+`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone` / `bench_es_clone` / `bench_kafka_clone` / `bench_duckdb_clone`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
@@ -1831,7 +1878,11 @@ host's proof is desktop-lab Elasticsearch `127.0.0.1:9200`; dest COUNT is
 dest is consume+produce of raw bytes, not `kafka_json_payload` /
 MirrorMaker 2 / Cluster Linking (this host's proof is desktop-lab Kafka
 on `:9092`; dest COUNT is log-end minus log-start watermarks, never
-producer ack). Iceberg→Iceberg writes **new** dest
+producer ack). DuckDB→DuckDB empty dest is `ATTACH … (READ_ONLY)` +
+`INSERT SELECT`, not `EXPORT DATABASE` / `read_parquet` staging / a pandas
+round trip (dest COUNT is `COUNT(*)`, never `duckdb_tables()` metadata;
+dest DDL is the source catalog's types and keys, not widened mapping
+stamps). Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. GCS same
@@ -1842,7 +1893,9 @@ account+database+schema+table declines. Cross-account Snowflake INSERT SELECT de
 project+dataset+table declines. Cross-project BigQuery INSERT SELECT declines. Redis same
 host+port+db+prefix declines. Cross-endpoint Redis COPY declines. Elasticsearch same
 host+port+index declines. Cross-endpoint Elasticsearch `_reindex` declines. Kafka same
-bootstrap+topic declines. Cross-endpoint Kafka consume+produce declines. JSON
+bootstrap+topic declines. Cross-endpoint Kafka consume+produce declines. DuckDB same
+file + same table declines; `:memory:` and MotherDuck decline; a CHECK /
+FOREIGN KEY source or a key over an unmapped column declines. JSON
 dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, Iceberg→S3, SQL Server→S3, and Oracle→S3 (row path keeps JSON export).
 JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, S3→Iceberg, S3→SQL Server, and S3→Oracle (CSV is the
 COPY-native wire).
