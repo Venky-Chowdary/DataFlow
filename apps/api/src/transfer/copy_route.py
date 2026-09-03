@@ -157,6 +157,18 @@ def _try_copy_fast_path(
     never emits it). Occupied dest with a different COUNT declines.
     Empty dest is CoW snapshot append, not ``MERGE INTO``.
 
+    PostgreSQL→MongoDB identity append/overwrite: text COPY decoded into
+    ``insert_many`` batches. Not ``mongoimport``. Dest COUNT is
+    ``count_documents({})``, never ``estimatedDocumentCount``. Empty dest
+    is insert, not upsert. Occupied dest with a different COUNT declines.
+    DATE is BSON Date at UTC midnight (Mongo has no date-only type).
+    ``_id`` is not invented from row bytes.
+
+    MongoDB→PostgreSQL identity append/overwrite: replica-set snapshot
+    ``find()`` encoded as COPY text into ``COPY FROM STDIN``. Source COUNT
+    is ``count_documents`` in that snapshot. Occupied dest with a
+    different COUNT declines. Nested documents decline.
+
     Returning ``None`` rather than raising is deliberate — every route this
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
@@ -230,6 +242,7 @@ def _try_copy_fast_path(
         return None
 
     from services.copy_oracle_oracle import oracle_family_name
+    from services.copy_pg_mongo import mongo_family_name
 
     if (
         src_n in {"postgresql", "postgres"}
@@ -270,6 +283,24 @@ def _try_copy_fast_path(
         )
         if pg_ice is not None:
             return pg_ice
+        return None
+
+    if src_n in {"postgresql", "postgres"} and mongo_family_name(dest_n) == "mongodb":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        pg_mongo = _try_pg_mongo_copy_fast_path(
+            source=source,
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if pg_mongo is not None:
+            return pg_mongo
         return None
 
     if src_n in {"iceberg", "apache_iceberg"} and dest_n in {"postgresql", "postgres"}:
@@ -345,6 +376,24 @@ def _try_copy_fast_path(
         )
         if ice_ora is not None:
             return ice_ora
+        return None
+
+    if mongo_family_name(src_n) == "mongodb" and dest_n in {"postgresql", "postgres"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        mongo_pg = _try_mongo_pg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or "public",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if mongo_pg is not None:
+            return mongo_pg
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
@@ -1213,6 +1262,107 @@ def _try_pg_iceberg_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_pg_mongo_copy_fast_path(
+    *,
+    source: EndpointConfig,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity PG→Mongo: COPY text + insert_many. Dest count_documents is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mongo import copy_postgres_to_mongo, pg_mongo_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("PG→Mongo COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mongo_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not pg_mongo_type_is_copy_safe(declared):
+            logger.info(
+                "PG→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        mongo_ddls.append(declared or "TEXT")
+
+    try:
+        result = copy_postgres_to_mongo(
+            source_cfg=src_cfg,
+            source_schema=source.schema or src_cfg.get("schema") or "public",
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mongo_ddls=mongo_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("PG→Mongo COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("PG→Mongo COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "copy_text_pg_insert_many_mongo",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "mongo_write": snapshot.get("mongo_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("mongo_write") or "insert"
+    proof_line = (
+        "Proof: Mongo dest count_documents equals source snapshot count. "
+        "Not estimatedDocumentCount. Empty dest is insert_many, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY {source_table} → MongoDB {dest_table} "
+        f"({result.source_rows:,} rows, COPY text + {write} insert_many, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_iceberg_pg_copy_fast_path(
     *,
     source_table: str,
@@ -1642,6 +1792,110 @@ def _try_iceberg_oracle_copy_fast_path(
     ddl_log = [
         f"COPY Iceberg {source_table} → Oracle {dest_table} "
         f"({result.source_rows:,} rows, snapshot Parquet + executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_mongo_pg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Mongo→PG: snapshot find + COPY FROM STDIN. Dest COUNT is the proof."""
+    from connectors.postgresql_writer import pg_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mongo_pg import copy_mongo_to_postgres, mongo_type_is_copy_safe
+    from services.copy_pg_mongo import pg_mongo_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Mongo→PG COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    pg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Mongo→PG COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_mongo_to_postgres(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_schema=dest_schema,
+            dest_table=dest_table,
+            pairs=pairs,
+            pg_ddls=pg_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Mongo→PG COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Mongo→PG COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "mongo_snapshot_find_copy_from_stdin_pg",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "mongo_read": snapshot.get("mongo_read"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    proof_line = (
+        "Proof: destination COUNT(*) equals Mongo source snapshot count_documents. "
+        "Not estimatedDocumentCount."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY MongoDB {source_table} → PostgreSQL {dest_table} "
+        f"({result.source_rows:,} rows, snapshot find + COPY FROM STDIN, "
         f"copy_split={split})",
         proof_line,
     ]

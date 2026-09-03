@@ -68,6 +68,8 @@ REPORTED_SUMMARY_KEYS = (
     "copy_split",
     "iceberg_write",
     "iceberg_read",
+    "mongo_write",
+    "mongo_read",
     "tsv_encoder",
     "partition_proof",
     "proof_scope",
@@ -4147,6 +4149,347 @@ def run_iceberg_oracle_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected Iceberg Parquet + executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _mongo_cfg(collection: str) -> dict[str, Any]:
+    return {
+        "type": "mongodb",
+        "format": "mongodb",
+        "host": "127.0.0.1",
+        "port": 27017,
+        "database": "dataflow",
+        "table": collection,
+        "collection": collection,
+    }
+
+
+def _mongo_drop(collection: str) -> None:
+    from pymongo import MongoClient
+
+    client = MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=5000)
+    try:
+        client["dataflow"][collection].drop()
+    finally:
+        client.close()
+
+
+def _mongo_count(collection: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count("mongodb", _mongo_cfg(collection), table_name=collection)
+    if n is None:
+        raise RuntimeError(f"Mongo dest COUNT unmeasured for {collection}")
+    return int(n)
+
+
+def run_pg_mongo_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity PostgreSQL→MongoDB through stream_database_transfer.
+
+    Dest COUNT is ``count_documents({})``, never ``estimatedDocumentCount``.
+    Empty dest is insert_many, not upsert.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    pg = _pg_local_cfg()
+    src_table = source_table or f"bench_emp_{rows}"
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    seed_source(pg, src_table, rows)
+    if not keep_dest:
+        _mongo_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "schema": "public",
+            "table": src_table,
+        },
+    )
+    destination = EndpointConfig.from_dict("database", _mongo_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-pg-mongo-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _mongo_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "postgresql→mongodb",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "postgres_port": 5432,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_write": summary.get("mongo_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} postgresql→mongodb [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination count_documents: {landed} (source rows: {rows})")
+    print(f"mongo_write: {summary.get('mongo_write')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_text_pg_insert_many_mongo"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected COPY text + insert_many, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_mongo_pg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MongoDB→PostgreSQL through stream_database_transfer.
+
+    Source COUNT is ``count_documents`` in a replica-set snapshot. Dest
+    proof is PostgreSQL ``COUNT(*)``.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 27017), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MongoDB 27017 not reachable: {exc}") from exc
+
+    mongo_src = str(source_table or "bench_pg_mongo")
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _mongo_count(mongo_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_mongo_volume(
+            rows=rows,
+            dest_table=mongo_src,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        pg = _pg_local_cfg()
+        conn = psycopg2.connect(
+            host=pg["host"],
+            port=pg["port"],
+            user=pg["user"],
+            password=pg["password"],
+            dbname=pg["dbname"],
+        )
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'DROP TABLE IF EXISTS public."{dest}"')  # nosec B608
+        finally:
+            conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    pg = _pg_local_cfg()
+    source = EndpointConfig.from_dict("database", _mongo_cfg(mongo_src))
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "schema": "public",
+            "table": dest,
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mongo-pg-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = psycopg2.connect(
+        host=pg["host"],
+        port=pg["port"],
+        user=pg["user"],
+        password=pg["password"],
+        dbname=pg["dbname"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')  # nosec B608
+            landed = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mongodb→postgresql",
+        "sync_mode": sync_mode,
+        "source_table": mongo_src,
+        "dest_table": dest,
+        "postgres_port": 5432,
+        "mongo_port": 27017,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "mongo_read": summary.get("mongo_read"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "source_count_source": "mongodb_count_documents",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} mongodb→postgresql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source count_documents: {rows})")
+    print(f"mongo_read: {summary.get('mongo_read')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "mongo_snapshot_find_copy_from_stdin_pg"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Mongo snapshot find + COPY FROM STDIN, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
