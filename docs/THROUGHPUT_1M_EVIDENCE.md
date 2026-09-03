@@ -1634,6 +1634,27 @@ Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_adls_src.jsonl BENCH_DEST=bench_a
 Pytest: `test_adls_adls_copy` **12 passed / 0 failed** in 1.10s
 (`/opt/cursor/artifacts/adls_adls_identity_pytest.log`).
 
+### Kafka→Kafka consume-produce bytes — wired, not a named 1M on this host (2026-09-03)
+
+Identity bulk on desktop-lab Kafka (`127.0.0.1:9092`) is consume of raw
+bytes (no deserializer / no `json.loads`) and produce of identical
+key/value/headers/timestamp with dest credentials. Dest COUNT is
+log-end minus log-start watermarks via `destination_row_count` — never
+producer ack, never poll count, never leftover compaction MERGE. Empty
+dest is consume+produce of bytes, **not** `kafka_json_payload` /
+MirrorMaker 2 / Cluster Linking / `kafka-mirror-maker`. Source seed
+(`bench_kafka_src`) is a JSON-bytes produce; that seed is **not** the
+COPY path. Unique dest `bench_kafka_clone` is not reused from
+`bench_1m` / `bench_redis_clone` / `bench_es_clone`. Same
+bootstrap+topic declines. Cross-endpoint declines. Occupied dest
+matching COUNT skip-completes. Occupied dest with a COUNT mismatch
+declines. Occupancy is counted **before** delete. Desktop-lab Kafka /
+Redpanda on `:9092` is **not** a customer-tenant PRODUCTION_SKU.
+
+Named 1M dest COUNT for Kafka→Kafka is **not recorded on this host
+yet** — do not invent times. Reproduce later:
+`BENCH_ROWS=1000000 BENCH_SRC=bench_kafka_src BENCH_DEST=bench_kafka_clone python scripts/bench_kafka_to_kafka_million.py`
+
 ### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
@@ -1652,7 +1673,7 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_s3_to_iceberg_million.py`, `bench_iceberg_to_s3_million.py`,
 `bench_sqlserver_to_s3_million.py`, `bench_s3_to_sqlserver_million.py`,
 `bench_oracle_to_s3_million.py`, `bench_s3_to_oracle_million.py`,
-`bench_gcs_to_gcs_million.py`, plus SQL
+`bench_gcs_to_gcs_million.py`, `bench_kafka_to_kafka_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1666,14 +1687,15 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_s3_iceberg` / `bench_s3_from_iceberg.csv` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
 `bench_oracle_s3.csv` / `bench_ora_from_s3` /
-`bench_gcs_clone.jsonl`
+`bench_gcs_clone.jsonl` / `bench_kafka_clone`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
 proof is `count_documents({})` (Mongo), file footers (Iceberg),
-`COUNT(*)` (SQLite / PostgreSQL), or object-store artifact COUNT (S3 —
+`COUNT(*)` (SQLite / PostgreSQL), object-store artifact COUNT (S3 —
 GET streams / Parquet footers, never ListObjects length, never writer
-PUT ack). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
+PUT ack), or Kafka log-end minus log-start watermarks (never producer
+ack). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
 dest is CoW snapshot append, not `MERGE INTO`. Empty SQLite dest is
 `INSERT SELECT` / `executemany`, not `.dump` / `.import`. Empty S3 dest
 is `CopyObject` (S3→S3) or COPY/SELECT CSV + `upload_file`
@@ -1706,7 +1728,10 @@ empty dest is GET CSV + `executemany`, not sqlldr / Data Pump /
 `gsutil cp` / GET+PUT (this host's proof is fake-gcs, not a customer-tenant
 PRODUCTION_SKU). ADLS→ADLS empty dest is server-side
 `start_copy_from_url`, not `azcopy` / GET+PUT (this host's proof is
-Azurite, not a customer-tenant PRODUCTION_SKU). Iceberg→Iceberg writes **new** dest
+Azurite, not a customer-tenant PRODUCTION_SKU). Kafka→Kafka empty dest is
+consume+produce of raw bytes, not `kafka_json_payload` / MirrorMaker 2
+(this host's proof is desktop-lab Kafka on :9092, not a customer-tenant
+PRODUCTION_SKU). Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. GCS same
