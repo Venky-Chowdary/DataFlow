@@ -119,6 +119,12 @@ def _try_copy_fast_path(
     COUNT is file footers, never ``scan().count()``. Occupied dest with
     a different COUNT declines. MoR snapshots decline.
 
+    Iceberg→MySQL identity append/overwrite: current-snapshot Parquet
+    files encoded as LOAD DATA TSV into a tempfile, then STRICT
+    ``LOAD DATA LOCAL INFILE``. Source COUNT is file footers, never
+    ``scan().count()``. Occupied dest with a different COUNT declines.
+    MoR snapshots decline.
+
     MySQL→Iceberg identity append/overwrite: consistent-snapshot SELECT
     encoded as CSV into one Arrow table and one catalog snapshot. Dest
     COUNT is file footers, never ``scan().count()``. Occupied dest with
@@ -257,6 +263,24 @@ def _try_copy_fast_path(
         )
         if ice_pg is not None:
             return ice_pg
+        return None
+
+    if src_n in {"iceberg", "apache_iceberg"} and dest_n in {"mysql", "mariadb"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ice_mysql = _try_iceberg_mysql_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "default",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ice_mysql is not None:
+            return ice_mysql
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
@@ -1180,6 +1204,111 @@ def _try_iceberg_pg_copy_fast_path(
     ddl_log = [
         f"COPY Iceberg {source_table} → PostgreSQL {dest_table} "
         f"({result.source_rows:,} rows, snapshot Parquet + COPY FROM STDIN, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_iceberg_mysql_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Iceberg→MySQL: snapshot Parquet + STRICT LOAD DATA. Dest COUNT is the proof."""
+    from connectors.mysql_writer import mysql_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_mysql import copy_iceberg_to_mysql
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_mysql_pg import mysql_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Iceberg→MySQL COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    mysql_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            mysql_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Iceberg→MySQL COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_iceberg_to_mysql(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            mysql_ddls=mysql_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Iceberg→MySQL COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Iceberg→MySQL COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "iceberg_parquet_load_data_mysql",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "iceberg_file_footers",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_read": snapshot.get("iceberg_read"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    proof_line = (
+        "Proof: destination COUNT(*) equals Iceberg source footer COUNT. "
+        "Not scan().count()."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Iceberg {source_table} → MySQL {dest_table} "
+        f"({result.source_rows:,} rows, snapshot Parquet + STRICT LOAD DATA, "
         f"copy_split={split})",
         proof_line,
     ]
