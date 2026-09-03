@@ -208,6 +208,15 @@ def _try_copy_fast_path(
     with a different COUNT declines. This host's proof is fake-gcs
     (``127.0.0.1:4443``), not a customer-tenant PRODUCTION_SKU.
 
+    ADLS→ADLS identity append/overwrite: server-side
+    ``start_copy_from_url`` (requires_sync). Dest COUNT is object-store
+    artifact COUNT (GET streams / Parquet footers), never ListBlobs
+    length, never copy ack. Same endpoint+container+blob declines.
+    Cross-endpoint declines. Empty dest is start_copy_from_url, not
+    GET+PUT / ``azcopy``. Occupied dest with a different COUNT declines.
+    This host's proof is Azurite (``127.0.0.1:10000``), not a
+    customer-tenant PRODUCTION_SKU.
+
     PostgreSQL→S3 identity append/overwrite: text COPY CSV (HEADER) into
     a tempfile, then ``upload_file``. Dest key must be ``.csv`` /
     ``.tsv``. Dest COUNT is artifact COUNT of that CSV (header skipped).
@@ -514,6 +523,7 @@ def _try_copy_fast_path(
     from services.copy_pg_mongo import mongo_family_name
     from services.copy_s3_common import s3_family_name
     from services.copy_gcs_common import gcs_family_name
+    from services.copy_adls_common import adls_family_name
 
     if (
         src_n in {"postgresql", "postgres"}
@@ -930,6 +940,23 @@ def _try_copy_fast_path(
         )
         if gcs_gcs is not None:
             return gcs_gcs
+        return None
+
+    if adls_family_name(src_n) == "adls" and adls_family_name(dest_n) == "adls":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        adls_adls = _try_adls_adls_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if adls_adls is not None:
+            return adls_adls
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -4442,6 +4469,100 @@ def _try_gcs_gcs_copy_fast_path(
     ddl_log = [
         f"COPY GCS {source_table} → GCS {dest_table} "
         f"({result.source_rows:,} rows, copy_blob {write}, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_adls_adls_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity ADLS→ADLS: start_copy_from_url. Dest artifact COUNT is the proof."""
+    from services.copy_adls_adls import copy_adls_to_adls
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("ADLS→ADLS COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    adls_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        pairs.append((source_col, target_col))
+        adls_ddls.append(declared or "string")
+
+    try:
+        result = copy_adls_to_adls(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            adls_ddls=adls_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("ADLS→ADLS COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("ADLS→ADLS COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("adls_key") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "start_copy_from_url_adls_adls",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "adls_read": snapshot.get("adls_read"),
+        "adls_write": snapshot.get("adls_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("adls_write") or "insert"
+    proof_line = (
+        "Proof: ADLS dest artifact COUNT equals source artifact COUNT. "
+        "Not azcopy / GET+PUT. Empty dest is start_copy_from_url. Azurite is not "
+        "a customer-tenant PRODUCTION_SKU."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY ADLS {source_table} → ADLS {dest_table} "
+        f"({result.source_rows:,} rows, start_copy_from_url {write}, "
         f"copy_split={split})",
         proof_line,
     ]
