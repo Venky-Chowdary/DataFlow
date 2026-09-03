@@ -72,6 +72,8 @@ REPORTED_SUMMARY_KEYS = (
     "mongo_read",
     "sqlite_write",
     "sqlite_read",
+    "s3_write",
+    "s3_read",
     "tsv_encoder",
     "partition_proof",
     "proof_scope",
@@ -6374,6 +6376,485 @@ def run_sqlite_pg_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected SQLite SELECT + PostgreSQL COPY FROM STDIN, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _s3_bench_bucket() -> str:
+    return os.environ.get("BENCH_S3_BUCKET", "dataflow-bench")
+
+
+def _s3_local_cfg(bucket: str, key: str) -> dict[str, Any]:
+    return {
+        "type": "s3",
+        "format": "s3",
+        "host": os.environ.get("MINIO_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("MINIO_PORT", "9000")),
+        "database": bucket,
+        "table": key,
+        "username": os.environ.get("MINIO_USER", "dataflow"),
+        "password": os.environ.get("MINIO_SECRET", "dataflowsecret"),
+        "ssl": False,
+        "path_style": True,
+    }
+
+
+def _s3_count(cfg: dict[str, Any], key: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count("s3", cfg, schema="", table_name=key)
+    if n is None:
+        raise ValueError(f"S3 dest COUNT unmeasured for {key}")
+    return int(n)
+
+
+def _s3_delete_key(cfg: dict[str, Any], key: str) -> None:
+    from services.copy_s3_common import s3_delete_keys, s3_list_keys
+
+    s3_delete_keys(cfg, s3_list_keys(cfg, key))
+
+
+def _require_minio() -> None:
+    import socket
+
+    host = os.environ.get("MINIO_HOST", "127.0.0.1")
+    port = int(os.environ.get("MINIO_PORT", "9000"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MinIO {host}:{port} not reachable: {exc}") from exc
+
+
+def run_pg_s3_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity PostgreSQL→S3 through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT of the CSV (header skipped),
+    never ListObjects length, never writer PUT ack. Empty dest is COPY CSV
+    + upload_file, not ``aws s3 cp``. Dest key must be ``.csv`` / ``.tsv``.
+    Unique dest ``bench_pg_s3.csv`` is not reused from ``bench_1m``.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+    _require_minio()
+
+    pg = _pg_local_cfg()
+    src_table = source_table or f"bench_emp_{rows}"
+    dest = str(dest_table)
+    bucket = dest_bucket or _s3_bench_bucket()
+    dest_cfg = _s3_local_cfg(bucket, dest)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    seed_source(pg, src_table, rows)
+    if not keep_dest:
+        from services.copy_s3_common import s3_ensure_bucket
+
+        s3_ensure_bucket(dest_cfg)
+        _s3_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "schema": "public",
+            "table": src_table,
+        },
+    )
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-pg-s3-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _s3_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "postgresql→s3",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_write": summary.get("s3_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "s3_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} postgresql→s3 [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source snapshot COUNT: {rows})")
+    print("Not aws s3 cp. Empty dest is COPY CSV + upload. CSV HEADER is not a dest row.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_csv_pg_upload_s3"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected PostgreSQL COPY CSV + S3 upload, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_s3_s3_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_bucket: str | None = None,
+    source_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity S3→S3 through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT, never ListObjects length.
+    Empty dest is server-side CopyObject, not GET+PUT / ``aws s3 cp`` /
+    ``aws s3 sync``. Seeds from PostgreSQL→S3 CSV when the source object
+    is missing. Unique dest ``bench_s3_clone.csv`` is not reused from
+    ``bench_pg_s3.csv`` / ``bench_1m``.
+    """
+    _require_minio()
+    src_key = str(source_table or "bench_pg_s3.csv")
+    dest = str(dest_table)
+    bucket = dest_bucket or _s3_bench_bucket()
+    src_bucket = source_bucket or bucket
+    src_cfg = _s3_local_cfg(src_bucket, src_key)
+    dest_cfg = _s3_local_cfg(bucket, dest)
+    if src_cfg["host"] == dest_cfg["host"] and src_bucket == bucket and src_key == dest:
+        raise AssertionError("S3→S3 bench refuses the same endpoint+bucket+key")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _s3_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_s3_volume(
+            rows=rows,
+            dest_table=src_key,
+            dest_bucket=src_bucket,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        from services.copy_s3_common import s3_ensure_bucket
+
+        s3_ensure_bucket(dest_cfg)
+        _s3_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-s3-s3-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _s3_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "s3→s3",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "dest_table": dest,
+        "source_bucket": src_bucket,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_read": summary.get("s3_read"),
+        "s3_write": summary.get("s3_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "s3_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} s3→s3 [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source COUNT: {rows})")
+    print("Not aws s3 cp / aws s3 sync / GET+PUT. Empty dest is CopyObject.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "copy_object_s3_s3"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected S3 CopyObject, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_s3_pg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity S3→PostgreSQL through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)``. Empty dest is ``COPY FROM STDIN``
+    CSV HEADER, not upsert / ``aws s3 cp``. JSON/JSONL/Parquet decline.
+    Seeds from PostgreSQL→S3 CSV when the source object is missing.
+    Unique dest ``bench_s3_from_pg`` is not reused from ``bench_1m``.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+    _require_minio()
+
+    pg = _pg_local_cfg()
+    src_key = str(source_table or "bench_pg_s3.csv")
+    dest = str(dest_table)
+    bucket = source_bucket or _s3_bench_bucket()
+    src_cfg = _s3_local_cfg(bucket, src_key)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _s3_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_s3_volume(
+            rows=rows,
+            dest_table=src_key,
+            dest_bucket=bucket,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        reset_pg_destination(pg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "host": pg["host"],
+            "port": pg["port"],
+            "database": pg["dbname"],
+            "username": pg["user"],
+            "password": pg["password"],
+            "schema": "public",
+            "table": dest,
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-s3-pg-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = postgres_count(pg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "s3→postgresql",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "dest_table": dest,
+        "source_bucket": bucket,
+        "pg_port": 5432,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_read": summary.get("s3_read"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "postgres_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} s3→postgresql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source artifact COUNT: {rows})")
+    print("Not aws s3 cp. Empty dest is COPY FROM STDIN. JSON/JSONL decline.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "get_csv_s3_copy_from_stdin_pg"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected S3 GET CSV + PostgreSQL COPY FROM STDIN, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
