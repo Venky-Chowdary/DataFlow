@@ -192,6 +192,27 @@ def qdrant_create_collection_from_source(
         )
 
 
+def _qdrant_assert_upsert_ok(resp: Any) -> None:
+    """Fail closed when Qdrant upsert HTTP succeeds but operation status is not completed."""
+    if resp.status_code not in {200, 201}:
+        raise ValueError(
+            f"Qdrant upsert failed: {resp.status_code} {getattr(resp, 'text', '')[:200]}"
+        )
+    body = load_http_json(resp) if resp.content else {}
+    if not isinstance(body, dict):
+        raise ValueError("Qdrant upsert returned non-JSON response")
+    top_status = str(body.get("status") or "").lower()
+    if top_status and top_status not in {"ok", "completed"}:
+        raise ValueError(f"Qdrant upsert top-level status not ok: {top_status!r}")
+    result = body.get("result")
+    if isinstance(result, dict):
+        op_status = str(result.get("status") or "").lower()
+        if op_status and op_status not in {"completed", "acknowledged", "ok"}:
+            raise ValueError(
+                f"Qdrant upsert operation status not completed: {op_status!r}"
+            )
+
+
 def qdrant_scroll_upsert(
     *,
     source_cfg: dict[str, Any],
@@ -206,7 +227,8 @@ def qdrant_scroll_upsert(
 
     src_name = qdrant_collection(src_collection)
     dest_name = qdrant_collection(dest_collection)
-    session, base_url, headers = qdrant_rest(source_cfg)
+    src_session, src_base, src_headers = qdrant_rest(source_cfg)
+    dest_session, dest_base, dest_headers = qdrant_rest(dest_cfg)
     copied = 0
     offset: Any = None
     while True:
@@ -217,10 +239,10 @@ def qdrant_scroll_upsert(
         }
         if offset is not None:
             body["offset"] = offset
-        resp = session.post(
-            f"{base_url}/collections/{src_name}/points/scroll",
+        resp = src_session.post(
+            f"{src_base}/collections/{src_name}/points/scroll",
             data=json.dumps(body, default=json_default),
-            headers=headers,
+            headers=src_headers,
             timeout=60,
         )
         if resp.status_code != 200:
@@ -237,19 +259,16 @@ def qdrant_scroll_upsert(
         if points:
             for i in range(0, len(points), _UPSERT_BATCH):
                 batch = points[i : i + _UPSERT_BATCH]
-                upsert = session.put(
-                    f"{base_url}/collections/{dest_name}/points?wait=true",
+                upsert = dest_session.put(
+                    f"{dest_base}/collections/{dest_name}/points?wait=true",
                     data=json.dumps(
                         {"points": batch},
                         default=sanitize_json_value,
                     ),
-                    headers=headers,
+                    headers=dest_headers,
                     timeout=60,
                 )
-                if upsert.status_code not in {200, 201}:
-                    raise ValueError(
-                        f"Qdrant upsert failed: {upsert.status_code} {upsert.text[:200]}"
-                    )
+                _qdrant_assert_upsert_ok(upsert)
                 copied += len(batch)
         nxt = result.get("next_page_offset")
         if nxt is None:
