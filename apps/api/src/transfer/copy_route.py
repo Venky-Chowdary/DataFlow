@@ -183,6 +183,20 @@ def _try_copy_fast_path(
     not upsert. Occupied dest with a different COUNT declines.
     ``:memory:`` declines. Not ``.dump`` / ``.import``.
 
+    DuckDB→DuckDB identity append/overwrite: ``ATTACH … (READ_ONLY)``
+    then ``INSERT INTO dest SELECT … FROM srcdb.main.src``. Dest
+    ``COUNT(*)`` is the proof, never ``duckdb_tables()`` metadata. The
+    read-only attach is the snapshot: DuckDB's lock admits many readers
+    or one writer, so no other process can write the source mid-copy.
+    Dest DDL is rebuilt from the **source catalog** (exact type text,
+    NOT NULL, DEFAULT, PRIMARY KEY, UNIQUE), so this path does not widen
+    ``INTEGER`` to ``BIGINT`` or enforce fewer rules than the source.
+    Same file + same table declines. ``:memory:`` and MotherDuck
+    decline. A ``CHECK`` / ``FOREIGN KEY`` source declines, as does a key
+    over an unmapped column. Occupied dest with a different COUNT
+    declines. Not ``EXPORT DATABASE`` / ``IMPORT DATABASE``, not
+    ``read_parquet`` staging, not a pandas / Arrow round trip.
+
     PostgreSQL→SQLite identity append/overwrite: text COPY decoded into
     ``executemany``. DATE lands as SQLite TEXT (ISO calendar day —
     SQLite has no DATE affinity). TIMESTAMP / BYTEA / JSONB decline.
@@ -583,6 +597,7 @@ def _try_copy_fast_path(
     from services.copy_s3_common import s3_family_name
     from services.copy_gcs_common import gcs_family_name
     from services.copy_adls_common import adls_family_name
+    from services.copy_duckdb_common import duckdb_family_name
     from services.copy_kafka_common import kafka_family_name
     from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_redis_common import redis_family_name
@@ -1133,6 +1148,27 @@ def _try_copy_fast_path(
         )
         if kafka_kafka is not None:
             return kafka_kafka
+        return None
+
+    if (
+        duckdb_family_name(src_n, src_cfg) == "duckdb"
+        and duckdb_family_name(dest_n, dest_cfg) == "duckdb"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        duckdb_duckdb = _try_duckdb_duckdb_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if duckdb_duckdb is not None:
+            return duckdb_duckdb
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -5350,6 +5386,115 @@ def _try_kafka_kafka_copy_fast_path(
     ddl_log = [
         f"COPY Kafka {source_table} → Kafka {dest_table} "
         f"({result.source_rows:,} rows, consume-produce bytes {write}, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_duckdb_duckdb_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity DuckDB→DuckDB: ATTACH + INSERT SELECT. Dest COUNT(*) is the proof."""
+    from services.copy_duckdb_common import duckdb_type_is_copy_safe
+    from services.copy_duckdb_duckdb import copy_duckdb_to_duckdb
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("DuckDB→DuckDB COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    duckdb_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if source_col != target_col:
+            logger.info("DuckDB→DuckDB COPY declined: column rename")
+            return None
+        if declared and not duckdb_type_is_copy_safe(declared):
+            logger.info(
+                "DuckDB→DuckDB COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        duckdb_ddls.append(declared or "VARCHAR")
+
+    try:
+        result = copy_duckdb_to_duckdb(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            duckdb_ddls=duckdb_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema or None,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("DuckDB→DuckDB COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("DuckDB→DuckDB COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("duckdb_table") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "attach_insert_select_duckdb_duckdb",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "duckdb_read": snapshot.get("duckdb_read"),
+        "duckdb_write": snapshot.get("duckdb_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("duckdb_write") or "insert"
+    read = dest_summary.get("duckdb_read") or "attach_select"
+    proof_line = (
+        "Proof: DuckDB dest COUNT(*) equals source COUNT(*) under a READ_ONLY "
+        "attach that no other writer can hold. Not EXPORT/IMPORT DATABASE, not "
+        "read_parquet staging, not a pandas round trip. Dest DDL is the source "
+        "catalog's types and keys, not widened mapping stamps."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY DuckDB {source_table} → DuckDB {dest_table} "
+        f"({result.source_rows:,} rows, {read} + INSERT SELECT {write}, "
         f"copy_split={split})",
         proof_line,
     ]
