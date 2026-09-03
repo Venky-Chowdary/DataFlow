@@ -435,18 +435,21 @@ def test_live_bigquery_bigquery_stream_load_method(monkeypatch):
 
 def test_live_bigquery_local_scan_total_is_list_not_num_rows(monkeypatch):
     """Row-path scan must not treat Table.num_rows as the snapshot size."""
+    _bq_or_skip()
     tag = uuid.uuid4().hex[:8]
     src = f"bq_scan_src_{tag}"
+    orig_num = None
+    table_cls = None
     try:
         _seed(src, 80)
-        from google.cloud.bigquery.table import Table
+        from google.cloud.bigquery.table import Table as table_cls
 
-        orig_num = Table.num_rows
+        orig_num = table_cls.num_rows
 
         def _lie(_self):
             return 0
 
-        monkeypatch.setattr(Table, "num_rows", property(_lie))
+        monkeypatch.setattr(table_cls, "num_rows", property(_lie))
         from connectors.bigquery_reader import read_table_scan_batch
 
         scan_state: dict = {}
@@ -479,5 +482,6 @@ def test_live_bigquery_local_scan_total_is_list_not_num_rows(monkeypatch):
         assert len(rows) == 80
         assert int(total or 0) == 80
     finally:
-        monkeypatch.setattr(Table, "num_rows", orig_num)
+        if orig_num is not None and table_cls is not None:
+            monkeypatch.setattr(table_cls, "num_rows", orig_num)
         _drop(src)
