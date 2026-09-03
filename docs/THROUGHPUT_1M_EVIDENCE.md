@@ -1817,7 +1817,25 @@ yet** — do not invent times.
 Pytest: `test_milvus_milvus_copy` — live tests skip when `:19530` is
 unreachable; unit declines always run.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity — wired, not measured
+### Weaviate→Weaviate list + batch — dest `meta.count` (2026-09-03)
+
+Identity bulk on desktop-lab Weaviate (`127.0.0.1:8080`) is REST
+``GET /v1/objects`` (include=vector) followed by ``POST /v1/batch/objects``
+to the dest class. Dest COUNT is Aggregate ``meta.count`` via GraphQL —
+never ``scan_source_ids`` DISTINCT source_id, never batch ack, never writer
+``rows_written``. Empty dest is list+batch, **not** vectorize / re-embed /
+backup restore. Same host+port+class declines. Cross-endpoint declines.
+Occupied dest matching COUNT skip-completes. Occupied dest with a COUNT
+mismatch declines. Occupancy is counted **before** delete. Desktop-lab
+Weaviate is not a customer-tenant PRODUCTION_SKU.
+
+Named 1M dest COUNT for Weaviate→Weaviate is **not recorded on this host
+yet** — do not invent times.
+
+Pytest: `test_weaviate_weaviate_copy` — live tests skip when `:8080` is
+unreachable; unit declines always run.
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity / Weaviate identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,

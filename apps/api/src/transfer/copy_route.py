@@ -216,6 +216,16 @@ def _try_copy_fast_path(
     COUNT declines. Occupancy is counted **before** delete. Desktop-lab
     Milvus on ``:19530`` is not a customer-tenant PRODUCTION_SKU.
 
+    Weaviate→Weaviate identity append/overwrite: list raw
+    id/properties/vector and batch-upsert to the dest class. Dest COUNT
+    is Aggregate ``meta.count`` via GraphQL, never ``scan_source_ids``
+    DISTINCT source_id, never batch ack, never writer ``rows_written``.
+    Same host+port+class declines. Cross-endpoint declines. Empty dest is
+    list+batch, not vectorize / re-embed / backup restore. Occupied dest
+    with a different COUNT declines. Occupancy is counted **before**
+    delete. Desktop-lab Weaviate on ``:8080`` is not a customer-tenant
+    PRODUCTION_SKU.
+
     PostgreSQL→SQLite identity append/overwrite: text COPY decoded into
     ``executemany``. DATE lands as SQLite TEXT (ISO calendar day —
     SQLite has no DATE affinity). TIMESTAMP / BYTEA / JSONB decline.
@@ -619,6 +629,7 @@ def _try_copy_fast_path(
     from services.copy_duckdb_common import duckdb_family_name
     from services.copy_qdrant_common import qdrant_family_name
     from services.copy_milvus_common import milvus_family_name
+    from services.copy_weaviate_common import weaviate_family_name
     from services.copy_kafka_common import kafka_family_name
     from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_redis_common import redis_family_name
@@ -1230,6 +1241,26 @@ def _try_copy_fast_path(
         )
         if milvus_milvus is not None:
             return milvus_milvus
+        return None
+
+    if (
+        weaviate_family_name(src_n) == "weaviate"
+        and weaviate_family_name(dest_n) == "weaviate"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        weaviate_weaviate = _try_weaviate_weaviate_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if weaviate_weaviate is not None:
+            return weaviate_weaviate
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -5772,6 +5803,114 @@ def _try_milvus_milvus_copy_fast_path(
     ddl_log = [
         f"COPY Milvus {source_table} → Milvus {dest_table} "
         f"({result.source_rows:,} rows, {read} + upsert {write}, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_weaviate_weaviate_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Weaviate→Weaviate: list+batch upsert. Dest meta.count is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_weaviate_common import weaviate_type_is_copy_safe
+    from services.copy_weaviate_weaviate import copy_weaviate_to_weaviate
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Weaviate→Weaviate COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    weaviate_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if source_col != target_col:
+            logger.info("Weaviate→Weaviate COPY declined: column rename")
+            return None
+        if declared and not weaviate_type_is_copy_safe(declared):
+            logger.info(
+                "Weaviate→Weaviate COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        weaviate_ddls.append(declared or "text")
+
+    try:
+        result = copy_weaviate_to_weaviate(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            weaviate_ddls=weaviate_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Weaviate→Weaviate COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Weaviate→Weaviate COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("weaviate_class") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "list_batch_upsert_weaviate_weaviate",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "weaviate_read": snapshot.get("weaviate_read"),
+        "weaviate_write": snapshot.get("weaviate_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("weaviate_write") or "insert"
+    read = dest_summary.get("weaviate_read") or "list"
+    proof_line = (
+        "Proof: Weaviate dest Aggregate meta.count equals source meta.count. "
+        "Not scan_source_ids DISTINCT source_id / batch ack / writer "
+        "rows_written / vectorize re-embed / backup restore. Empty dest "
+        "is list+batch of raw id/properties/vector. Desktop-lab Weaviate is "
+        "not a customer-tenant PRODUCTION_SKU."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Weaviate {source_table} → Weaviate {dest_table} "
+        f"({result.source_rows:,} rows, {read} + batch {write}, "
         f"copy_split={split})",
         proof_line,
     ]
