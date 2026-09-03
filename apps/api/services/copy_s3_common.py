@@ -9,6 +9,9 @@ endpoint+bucket+key declines. Cross-endpoint CopyObject declines
 
 from __future__ import annotations
 
+import csv
+from collections.abc import Iterable, Iterator, Sequence
+from datetime import date, datetime
 from typing import Any
 
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_endpoint_url
@@ -205,3 +208,95 @@ def skip_complete_s3(
         source_snapshot=snapshot,
         proof_scope="dest_count_equals_source_snapshot_count",
     )
+
+
+def s3_csv_cell(value: object) -> str:
+    """Encode one cell for the CSV/TSV COPY wire.
+
+    NULL is unquoted ``\\N``. Empty string is later quoted as ``""``.
+    """
+    if value is None:
+        return "\\N"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise FastPathUnavailable("BLOB values are not S3 CSV COPY-safe")
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable("timestamptz value is not S3 CSV COPY-safe")
+        if value.microsecond:
+            return value.strftime("%Y-%m-%d %H:%M:%S.%f")
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if value == "":
+        return ""
+    return str(value)
+
+
+def s3_csv_quote(cell: str) -> str:
+    if cell == "":
+        return '""'
+    if cell == "\\N":
+        return "\\N"
+    if any(c in cell for c in ',\"\n\r'):
+        return '"' + cell.replace('"', '""') + '"'
+    return cell
+
+
+def s3_format_delimited_row(cells: Sequence[str], delimiter: str) -> str:
+    if delimiter == "\t":
+        return "\t".join(cells)
+    return ",".join(s3_csv_quote(c) for c in cells)
+
+
+def s3_write_delimited(
+    path: str,
+    header: Sequence[str],
+    rows: Iterable[Sequence[object]],
+    delimiter: str,
+) -> int:
+    """Write HEADER plus data rows. Header is not a dest row."""
+    written = 0
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(s3_format_delimited_row(list(header), delimiter) + "\n")
+        for row in rows:
+            handle.write(
+                s3_format_delimited_row([s3_csv_cell(v) for v in row], delimiter)
+                + "\n"
+            )
+            written += 1
+    return written
+
+
+def s3_iter_fetchmany(cursor: Any, batch: int = 8192) -> Iterator[Any]:
+    while True:
+        rows = cursor.fetchmany(batch)
+        if not rows:
+            break
+        yield from rows
+
+
+def s3_parse_delimited_cell(cell: str) -> str | None:
+    if cell == "\\N":
+        return None
+    return cell
+
+
+def s3_iter_delimited_rows(
+    path: str,
+    delimiter: str,
+) -> Iterator[list[str | None]]:
+    """Yield data rows (header skipped). ``\\N`` becomes None; ``""`` stays ``""``."""
+    with open(path, encoding="utf-8", newline="") as handle:
+        reader = csv.reader(handle, delimiter=delimiter)
+        header = next(reader, None)
+        if header is None:
+            return
+        expected = len(header)
+        for row in reader:
+            if len(row) != expected:
+                raise ValueError(
+                    f"CSV row width {len(row)} != header {expected}"
+                )
+            yield [s3_parse_delimited_cell(c) for c in row]

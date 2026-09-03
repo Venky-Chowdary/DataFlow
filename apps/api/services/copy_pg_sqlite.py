@@ -18,7 +18,7 @@ source, ``:memory:``.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
@@ -32,9 +32,10 @@ from services.copy_pg_mysql import (
     mapping_is_plain_carry,
     pg_type_is_load_safe,
 )
-from services.copy_pg_sqlserver import _CopyExecutemanySink, _as_float, _as_int, _identity
+from services.copy_pg_sqlserver import _CopyExecutemanySink
 from services.copy_sqlite_common import (
     skip_complete_sqlite,
+    sqlite_bind_from_text,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -62,15 +63,6 @@ def pg_sqlite_type_is_copy_safe(declared: str) -> bool:
         return False
     base = _pg_base(declared)
     return base not in {"TIMESTAMP", "DATETIME", "TIMESTAMPTZ", "BYTEA", "JSONB", "JSON"}
-
-
-def _converter_for_sqlite_ddl(ddl: str) -> Callable[[str | None], Any]:
-    base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
-    if base in {"BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "INT2", "INT4", "INT8"}:
-        return _as_int
-    if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
-        return _as_float
-    return _identity
 
 
 def copy_postgres_to_sqlite(
@@ -110,7 +102,7 @@ def copy_postgres_to_sqlite(
     col_sql = ", ".join(sqlite_ident(c) for c in target_cols)
     placeholders = ", ".join(["?"] * len(target_cols))
     insert_sql = f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-    converters = [_converter_for_sqlite_ddl(ddl) for ddl in sqlite_ddls]
+    converters = [sqlite_bind_from_text(ddl) for ddl in sqlite_ddls]
 
     source_conn = _pg_connect(source_cfg)
     dest_conn = sqlite_connect(dest_cfg)

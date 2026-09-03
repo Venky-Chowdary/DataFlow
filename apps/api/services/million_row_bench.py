@@ -7151,6 +7151,287 @@ def run_s3_mysql_volume(
     return report
 
 
+def run_sqlite_s3_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_database: str | Path | None = None,
+    dest_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQLite→S3 through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT of the CSV (header skipped),
+    never ListObjects length, never writer PUT ack. Empty dest is SELECT
+    CSV + upload_file, not ``.dump`` / ``aws s3 cp``. Dest key must be
+    ``.csv`` / ``.tsv``. DATE affinity is allowed (stored TEXT). Unique
+    dest ``bench_sqlite_s3.csv`` is not reused from ``bench_mysql_s3.csv``
+    / ``bench_pg_s3.csv``. Seeds from PostgreSQL→SQLite when the source
+    file/table is missing.
+    """
+    _require_minio()
+
+    src_table = str(source_table or "bench_pg_sqlite")
+    dest = str(dest_table)
+    src_db = Path(source_database or (_sqlite_bench_dir() / "src.db"))
+    bucket = dest_bucket or _s3_bench_bucket()
+    dest_cfg = _s3_local_cfg(bucket, dest)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _sqlite_count(src_db, src_table) if src_db.exists() else 0
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_sqlite_volume(
+            rows=rows,
+            dest_table=src_table,
+            dest_database=src_db,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        from services.copy_s3_common import s3_ensure_bucket
+
+        s3_ensure_bucket(dest_cfg)
+        _s3_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _sqlite_cfg(src_db, src_table))
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-sqlite-s3-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _s3_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlite→s3",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "source_database": str(src_db),
+        "dest_table": dest,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlite_read": summary.get("sqlite_read"),
+        "s3_write": summary.get("s3_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "s3_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} sqlite→s3 [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source snapshot COUNT: {rows})")
+    print("Not aws s3 cp / .dump. Empty dest is SELECT CSV + upload. CSV HEADER is not a dest row.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlite_upload_s3"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SQLite SELECT CSV + S3 upload, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_s3_sqlite_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_bucket: str | None = None,
+    dest_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity S3→SQLite through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)``. Empty dest is ``executemany``
+    insert, not upsert / sqlite3 ``.import`` / ``aws s3 cp``.
+    JSON/JSONL/Parquet decline. Seeds from SQLite→S3 CSV when the source
+    object is missing. Unique dest ``bench_s3_from_sqlite`` is not reused
+    from ``bench_1m`` / ``bench_pg_sqlite``.
+    """
+    _require_minio()
+
+    src_key = str(source_table or "bench_sqlite_s3.csv")
+    dest = str(dest_table)
+    dest_db = Path(dest_database or (_sqlite_bench_dir() / "from_s3.db"))
+    bucket = source_bucket or _s3_bench_bucket()
+    src_cfg = _s3_local_cfg(bucket, src_key)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _s3_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlite_s3_volume(
+            rows=rows,
+            dest_table=src_key,
+            dest_bucket=bucket,
+            source_table="bench_pg_sqlite",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlite_drop_table(dest_db, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", _sqlite_cfg(dest_db, dest))
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-s3-sqlite-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlite_count(dest_db, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "s3→sqlite",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "source_bucket": bucket,
+        "dest_table": dest,
+        "dest_database": str(dest_db),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_read": summary.get("s3_read"),
+        "sqlite_write": summary.get("sqlite_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "sqlite_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} s3→sqlite [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source artifact COUNT: {rows})")
+    print("Not aws s3 cp / .import. Empty dest is executemany insert. JSON/JSONL decline.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "get_csv_s3_executemany_sqlite"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected S3 GET CSV + SQLite executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 

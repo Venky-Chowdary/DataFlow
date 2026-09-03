@@ -1,17 +1,17 @@
-"""MySQL SELECT CSV → S3 PUT (cross-engine bulk).
+"""SQLite SELECT CSV → S3 PUT (cross-engine bulk).
 
-One ``START TRANSACTION WITH CONSISTENT SNAPSHOT`` streams ``SELECT``
-(SSCursor) into a CSV tempfile (HEADER, ``\\N`` = NULL, ``""`` = empty
-string), then ``upload_file``. Dest COUNT is object-store artifact COUNT
-of that CSV (header skipped) — never writer PUT ack, never ListObjects
-length. Empty dest is PUT, **not** upsert / ``aws s3 cp``. Occupied dest
-whose COUNT already equals the source snapshot is skip-complete.
-Occupied dest with a different COUNT declines. Dest key must be
-``.csv`` / ``.tsv``.
+One ``BEGIN`` on the source file streams ``SELECT`` into a CSV tempfile
+(HEADER, ``\\N`` = NULL, ``""`` = empty string), then ``upload_file``.
+Dest COUNT is object-store artifact COUNT of that CSV (header skipped) —
+never writer PUT ack, never ListObjects length. Empty dest is PUT, **not**
+``.dump`` / ``aws s3 cp``. Occupied dest whose COUNT already equals the
+source COUNT is skip-complete. Occupied dest with a different COUNT
+declines. Dest key must be ``.csv`` / ``.tsv``. DATE affinity is allowed
+(SQLite stores DATE as TEXT; identity of that storage). BLOB declines.
 
 Declines (row path keeps quarantine): transforms that change values,
-blob/json/geometry/bit/timestamp, public proxy, occupied dest with dest
-COUNT ≠ source, non-CSV dest key.
+BLOB, public proxy, occupied dest with dest COUNT ≠ source, non-CSV dest
+key, ``:memory:``.
 """
 
 from __future__ import annotations
@@ -23,13 +23,6 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
-from services.copy_mysql_pg import (
-    _FETCH_BATCH,
-    _mysql_connect,
-    _mysql_ident,
-    _mysql_table_pk_and_types,
-    mysql_type_is_copy_safe,
-)
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
     s3_bucket,
@@ -43,43 +36,29 @@ from services.copy_s3_common import (
     s3_write_delimited,
     skip_complete_s3,
 )
+from services.copy_sqlite_common import (
+    sqlite_connect,
+    sqlite_ident,
+    sqlite_pragma_types,
+    sqlite_resolved_path,
+    sqlite_type_is_copy_safe,
+)
 
 logger = logging.getLogger(__name__)
 
+_FETCH_BATCH = 8192
 
-def mysql_s3_copy_enabled() -> bool:
-    raw = (getenv_brand("MYSQL_S3_COPY", "1") or "1").strip().lower()
+
+def sqlite_s3_copy_enabled() -> bool:
+    raw = (getenv_brand("SQLITE_S3_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
-def mysql_s3_type_is_copy_safe(declared: str) -> bool:
-    return mysql_type_is_copy_safe(declared)
+def sqlite_s3_type_is_copy_safe(declared: str) -> bool:
+    return sqlite_type_is_copy_safe(declared)
 
 
-def _select_to_delimited(
-    source_conn: Any,
-    select_sql: str,
-    path: str,
-    *,
-    header: list[str],
-    delimiter: str,
-) -> int:
-    from pymysql.cursors import SSCursor
-
-    cur = source_conn.cursor(SSCursor)
-    try:
-        cur.execute(select_sql)
-        return s3_write_delimited(
-            path, header, s3_iter_fetchmany(cur, _FETCH_BATCH), delimiter
-        )
-    finally:
-        try:
-            cur.close()
-        except Exception:
-            logger.debug("MySQL stream cursor close skipped", exc_info=True)
-
-
-def copy_mysql_to_s3(
+def copy_sqlite_to_s3(
     *,
     source_cfg: dict[str, Any],
     source_table: str,
@@ -90,12 +69,12 @@ def copy_mysql_to_s3(
     replace_destination: bool,
     source_schema: str | None = None,
 ) -> FastPathResult:
-    """SELECT CSV from MySQL into one S3 object. Dest COUNT is the proof."""
+    """SELECT CSV from SQLite into one S3 object. Dest COUNT is the proof."""
     del source_schema
     if not pairs or len(pairs) != len(s3_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
-    if not mysql_s3_copy_enabled():
-        raise FastPathUnavailable("MySQL→S3 COPY disabled")
+    if not sqlite_s3_copy_enabled():
+        raise FastPathUnavailable("SQLite→S3 COPY disabled")
     ok, reason = mapping_is_plain_carry(
         [{"source": s, "target": t, "transform": "none"} for s, t in pairs]
     )
@@ -104,7 +83,7 @@ def copy_mysql_to_s3(
 
     from connectors.write_resilience import is_public_proxy_host
 
-    if is_public_proxy_host(source_cfg.get("host") or "") or is_public_proxy_host(
+    if is_public_proxy_host(
         dest_cfg.get("host")
         or dest_cfg.get("connection_string")
         or dest_cfg.get("endpoint_url")
@@ -114,35 +93,37 @@ def copy_mysql_to_s3(
 
     ext = s3_ext(dest_table)
     if ext not in {"csv", "tsv"}:
-        raise FastPathUnavailable("MySQL→S3 COPY writes CSV/TSV")
+        raise FastPathUnavailable("SQLite→S3 COPY writes CSV/TSV")
 
+    sqlite_resolved_path(source_cfg)
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
-    table_q = _mysql_ident(source_table)
-    select_list = ", ".join(
-        f"{_mysql_ident(src)} AS {_mysql_ident(tgt)}" if src != tgt else _mysql_ident(src)
+    src_ref = sqlite_ident(source_table)
+    src_col_sql = ", ".join(
+        f"{sqlite_ident(src)} AS {sqlite_ident(tgt)}" if src != tgt else sqlite_ident(src)
         for src, tgt in pairs
     )
-    select_sql = f"SELECT {select_list} FROM {table_q}"  # nosec B608
+    select_sql = f"SELECT {src_col_sql} FROM {src_ref}"  # nosec B608
     delim = "\t" if ext == "tsv" else ","
 
-    source_conn = _mysql_connect(source_cfg)
+    source_conn = sqlite_connect(source_cfg)
     created_here = False
     tmp_path = ""
     try:
-        with source_conn.cursor() as src_cur:
-            src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-            _pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
-            live_l = {k.lower(): v for k, v in live.items()}
-            for col in source_cols:
-                declared = live_l.get(col.lower()) or ""
-                if not mysql_s3_type_is_copy_safe(declared):
-                    raise FastPathUnavailable(
-                        f"source column {col!r} type {declared} is not S3 COPY-safe"
-                    )
-            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
-            source_count = int(src_cur.fetchone()[0])
+        source_conn.execute("BEGIN")
+        live = sqlite_pragma_types(source_conn, source_table)
+        live_l = {k.lower(): v for k, v in live.items()}
+        for col in source_cols:
+            declared = live_l.get(col.lower())
+            if declared is None:
+                raise FastPathUnavailable(f"source column {col!r} absent")
+            if not sqlite_s3_type_is_copy_safe(declared):
+                raise FastPathUnavailable(
+                    f"source column {col!r} type {declared} is not S3 COPY-safe"
+                )
+        source_count = int(
+            source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
+        )
 
         s3_ensure_bucket(dest_cfg)
         dest_count_before = s3_dest_count(dest_cfg, dest_table)
@@ -153,7 +134,7 @@ def copy_mysql_to_s3(
                     source_count=source_count,
                     dest_count=dest_count_before,
                     extra_snapshot={
-                        "mysql_snapshot": "consistent_snapshot",
+                        "sqlite_read": "skip",
                         "s3_write": "skip",
                     },
                 )
@@ -166,18 +147,19 @@ def copy_mysql_to_s3(
             s3_delete_keys(dest_cfg, s3_list_keys(dest_cfg, dest_table))
         created_here = dest_count_before == 0 or replace_destination
 
-        fd, tmp_path = tempfile.mkstemp(prefix="df-mysql-s3-", suffix=f".{ext}")
+        fd, tmp_path = tempfile.mkstemp(prefix="df-sqlite-s3-", suffix=f".{ext}")
         os.close(fd)
-        csv_rows = _select_to_delimited(
-            source_conn,
-            select_sql,
+        src_cur = source_conn.cursor()
+        src_cur.execute(select_sql)
+        csv_rows = s3_write_delimited(
             tmp_path,
-            header=target_cols,
-            delimiter=delim,
+            target_cols,
+            s3_iter_fetchmany(src_cur, _FETCH_BATCH),
+            delim,
         )
         if csv_rows != source_count:
             raise ValueError(
-                "MySQL→S3 COPY refused: CSV rows "
+                "SQLite→S3 COPY refused: CSV rows "
                 f"{csv_rows} != source snapshot {source_count}"
             )
         client = s3_client(dest_cfg)
@@ -185,13 +167,13 @@ def copy_mysql_to_s3(
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:
             raise ValueError(
-                "MySQL→S3 COPY refused: dest COUNT "
+                "SQLite→S3 COPY refused: dest COUNT "
                 f"{dest_count} != source snapshot {source_count}"
             )
         try:
             source_conn.commit()
         except Exception:
-            logger.debug("MySQL source commit skipped", exc_info=True)
+            logger.debug("SQLite source commit skipped", exc_info=True)
         s3_write = "overwrite" if replace_destination and dest_occupied else "insert"
         proof = f"dest_count:{dest_count}"
         return FastPathResult(
@@ -201,7 +183,7 @@ def copy_mysql_to_s3(
             target_rows=dest_count,
             target_checksum=proof,
             source_snapshot={
-                "mysql_snapshot": "consistent_snapshot",
+                "sqlite_read": "select",
                 "copy_workers": 1,
                 "copy_split": "serial",
                 "copy_partitions": 1,
@@ -225,8 +207,8 @@ def copy_mysql_to_s3(
             try:
                 os.unlink(tmp_path)
             except OSError:
-                logger.debug("MySQL→S3 tempfile unlink skipped", exc_info=True)
+                logger.debug("SQLite→S3 tempfile unlink skipped", exc_info=True)
         try:
             source_conn.close()
         except Exception:
-            logger.debug("MySQL source close skipped", exc_info=True)
+            logger.debug("SQLite source close skipped", exc_info=True)

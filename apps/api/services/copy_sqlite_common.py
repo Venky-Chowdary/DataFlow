@@ -10,6 +10,7 @@ Same file + different tables uses ``INSERT SELECT`` on one connection
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,37 @@ def sqlite_same_file(src_cfg: dict[str, Any], dest_cfg: dict[str, Any]) -> bool:
     src = Path(sqlite_resolved_path(src_cfg)).expanduser().resolve(strict=False)
     dest = Path(sqlite_resolved_path(dest_cfg)).expanduser().resolve(strict=False)
     return src == dest
+
+
+def sqlite_bind_from_text(ddl: str) -> Callable[[str | None], Any]:
+    """Bind a CSV/COPY-text cell to a SQLite value. NULL stays None."""
+    base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
+    if base in {
+        "BIGINT",
+        "INT",
+        "INTEGER",
+        "SMALLINT",
+        "TINYINT",
+        "INT2",
+        "INT4",
+        "INT8",
+    }:
+        return _bind_int
+    if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
+        return _bind_float
+    return _bind_text
+
+
+def _bind_int(value: str | None) -> int | None:
+    return None if value is None else int(value)
+
+
+def _bind_float(value: str | None) -> float | None:
+    return None if value is None else float(value)
+
+
+def _bind_text(value: str | None) -> str | None:
+    return value
 
 
 def sqlite_type_is_copy_safe(declared: str) -> bool:
