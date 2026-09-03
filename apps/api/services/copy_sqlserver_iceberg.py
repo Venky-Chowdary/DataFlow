@@ -1,20 +1,20 @@
-"""MySQL SELECT → Iceberg catalog snapshot (cross-engine bulk).
+"""SQL Server SELECT → Iceberg catalog snapshot (cross-engine bulk).
 
-MySQL has no ``COPY TO STDOUT``. One ``START TRANSACTION WITH CONSISTENT
-SNAPSHOT`` streams ``SELECT`` (SSCursor) into a CSV tempfile; Arrow
-reads that CSV; one Iceberg snapshot commit follows. Dest COUNT is
-Parquet file footers via ``destination_row_count`` / ``iceberg_mor`` —
-never ``scan().count()``. Empty dest is CoW snapshot append, **not**
-``MERGE INTO``. Occupied dest whose footer COUNT already equals the
-source snapshot is skip-complete. Occupied dest with a different COUNT
-declines. Filesystem CoW declines. Iceberg catalog commits are
-snapshot-isolated, so this COPY is serial.
+SQL Server has no ``COPY TO STDOUT`` and this host has no client ``bcp``.
+One HOLDLOCK (or SNAPSHOT) transaction streams ``SELECT`` into a CSV
+tempfile; Arrow reads that CSV; one Iceberg snapshot commit follows.
+Dest COUNT is Parquet file footers via ``destination_row_count`` /
+``iceberg_mor`` — never ``scan().count()``. Empty dest is CoW snapshot
+append, **not** ``MERGE INTO``. Occupied dest whose footer COUNT already
+equals the source snapshot is skip-complete. Occupied dest with a
+different COUNT declines. Filesystem CoW declines. Iceberg catalog
+commits are snapshot-isolated, so this COPY is serial.
 
 Reuses the Iceberg dest helpers in ``copy_pg_iceberg``.
 
 Declines (row path keeps quarantine): transforms that change values,
-blob/json/geometry/bit/timestamp, public proxy, occupied dest with dest
-COUNT ≠ source.
+varbinary/xml/geography/rowversion, public proxy, occupied dest with
+dest COUNT ≠ source.
 """
 
 from __future__ import annotations
@@ -27,14 +27,6 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
-from services.copy_mysql_pg import (
-    _FETCH_BATCH,
-    _mysql_connect,
-    _mysql_ident,
-    _mysql_table_pk_and_types,
-    _select_sql,
-    mysql_type_is_copy_safe,
-)
 from services.copy_pg_iceberg import (
     _arrow_from_csv,
     _arrow_schema_for_iceberg,
@@ -44,22 +36,46 @@ from services.copy_pg_iceberg import (
     iceberg_csv_cell,
 )
 from services.copy_pg_mysql import mapping_is_plain_carry
+from services.copy_sqlserver_pg import (
+    _FETCH_BATCH,
+    _close_ss,
+    _select_sql,
+    sqlserver_type_is_copy_safe,
+)
+from services.copy_sqlserver_sqlserver import (
+    _count as _ss_count,
+    _prepare_source_read,
+    _schema_of as _ss_schema_of,
+    _ss_connect,
+    _ss_table_pk_and_types,
+    _table_ref as _ss_table_ref,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def mysql_iceberg_copy_enabled() -> bool:
-    raw = (getenv_brand("MYSQL_ICEBERG_COPY", "1") or "1").strip().lower()
+def sqlserver_iceberg_copy_enabled() -> bool:
+    raw = (getenv_brand("SQLSERVER_ICEBERG_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
 
-def _select_to_csv(source_conn: Any, select_sql: str, path: str) -> int:
-    from pymysql.cursors import SSCursor
-
+def _select_to_csv(
+    source_conn: Any,
+    select_sql: str,
+    path: str,
+    params: list[Any] | None = None,
+) -> int:
     written = 0
-    cur = source_conn.cursor(SSCursor)
+    cur = source_conn.cursor()
     try:
-        cur.execute(select_sql)
+        try:
+            cur.arraysize = _FETCH_BATCH
+        except Exception:
+            logger.debug("SQL Server arraysize skipped", exc_info=True)
+        if params:
+            cur.execute(select_sql, params)
+        else:
+            cur.execute(select_sql)
         with open(path, "w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, lineterminator="\n")
             while True:
@@ -74,10 +90,10 @@ def _select_to_csv(source_conn: Any, select_sql: str, path: str) -> int:
         try:
             cur.close()
         except Exception:
-            logger.debug("MySQL stream cursor close skipped", exc_info=True)
+            logger.debug("SQL Server stream cursor close skipped", exc_info=True)
 
 
-def copy_mysql_to_iceberg(
+def copy_sqlserver_to_iceberg(
     *,
     source_cfg: dict[str, Any],
     source_table: str,
@@ -86,13 +102,14 @@ def copy_mysql_to_iceberg(
     pairs: list[tuple[str, str]],
     iceberg_ddls: list[str],
     replace_destination: bool,
+    source_schema: str | None = None,
     dest_schema: str | None = None,
 ) -> FastPathResult:
-    """SELECT MySQL into one Iceberg snapshot. Dest COUNT is the proof."""
+    """SELECT SQL Server into one Iceberg snapshot. Dest COUNT is the proof."""
     if not pairs or len(pairs) != len(iceberg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
-    if not mysql_iceberg_copy_enabled():
-        raise FastPathUnavailable("MySQL→Iceberg COPY disabled")
+    if not sqlserver_iceberg_copy_enabled():
+        raise FastPathUnavailable("SQL Server→Iceberg COPY disabled")
     ok, reason = mapping_is_plain_carry(
         [{"source": s, "target": t, "transform": "none"} for s, t in pairs]
     )
@@ -123,27 +140,31 @@ def copy_mysql_to_iceberg(
 
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
-    table_q = _mysql_ident(source_table)
+    src_schema = _ss_schema_of(source_cfg, source_schema)
+    source_ref = _ss_table_ref(src_schema, source_table)
     arrow_schema = _arrow_schema_for_iceberg(target_cols, iceberg_ddls)
-    select_sql = _select_sql(table_q, source_cols, "")
 
-    source_conn = _mysql_connect(source_cfg)
+    source_conn = _ss_connect(source_cfg)
     created_here = False
     tmp_path = ""
+    src_cur = source_conn.cursor()
     try:
-        with source_conn.cursor() as src_cur:
-            src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-            pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
-            live_l = {k.lower(): v for k, v in live.items()}
-            for col in source_cols:
-                declared = live_l.get(col.lower()) or ""
-                if not mysql_type_is_copy_safe(declared):
-                    raise FastPathUnavailable(
-                        f"source column {col!r} type {declared} is not Iceberg COPY-safe"
-                    )
-            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
-            source_count = int(src_cur.fetchone()[0])
+        pk_cols, live = _ss_table_pk_and_types(
+            src_cur, src_schema, source_table, source_cols
+        )
+        live_l = {k.lower(): v for k, v in live.items()}
+        for col in source_cols:
+            declared = live_l.get(col.lower()) or ""
+            if not sqlserver_type_is_copy_safe(declared):
+                raise FastPathUnavailable(
+                    f"source column {col!r} type {declared} is not Iceberg COPY-safe"
+                )
+        isolation = _prepare_source_read(src_cur, source_conn)
+        source_hint = "WITH (HOLDLOCK, TABLOCK)" if isolation == "holdlock" else ""
+        source_count = _ss_count(src_cur, source_ref, source_hint)
+        select_sql = _select_sql(source_ref, source_cols, "", source_hint)
+        src_cur.close()
+        src_cur = None  # type: ignore[assignment]
 
         tbl, existed = _load_or_create_table(endpoint, arrow_schema, create=True)
         created_here = not existed
@@ -167,7 +188,7 @@ def copy_mysql_to_iceberg(
                     target_rows=dest_count_before,
                     target_checksum=proof,
                     source_snapshot={
-                        "mysql_snapshot": "consistent_snapshot",
+                        "sqlserver_isolation": isolation,
                         "copy_workers": 1,
                         "copy_split": "skip",
                         "copy_partitions": 1,
@@ -184,18 +205,18 @@ def copy_mysql_to_iceberg(
                 "(leftover MERGE / upsert); identity COPY would duplicate"
             )
 
-        handle, tmp_path = tempfile.mkstemp(prefix="df_mysql_iceberg_", suffix=".csv")
+        handle, tmp_path = tempfile.mkstemp(prefix="df_ss_iceberg_", suffix=".csv")
         os.close(handle)
         csv_rows = _select_to_csv(source_conn, select_sql, tmp_path)
         if csv_rows != source_count:
             raise ValueError(
-                "MySQL→Iceberg COPY refused: CSV rows "
+                "SQL Server→Iceberg COPY refused: CSV rows "
                 f"{csv_rows} != source snapshot {source_count}"
             )
         pa_table = _arrow_from_csv(tmp_path, arrow_schema)
         if len(pa_table) != source_count:
             raise ValueError(
-                "MySQL→Iceberg COPY refused: Arrow rows "
+                "SQL Server→Iceberg COPY refused: Arrow rows "
                 f"{len(pa_table)} != source snapshot {source_count}"
             )
         if existed:
@@ -211,13 +232,13 @@ def copy_mysql_to_iceberg(
         dest_count = _iceberg_dest_count(endpoint)
         if dest_count != source_count:
             raise ValueError(
-                "MySQL→Iceberg COPY refused: dest COUNT "
+                "SQL Server→Iceberg COPY refused: dest COUNT "
                 f"{dest_count} != source snapshot {source_count}"
             )
         try:
             source_conn.commit()
         except Exception:
-            logger.debug("MySQL source commit skipped", exc_info=True)
+            logger.debug("SQL Server source commit skipped", exc_info=True)
         proof = f"dest_count:{dest_count}"
         return FastPathResult(
             rows_copied=dest_count,
@@ -226,7 +247,7 @@ def copy_mysql_to_iceberg(
             target_rows=dest_count,
             target_checksum=proof,
             source_snapshot={
-                "mysql_snapshot": "consistent_snapshot",
+                "sqlserver_isolation": isolation,
                 "copy_workers": 1,
                 "copy_split": "serial",
                 "copy_partitions": 1,
@@ -254,8 +275,13 @@ def copy_mysql_to_iceberg(
             try:
                 os.unlink(tmp_path)
             except OSError:
-                logger.debug("MySQL Iceberg COPY tempfile unlink skipped", exc_info=True)
+                logger.debug("SQL Server Iceberg COPY tempfile unlink skipped", exc_info=True)
         try:
-            source_conn.close()
+            if src_cur is not None:
+                src_cur.close()
         except Exception:
-            logger.debug("MySQL source close skipped", exc_info=True)
+            logger.debug("SQL Server source cursor close skipped", exc_info=True)
+        try:
+            _close_ss(source_conn)
+        except Exception:
+            logger.debug("SQL Server source close skipped", exc_info=True)

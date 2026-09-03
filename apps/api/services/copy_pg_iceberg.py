@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -46,6 +48,36 @@ logger = logging.getLogger(__name__)
 def pg_iceberg_copy_enabled() -> bool:
     raw = (getenv_brand("PG_ICEBERG_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def iceberg_csv_cell(value: Any) -> str:
+    """Encode one Python cell as Arrow CSV (NULL is ``\\N``).
+
+    ``datetime`` at midnight is written as a date so SQL Server DATE
+    values (often returned as ``datetime``) parse as Iceberg date.
+    """
+    if value is None:
+        return "\\N"
+    if isinstance(value, bool):
+        return "t" if value else "f"
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable("timestamptz cell is not Iceberg COPY-safe")
+        if (
+            value.hour == 0
+            and value.minute == 0
+            and value.second == 0
+            and value.microsecond == 0
+        ):
+            return value.date().isoformat()
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise FastPathUnavailable("binary cell is not Iceberg COPY-safe")
+    return str(value)
 
 
 def iceberg_copy_endpoint(

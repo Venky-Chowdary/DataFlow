@@ -125,7 +125,19 @@ def _try_copy_fast_path(
     ``scan().count()``. Occupied dest with a different COUNT declines.
     MoR snapshots decline.
 
+    Iceberg→SQL Server identity append/overwrite: current-snapshot
+    Parquet files bound with pyodbc ``fast_executemany``. Not BCP /
+    ``BULK INSERT`` CSV. Source COUNT is file footers, never
+    ``scan().count()``. Occupied dest with a different COUNT declines.
+    MoR snapshots decline.
+
     MySQL→Iceberg identity append/overwrite: consistent-snapshot SELECT
+    encoded as CSV into one Arrow table and one catalog snapshot. Dest
+    COUNT is file footers, never ``scan().count()``. Occupied dest with
+    a different COUNT declines. Empty dest is CoW snapshot append, not
+    ``MERGE INTO``.
+
+    SQL Server→Iceberg identity append/overwrite: HOLDLOCK SELECT
     encoded as CSV into one Arrow table and one catalog snapshot. Dest
     COUNT is file footers, never ``scan().count()``. Occupied dest with
     a different COUNT declines. Empty dest is CoW snapshot append, not
@@ -281,6 +293,25 @@ def _try_copy_fast_path(
         )
         if ice_mysql is not None:
             return ice_mysql
+        return None
+
+    if src_n in {"iceberg", "apache_iceberg"} and sqlserver_family_name(dest_n) == "sqlserver":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ice_ss = _try_iceberg_sqlserver_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "default",
+            dest_schema=destination.schema or dest_cfg.get("schema") or "dbo",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ice_ss is not None:
+            return ice_ss
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
@@ -464,6 +495,28 @@ def _try_copy_fast_path(
         )
         if ss_ora is not None:
             return ss_ora
+        return None
+
+    if (
+        sqlserver_family_name(src_n) == "sqlserver"
+        and dest_n in {"iceberg", "apache_iceberg"}
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ss_ice = _try_sqlserver_iceberg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "dbo",
+            dest_schema=destination.schema or dest_cfg.get("schema") or "default",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ss_ice is not None:
+            return ss_ice
         return None
 
     if oracle_family_name(src_n) == "oracle" and oracle_family_name(dest_n) == "oracle":
@@ -1315,6 +1368,115 @@ def _try_iceberg_mysql_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_iceberg_sqlserver_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Iceberg→SQL Server: snapshot Parquet + fast_executemany. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_iceberg_sqlserver import copy_iceberg_to_sqlserver
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_pg import sqlserver_type_is_copy_safe
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Iceberg→SQL Server COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlserver_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            sqlserver_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Iceberg→SQL Server COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlserver_ddls.append(
+            ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
+        )
+
+    try:
+        result = copy_iceberg_to_sqlserver(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlserver_ddls=sqlserver_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Iceberg→SQL Server COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Iceberg→SQL Server COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "iceberg_parquet_fast_executemany_sqlserver",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "iceberg_file_footers",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_read": snapshot.get("iceberg_read"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    proof_line = (
+        "Proof: destination COUNT(*) equals Iceberg source footer COUNT. "
+        "Not scan().count()."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Iceberg {source_table} → SQL Server {dest_table} "
+        f"({result.source_rows:,} rows, snapshot Parquet + fast_executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_sqlserver_pg_copy_fast_path(
     *,
     source_table: str,
@@ -2042,6 +2204,111 @@ def _try_mysql_iceberg_copy_fast_path(
         proof_line += " Resume skipped complete dest (COUNT only)."
     ddl_log = [
         f"COPY MySQL {source_table} → Iceberg {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + CSV + {write} snapshot, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlserver_iceberg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQL Server→Iceberg: SELECT + CSV + snapshot. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlserver_iceberg import copy_sqlserver_to_iceberg
+    from services.copy_sqlserver_pg import sqlserver_type_is_copy_safe
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQL Server→Iceberg COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    iceberg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if not sqlserver_type_is_copy_safe(declared):
+            logger.info(
+                "SQL Server→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
+
+    try:
+        result = copy_sqlserver_to_iceberg(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            iceberg_ddls=iceberg_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQL Server→Iceberg COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQL Server→Iceberg COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlserver_csv_iceberg_snapshot",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_write": snapshot.get("iceberg_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("iceberg_write") or "append"
+    proof_line = (
+        "Proof: Iceberg dest COUNT (file footers) equals source snapshot count. "
+        "Not scan().count(). Empty dest is CoW snapshot append, not MERGE INTO."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQL Server {source_table} → Iceberg {dest_table} "
         f"({result.source_rows:,} rows, SELECT + CSV + {write} snapshot, "
         f"copy_split={split})",
         proof_line,
