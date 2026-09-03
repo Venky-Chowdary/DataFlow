@@ -35,6 +35,8 @@ BENCH_ROWS=1000000 BENCH_SRC=BENCH_SS_ORA BENCH_DEST=bench_ss_from_ora \\
   python scripts/bench_oracle_to_sqlserver_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_iceberg \\
   python scripts/bench_pg_to_iceberg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_pg_iceberg BENCH_DEST=bench_pg_from_iceberg \\
+  python scripts/bench_iceberg_to_pg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -984,8 +986,55 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 | Elapsed | **0.648 s** (COUNTs only — not a copy-speed figure) |
 | Artifact | `/opt/cursor/artifacts/pg_iceberg_1000000_resume_skip_proof.json` |
 
-Do not quote 1.54M rows/s from skip-all. Iceberg→PostgreSQL reverse is
-not on this path yet. Pytest: `test_pg_iceberg_copy` **10 passed / 0 failed**.
+Do not quote 1.54M rows/s from skip-all. Pytest: `test_pg_iceberg_copy`
+**10 passed / 0 failed**.
+
+### Named 1M fixture — Iceberg→PostgreSQL snapshot Parquet + COPY FROM STDIN (2026-09-03)
+
+Reverse of PostgreSQL→Iceberg on the **same 10-col employee data** now
+sitting on Iceberg REST (`bench_pg_iceberg`). Current-snapshot Parquet
+files are encoded as COPY text into `COPY FROM STDIN`. Source COUNT is
+file footers, never `scan().count()`. Payload is never
+`scan().to_arrow()`. Dest proof is PostgreSQL `COUNT(*)`.
+
+Warehouse is still **local files**, not S3. Do not mix 2.898 s with
+network SQL engine times.
+
+Reproduce: `BENCH_SRC=bench_pg_iceberg BENCH_DEST=bench_pg_from_iceberg python scripts/bench_iceberg_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Iceberg REST **8181** (`default.bench_pg_iceberg`, 10 columns) |
+| Destination | PostgreSQL **5432**, create-new `bench_pg_from_iceberg` |
+| Warehouse | `file:///tmp/iceberg-rest-wh` (local files, not S3) |
+| Rows | **1,000,000** |
+| Elapsed | **2.898 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| Iceberg source COUNT (file footers) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `iceberg_parquet_copy_from_stdin_pg` |
+| `copy_split` | `serial` |
+| `iceberg_read` | `snapshot_parquet` |
+| Artifact | `/opt/cursor/artifacts/iceberg_pg_1000000_proof.json` |
+
+Live 3-row NULL / `''` / `'x'` round-trips as NULL / `''` / `x`. Occupied
+dest whose `COUNT(*)` already equals the source footer COUNT is
+skip-complete. Occupied dest with a different COUNT declines. MoR
+snapshots (delete files) decline.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `iceberg_read` | skip |
+| Elapsed | **0.052 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/iceberg_pg_1000000_resume_skip_proof.json` |
+
+Do not quote 19.3M rows/s from skip-all. Pytest: `test_iceberg_pg_copy`
+**9 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 
