@@ -38,6 +38,7 @@ from services.copy_oracle_oracle import (
     _schema_of as _ora_schema_of,
     _table_exists as _ora_table_exists,
     _table_ref as _ora_table_ref,
+    oracle_cfg_is_public_proxy,
 )
 from services.copy_oracle_pg import oracle_type_is_copy_safe
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -176,9 +177,7 @@ def copy_sqlite_to_oracle(
         if ddl and not oracle_type_is_copy_safe(ddl):
             raise FastPathUnavailable(f"dest DDL {ddl} is not Oracle COPY-safe")
 
-    from connectors.write_resilience import is_public_proxy_host
-
-    if is_public_proxy_host(dest_cfg.get("host") or dest_cfg.get("connection_string") or ""):
+    if oracle_cfg_is_public_proxy(dest_cfg):
         raise FastPathUnavailable("public proxy: Oracle bulk copy not assumed")
 
     sqlite_resolved_path(source_cfg)
@@ -275,6 +274,19 @@ def copy_sqlite_to_oracle(
             if batch:
                 dst_cur.executemany(insert_sql, batch)
                 copied += len(batch)
+            if copied != source_count:
+                dest_conn.rollback()
+                raise ValueError(
+                    "SQLite→Oracle COPY refused: bound rows "
+                    f"{copied} != source COUNT {source_count}"
+                )
+            dest_count = _ora_count(dst_cur, dest_ref)
+            if dest_count != source_count:
+                dest_conn.rollback()
+                raise ValueError(
+                    "SQLite→Oracle COPY refused: dest COUNT(*) "
+                    f"{dest_count} != source COUNT {source_count}"
+                )
             dest_conn.commit()
         finally:
             try:
@@ -282,17 +294,6 @@ def copy_sqlite_to_oracle(
             except Exception:
                 logger.debug("SQLite stream cursor close skipped", exc_info=True)
 
-        if copied != source_count:
-            raise ValueError(
-                "SQLite→Oracle COPY refused: bound rows "
-                f"{copied} != source COUNT {source_count}"
-            )
-        dest_count = _ora_count(dst_cur, dest_ref)
-        if dest_count != source_count:
-            raise ValueError(
-                "SQLite→Oracle COPY refused: dest COUNT(*) "
-                f"{dest_count} != source COUNT {source_count}"
-            )
         try:
             source_conn.commit()
         except Exception:

@@ -142,6 +142,16 @@ def _oracle_connect(cfg: dict[str, Any]) -> Any:
         raise FastPathUnavailable(f"Oracle connect failed: {exc}") from exc
 
 
+def oracle_cfg_is_public_proxy(cfg: dict[str, Any]) -> bool:
+    """True when host, connection_string, or dsn names a public TCP proxy."""
+    from connectors.write_resilience import is_public_proxy_host
+
+    return any(
+        is_public_proxy_host(str(cfg.get(key) or ""))
+        for key in ("host", "connection_string", "dsn")
+    )
+
+
 def _format_ora_type(
     data_type: str, data_length: Any, data_precision: Any, data_scale: Any
 ) -> str:

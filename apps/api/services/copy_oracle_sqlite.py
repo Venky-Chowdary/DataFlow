@@ -36,6 +36,7 @@ from services.copy_oracle_oracle import (
     _oracle_connect,
     _schema_of as _ora_schema_of,
     _table_ref as _ora_table_ref,
+    oracle_cfg_is_public_proxy,
 )
 from services.copy_oracle_pg import (
     _select_sql,
@@ -120,11 +121,7 @@ def copy_oracle_to_sqlite(
         if not sqlite_type_is_copy_safe(ddl):
             raise FastPathUnavailable(f"dest DDL {ddl} is not SQLite COPY-safe")
 
-    from connectors.write_resilience import is_public_proxy_host
-
-    if is_public_proxy_host(source_cfg.get("host") or "") or is_public_proxy_host(
-        dest_cfg.get("host") or dest_cfg.get("connection_string") or ""
-    ):
+    if oracle_cfg_is_public_proxy(source_cfg) or oracle_cfg_is_public_proxy(dest_cfg):
         raise FastPathUnavailable("public proxy: SQLite bulk copy not assumed")
 
     sqlite_resolved_path(dest_cfg)

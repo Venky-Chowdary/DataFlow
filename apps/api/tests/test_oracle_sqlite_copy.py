@@ -188,6 +188,36 @@ def test_oracle_sqlite_memory_declines():
         )
 
 
+def test_oracle_sqlite_public_proxy_declines(tmp_path):
+    src = {
+        **_ora_cfg(),
+        "host": "",
+        "connection_string": "dataflow/x@caboose.proxy.rlwy.net:1521/XEPDB1",
+        "dsn": "",
+    }
+    with pytest.raises(FastPathUnavailable, match="public proxy"):
+        copy_oracle_to_sqlite(
+            source_cfg=src,
+            source_table="missing",
+            dest_cfg=_sqlite_cfg(tmp_path / "dest.db", "nope"),
+            dest_table="nope",
+            pairs=[("id", "id")],
+            sqlite_ddls=["INTEGER"],
+            replace_destination=True,
+        )
+    src_dsn = {**_ora_cfg(), "host": "", "connection_string": "", "dsn": "caboose.proxy.rlwy.net:1521/XEPDB1"}
+    with pytest.raises(FastPathUnavailable, match="public proxy"):
+        copy_oracle_to_sqlite(
+            source_cfg=src_dsn,
+            source_table="missing",
+            dest_cfg=_sqlite_cfg(tmp_path / "dest.db", "nope"),
+            dest_table="nope",
+            pairs=[("id", "id")],
+            sqlite_ddls=["INTEGER"],
+            replace_destination=True,
+        )
+
+
 def test_oracle_sqlite_blob_dest_declines(tmp_path):
     with pytest.raises(FastPathUnavailable, match="BLOB"):
         copy_oracle_to_sqlite(

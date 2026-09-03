@@ -182,6 +182,36 @@ def test_sqlite_oracle_memory_declines():
         )
 
 
+def test_sqlite_oracle_public_proxy_declines(tmp_path):
+    dest = {
+        **_ora_cfg(),
+        "host": "",
+        "connection_string": "dataflow/x@caboose.proxy.rlwy.net:1521/XEPDB1",
+        "dsn": "",
+    }
+    with pytest.raises(FastPathUnavailable, match="public proxy"):
+        copy_sqlite_to_oracle(
+            source_cfg=_cfg(tmp_path / "src.db", "src_t"),
+            source_table="src_t",
+            dest_cfg=dest,
+            dest_table="missing",
+            pairs=[("id", "id")],
+            oracle_ddls=["NUMBER"],
+            replace_destination=True,
+        )
+    dest_dsn = {**_ora_cfg(), "host": "", "connection_string": "", "dsn": "caboose.proxy.rlwy.net:1521/XEPDB1"}
+    with pytest.raises(FastPathUnavailable, match="public proxy"):
+        copy_sqlite_to_oracle(
+            source_cfg=_cfg(tmp_path / "src.db", "src_t"),
+            source_table="src_t",
+            dest_cfg=dest_dsn,
+            dest_table="missing",
+            pairs=[("id", "id")],
+            oracle_ddls=["NUMBER"],
+            replace_destination=True,
+        )
+
+
 def test_live_sqlite_oracle_dest_count(monkeypatch, tmp_path):
     monkeypatch.delenv("DATAFLOW_SQLITE_ORACLE_COPY", raising=False)
     tag = uuid.uuid4().hex[:8]
