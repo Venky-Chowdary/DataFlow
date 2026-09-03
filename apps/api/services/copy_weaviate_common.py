@@ -203,6 +203,27 @@ def weaviate_create_class_from_source(
         )
 
 
+def _weaviate_assert_batch_ok(batch: list[dict[str, Any]], response_items: Any) -> None:
+    """Fail closed on partial or per-object batch rejections (matches weaviate_writer)."""
+    if not isinstance(response_items, list) or len(response_items) != len(batch):
+        raise ValueError(
+            "Weaviate returned incomplete per-object batch acknowledgement"
+        )
+    failures = [
+        item
+        for item in response_items
+        if not isinstance(item, dict)
+        or (item.get("result") or {}).get("errors")
+        or str((item.get("result") or {}).get("status") or "").upper() == "FAILED"
+    ]
+    if failures:
+        sample = failures[0]
+        err = (sample.get("result") or {}).get("errors") if isinstance(sample, dict) else sample
+        raise ValueError(
+            f"Weaviate rejected {len(failures)} batch object(s): {str(err)[:200]}"
+        )
+
+
 def _batch_object(obj: dict[str, Any], dest_class: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "class": dest_class,
@@ -266,6 +287,8 @@ def weaviate_list_batch_upsert(
                 raise ValueError(
                     f"Weaviate batch upsert failed: {upsert.status_code} {upsert.text[:200]}"
                 )
+            response_items = upsert.json() if upsert.content else []
+            _weaviate_assert_batch_ok(batch, response_items)
             copied += len(batch)
         if len(objects) < page:
             break

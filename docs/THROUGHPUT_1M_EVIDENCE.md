@@ -1835,7 +1835,29 @@ yet** — do not invent times.
 Pytest: `test_weaviate_weaviate_copy` — live tests skip when `:8080` is
 unreachable; unit declines always run.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity / Weaviate identity — wired, not measured
+Audit fixes (same branch): Milvus PK filter uses describe primary-key field
+(not hardcoded ``id``); query pagination enforces ``limit+offset < 16384``;
+create-from-source copies ``indexParams`` when present. Weaviate identity
+batch upsert validates per-object ack (matches ``weaviate_writer``).
+
+### Pinecone→Pinecone identity COPY (list+fetch+upsert)
+
+Dest COUNT is ``describe_index_stats`` namespace ``vectorCount`` — never
+``scan_source_ids`` DISTINCT source_id, never upsert ack, never writer
+``rows_written``. Empty dest is list+fetch+upsert of raw id/values/metadata,
+**not** vectorize / re-embed / backup restore. Same index+namespace declines.
+Cross-index declines. Pod indexes without ``/vectors/list`` decline.
+Occupied dest matching COUNT skip-completes. Occupied dest with a COUNT
+mismatch declines. Occupancy is counted **before** delete.
+
+Named 1M dest COUNT for Pinecone→Pinecone is **not recorded on this host
+yet** — do not invent times.
+
+Pytest: `test_pinecone_pinecone_copy` — unit declines only (no live Pinecone
+index on this host). `test_vector_copy_audit` — Milvus PK filter + Weaviate
+batch ack unit tests.
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity / Weaviate identity / Pinecone identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
