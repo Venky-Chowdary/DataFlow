@@ -33,6 +33,8 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_mysql BENCH_DEST=BENCH_SS_ORA \\
   python scripts/bench_sqlserver_to_oracle_million.py
 BENCH_ROWS=1000000 BENCH_SRC=BENCH_SS_ORA BENCH_DEST=bench_ss_from_ora \\
   python scripts/bench_oracle_to_sqlserver_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_iceberg \\
+  python scripts/bench_pg_to_iceberg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -933,6 +935,58 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 1.42M rows/s from skip-all. Pytest: `test_oracle_sqlserver_copy`
 **6 passed / 0 failed**; combined identity-copy matrix **92 passed / 0 failed**.
 
+### Named 1M fixture — PostgreSQL→Iceberg COPY CSV + snapshot (2026-09-03)
+
+SQL cartesian among PostgreSQL / MySQL / SQL Server / Oracle is closed.
+Next live engine on this host is Iceberg REST (`127.0.0.1:8181`) with a
+**local** warehouse (`file:///tmp/iceberg-rest-wh`). Identity bulk is
+`COPY (SELECT …) TO STDOUT` CSV into one Arrow table and one catalog
+snapshot commit. Python never builds dict rows. Dest COUNT is Parquet
+file footers via `destination_row_count` / `iceberg_mor`, never
+`scan().count()`. Empty dest is CoW snapshot append — **not**
+`MERGE INTO`. Glue / Nessie are not on this host (Planned).
+
+Do not mix this 1.344 s with PG→MySQL 3.480 s: Iceberg dest is a local
+file warehouse, not a network SQL engine.
+
+Reproduce: `BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_iceberg python scripts/bench_pg_to_iceberg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | PostgreSQL **5432** (`bench_emp_1000000`, 10 columns, PK `employee_id`) |
+| Destination | Iceberg REST **8181**, create-new `default.bench_pg_iceberg` |
+| Warehouse | `file:///tmp/iceberg-rest-wh` (local files, not S3) |
+| Rows | **1,000,000** |
+| Elapsed | **1.344 s** |
+| dest COUNT (file footers) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `copy_csv_pg_to_iceberg_snapshot` |
+| `copy_split` | `serial` |
+| `iceberg_write` | `append` |
+| `shard_mode` | `table` |
+| Artifact | `/opt/cursor/artifacts/pg_iceberg_1000000_proof.json` |
+
+Live 3-row NULL / `''` / `'x'` on Iceberg string lands as NULL / `''` /
+`x` — empty string is preserved (unlike Oracle VARCHAR2). Occupied dest
+whose footer COUNT already equals the source snapshot is skip-complete.
+Occupied dest with a different COUNT declines (leftover MERGE stays on
+the row path). Iceberg catalog commits are snapshot-isolated, so this
+COPY is serial.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest COUNT (file footers) | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `iceberg_write` | skip |
+| Elapsed | **0.648 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_iceberg_1000000_resume_skip_proof.json` |
+
+Do not quote 1.54M rows/s from skip-all. Iceberg→PostgreSQL reverse is
+not on this path yet. Pytest: `test_pg_iceberg_copy` **10 passed / 0 failed**.
+
 ### 200M named fixture — not run on this host
 
 10M source is **1.4 GB** on disk. 200M projects to **~28 GB** source plus
@@ -1099,13 +1153,12 @@ per-cell CPU in transform/validate, not database I/O.
 - Do **not** extrapolate 1M or 10M to 200M. This host did not run 200M
   (15 GiB RAM vs ~28 GB projected source heap). 200M is the partitioned
   skip/reload job on a larger box.
-- Only PostgreSQL→MySQL identity append is measured here. Warehouse sources,
-  CDC and upsert/MERGE routes are timed separately and are not covered by
-  this artifact.
-- Copy-path proof is dest `COUNT(*)` vs the source snapshot, not a second
-  checksum reread. With `shard_mode=pk`, each key range also has dest COUNT
-  equal to that range's snapshot COUNT. Unfit cells on this path fail closed
-  (STRICT + rollback), they do not silently coerce. Quarantine remains on the
-  row path.
+- Copy-path proof is dest COUNT vs the source snapshot, not a second
+  checksum reread. SQL engines use dest `COUNT(*)`. Iceberg dest COUNT is
+  file footers, never `scan().count()`. Empty Iceberg dest is CoW snapshot
+  append, not MERGE INTO. The 1.344 s PG→Iceberg figure is a **local**
+  warehouse, not S3/Glue.
+- Unfit cells on SQL COPY paths fail closed (STRICT + rollback). Quarantine
+  remains on the row path.
 - Profiled runs (`BENCH_PROFILE=1`) are ~2× slower by construction and are
   diagnostic only — never quote them as throughput.
