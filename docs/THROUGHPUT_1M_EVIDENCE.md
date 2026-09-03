@@ -1793,10 +1793,31 @@ Named 1M dest COUNT for Qdrant→Qdrant is **not recorded on this host
 yet** — do not invent times. Reproduce later:
 `BENCH_ROWS=1000000 BENCH_SRC=bench_qdrant_src BENCH_DEST=bench_qdrant_clone python scripts/bench_qdrant_to_qdrant_million.py`
 
-Pytest: `test_qdrant_qdrant_copy` — live tests skip when `:6333` is
+Pytest: `test_qdrant_qdrant_copy` **12 passed / 0 failed**
+(`/opt/cursor/artifacts/qdrant_qdrant_identity_pytest.log`) on Qdrant v1.12.5
+`127.0.0.1:6333`. Combined extended identity matrix **99 passed / 0 failed**
+(`/opt/cursor/artifacts/identity_matrix_merged_extended_pytest.log`).
+
+### Milvus→Milvus query + upsert — dest `count(*)` (2026-09-03)
+
+Identity bulk on desktop-lab Milvus (`127.0.0.1:19530`) is REST
+entities/query of raw entity fields followed by entities/upsert to the
+dest collection. Dest COUNT is ``count(*)`` from entities/query — never
+``scan_source_ids`` DISTINCT source_id, never upsert ack, never writer
+``rows_written``. Empty dest is query+upsert, **not** vectorize /
+re-embed / backup restore. Same host+port+collection declines.
+Cross-endpoint declines. Occupied dest matching COUNT skip-completes.
+Occupied dest with a COUNT mismatch declines. Occupancy is counted
+**before** delete. Desktop-lab Milvus is not a customer-tenant
+PRODUCTION_SKU.
+
+Named 1M dest COUNT for Milvus→Milvus is **not recorded on this host
+yet** — do not invent times.
+
+Pytest: `test_milvus_milvus_copy` — live tests skip when `:19530` is
 unreachable; unit declines always run.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity — wired, not measured
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity / Milvus identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
