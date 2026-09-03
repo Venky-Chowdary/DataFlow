@@ -8308,6 +8308,310 @@ def run_mysql_sqlite_volume(
     return report
 
 
+def run_sqlite_iceberg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity SQLite→Iceberg through stream_database_transfer.
+
+    Dest COUNT is file footers, never ``scan().count()``. Empty dest is
+    SELECT CSV + CoW snapshot append, not upsert / sqlite3 ``.dump`` /
+    ``MERGE INTO``. DATE ISO TEXT stays a string after PostgreSQL→SQLite.
+    DATETIME / TIMESTAMP / BLOB / JSON decline. ``:memory:`` declines.
+    Unique dest ``bench_sqlite_iceberg`` is not reused from ``bench_1m`` /
+    ``bench_pg_iceberg`` / ``bench_mysql_ice``. Seeds from PostgreSQL→SQLite
+    when the source file/table is missing. Iceberg times are **local**
+    warehouse.
+    """
+    import socket
+    from urllib.request import urlopen
+
+    rest = _iceberg_rest_uri()
+    try:
+        with urlopen(f"{rest}/v1/config", timeout=2) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                raise RuntimeError(f"Iceberg REST {rest}/v1/config not 200")
+    except Exception as exc:
+        raise RuntimeError(f"Iceberg REST not reachable at {rest}: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+
+    src_table = str(source_table or "bench_pg_sqlite")
+    dest = str(dest_table)
+    src_db = Path(source_database or (_sqlite_bench_dir() / "src.db"))
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _sqlite_count(src_db, src_table) if src_db.exists() else 0
+    except Exception:
+        have = 0
+    if have != rows:
+        run_pg_sqlite_volume(
+            rows=rows,
+            dest_table=src_table,
+            dest_database=src_db,
+            source_table=f"bench_emp_{rows}",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _iceberg_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _sqlite_cfg(src_db, src_table))
+    destination = EndpointConfig.from_dict("database", _iceberg_rest_cfg(dest))
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-sqlite-iceberg-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _iceberg_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "sqlite→iceberg",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "source_database": str(src_db),
+        "dest_table": dest,
+        "iceberg_rest": rest,
+        "iceberg_warehouse": _iceberg_rest_warehouse(),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "sqlite_read": summary.get("sqlite_read"),
+        "iceberg_write": summary.get("iceberg_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "iceberg_file_footers",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} sqlite→iceberg [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT (file footers): {landed} (source COUNT(*): {rows})")
+    print("Not .dump / MERGE INTO. Empty dest is CoW snapshot append. DATE ISO TEXT stays a string.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_sqlite_csv_iceberg_snapshot"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SQLite SELECT CSV + Iceberg snapshot, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_iceberg_sqlite_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_database: str | Path | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Iceberg→SQLite through stream_database_transfer.
+
+    Source COUNT is Iceberg file footers, never ``scan().count()``. Dest
+    COUNT is SQLite ``COUNT(*)``. Empty dest is snapshot Parquet +
+    ``executemany``, not upsert / sqlite3 ``.import`` / ``MERGE INTO``.
+    DATE lands as SQLite TEXT (ISO calendar day — no DATE affinity).
+    Nested list/map/struct / MoR / binary decline. ``:memory:`` declines.
+    Unique dest ``bench_sqlite_from_iceberg`` is not reused from
+    ``bench_1m`` / ``bench_pg_sqlite`` / ``bench_ice_mongo``. Seeds from
+    SQLite→Iceberg when the source table is missing.
+    """
+    import socket
+    from urllib.request import urlopen
+
+    rest = _iceberg_rest_uri()
+    try:
+        with urlopen(f"{rest}/v1/config", timeout=2) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                raise RuntimeError(f"Iceberg REST {rest}/v1/config not 200")
+    except Exception as exc:
+        raise RuntimeError(f"Iceberg REST not reachable at {rest}: {exc}") from exc
+    try:
+        socket.create_connection(("127.0.0.1", 5432), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"PostgreSQL 5432 not reachable: {exc}") from exc
+
+    ice_src = str(source_table or "bench_sqlite_iceberg")
+    dest = str(dest_table)
+    dest_db = Path(dest_database or (_sqlite_bench_dir() / "from_iceberg.db"))
+    dest_db.parent.mkdir(parents=True, exist_ok=True)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _iceberg_count(ice_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_sqlite_iceberg_volume(
+            rows=rows,
+            dest_table=ice_src,
+            source_table="bench_pg_sqlite",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        _sqlite_drop_table(dest_db, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", _iceberg_rest_cfg(ice_src))
+    destination = EndpointConfig.from_dict("database", _sqlite_cfg(dest_db, dest))
+    cols = _sqlite_physical_columns()
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in cols
+    ]
+    schema = dict(cols)
+    job_id = f"bench-iceberg-sqlite-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _sqlite_count(dest_db, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "iceberg→sqlite",
+        "sync_mode": sync_mode,
+        "source_table": ice_src,
+        "dest_table": dest,
+        "dest_database": str(dest_db),
+        "iceberg_rest": rest,
+        "iceberg_warehouse": _iceberg_rest_warehouse(),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "iceberg_read": summary.get("iceberg_read"),
+        "sqlite_write": summary.get("sqlite_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(cols),
+        "dest_count_source": "sqlite_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} iceberg→sqlite [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source footer COUNT: {rows})")
+    print("Not .import / MERGE INTO. Empty dest is executemany. DATE lands as TEXT.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "iceberg_parquet_executemany_sqlite"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Iceberg snapshot Parquet + SQLite executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 

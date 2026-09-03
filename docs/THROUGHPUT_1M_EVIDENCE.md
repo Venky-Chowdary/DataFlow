@@ -1578,7 +1578,7 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL — wired, not measured
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1589,14 +1589,16 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_sqlite_to_s3_million.py`, `bench_s3_to_sqlite_million.py`,
 `bench_mongo_to_s3_million.py`, `bench_s3_to_mongo_million.py`,
 `bench_sqlite_to_mongo_million.py`, `bench_mongo_to_sqlite_million.py`,
-`bench_sqlite_to_mysql_million.py`, `bench_mysql_to_sqlite_million.py`, plus SQL
+`bench_sqlite_to_mysql_million.py`, `bench_mysql_to_sqlite_million.py`,
+`bench_sqlite_to_iceberg_million.py`, `bench_iceberg_to_sqlite_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
 `bench_s3_clone.csv` / `bench_s3_from_pg` / `bench_mysql_s3.csv` /
 `bench_s3_from_mysql` / `bench_sqlite_s3.csv` / `bench_s3_from_sqlite` /
 `bench_mongo_s3.csv` / `bench_s3_from_mongo` / `bench_sqlite_mongo` /
-`bench_sqlite_from_mongo` / `bench_sqlite_mysql` / `bench_sqlite_from_mysql`
+`bench_sqlite_from_mongo` / `bench_sqlite_mysql` / `bench_sqlite_from_mysql` /
+`bench_sqlite_iceberg` / `bench_sqlite_from_iceberg`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
@@ -1615,7 +1617,9 @@ is `insert_many`, not `mongoimport`. SQLite→Mongo empty dest is
 `executemany` insert, not `mongoexport` / sqlite3 `.import`. SQLite→MySQL
 empty dest is STRICT `LOAD DATA LOCAL INFILE`, not `.dump` / sqlldr.
 MySQL→SQLite empty dest is `executemany` insert, not mysqldump / sqlite3
-`.import`. Iceberg→Iceberg writes **new** dest
+`.import`. SQLite→Iceberg empty dest is SELECT CSV + CoW snapshot append,
+not `.dump` / `MERGE INTO`. Iceberg→SQLite empty dest is snapshot Parquet
++ `executemany`, not `.import` / `MERGE INTO`. Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. JSON
@@ -1624,13 +1628,15 @@ JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, and S3→Mo
 COPY-native wire).
 TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date would invent UTC).
 Nested BSON declines Mongo→Iceberg and Mongo→S3. Nested list/map/struct decline
-Iceberg→Iceberg. SQLite DATE affinity declines SQLite→PostgreSQL (would
+Iceberg→Iceberg and Iceberg→SQLite. SQLite DATE affinity declines SQLite→PostgreSQL (would
 invent a PG type); SQLite→S3 allows DATE as stored TEXT (identity of
 SQLite storage). SQLite→Mongo DATE ISO/calendar day becomes BSON Date at
 UTC midnight when the mapping/pragma is DATE; TEXT ISO stays a string.
-DATETIME/TIMESTAMP/BLOB decline SQLite→Mongo (BSON Date would invent UTC).
-DATETIME/TIMESTAMP/BLOB/JSON decline SQLite→MySQL. PostgreSQL DATE lands as SQLite TEXT (no DATE affinity
-— engine law). Mongo→SQLite DATE also lands as TEXT. Nested BSON declines
+SQLite→Iceberg DATE ISO/calendar day is COPY-safe (Iceberg date, or string
+when mapped TEXT). DATETIME/TIMESTAMP/BLOB decline SQLite→Mongo (BSON Date would invent UTC).
+DATETIME/TIMESTAMP/BLOB/JSON decline SQLite→MySQL and SQLite→Iceberg. PostgreSQL DATE lands as SQLite TEXT (no DATE affinity
+— engine law). Mongo→SQLite DATE also lands as TEXT. Iceberg→SQLite DATE
+also lands as TEXT. Nested BSON declines
 Mongo→SQLite. MySQL→SQLite DATE/DATETIME land as TEXT. Named 1M dest COUNT for these pairs is **not recorded on
 this host yet** — do not invent times.
 
