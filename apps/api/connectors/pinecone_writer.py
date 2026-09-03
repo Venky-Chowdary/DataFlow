@@ -84,7 +84,7 @@ def _pinecone_total_vector_count(
         return 0
     ns = (namespace or "").strip()
     namespaces = payload.get("namespaces")
-    if ns and isinstance(namespaces, dict):
+    if isinstance(namespaces, dict):
         entry = namespaces.get(ns)
         if isinstance(entry, dict):
             raw = entry.get("vectorCount")
@@ -94,7 +94,8 @@ def _pinecone_total_vector_count(
                 return max(0, int(raw or 0))
             except (TypeError, ValueError):
                 return 0
-        # Named namespace absent from stats → treat as empty for that namespace.
+        # Namespace absent from per-namespace stats → empty for that namespace
+        # (never fall back to totalVectorCount when siblings exist).
         return 0
     raw = payload.get("totalVectorCount")
     if raw is None:

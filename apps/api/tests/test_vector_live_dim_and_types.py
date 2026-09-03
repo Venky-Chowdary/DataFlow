@@ -378,6 +378,18 @@ def test_pinecone_empty_namespace_allows_map_when_sibling_has_vectors():
     assert _pinecone_total_vector_count(stats, namespace="other") == 99
 
 
+def test_pinecone_default_namespace_not_inflated_by_siblings():
+    """Default namespace must not inherit totalVectorCount from other namespaces."""
+    from connectors.pinecone_writer import _pinecone_total_vector_count
+
+    stats = {
+        "totalVectorCount": 99,
+        "namespaces": {"other": {"vectorCount": 99}},
+    }
+    assert _pinecone_total_vector_count(stats, namespace="") == 0
+    assert _pinecone_total_vector_count(stats, namespace="other") == 99
+
+
 def test_weaviate_live_property_types():
     from connectors.weaviate_writer import _weaviate_live_property_types
 
