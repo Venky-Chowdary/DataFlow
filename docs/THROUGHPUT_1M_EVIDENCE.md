@@ -1584,11 +1584,13 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
 `bench_sqlite_to_sqlite_million.py`, `bench_pg_to_sqlite_million.py`,
 `bench_sqlite_to_pg_million.py`, `bench_pg_to_s3_million.py`,
-`bench_s3_to_s3_million.py`, `bench_s3_to_pg_million.py`, plus SQL
+`bench_s3_to_s3_million.py`, `bench_s3_to_pg_million.py`,
+`bench_mysql_to_s3_million.py`, `bench_s3_to_mysql_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
-`bench_s3_clone.csv` / `bench_s3_from_pg` (not reused from `bench_pg_mongo`
+`bench_s3_clone.csv` / `bench_s3_from_pg` / `bench_mysql_s3.csv` /
+`bench_s3_from_mysql` (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
 proof is `count_documents({})` (Mongo), file footers (Iceberg),
@@ -1597,13 +1599,15 @@ GET streams / Parquet footers, never ListObjects length, never writer
 PUT ack). Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg
 dest is CoW snapshot append, not `MERGE INTO`. Empty SQLite dest is
 `INSERT SELECT` / `executemany`, not `.dump` / `.import`. Empty S3 dest
-is `CopyObject` (S3→S3) or COPY CSV + `upload_file` (PostgreSQL→S3), not
-`aws s3 cp` / `aws s3 sync` / GET+PUT. Iceberg→Iceberg writes **new** dest
+is `CopyObject` (S3→S3) or COPY/SELECT CSV + `upload_file`
+(PostgreSQL→S3 / MySQL→S3), not `aws s3 cp` / `aws s3 sync` / GET+PUT.
+S3→MySQL empty dest is STRICT `LOAD DATA LOCAL INFILE`. Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. JSON
-dest keys decline PostgreSQL→S3 (row path keeps JSON export).
-JSON/JSONL/Parquet decline S3→PostgreSQL (CSV is the COPY-native wire).
+dest keys decline PostgreSQL→S3 and MySQL→S3 (row path keeps JSON export).
+JSON/JSONL/Parquet decline S3→PostgreSQL and S3→MySQL (CSV is the
+COPY-native wire).
 TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date would invent UTC).
 Nested BSON declines Mongo→Iceberg. Nested list/map/struct decline
 Iceberg→Iceberg. SQLite DATE affinity declines SQLite→PostgreSQL (would

@@ -228,16 +228,34 @@ def quote_load_data_path(path: str) -> str:
     return "'" + path.replace("\\", "\\\\") + "'"
 
 
-def build_load_data_sql(*, table_q: str, columns: list[str], infile_sql: str) -> str:
+def build_load_data_sql(
+    *,
+    table_q: str,
+    columns: list[str],
+    infile_sql: str,
+    field_terminator: str = "\t",
+    optionally_enclosed: bool = False,
+    ignore_lines: int = 0,
+) -> str:
     from connectors.writer_common import quote_sql_identifier
 
     col_sql = ", ".join(quote_sql_identifier(c, "`") for c in columns)
+    if field_terminator == "\t":
+        term_sql = r"'\t'"
+    elif field_terminator == ",":
+        term_sql = "','"
+    else:
+        raise ValueError("LOAD DATA terminator must be tab or comma")
+    enclosed = " OPTIONALLY ENCLOSED BY '\"'" if optionally_enclosed else ""
+    ignore = f" IGNORE {int(ignore_lines)} LINES" if int(ignore_lines) > 0 else ""
     # table_q and infile_sql are already quoted identifiers / literals.
     return (
         f"LOAD DATA LOCAL INFILE {infile_sql} INTO TABLE {table_q} "
         "CHARACTER SET utf8mb4 "
-        r"FIELDS TERMINATED BY '\t' ESCAPED BY '\\' "
-        r"LINES TERMINATED BY '\n' "
+        f"FIELDS TERMINATED BY {term_sql}{enclosed} "
+        r"ESCAPED BY '\\' "
+        r"LINES TERMINATED BY '\n'"
+        f"{ignore} "
         f"({col_sql})"
     )
 

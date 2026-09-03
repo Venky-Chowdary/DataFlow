@@ -6860,6 +6860,297 @@ def run_s3_pg_volume(
     return report
 
 
+def _require_mysql() -> None:
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 3306), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"MySQL 3306 not reachable: {exc}") from exc
+
+
+def run_mysql_s3_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    dest_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity MySQL→S3 through stream_database_transfer.
+
+    Dest COUNT is object-store artifact COUNT of the CSV (header skipped),
+    never ListObjects length, never writer PUT ack. Empty dest is SELECT
+    CSV + upload_file, not ``aws s3 cp``. Dest key must be ``.csv`` /
+    ``.tsv``. Unique dest ``bench_mysql_s3.csv`` is not reused from
+    ``bench_1m`` / ``bench_pg_s3.csv``.
+    """
+    _require_mysql()
+    _require_minio()
+
+    src_table = source_table or "bench_1m"
+    dest = str(dest_table)
+    bucket = dest_bucket or _s3_bench_bucket()
+    dest_cfg = _s3_local_cfg(bucket, dest)
+    mysql = _mysql_local_cfg()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    _ensure_mysql_employee_fixture(rows, src_table)
+    if not keep_dest:
+        from services.copy_s3_common import s3_ensure_bucket
+
+        s3_ensure_bucket(dest_cfg)
+        _s3_delete_key(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["username"],
+            "password": mysql["password"],
+            "table": src_table,
+        },
+    )
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-mysql-s3-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _s3_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "mysql→s3",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "dest_bucket": bucket,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_write": summary.get("s3_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "s3_artifact_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {bucket}/{dest} mysql→s3 [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination artifact COUNT: {landed} (source snapshot COUNT: {rows})")
+    print("Not aws s3 cp. Empty dest is SELECT CSV + upload. CSV HEADER is not a dest row.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_mysql_upload_s3"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected MySQL SELECT CSV + S3 upload, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_s3_mysql_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    source_bucket: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity S3→MySQL through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)``. Empty dest is STRICT
+    ``LOAD DATA LOCAL INFILE``, not upsert / ``aws s3 cp``.
+    JSON/JSONL/Parquet decline. Seeds from MySQL→S3 CSV when the source
+    object is missing. Unique dest ``bench_s3_from_mysql`` is not reused
+    from ``bench_1m``.
+    """
+    _require_mysql()
+    _require_minio()
+
+    mysql = _mysql_local_cfg()
+    src_key = str(source_table or "bench_mysql_s3.csv")
+    dest = str(dest_table)
+    bucket = source_bucket or _s3_bench_bucket()
+    src_cfg = _s3_local_cfg(bucket, src_key)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _s3_count(src_cfg, src_key)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_mysql_s3_volume(
+            rows=rows,
+            dest_table=src_key,
+            dest_bucket=bucket,
+            source_table="bench_1m",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        reset_destination(mysql, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "mysql",
+            "host": mysql["host"],
+            "port": mysql["port"],
+            "database": mysql["database"],
+            "username": mysql["username"],
+            "password": mysql["password"],
+            "table": dest,
+        },
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-s3-mysql-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = destination_count(mysql, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "s3→mysql",
+        "sync_mode": sync_mode,
+        "source_table": src_key,
+        "dest_table": dest,
+        "source_bucket": bucket,
+        "mysql_port": 3306,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "s3_read": summary.get("s3_read"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "mysql_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} s3→mysql [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source artifact COUNT: {rows})")
+    print("Not aws s3 cp. Empty dest is STRICT LOAD DATA. JSON/JSONL decline.")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "get_csv_s3_load_data_mysql"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected S3 GET CSV + MySQL STRICT LOAD DATA, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 
 

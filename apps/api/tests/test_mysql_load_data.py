@@ -76,6 +76,22 @@ def test_load_data_sql_is_tab_delimited_local_infile():
     assert r"ESCAPED BY '\\'" in sql
     assert "(`id`, `amount`)" in sql
     assert "IGNORE" not in sql
+    assert "OPTIONALLY ENCLOSED" not in sql
+
+
+def test_load_data_sql_csv_header_ignore():
+    sql = build_load_data_sql(
+        table_q="`orders`",
+        columns=["id", "amount"],
+        infile_sql="'/tmp/df_mysql_ld_x.csv'",
+        field_terminator=",",
+        optionally_enclosed=True,
+        ignore_lines=1,
+    )
+    assert r"FIELDS TERMINATED BY ','" in sql
+    assert "OPTIONALLY ENCLOSED BY '\"'" in sql
+    assert "IGNORE 1 LINES" in sql
+    assert r"ESCAPED BY '\\'" in sql
 
 
 def test_quote_load_data_path_refuses_quote():
