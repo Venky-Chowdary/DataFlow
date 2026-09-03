@@ -74,6 +74,8 @@ REPORTED_SUMMARY_KEYS = (
     "sqlite_read",
     "s3_write",
     "s3_read",
+    "bigquery_write",
+    "bigquery_read",
     "snowflake_write",
     "snowflake_read",
     "tsv_encoder",
@@ -10947,6 +10949,214 @@ def run_snowflake_snowflake_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected Snowflake INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _bigquery_local_cfg(table: str) -> dict[str, Any]:
+    return {
+        "type": "bigquery",
+        "format": "bigquery",
+        "host": "127.0.0.1",
+        "port": 9050,
+        "database": "dataflow-test",
+        "schema": "dataflow",
+        "table": table,
+        "connection_string": "http://127.0.0.1:9050",
+    }
+
+
+def _require_goccy() -> None:
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 9050), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"BigQuery emulator 9050 not reachable: {exc}") from exc
+
+
+def _bigquery_run_bench(sql: str) -> None:
+    from connectors.bigquery_conn import get_client
+    from services.dest_precount import _bigquery_run_job
+
+    client = get_client(
+        project_id="dataflow-test",
+        host="127.0.0.1",
+        port=9050,
+        connection_string="http://127.0.0.1:9050",
+    )
+    try:
+        _bigquery_run_job(client, sql)
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _bigquery_count(table: str) -> int:
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count(
+        "bigquery",
+        _bigquery_local_cfg(table),
+        schema="dataflow",
+        table_name=table,
+    )
+    if n is None:
+        raise RuntimeError(f"BigQuery dest COUNT(*) unknowable for {table!r}")
+    return int(n)
+
+
+def _bigquery_drop(table: str) -> None:
+    _bigquery_run_bench(
+        f"DROP TABLE IF EXISTS `dataflow-test`.`dataflow`.`{table}`"
+    )
+
+
+def _bigquery_seed(table: str, rows: int) -> None:
+    """Seed INT64 id + STRING label. Seed INSERT is not the COPY path."""
+    _bigquery_drop(table)
+    _bigquery_run_bench(
+        f"CREATE TABLE `dataflow-test`.`dataflow`.`{table}` (id INT64, label STRING)"
+    )
+    batch_size = 500
+    for start in range(1, rows + 1, batch_size):
+        end = min(start + batch_size - 1, rows)
+        values = ", ".join(f"({i}, 'r{i}')" for i in range(start, end + 1))
+        _bigquery_run_bench(
+            f"INSERT INTO `dataflow-test`.`dataflow`.`{table}` (id, label) VALUES {values}"
+        )
+
+
+def run_bigquery_bigquery_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity BigQuery→BigQuery through stream_database_transfer.
+
+    Dest COUNT is ``SELECT COUNT(*)`` via ``destination_row_count``, never
+    ``Table.num_rows`` / ``insert_rows_json`` ack. Empty dest is CTAS /
+    INSERT SELECT of mapped columns, not ``CLONE`` / leftover MERGE. Same
+    project+dataset+table declines. Seeds INT64+STRING when the source
+    table is missing (seed is not the COPY path). Unique dest
+    ``bench_bq_clone`` is not reused from ``bench_1m`` /
+    ``bench_adls_clone.jsonl``. goccy is not a customer-tenant
+    PRODUCTION_SKU.
+    """
+    _require_goccy()
+    src_table = str(source_table or "bench_bq_src")
+    dest = str(dest_table)
+    src_cfg = _bigquery_local_cfg(src_table)
+    dest_cfg = _bigquery_local_cfg(dest)
+    if src_table.strip().lower() == dest.strip().lower():
+        raise AssertionError(
+            "BigQuery→BigQuery bench refuses the same project+dataset+table"
+        )
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _bigquery_count(src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _bigquery_seed(src_table, rows)
+    if not keep_dest:
+        _bigquery_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INT64", "transform": "none"},
+        {"source": "label", "target": "label", "type": "STRING", "transform": "none"},
+    ]
+    schema = {"id": "INT64", "label": "STRING"}
+    job_id = f"bench-bigquery-bigquery-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _bigquery_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "bigquery→bigquery",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "bigquery_read": summary.get("bigquery_read"),
+        "bigquery_write": summary.get("bigquery_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "bigquery_count_star",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} bigquery→bigquery [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source COUNT: {rows})")
+    print(
+        "Not insert_rows_json / CLONE / leftover MERGE. Never Table.num_rows. "
+        "Empty dest is INSERT SELECT. goccy is not PRODUCTION_SKU."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "insert_select_bigquery_bigquery"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected BigQuery INSERT SELECT, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report
