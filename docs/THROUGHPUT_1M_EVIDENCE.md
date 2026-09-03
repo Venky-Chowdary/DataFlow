@@ -1676,7 +1676,28 @@ Pytest: `test_redis_redis_copy` **14 passed / 0 failed** in 0.90s
 (`/opt/cursor/artifacts/redis_redis_identity_pytest.log`). Named 1M is
 **wired, not measured** (queue still had continue-with-next).
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity — wired, not measured
+### Elasticsearch→Elasticsearch `_reindex` — dest `_count` (2026-09-03)
+
+Identity bulk on desktop-lab Elasticsearch (`127.0.0.1:9200`) is cluster
+`_reindex`. Dest COUNT is `_count` after refresh via
+`destination_row_count` — never `_cat/indices` `docs.count`, never
+reindex `created` ack, never scroll+bulk. Empty dest is `_reindex`,
+**not** `helpers.bulk` / `helpers.reindex`. Source seed (`bench_es_src`)
+is JSON bulk; that seed is **not** the COPY path. Unique dest
+`bench_es_clone` is not reused from `bench_1m` / `bench_redis_clone` /
+`bench_gcs_clone.jsonl`. Same host+port+index declines. Cross-endpoint
+declines. Occupied dest matching COUNT skip-completes. Occupied dest
+with a COUNT mismatch declines. Occupancy is counted **before** delete.
+Named 1M is **wired, not measured** (queue still had continue-with-next).
+Desktop-lab Elasticsearch is not a customer-tenant PRODUCTION_SKU.
+
+Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_es_src BENCH_DEST=bench_es_clone python scripts/bench_elasticsearch_to_elasticsearch_million.py`
+
+Pytest: `test_elasticsearch_elasticsearch_copy` **15 passed / 0 failed** in 20.33s
+(`/opt/cursor/artifacts/elasticsearch_elasticsearch_identity_pytest.log`). Named
+1M is **wired, not measured** (queue still had continue-with-next).
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1696,7 +1717,8 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_oracle_to_s3_million.py`, `bench_s3_to_oracle_million.py`,
 `bench_gcs_to_gcs_million.py`, `bench_dynamodb_to_dynamodb_million.py`,
 `bench_snowflake_to_snowflake_million.py`,
-`bench_bigquery_to_bigquery_million.py`, `bench_redis_to_redis_million.py`, plus SQL
+`bench_bigquery_to_bigquery_million.py`, `bench_redis_to_redis_million.py`,
+`bench_elasticsearch_to_elasticsearch_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1711,7 +1733,7 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
 `bench_oracle_s3.csv` / `bench_ora_from_s3` /
 `bench_gcs_clone.jsonl` / `bench_dynamodb_clone` /
-`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone`
+`bench_snowflake_clone` / `bench_bq_clone` / `bench_redis_clone` / `bench_es_clone`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
@@ -1767,7 +1789,11 @@ customer-tenant PRODUCTION_SKU; dest COUNT is `COUNT(*)` via
 server-side `COPY` of each `prefix:identity` key, not GET+SET /
 DUMP+RESTORE / `DBSIZE` (this host's proof is desktop-lab Redis
 `127.0.0.1:6379`; dest COUNT is prefix SCAN cardinality via
-`destination_row_count`, never `DBSIZE` / `INFO keyspace`). Iceberg→Iceberg writes **new** dest
+`destination_row_count`, never `DBSIZE` / `INFO keyspace`).
+Elasticsearch→Elasticsearch empty dest is cluster `_reindex`, not
+scroll+bulk / `helpers.reindex` / `_cat/indices` `docs.count` (this
+host's proof is desktop-lab Elasticsearch `127.0.0.1:9200`; dest COUNT is
+`_count` after refresh via `destination_row_count`). Iceberg→Iceberg writes **new** dest
 files (source files are not shared); same table declines. SQLite same
 file + same table declines. `:memory:` declines. S3 same
 endpoint+bucket+key declines. Cross-endpoint CopyObject declines. GCS same
@@ -1776,7 +1802,8 @@ endpoint+container+blob declines. Cross-endpoint ADLS start_copy_from_url declin
 endpoint+table declines. Snowflake same
 account+database+schema+table declines. Cross-account Snowflake INSERT SELECT declines. BigQuery same
 project+dataset+table declines. Cross-project BigQuery INSERT SELECT declines. Redis same
-host+port+db+prefix declines. Cross-endpoint Redis COPY declines. JSON
+host+port+db+prefix declines. Cross-endpoint Redis COPY declines. Elasticsearch same
+host+port+index declines. Cross-endpoint Elasticsearch `_reindex` declines. JSON
 dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, Iceberg→S3, SQL Server→S3, and Oracle→S3 (row path keeps JSON export).
 JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, S3→Iceberg, S3→SQL Server, and S3→Oracle (CSV is the
 COPY-native wire).
