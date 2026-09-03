@@ -1776,7 +1776,27 @@ yet** — do not invent times. Reproduce later:
 Pytest: `test_duckdb_duckdb_copy` **19 passed / 0 failed**
 (`/opt/cursor/artifacts/duckdb_duckdb_identity_pytest.log`).
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity — wired, not measured
+### Qdrant→Qdrant scroll + upsert — dest `points_count` (2026-09-03)
+
+Identity bulk on desktop-lab Qdrant (`127.0.0.1:6333`) is REST
+``scroll`` of raw id/vector/payload followed by ``upsert`` to the dest
+collection. Dest COUNT is collection ``points_count`` from GET
+/collections/{name} — never ``scan_source_ids`` DISTINCT source_id, never
+upsert ack, never writer ``rows_written``. Empty dest is scroll+upsert,
+**not** vectorize / re-embed / snapshot restore / qdrant-migration CLI.
+Same host+port+collection declines. Cross-endpoint declines. Occupied dest
+matching COUNT skip-completes. Occupied dest with a COUNT mismatch
+declines. Occupancy is counted **before** delete. Desktop-lab Qdrant is
+not a customer-tenant PRODUCTION_SKU.
+
+Named 1M dest COUNT for Qdrant→Qdrant is **not recorded on this host
+yet** — do not invent times. Reproduce later:
+`BENCH_ROWS=1000000 BENCH_SRC=bench_qdrant_src BENCH_DEST=bench_qdrant_clone python scripts/bench_qdrant_to_qdrant_million.py`
+
+Pytest: `test_qdrant_qdrant_copy` — live tests skip when `:6333` is
+unreachable; unit declines always run.
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / DynamoDB identity / Snowflake identity / BigQuery identity / Redis identity / Elasticsearch identity / Kafka identity / DuckDB identity / Qdrant identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1895,7 +1915,10 @@ host+port+db+prefix declines. Cross-endpoint Redis COPY declines. Elasticsearch 
 host+port+index declines. Cross-endpoint Elasticsearch `_reindex` declines. Kafka same
 bootstrap+topic declines. Cross-endpoint Kafka consume+produce declines. DuckDB same
 file + same table declines; `:memory:` and MotherDuck decline; a CHECK /
-FOREIGN KEY source or a key over an unmapped column declines. JSON
+FOREIGN KEY source or a key over an unmapped column declines. Qdrant same
+host+port+collection declines. Cross-endpoint Qdrant scroll+upsert declines.
+Empty dest is scroll+upsert of raw id/vector/payload (dest COUNT is
+``points_count``, never DISTINCT source_id). JSON
 dest keys decline PostgreSQL→S3, MySQL→S3, SQLite→S3, Mongo→S3, Iceberg→S3, SQL Server→S3, and Oracle→S3 (row path keeps JSON export).
 JSON/JSONL/Parquet decline S3→PostgreSQL, S3→MySQL, S3→SQLite, S3→Mongo, S3→Iceberg, S3→SQL Server, and S3→Oracle (CSV is the
 COPY-native wire).

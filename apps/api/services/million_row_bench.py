@@ -79,6 +79,8 @@ REPORTED_SUMMARY_KEYS = (
     "kafka_read",
     "duckdb_write",
     "duckdb_read",
+    "qdrant_write",
+    "qdrant_read",
     "dynamodb_write",
     "dynamodb_read",
     "elasticsearch_write",
@@ -11969,6 +11971,210 @@ def run_duckdb_duckdb_volume(
         if summary.get("load_method") != expected_load:
             raise AssertionError(
                 "expected DuckDB ATTACH + INSERT SELECT, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def _require_qdrant() -> None:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 6333), timeout=1):
+            return
+    except OSError as exc:
+        raise RuntimeError(
+            "Qdrant required for Qdrant identity bench (127.0.0.1:6333)"
+        ) from exc
+
+
+def _qdrant_local_cfg(collection: str) -> dict[str, Any]:
+    return {
+        "type": "qdrant",
+        "format": "qdrant",
+        "host": "127.0.0.1",
+        "port": 6333,
+        "database": collection,
+        "table": collection,
+    }
+
+
+def _qdrant_count(cfg: dict[str, Any], collection: str) -> int:
+    from services.copy_qdrant_common import qdrant_points_count
+
+    return qdrant_points_count(cfg, collection)
+
+
+def _qdrant_seed(cfg: dict[str, Any], collection: str, rows: int) -> None:
+    """Seed 4-dim vectors with payload. Seed upsert is not the COPY path."""
+    import json
+
+    from connectors.qdrant_writer import qdrant_rest
+    from services.value_serializer import json_default
+
+    session, base_url, headers = qdrant_rest(cfg)
+    name = str(collection)
+    session.delete(f"{base_url}/collections/{name}", headers=headers, timeout=15)
+    create = session.put(
+        f"{base_url}/collections/{name}",
+        data=json.dumps(
+            {"vectors": {"size": 4, "distance": "Cosine"}},
+            default=json_default,
+        ),
+        headers=headers,
+        timeout=15,
+    )
+    if create.status_code not in {200, 201}:
+        raise RuntimeError(f"Qdrant seed create failed: {create.status_code} {create.text}")
+    batch_size = 100
+    for start in range(1, rows + 1, batch_size):
+        end = min(rows + 1, start + batch_size)
+        points = [
+            {
+                "id": i,
+                "vector": [0.1 * (i % 7), 0.2, 0.3, 0.4],
+                "payload": {"id": i, "source_id": f"doc-{i}", "label": f"r{i}"},
+            }
+            for i in range(start, end)
+        ]
+        resp = session.put(
+            f"{base_url}/collections/{name}/points?wait=true",
+            data=json.dumps({"points": points}, default=json_default),
+            headers=headers,
+            timeout=60,
+        )
+        if resp.status_code not in {200, 201}:
+            raise RuntimeError(f"Qdrant seed upsert failed: {resp.status_code} {resp.text}")
+    print(f"seed: Qdrant {collection} wrote {rows} points (seed is not the COPY path)")
+
+
+def _qdrant_drop(cfg: dict[str, Any], collection: str) -> None:
+    from services.copy_qdrant_common import qdrant_delete_collection
+
+    qdrant_delete_collection(cfg, collection)
+
+
+def run_qdrant_qdrant_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Qdrant→Qdrant through stream_database_transfer.
+
+    Dest COUNT is collection ``points_count``, never ``scan_source_ids``
+    DISTINCT source_id. Empty dest is scroll+upsert, not vectorize /
+    re-embed / snapshot restore. Unique dest ``bench_qdrant_clone`` is not
+    reused from other bench clones.
+    """
+    _require_qdrant()
+    src_table = str(source_table or "bench_qdrant_src")
+    dest = str(dest_table)
+    src_cfg = _qdrant_local_cfg(src_table)
+    dest_cfg = _qdrant_local_cfg(dest)
+    if src_table.strip().lower() == dest.strip().lower():
+        raise AssertionError("Qdrant→Qdrant bench refuses the same collection")
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _qdrant_count(src_cfg, src_table)
+    except Exception:
+        have = 0
+    if have != rows:
+        _qdrant_seed(src_cfg, src_table, rows)
+    if not keep_dest:
+        _qdrant_drop(dest_cfg, dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    source = EndpointConfig.from_dict("database", src_cfg)
+    destination = EndpointConfig.from_dict("database", dest_cfg)
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "label", "target": "label", "type": "KEYWORD", "transform": "none"},
+    ]
+    schema = {"id": "INTEGER", "label": "KEYWORD"}
+    job_id = f"bench-qdrant-qdrant-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _qdrant_count(dest_cfg, dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "qdrant→qdrant",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "qdrant_read": summary.get("qdrant_read"),
+        "qdrant_write": summary.get("qdrant_write"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": 2,
+        "dest_count_source": "qdrant_points_count",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} qdrant→qdrant [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination points_count: {landed} (source points_count: {rows})")
+    print(
+        "Not scan_source_ids DISTINCT source_id / upsert ack / vectorize. "
+        "Empty dest is scroll+upsert of raw id/vector/payload."
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "scroll_upsert_points_qdrant_qdrant"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Qdrant scroll+upsert, "
                 f"got load_method={summary.get('load_method')!r}"
             )
     return report

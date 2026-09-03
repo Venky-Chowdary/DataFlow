@@ -197,6 +197,16 @@ def _try_copy_fast_path(
     declines. Not ``EXPORT DATABASE`` / ``IMPORT DATABASE``, not
     ``read_parquet`` staging, not a pandas / Arrow round trip.
 
+    Qdrant→Qdrant identity append/overwrite: scroll raw
+    id/vector/payload and upsert to the dest collection. Dest COUNT is
+    collection ``points_count``, never ``scan_source_ids`` DISTINCT
+    source_id, never upsert ack, never writer ``rows_written``. Same
+    host+port+collection declines. Cross-endpoint declines. Empty dest
+    is scroll+upsert, not vectorize / re-embed / snapshot restore /
+    qdrant-migration CLI. Occupied dest with a different COUNT declines.
+    Occupancy is counted **before** delete. Desktop-lab Qdrant on
+    ``:6333`` is not a customer-tenant PRODUCTION_SKU.
+
     PostgreSQL→SQLite identity append/overwrite: text COPY decoded into
     ``executemany``. DATE lands as SQLite TEXT (ISO calendar day —
     SQLite has no DATE affinity). TIMESTAMP / BYTEA / JSONB decline.
@@ -598,6 +608,7 @@ def _try_copy_fast_path(
     from services.copy_gcs_common import gcs_family_name
     from services.copy_adls_common import adls_family_name
     from services.copy_duckdb_common import duckdb_family_name
+    from services.copy_qdrant_common import qdrant_family_name
     from services.copy_kafka_common import kafka_family_name
     from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_redis_common import redis_family_name
@@ -1169,6 +1180,26 @@ def _try_copy_fast_path(
         )
         if duckdb_duckdb is not None:
             return duckdb_duckdb
+        return None
+
+    if (
+        qdrant_family_name(src_n) == "qdrant"
+        and qdrant_family_name(dest_n) == "qdrant"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        qdrant_qdrant = _try_qdrant_qdrant_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if qdrant_qdrant is not None:
+            return qdrant_qdrant
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -5495,6 +5526,114 @@ def _try_duckdb_duckdb_copy_fast_path(
     ddl_log = [
         f"COPY DuckDB {source_table} → DuckDB {dest_table} "
         f"({result.source_rows:,} rows, {read} + INSERT SELECT {write}, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_qdrant_qdrant_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Qdrant→Qdrant: scroll+upsert points. Dest points_count is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_qdrant_common import qdrant_type_is_copy_safe
+    from services.copy_qdrant_qdrant import copy_qdrant_to_qdrant
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Qdrant→Qdrant COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    qdrant_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if source_col != target_col:
+            logger.info("Qdrant→Qdrant COPY declined: column rename")
+            return None
+        if declared and not qdrant_type_is_copy_safe(declared):
+            logger.info(
+                "Qdrant→Qdrant COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        qdrant_ddls.append(declared or "keyword")
+
+    try:
+        result = copy_qdrant_to_qdrant(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            qdrant_ddls=qdrant_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Qdrant→Qdrant COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Qdrant→Qdrant COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("qdrant_collection") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "scroll_upsert_points_qdrant_qdrant",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "qdrant_read": snapshot.get("qdrant_read"),
+        "qdrant_write": snapshot.get("qdrant_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("qdrant_write") or "insert"
+    read = dest_summary.get("qdrant_read") or "scroll"
+    proof_line = (
+        "Proof: Qdrant dest points_count equals source points_count. "
+        "Not scan_source_ids DISTINCT source_id / upsert ack / writer "
+        "rows_written / vectorize re-embed / snapshot restore. Empty dest "
+        "is scroll+upsert of raw id/vector/payload. Desktop-lab Qdrant is "
+        "not a customer-tenant PRODUCTION_SKU."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Qdrant {source_table} → Qdrant {dest_table} "
+        f"({result.source_rows:,} rows, {read} + upsert {write}, "
         f"copy_split={split})",
         proof_line,
     ]
