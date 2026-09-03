@@ -1655,6 +1655,13 @@ NULL vs `''` preserved on STRING. Local scan total is `list_rows` length.
 Named 1M is **wired, not measured** (queue still had continue-with-next).
 goccy is not a customer-tenant PRODUCTION_SKU.
 
+goccy `v0.8.1` panics (`googlesqlite: panic runtime error: slice bounds
+out of range`) once a long-lived process has accumulated tables, so this
+suite is measured against a **freshly started** emulator. A stale
+emulator produces `500 InternalServerError` failures that are the
+emulator's, not the engine's — restart `bigquery-emulator` before
+quoting a number.
+
 ### Redis→Redis COPY — dest prefix COUNT (2026-09-03)
 
 Identity bulk on desktop-lab Redis (`127.0.0.1:6379`) is server-side
