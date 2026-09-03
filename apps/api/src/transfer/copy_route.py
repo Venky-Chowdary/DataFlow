@@ -630,6 +630,7 @@ def _try_copy_fast_path(
     from services.copy_qdrant_common import qdrant_family_name
     from services.copy_milvus_common import milvus_family_name
     from services.copy_weaviate_common import weaviate_family_name
+    from services.copy_pinecone_common import pinecone_family_name
     from services.copy_kafka_common import kafka_family_name
     from services.copy_elasticsearch_common import elasticsearch_family_name
     from services.copy_redis_common import redis_family_name
@@ -1261,6 +1262,26 @@ def _try_copy_fast_path(
         )
         if weaviate_weaviate is not None:
             return weaviate_weaviate
+        return None
+
+    if (
+        pinecone_family_name(src_n) == "pinecone"
+        and pinecone_family_name(dest_n) == "pinecone"
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        pinecone_pinecone = _try_pinecone_pinecone_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if pinecone_pinecone is not None:
+            return pinecone_pinecone
         return None
 
     if s3_family_name(src_n) == "s3" and dest_n in {"postgresql", "postgres"}:
@@ -5911,6 +5932,115 @@ def _try_weaviate_weaviate_copy_fast_path(
     ddl_log = [
         f"COPY Weaviate {source_table} → Weaviate {dest_table} "
         f"({result.source_rows:,} rows, {read} + batch {write}, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_pinecone_pinecone_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Pinecone→Pinecone: list+fetch+upsert. Dest vectorCount is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_pinecone_common import pinecone_type_is_copy_safe
+    from services.copy_pinecone_pinecone import copy_pinecone_to_pinecone
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Pinecone→Pinecone COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    pinecone_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if source_col != target_col:
+            logger.info("Pinecone→Pinecone COPY declined: column rename")
+            return None
+        if declared and not pinecone_type_is_copy_safe(declared):
+            logger.info(
+                "Pinecone→Pinecone COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        pinecone_ddls.append(declared or "text")
+
+    try:
+        result = copy_pinecone_to_pinecone(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            pinecone_ddls=pinecone_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Pinecone→Pinecone COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Pinecone→Pinecone COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": snapshot.get("pinecone_namespace") or dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "list_fetch_upsert_pinecone_pinecone",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "pinecone_read": snapshot.get("pinecone_read"),
+        "pinecone_write": snapshot.get("pinecone_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("pinecone_write") or "insert"
+    read = dest_summary.get("pinecone_read") or "list_fetch"
+    proof_line = (
+        "Proof: Pinecone dest describe_index_stats vectorCount equals source "
+        "vectorCount. Not scan_source_ids DISTINCT source_id / upsert ack / "
+        "writer rows_written / vectorize re-embed / backup restore. Empty dest "
+        "is list+fetch+upsert of raw id/values/metadata. Pod indexes without "
+        "list API decline. Desktop-lab Pinecone is not a customer-tenant "
+        "PRODUCTION_SKU."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Pinecone {source_table} → Pinecone {dest_table} "
+        f"({result.source_rows:,} rows, {read} + upsert {write}, "
         f"copy_split={split})",
         proof_line,
     ]
