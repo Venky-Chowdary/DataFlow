@@ -3835,5 +3835,322 @@ def run_iceberg_sqlserver_volume(
     return report
 
 
+def _ensure_oracle_employee_fixture(rows: int, ora_table: str) -> str:
+    """Use existing Oracle 10-col table or COPY MySQL ``bench_1m`` into it."""
+    tbl = str(ora_table).upper()
+    conn = _oracle_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM user_tables WHERE table_name = :1",
+            [tbl],
+        )
+        exists = int(cur.fetchone()[0]) > 0
+        if exists and _oracle_count(conn, tbl) == rows:
+            return tbl
+    finally:
+        conn.close()
+    run_mysql_oracle_volume(
+        rows=rows,
+        dest_table=tbl,
+        source_table="bench_1m",
+        sync_mode="full_refresh_overwrite",
+        keep_dest=False,
+        fail_closed=True,
+        proof_path=None,
+    )
+    return tbl
+
+
+def run_oracle_iceberg_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Oracle→Iceberg through stream_database_transfer.
+
+    Dest COUNT is file footers, never ``scan().count()``. Empty dest is CoW
+    snapshot append, not MERGE INTO.
+    """
+    import socket
+    from urllib.request import urlopen
+
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+    rest = _iceberg_rest_uri()
+    try:
+        with urlopen(f"{rest}/v1/config", timeout=2) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                raise RuntimeError(f"Iceberg REST {rest}/v1/config not 200")
+    except Exception as exc:
+        raise RuntimeError(f"Iceberg REST not reachable at {rest}: {exc}") from exc
+
+    src_table = _ensure_oracle_employee_fixture(rows, source_table or "BENCH_MY_ORA")
+    dest = str(dest_table)
+    job_store = ensure_memory_job_store_if_mongo_down()
+    if not keep_dest:
+        _iceberg_drop(dest)
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": src_table}
+    )
+    destination = EndpointConfig.from_dict("database", _iceberg_rest_cfg(dest))
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-ora-iceberg-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    landed = _iceberg_count(dest)
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "oracle→iceberg",
+        "sync_mode": sync_mode,
+        "source_table": src_table,
+        "dest_table": dest,
+        "oracle_dsn": "127.0.0.1:1521/XEPDB1",
+        "iceberg_rest": rest,
+        "iceberg_warehouse": _iceberg_rest_warehouse(),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "iceberg_write": summary.get("iceberg_write"),
+        "oracle_lock": summary.get("oracle_lock"),
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "dest_count_source": "iceberg_file_footers",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} oracle→iceberg [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT (file footers): {landed} (source rows: {rows})")
+    print(f"iceberg_write: {summary.get('iceberg_write')}")
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "select_oracle_csv_iceberg_snapshot"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected SELECT + CSV + Iceberg snapshot, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
+def run_iceberg_oracle_volume(
+    *,
+    rows: int,
+    dest_table: str,
+    source_table: str | None = None,
+    sync_mode: str = "full_refresh_append",
+    keep_dest: bool = False,
+    fail_closed: bool = True,
+    proof_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Identity Iceberg→Oracle through stream_database_transfer.
+
+    Source COUNT is Iceberg file footers, never ``scan().count()``. Dest
+    proof is Oracle ``COUNT(*)``. VARCHAR2 empty-string→NULL is engine
+    law, counted in ``empty_string_as_null_cells``.
+    """
+    import socket
+    from urllib.request import urlopen
+
+    try:
+        socket.create_connection(("127.0.0.1", 1521), timeout=1).close()
+    except OSError as exc:
+        raise RuntimeError(f"Oracle 1521 not reachable: {exc}") from exc
+    rest = _iceberg_rest_uri()
+    try:
+        with urlopen(f"{rest}/v1/config", timeout=2) as resp:
+            if int(getattr(resp, "status", 0) or 0) != 200:
+                raise RuntimeError(f"Iceberg REST {rest}/v1/config not 200")
+    except Exception as exc:
+        raise RuntimeError(f"Iceberg REST not reachable at {rest}: {exc}") from exc
+
+    ice_src = str(source_table or "bench_ora_iceberg")
+    dest = str(dest_table).upper()
+    job_store = ensure_memory_job_store_if_mongo_down()
+    try:
+        have = _iceberg_count(ice_src)
+    except Exception:
+        have = 0
+    if have != rows:
+        run_oracle_iceberg_volume(
+            rows=rows,
+            dest_table=ice_src,
+            source_table="BENCH_MY_ORA",
+            sync_mode="full_refresh_append",
+            keep_dest=False,
+            fail_closed=True,
+            proof_path=None,
+        )
+    if not keep_dest:
+        conn = _oracle_connect()
+        try:
+            _oracle_drop(conn.cursor(), dest)
+            conn.commit()
+        finally:
+            conn.close()
+
+    from services.mongodb_service import get_mongodb_service
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ora = _oracle_cfg()
+    source = EndpointConfig.from_dict("database", _iceberg_rest_cfg(ice_src))
+    destination = EndpointConfig.from_dict(
+        "database", {**ora, "format": "oracle", "table": dest}
+    )
+    mappings = [
+        {"source": name, "target": name, "type": ddl, "transform": "none"}
+        for name, ddl in COLUMNS
+    ]
+    schema = dict(COLUMNS)
+    job_id = f"bench-iceberg-ora-{dest}-{int(time.time())}"
+    get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+
+    started = time.monotonic()
+    transferred, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        job_id=job_id,
+    )
+    elapsed = time.monotonic() - started
+    conn = _oracle_connect()
+    try:
+        landed = _oracle_count(conn, dest)
+    finally:
+        conn.close()
+    rejected = int(summary.get("rejected_rows") or 0)
+    conservation = row_conservation(
+        source_rows=rows,
+        dest_count=landed,
+        rejected_rows=rejected,
+    )
+    rps = transferred / elapsed if elapsed > 0 else 0.0
+    report: dict[str, Any] = {
+        "route": "iceberg→oracle",
+        "sync_mode": sync_mode,
+        "source_table": ice_src,
+        "dest_table": dest,
+        "oracle_dsn": "127.0.0.1:1521/XEPDB1",
+        "iceberg_rest": rest,
+        "iceberg_warehouse": _iceberg_rest_warehouse(),
+        "job_store": job_store,
+        "job_id": job_id,
+        "load_method": summary.get("load_method"),
+        "shard_mode": summary.get("shard_mode"),
+        "copy_split": summary.get("copy_split"),
+        "iceberg_read": summary.get("iceberg_read"),
+        "empty_string_as_null_cells": summary.get("empty_string_as_null_cells") or 0,
+        "partition_proof": summary.get("partition_proof"),
+        "proof_scope": summary.get("proof_scope"),
+        "copy_workers": summary.get("copy_workers"),
+        "copy_partitions": summary.get("copy_partitions"),
+        "partitions_skipped": summary.get("partitions_skipped"),
+        "rows_requested": rows,
+        "rows_transferred": transferred,
+        "elapsed_seconds": round(elapsed, 3),
+        "rows_per_sec": round(rps, 1),
+        "dest_count": landed,
+        "rejected_rows": rejected,
+        "conservation": conservation,
+        "columns": len(COLUMNS),
+        "source_count_source": "iceberg_file_footers",
+        "summary_scalars": {
+            key: summary[key] for key in REPORTED_SUMMARY_KEYS if key in summary
+        },
+    }
+    print(
+        f"\n=== {dest} iceberg→oracle [{sync_mode}]: {transferred} rows "
+        f"in {elapsed:.1f}s = {rps:,.0f} rows/s"
+    )
+    for key in REPORTED_SUMMARY_KEYS:
+        if key in summary:
+            print(f"{key}: {summary[key]}")
+    print(f"destination COUNT(*): {landed} (source footer COUNT: {rows})")
+    print(f"iceberg_read: {summary.get('iceberg_read')}")
+    print(
+        "empty_string_as_null_cells: "
+        f"{summary.get('empty_string_as_null_cells') or 0}"
+    )
+    print(f"row conservation: {conservation['verdict']}")
+    if proof_path:
+        write_million_proof(proof_path, report)
+    if fail_closed:
+        assert_clean_conservation(conservation)
+        if transferred != rows:
+            raise AssertionError(
+                f"engine transferred {transferred}, requested {rows}"
+            )
+        expected_load = "iceberg_parquet_executemany_oracle"
+        if summary.get("load_method") != expected_load:
+            raise AssertionError(
+                "expected Iceberg Parquet + executemany, "
+                f"got load_method={summary.get('load_method')!r}"
+            )
+    return report
+
+
 
 

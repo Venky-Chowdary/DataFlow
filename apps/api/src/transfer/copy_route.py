@@ -131,6 +131,13 @@ def _try_copy_fast_path(
     ``scan().count()``. Occupied dest with a different COUNT declines.
     MoR snapshots decline.
 
+    Iceberg→Oracle identity append/overwrite: current-snapshot Parquet
+    files bound with ``oracledb.executemany``. Not sqlldr / Data Pump.
+    VARCHAR2 stores ``''`` as NULL (engine law, counted in
+    ``empty_string_as_null_cells``). Source COUNT is file footers, never
+    ``scan().count()``. Occupied dest with a different COUNT declines.
+    MoR snapshots decline.
+
     MySQL→Iceberg identity append/overwrite: consistent-snapshot SELECT
     encoded as CSV into one Arrow table and one catalog snapshot. Dest
     COUNT is file footers, never ``scan().count()``. Occupied dest with
@@ -142,6 +149,13 @@ def _try_copy_fast_path(
     COUNT is file footers, never ``scan().count()``. Occupied dest with
     a different COUNT declines. Empty dest is CoW snapshot append, not
     ``MERGE INTO``.
+
+    Oracle→Iceberg identity append/overwrite: SHARE-lock SELECT encoded
+    as CSV into one Arrow table and one catalog snapshot. Dest COUNT is
+    file footers, never ``scan().count()``. VARCHAR2 ``''`` → NULL is
+    source-side engine law (Iceberg string can store ``''``, Oracle
+    never emits it). Occupied dest with a different COUNT declines.
+    Empty dest is CoW snapshot append, not ``MERGE INTO``.
 
     Returning ``None`` rather than raising is deliberate — every route this
     cannot prove belongs on the row path, which knows how to reconcile the
@@ -312,6 +326,25 @@ def _try_copy_fast_path(
         )
         if ice_ss is not None:
             return ice_ss
+        return None
+
+    if src_n in {"iceberg", "apache_iceberg"} and oracle_family_name(dest_n) == "oracle":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ice_ora = _try_iceberg_oracle_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "default",
+            dest_schema=destination.schema or dest_cfg.get("schema") or dest_cfg.get("username") or "DATAFLOW",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ice_ora is not None:
+            return ice_ora
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
@@ -601,6 +634,28 @@ def _try_copy_fast_path(
         )
         if ora_ss is not None:
             return ora_ss
+        return None
+
+    if (
+        oracle_family_name(src_n) == "oracle"
+        and dest_n in {"iceberg", "apache_iceberg"}
+    ):
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        ora_ice = _try_oracle_iceberg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or src_cfg.get("username") or "",
+            dest_schema=destination.schema or dest_cfg.get("schema") or "default",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if ora_ice is not None:
+            return ora_ice
         return None
 
     if not (
@@ -1477,6 +1532,122 @@ def _try_iceberg_sqlserver_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_iceberg_oracle_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Iceberg→Oracle: snapshot Parquet + executemany. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_oracle import copy_iceberg_to_oracle
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_oracle_pg import oracle_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Iceberg→Oracle COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    oracle_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            iceberg_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Iceberg→Oracle COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        oracle_ddls.append(
+            ddl_type("oracle", declared) if declared else "VARCHAR2(4000)"
+        )
+
+    try:
+        result = copy_iceberg_to_oracle(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            oracle_ddls=oracle_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Iceberg→Oracle COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Iceberg→Oracle COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "iceberg_parquet_executemany_oracle",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "iceberg_file_footers",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "empty_string_as_null_cells": snapshot.get("empty_string_as_null_cells") or 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_read": snapshot.get("iceberg_read"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    proof_line = (
+        "Proof: destination COUNT(*) equals Iceberg source footer COUNT. "
+        "Not scan().count()."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    empty_cells = int(dest_summary.get("empty_string_as_null_cells") or 0)
+    if empty_cells:
+        proof_line += (
+            f" Oracle VARCHAR2 stored {empty_cells} empty string(s) as NULL "
+            "(engine law, not a row drop)."
+        )
+    ddl_log = [
+        f"COPY Iceberg {source_table} → Oracle {dest_table} "
+        f"({result.source_rows:,} rows, snapshot Parquet + executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_sqlserver_pg_copy_fast_path(
     *,
     source_table: str,
@@ -2309,6 +2480,115 @@ def _try_sqlserver_iceberg_copy_fast_path(
         proof_line += " Resume skipped complete dest (COUNT only)."
     ddl_log = [
         f"COPY SQL Server {source_table} → Iceberg {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + CSV + {write} snapshot, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_oracle_iceberg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity Oracle→Iceberg: SELECT + CSV + snapshot. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import iceberg_type_is_copy_safe
+    from services.copy_oracle_iceberg import copy_oracle_to_iceberg
+    from services.copy_oracle_pg import oracle_type_is_copy_safe
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.type_system import ddl_type
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("Oracle→Iceberg COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    iceberg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            oracle_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "Oracle→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
+
+    try:
+        result = copy_oracle_to_iceberg(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            iceberg_ddls=iceberg_ddls,
+            replace_destination=replace_destination,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("Oracle→Iceberg COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("Oracle→Iceberg COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_oracle_csv_iceberg_snapshot",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "iceberg_write": snapshot.get("iceberg_write"),
+        "oracle_lock": snapshot.get("oracle_lock"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("iceberg_write") or "append"
+    proof_line = (
+        "Proof: Iceberg dest COUNT (file footers) equals source snapshot count. "
+        "Not scan().count(). Empty dest is CoW snapshot append, not MERGE INTO."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY Oracle {source_table} → Iceberg {dest_table} "
         f"({result.source_rows:,} rows, SELECT + CSV + {write} snapshot, "
         f"copy_split={split})",
         proof_line,
