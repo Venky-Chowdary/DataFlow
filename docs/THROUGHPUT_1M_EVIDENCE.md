@@ -1594,7 +1594,47 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity / ADLS identity — wired, not measured
+### Named 1M fixture — ADLS→ADLS start_copy_from_url (2026-09-03)
+
+Identity bulk on Azurite (`127.0.0.1:10000`, account `devstoreaccount1`)
+is server-side `BlobClient.start_copy_from_url` (`requires_sync=True`).
+Dest COUNT is object-store artifact COUNT (GET stream / Parquet footer)
+— never ListBlobs length, never copy ack. Empty dest is COPY, **not**
+`azcopy` / GET+PUT / `upload_blob` of the payload. Source seed
+(`bench_adls_src.jsonl`) is a JSONL upload; that seed is **not** the
+COPY path. Unique dest `bench_adls_clone.jsonl` is not reused from
+`bench_gcs_clone.jsonl` / `bench_s3_clone.csv` / `bench_1m`. Same
+endpoint+container+blob declines. Cross-endpoint declines. `.bin`
+declines before list. Occupied dest matching COUNT skip-completes.
+Occupied dest with a COUNT mismatch declines. Occupancy is counted
+**before** delete. Azurite is an emulator, **not** a customer-tenant
+PRODUCTION_SKU.
+
+Do not mix this 6.246 s with GCS `copy_blob` or S3 `CopyObject` times
+(different emulator, different object store). Do not quote rows/s from
+this run as a customer ADLS Gen2 figure.
+
+Reproduce: `BENCH_ROWS=1000000 BENCH_SRC=bench_adls_src.jsonl BENCH_DEST=bench_adls_clone.jsonl python scripts/bench_adls_to_adls_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Azurite **10000** (`dataflowbench/bench_adls_src.jsonl`) |
+| Destination | Azurite **10000** create-new `dataflowbench/bench_adls_clone.jsonl` |
+| Rows | **1,000,000** |
+| Elapsed | **6.246 s** |
+| dest artifact COUNT | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `start_copy_from_url_adls_adls` |
+| `copy_split` | `serial` |
+| `adls_read` | `start_copy_from_url` |
+| `adls_write` | `insert` |
+| `shard_mode` | `object` |
+| Artifact | `/opt/cursor/artifacts/adls_adls_1000000_proof.json` |
+
+Pytest: `test_adls_adls_copy` **12 passed / 0 failed** in 1.10s
+(`/opt/cursor/artifacts/adls_adls_identity_pytest.log`).
+
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
@@ -1612,7 +1652,7 @@ Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_s3_to_iceberg_million.py`, `bench_iceberg_to_s3_million.py`,
 `bench_sqlserver_to_s3_million.py`, `bench_s3_to_sqlserver_million.py`,
 `bench_oracle_to_s3_million.py`, `bench_s3_to_oracle_million.py`,
-`bench_gcs_to_gcs_million.py`, `bench_adls_to_adls_million.py`, plus SQL
+`bench_gcs_to_gcs_million.py`, plus SQL
 Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_ice_from_mongo` / `bench_ice_clone` / `bench_sqlite_clone` /
 `bench_pg_sqlite` / `bench_sqlite_from_pg` / `bench_pg_s3.csv` /
@@ -1626,7 +1666,7 @@ Server/Oracle/Mongo↔Mongo scripts). Unique dest names: `bench_ice_mongo` /
 `bench_s3_iceberg` / `bench_s3_from_iceberg.csv` /
 `bench_sqlserver_s3.csv` / `bench_ss_from_s3` /
 `bench_oracle_s3.csv` / `bench_ora_from_s3` /
-`bench_gcs_clone.jsonl` / `bench_adls_clone.jsonl`
+`bench_gcs_clone.jsonl`
 (not reused from `bench_pg_mongo`
 / `bench_ss_mongo` / `bench_pg_iceberg` / `bench_1m`). Iceberg times are
 **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest
