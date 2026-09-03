@@ -76,6 +76,14 @@ def copy_gcs_to_gcs(
         raise FastPathUnavailable("GCS COPY onto the same object stays on the row path")
     if gcs_endpoint_key(source_cfg) != gcs_endpoint_key(dest_cfg):
         raise FastPathUnavailable("cross-endpoint GCS COPY stays on the row path")
+    if not gcs_type_is_copy_safe(source_table):
+        raise FastPathUnavailable(
+            f"source object {source_table!r} is not GCS COPY-safe"
+        )
+    if not gcs_type_is_copy_safe(dest_table):
+        raise FastPathUnavailable(
+            f"dest object {dest_table!r} is not GCS COPY-safe"
+        )
 
     src_keys = gcs_list_keys(source_cfg, source_table)
     if not src_keys:
