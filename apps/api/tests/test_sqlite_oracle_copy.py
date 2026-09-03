@@ -295,9 +295,8 @@ def test_live_sqlite_oracle_occupied_mismatch_declines(tmp_path):
             f"CREATE TABLE {dest} ("
             "id NUMBER NOT NULL PRIMARY KEY, label VARCHAR2(32) NULL)"
         )
-        cur.execute(
-            f"INSERT INTO {dest} (id, label) VALUES (1, 'g'), (2, 'g')"
-        )
+        cur.execute(f"INSERT INTO {dest} (id, label) VALUES (1, 'g')")
+        cur.execute(f"INSERT INTO {dest} (id, label) VALUES (2, 'g')")
         ora.commit()
         assert _dest_count(dest) == 2
         with pytest.raises(FastPathUnavailable, match="occupied Oracle dest"):
