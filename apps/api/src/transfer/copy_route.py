@@ -177,6 +177,22 @@ def _try_copy_fast_path(
     Occupied dest with a different COUNT declines. MoR snapshots
     decline. Nested list/map/struct decline.
 
+    SQLite→SQLite identity append/overwrite: ``ATTACH DATABASE`` then
+    ``INSERT INTO dest SELECT … FROM src``. Dest ``COUNT(*)`` is the
+    proof. Same file + same table declines. Empty dest is INSERT SELECT,
+    not upsert. Occupied dest with a different COUNT declines.
+    ``:memory:`` declines. Not ``.dump`` / ``.import``.
+
+    PostgreSQL→SQLite identity append/overwrite: text COPY decoded into
+    ``executemany``. DATE lands as SQLite TEXT (ISO calendar day —
+    SQLite has no DATE affinity). TIMESTAMP / BYTEA / JSONB decline.
+    Dest ``COUNT(*)`` is the proof.
+
+    SQLite→PostgreSQL identity append/overwrite: ``SELECT`` encoded as
+    COPY text into ``COPY FROM STDIN``. DATE/BOOLEAN/BLOB decline
+    (SQLite affinity would invent a PostgreSQL type). Dest ``COUNT(*)``
+    is the proof.
+
     MongoDB→Iceberg identity append/overwrite: replica-set snapshot
     ``find()`` encoded as CSV into one Arrow table and one catalog
     snapshot. Source COUNT is ``count_documents``. Dest COUNT is file
@@ -368,6 +384,24 @@ def _try_copy_fast_path(
             return pg_mongo
         return None
 
+    if src_n in {"postgresql", "postgres"} and dest_n == "sqlite":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        pg_sqlite = _try_pg_sqlite_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            source_schema=source.schema or src_cfg.get("schema") or "public",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if pg_sqlite is not None:
+            return pg_sqlite
+        return None
+
     if src_n in {"iceberg", "apache_iceberg"} and dest_n in {"postgresql", "postgres"}:
         if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
             return None
@@ -478,6 +512,41 @@ def _try_copy_fast_path(
         )
         if ice_ice is not None:
             return ice_ice
+        return None
+
+    if src_n == "sqlite" and dest_n == "sqlite":
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        sqlite_sqlite = _try_sqlite_sqlite_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if sqlite_sqlite is not None:
+            return sqlite_sqlite
+        return None
+
+    if src_n == "sqlite" and dest_n in {"postgresql", "postgres"}:
+        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+            return None
+        sqlite_pg = _try_sqlite_pg_copy_fast_path(
+            source_table=source_table,
+            dest_table=dest_table,
+            mappings=mappings,
+            schema=schema,
+            src_cfg=src_cfg,
+            dest_cfg=dest_cfg,
+            dest_type=dest_n,
+            dest_schema=destination.schema or dest_cfg.get("schema") or "public",
+            replace_destination=is_overwrite_sync(effective_sync),
+        )
+        if sqlite_pg is not None:
+            return sqlite_pg
         return None
 
     if mongo_family_name(src_n) == "mongodb" and mongo_family_name(dest_n) == "mongodb":
@@ -1612,6 +1681,110 @@ def _try_pg_mongo_copy_fast_path(
     return result.rows_copied, ddl_log, dest_summary, columns
 
 
+def _try_pg_sqlite_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    source_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity PG→SQLite: COPY text + executemany. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_pg_sqlite import copy_postgres_to_sqlite, pg_sqlite_type_is_copy_safe
+    from services.copy_sqlite_common import sqlite_type_is_copy_safe
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("PostgreSQL→SQLite COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlite_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not (
+            pg_sqlite_type_is_copy_safe(declared) or sqlite_type_is_copy_safe(declared)
+        ):
+            logger.info(
+                "PostgreSQL→SQLite COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlite_ddls.append(declared or "TEXT")
+
+    try:
+        result = copy_postgres_to_sqlite(
+            source_cfg=src_cfg,
+            source_schema=source_schema,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlite_ddls=sqlite_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("PostgreSQL→SQLite COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("PostgreSQL→SQLite COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "copy_text_pg_executemany_sqlite",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlite_write": snapshot.get("sqlite_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("sqlite_write") or "insert"
+    proof_line = (
+        "Proof: SQLite dest COUNT(*) equals source snapshot COUNT(*). "
+        "Not .import. Empty dest is insert, not upsert. DATE lands as TEXT."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY PostgreSQL {source_table} → SQLite {dest_table} "
+        f"({result.source_rows:,} rows, COPY text + {write} executemany, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
 def _try_iceberg_pg_copy_fast_path(
     *,
     source_table: str,
@@ -2253,6 +2426,209 @@ def _try_iceberg_iceberg_copy_fast_path(
     ddl_log = [
         f"COPY Iceberg {source_table} → Iceberg {dest_table} "
         f"({result.source_rows:,} rows, snapshot Parquet + {write} snapshot, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlite_sqlite_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQLite→SQLite: ATTACH + INSERT SELECT. Dest COUNT is the proof."""
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlite_common import sqlite_type_is_copy_safe
+    from services.copy_sqlite_sqlite import copy_sqlite_to_sqlite
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQLite→SQLite COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    sqlite_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not sqlite_type_is_copy_safe(declared):
+            logger.info(
+                "SQLite→SQLite COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        sqlite_ddls.append(declared or "TEXT")
+
+    try:
+        result = copy_sqlite_to_sqlite(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            pairs=pairs,
+            sqlite_ddls=sqlite_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQLite→SQLite COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQLite→SQLite COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "attach_insert_select_sqlite",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlite_read": snapshot.get("sqlite_read"),
+        "sqlite_write": snapshot.get("sqlite_write"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    write = dest_summary.get("sqlite_write") or "insert"
+    proof_line = (
+        "Proof: SQLite dest COUNT(*) equals source COUNT(*). "
+        "Not .dump / .import. Empty dest is INSERT SELECT, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQLite {source_table} → SQLite {dest_table} "
+        f"({result.source_rows:,} rows, ATTACH + {write} INSERT SELECT, "
+        f"copy_split={split})",
+        proof_line,
+    ]
+    return result.rows_copied, ddl_log, dest_summary, columns
+
+
+def _try_sqlite_pg_copy_fast_path(
+    *,
+    source_table: str,
+    dest_table: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    src_cfg: dict[str, Any],
+    dest_cfg: dict[str, Any],
+    dest_type: str,
+    dest_schema: str,
+    replace_destination: bool,
+) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
+    """Identity SQLite→PG: SELECT + COPY FROM STDIN. Dest COUNT is the proof."""
+    from connectors.postgresql_writer import pg_type
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.copy_sqlite_common import sqlite_pg_type_is_copy_safe
+    from services.copy_sqlite_pg import copy_sqlite_to_postgres
+
+    ok, reason = mapping_is_plain_carry(mappings)
+    if not ok:
+        logger.info("SQLite→PG COPY declined: %s", reason)
+        return None
+
+    pairs: list[tuple[str, str]] = []
+    pg_ddls: list[str] = []
+    for item in mappings:
+        source_col = str(item.get("source") or "").strip()
+        target_col = str(item.get("target") or "").strip()
+        declared = str(
+            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
+        )
+        if declared and not sqlite_pg_type_is_copy_safe(declared):
+            logger.info(
+                "SQLite→PG COPY declined: %s type %s is not COPY-safe",
+                source_col,
+                declared,
+            )
+            return None
+        pairs.append((source_col, target_col))
+        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+
+    try:
+        result = copy_sqlite_to_postgres(
+            source_cfg=src_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_schema=dest_schema,
+            dest_table=dest_table,
+            pairs=pairs,
+            pg_ddls=pg_ddls,
+            replace_destination=replace_destination,
+        )
+    except FastPathUnavailable as exc:
+        logger.info("SQLite→PG COPY declined: %s", exc)
+        return None
+    except Exception as exc:
+        logger.warning("SQLite→PG COPY failed after starting: %s", exc)
+        raise
+
+    columns = [p[1] for p in pairs]
+    snapshot = dict(result.source_snapshot or {})
+    dest_summary: dict[str, Any] = {
+        "type": dest_type,
+        "table": dest_table,
+        "rows_written": result.source_rows,
+        "checksum": result.target_checksum,
+        "load_method": "select_sqlite_copy_from_stdin_pg",
+        "source_row_count": result.source_rows,
+        "source_row_count_source": "engine_population_in_snapshot",
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "sync_mode": (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        ),
+        "proof_scope": result.proof_scope,
+        "source_snapshot": snapshot,
+        "copy_workers": int(snapshot.get("copy_workers") or 1),
+        "copy_partitions": snapshot.get("copy_partitions"),
+        "partitions_skipped": snapshot.get("partitions_skipped"),
+        "shard_mode": snapshot.get("shard_mode"),
+        "copy_split": snapshot.get("copy_split"),
+        "sqlite_read": snapshot.get("sqlite_read"),
+        "partition_proof": list(snapshot.get("partition_proof") or []),
+    }
+    split = dest_summary.get("copy_split") or "serial"
+    proof_line = (
+        "Proof: PostgreSQL dest COUNT(*) equals SQLite source COUNT(*). "
+        "Not .dump. Empty dest is COPY FROM STDIN, not upsert."
+    )
+    skipped = int(dest_summary.get("partitions_skipped") or 0)
+    if split == "skip" and skipped:
+        proof_line += " Resume skipped complete dest (COUNT only)."
+    ddl_log = [
+        f"COPY SQLite {source_table} → PostgreSQL {dest_table} "
+        f"({result.source_rows:,} rows, SELECT + COPY FROM STDIN, "
         f"copy_split={split})",
         proof_line,
     ]

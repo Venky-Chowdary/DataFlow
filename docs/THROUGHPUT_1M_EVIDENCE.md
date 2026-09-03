@@ -1578,22 +1578,29 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 2.93M rows/s from skip-all. Pytest: `test_mongo_mysql_copy`
 **9 passed / 0 failed**. Combined MySQL↔Mongo **18 passed / 0 failed**.
 
-### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo — wired, not measured
+### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
 `bench_mongo_to_iceberg_million.py`, `bench_iceberg_to_iceberg_million.py`,
-plus SQL Server/Oracle/Mongo↔Mongo scripts). Unique dest names:
-`bench_ice_mongo` / `bench_ice_from_mongo` / `bench_ice_clone` (not reused
-from `bench_pg_mongo` / `bench_ss_mongo` / `bench_pg_iceberg`). Iceberg
-times are **local** warehouse (`file:///tmp/iceberg-rest-wh`), not S3/Glue.
-Dest proof is `count_documents({})` (Mongo) or file footers (Iceberg).
-Empty Mongo dest is `insert_many`, not upsert. Empty Iceberg dest is CoW
-snapshot append, not `MERGE INTO`. Iceberg→Iceberg writes **new** dest
-files (source files are not shared); same table declines.
-TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date would invent UTC).
-Nested BSON declines Mongo→Iceberg. Nested list/map/struct decline
-Iceberg→Iceberg. Named 1M dest COUNT for these pairs is **not recorded
-on this host yet** — do not invent times.
+`bench_sqlite_to_sqlite_million.py`, `bench_pg_to_sqlite_million.py`,
+`bench_sqlite_to_pg_million.py`, plus SQL Server/Oracle/Mongo↔Mongo
+scripts). Unique dest names: `bench_ice_mongo` / `bench_ice_from_mongo` /
+`bench_ice_clone` / `bench_sqlite_clone` / `bench_pg_sqlite` /
+`bench_sqlite_from_pg` (not reused from `bench_pg_mongo` / `bench_ss_mongo`
+/ `bench_pg_iceberg` / `bench_1m`). Iceberg times are **local** warehouse
+(`file:///tmp/iceberg-rest-wh`), not S3/Glue. Dest proof is
+`count_documents({})` (Mongo), file footers (Iceberg), or `COUNT(*)`
+(SQLite / PostgreSQL). Empty Mongo dest is `insert_many`, not upsert.
+Empty Iceberg dest is CoW snapshot append, not `MERGE INTO`. Empty SQLite
+dest is `INSERT SELECT` / `executemany`, not `.dump` / `.import`.
+Iceberg→Iceberg writes **new** dest files (source files are not shared);
+same table declines. SQLite same file + same table declines. `:memory:`
+declines. TIMESTAMP/TIMESTAMPTZ decline Iceberg→Mongo (BSON Date would
+invent UTC). Nested BSON declines Mongo→Iceberg. Nested list/map/struct
+decline Iceberg→Iceberg. SQLite DATE affinity declines SQLite→PostgreSQL
+(would invent a PG type); PostgreSQL DATE lands as SQLite TEXT (no DATE
+affinity — engine law). Named 1M dest COUNT for these pairs is **not
+recorded on this host yet** — do not invent times.
 
 ### 200M named fixture — not run on this host
 

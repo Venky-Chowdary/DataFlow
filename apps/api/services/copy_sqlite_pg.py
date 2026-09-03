@@ -1,0 +1,229 @@
+"""SQLite SELECT → PostgreSQL COPY FROM STDIN (cross-engine bulk).
+
+SQLite has no server COPY. One ``BEGIN`` on the source file streams
+``SELECT``; each cell is encoded as PostgreSQL COPY text into
+``COPY … FROM STDIN``. Dest ``COUNT(*)`` must equal the source COUNT.
+Empty dest COPYs once. Occupied dest whose COUNT already equals the
+source COUNT is skip-complete. Occupied dest with a different COUNT
+declines. DATE/DATETIME/BLOB/BOOLEAN decline (SQLite affinity would
+invent a PostgreSQL type). This is **not** ``.dump``.
+
+Declines (row path keeps quarantine): transforms that change values,
+BLOB/DATE/BOOLEAN, public proxy, occupied dest with dest COUNT ≠ source,
+``:memory:``.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from services.brand_env import getenv_brand
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import _table_ref as _pg_table_ref
+from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
+from services.copy_pg_mysql import mapping_is_plain_carry
+from services.copy_sqlite_common import (
+    skip_complete_sqlite,
+    sqlite_connect,
+    sqlite_ident,
+    sqlite_pg_type_is_copy_safe,
+    sqlite_pragma_types,
+    sqlite_resolved_path,
+)
+
+logger = logging.getLogger(__name__)
+
+_READ_CHUNK = 1 << 20
+_FETCH_BATCH = 8192
+
+
+def sqlite_pg_copy_enabled() -> bool:
+    raw = (getenv_brand("SQLITE_PG_COPY", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _pg_ident(name: str) -> str:
+    return _quote(name)
+
+
+class _SqliteCopyReader:
+    """File-like: encode SQLite fetch batches as COPY text on read()."""
+
+    def __init__(self, cursor: Any, select_sql: str) -> None:
+        self._cursor = cursor
+        self._select_sql = select_sql
+        self._buf = b""
+        self._started = False
+        self._done = False
+        self._encode = fast_copy_text_value
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        want = _READ_CHUNK if size is None or size < 0 else max(int(size), 1)
+        if not self._started:
+            self._cursor.execute(self._select_sql)
+            self._started = True
+        join = "\t".join
+        encode = self._encode
+        while not self._done and len(self._buf) < want:
+            batch = self._cursor.fetchmany(_FETCH_BATCH)
+            if not batch:
+                self._done = True
+                break
+            payload = "\n".join(join(encode(v) for v in row) for row in batch)
+            if payload:
+                self._buf += (payload + "\n").encode("utf-8")
+        out = self._buf[:want]
+        self._buf = self._buf[want:]
+        return out
+
+
+def copy_sqlite_to_postgres(
+    *,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_schema: str,
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    pg_ddls: list[str],
+    replace_destination: bool,
+    source_schema: str | None = None,
+) -> FastPathResult:
+    """SELECT SQLite into PostgreSQL COPY FROM STDIN. Dest COUNT(*) is the proof."""
+    del source_schema
+    if not pairs or len(pairs) != len(pg_ddls):
+        raise FastPathUnavailable("column list / DDL mismatch")
+    if not sqlite_pg_copy_enabled():
+        raise FastPathUnavailable("SQLite→PostgreSQL COPY disabled")
+    ok, reason = mapping_is_plain_carry(
+        [{"source": s, "target": t, "transform": "none"} for s, t in pairs]
+    )
+    if not ok:
+        raise FastPathUnavailable(reason)
+
+    from connectors.write_resilience import is_public_proxy_host
+
+    if is_public_proxy_host(dest_cfg.get("host") or dest_cfg.get("connection_string") or ""):
+        raise FastPathUnavailable("public proxy: COPY FROM STDIN not assumed")
+
+    sqlite_resolved_path(source_cfg)
+    source_cols = [p[0] for p in pairs]
+    target_cols = [p[1] for p in pairs]
+    dest_schema_n = dest_schema or dest_cfg.get("schema") or "public"
+    dest_ref = _pg_table_ref(dest_schema_n, dest_table)
+    src_ref = sqlite_ident(source_table)
+    src_col_sql = ", ".join(sqlite_ident(c) for c in source_cols)
+    select_sql = f"SELECT {src_col_sql} FROM {src_ref}"  # nosec B608
+
+    source_conn = sqlite_connect(source_cfg)
+    dest_conn = _pg_connect(dest_cfg)
+    created_here = False
+    try:
+        source_conn.execute("BEGIN")
+        live = sqlite_pragma_types(source_conn, source_table)
+        live_l = {k.lower(): v for k, v in live.items()}
+        for col in source_cols:
+            declared = live_l.get(col.lower())
+            if declared is None:
+                raise FastPathUnavailable(f"source column {col!r} absent")
+            if not sqlite_pg_type_is_copy_safe(declared):
+                raise FastPathUnavailable(
+                    f"source column {col!r} type {declared} is not PostgreSQL COPY-safe"
+                )
+        source_count = int(
+            source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
+        )
+
+        dst_cur = dest_conn.cursor()
+        dst_cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = %s LIMIT 1",
+            (dest_schema_n, dest_table),
+        )
+        exists = dst_cur.fetchone() is not None
+        dest_occupied = False
+        if replace_destination and exists:
+            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+            dest_conn.commit()
+            exists = False
+        if exists:
+            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+            dest_count_before = int(dst_cur.fetchone()[0])
+            dest_occupied = dest_count_before > 0
+            if dest_occupied and dest_count_before == source_count and not replace_destination:
+                return skip_complete_sqlite(
+                    source_count=source_count,
+                    dest_count=dest_count_before,
+                    extra_snapshot={"sqlite_read": "skip"},
+                )
+            if dest_occupied:
+                raise FastPathUnavailable(
+                    "append into occupied PostgreSQL dest stays on the row path "
+                    "(identity COPY would duplicate)"
+                )
+        else:
+            dst_cur.execute(
+                _pg_create_sql(dest_schema_n, dest_table, pairs, pg_ddls, [])
+            )
+            dest_conn.commit()
+            created_here = True
+
+        col_list = ", ".join(_pg_ident(c) for c in target_cols)
+        copy_sql = (
+            f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
+            "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
+        )
+        src_cur = source_conn.cursor()
+        dst_cur.copy_expert(copy_sql, _SqliteCopyReader(src_cur, select_sql))
+        dest_conn.commit()
+
+        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+        dest_count = int(dst_cur.fetchone()[0])
+        if dest_count != source_count:
+            raise ValueError(
+                "SQLite→PG COPY refused: dest COUNT(*) "
+                f"{dest_count} != source COUNT {source_count}"
+            )
+        try:
+            source_conn.commit()
+        except Exception:
+            logger.debug("SQLite source commit skipped", exc_info=True)
+        proof = f"dest_count:{dest_count}"
+        return FastPathResult(
+            rows_copied=dest_count,
+            source_rows=source_count,
+            source_checksum=proof,
+            target_rows=dest_count,
+            target_checksum=proof,
+            source_snapshot={
+                "copy_workers": 1,
+                "copy_split": "serial",
+                "copy_partitions": 1,
+                "partitions_skipped": 0,
+                "partitions_loaded": 1,
+                "shard_mode": "table",
+                "sqlite_read": "select",
+            },
+            proof_scope="dest_count_equals_source_snapshot_count",
+        )
+    except Exception:
+        if created_here:
+            try:
+                dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug("PG dest drop after copy failure skipped", exc_info=True)
+        raise
+    finally:
+        try:
+            source_conn.close()
+        except Exception:
+            logger.debug("SQLite source close skipped", exc_info=True)
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("PostgreSQL dest close skipped", exc_info=True)
