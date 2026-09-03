@@ -1655,6 +1655,10 @@ Named 1M dest COUNT for Kafka→Kafka is **not recorded on this host
 yet** — do not invent times. Reproduce later:
 `BENCH_ROWS=1000000 BENCH_SRC=bench_kafka_src BENCH_DEST=bench_kafka_clone python scripts/bench_kafka_to_kafka_million.py`
 
+Pytest: `test_kafka_kafka_copy` **15 passed / 0 failed** in 11.22s
+(`/opt/cursor/artifacts/kafka_kafka_identity_pytest.log`) on Kafka 3.8.1
+KRaft `127.0.0.1:9092`. Dest COUNT is watermarks, never producer ack.
+
 ### Named 1M fixture — Iceberg↔Mongo / Iceberg↔Iceberg / SQL Server↔Mongo / Oracle↔Mongo / SQLite identity / MinIO S3 identity / SQLite↔Mongo / SQLite↔MySQL / SQLite↔Iceberg / SQLite↔SQL Server / SQLite↔Oracle / S3↔Iceberg / SQL Server↔S3 / Oracle↔S3 / GCS identity — wired, not measured
 
 Harnesses exist (`bench_iceberg_to_mongo_million.py`,
