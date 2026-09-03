@@ -41,6 +41,10 @@ BENCH_ROWS=1000000 BENCH_SRC=bench_1m BENCH_DEST=bench_mysql_iceberg \\
   python scripts/bench_mysql_to_iceberg_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_mysql_iceberg BENCH_DEST=bench_mysql_from_iceberg \\
   python scripts/bench_iceberg_to_mysql_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_from_mysql BENCH_DEST=bench_ss_iceberg \\
+  python scripts/bench_sqlserver_to_iceberg_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_ss_iceberg BENCH_DEST=bench_ss_from_iceberg \\
+  python scripts/bench_iceberg_to_sqlserver_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1140,6 +1144,103 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 
 Do not quote 14.7M rows/s from skip-all. Pytest: `test_iceberg_mysql_copy`
 **9 passed / 0 failed**.
+
+### Named 1M fixture — SQL Server→Iceberg SELECT + CSV + snapshot (2026-09-03)
+
+SQL Server has no `COPY TO STDOUT` and this host has no client `bcp`.
+Identity bulk is one HOLDLOCK (or SNAPSHOT) `SELECT` encoded as CSV into
+one Arrow table and one Iceberg catalog snapshot. Dest COUNT is Parquet
+file footers via `destination_row_count` / `iceberg_mor`, never
+`scan().count()`. Empty dest is CoW snapshot append — **not**
+`MERGE INTO`. Warehouse is still **local files**, not S3.
+
+Do not mix this 6.948 s with PostgreSQL→Iceberg 1.344 s: PostgreSQL
+emits CSV in the server; SQL Server pays a Python CSV encode. Do not
+mix either with network SQL engine times.
+
+Reproduce: `BENCH_SRC=bench_ss_from_mysql BENCH_DEST=bench_ss_iceberg python scripts/bench_sqlserver_to_iceberg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | SQL Server **1433** (`dbo.bench_ss_from_mysql`, 10 columns, PK `employee_id`) |
+| Destination | Iceberg REST **8181**, create-new `default.bench_ss_iceberg` |
+| Warehouse | `file:///tmp/iceberg-rest-wh` (local files, not S3) |
+| Rows | **1,000,000** |
+| Elapsed | **6.948 s** |
+| dest COUNT (file footers) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `select_sqlserver_csv_iceberg_snapshot` |
+| `copy_split` | `serial` |
+| `iceberg_write` | `append` |
+| `shard_mode` | `table` |
+| Artifact | `/opt/cursor/artifacts/sqlserver_iceberg_1000000_proof.json` |
+
+Live 3-row NULL / `''` / `'x'` on Iceberg string lands as NULL / `''` /
+`x`. Occupied dest whose footer COUNT already equals the source snapshot
+is skip-complete. Occupied dest with a different COUNT declines.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest COUNT (file footers) | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `iceberg_write` | skip |
+| Elapsed | **0.756 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/sqlserver_iceberg_1000000_resume_skip_proof.json` |
+
+Do not quote 1.32M rows/s from skip-all. Pytest: `test_sqlserver_iceberg_copy`
+**9 passed / 0 failed**.
+
+### Named 1M fixture — Iceberg→SQL Server snapshot Parquet + fast_executemany (2026-09-03)
+
+Reverse of SQL Server→Iceberg on the **same 10-col employee data** now
+sitting on Iceberg REST (`bench_ss_iceberg`). Current-snapshot Parquet
+files are bound with pyodbc `fast_executemany`. This is **not** BCP /
+`BULK INSERT` CSV (quoted empty string collapses to NULL on Linux SQL
+Server). Source COUNT is file footers, never `scan().count()`. Payload
+is never `scan().to_arrow()`. Dest proof is SQL Server `COUNT(*)`.
+
+Warehouse is still **local files**, not S3. Do not mix 10.3 s with
+Iceberg→PostgreSQL 2.898 s (`COPY FROM STDIN` vs executemany) or with
+network SQL engine times.
+
+Reproduce: `BENCH_SRC=bench_ss_iceberg BENCH_DEST=bench_ss_from_iceberg python scripts/bench_iceberg_to_sqlserver_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | Iceberg REST **8181** (`default.bench_ss_iceberg`, 10 columns) |
+| Destination | SQL Server **1433**, create-new `dbo.bench_ss_from_iceberg` |
+| Warehouse | `file:///tmp/iceberg-rest-wh` (local files, not S3) |
+| Rows | **1,000,000** |
+| Elapsed | **10.3 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| Iceberg source COUNT (file footers) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `iceberg_parquet_fast_executemany_sqlserver` |
+| `copy_split` | `serial` |
+| `iceberg_read` | `snapshot_parquet` |
+| Artifact | `/opt/cursor/artifacts/iceberg_sqlserver_1000000_proof.json` |
+
+Live 3-row NULL / `''` / `'x'` round-trips as NULL / `''` / `x` on
+Iceberg string and SQL Server NVARCHAR. Occupied dest whose `COUNT(*)`
+already equals the source footer COUNT is skip-complete. Occupied dest
+with a different COUNT declines. MoR snapshots decline.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `iceberg_read` | skip |
+| Elapsed | **0.116 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/iceberg_sqlserver_1000000_resume_skip_proof.json` |
+
+Do not quote 8.6M rows/s from skip-all. Pytest: `test_iceberg_sqlserver_copy`
+**9 passed / 0 failed**. Combined SQL Server↔Iceberg **18 passed / 0 failed**.
 
 ### 200M named fixture — not run on this host
 

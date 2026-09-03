@@ -162,7 +162,7 @@ def _seed_iceberg_from_ss(ss, src: str, ice: str, rows: int) -> None:
 def test_iceberg_sqlserver_copy_safe_types():
     assert iceberg_type_is_copy_safe("string") is True
     assert iceberg_type_is_copy_safe("long") is True
-    assert iceberg_type_is_copy_safe("NVARCHAR(32)") is True
+    assert iceberg_type_is_copy_safe("VARCHAR(32)") is True
     assert iceberg_type_is_copy_safe("binary") is False
     assert iceberg_type_is_copy_safe("uuid") is False
     assert iceberg_type_is_copy_safe("timestamptz") is False
