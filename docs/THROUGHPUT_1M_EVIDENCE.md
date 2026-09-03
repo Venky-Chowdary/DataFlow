@@ -49,6 +49,10 @@ BENCH_ROWS=1000000 BENCH_SRC=BENCH_MY_ORA BENCH_DEST=bench_ora_iceberg \\
   python scripts/bench_oracle_to_iceberg_million.py
 BENCH_ROWS=1000000 BENCH_SRC=bench_ora_iceberg BENCH_DEST=BENCH_ORA_FROM_ICEBERG \\
   python scripts/bench_iceberg_to_oracle_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_mongo \\
+  python scripts/bench_pg_to_mongo_million.py
+BENCH_ROWS=1000000 BENCH_SRC=bench_pg_mongo BENCH_DEST=bench_pg_from_mongo \\
+  python scripts/bench_mongo_to_pg_million.py
 ```
 
 The harness discovers the reachable local pair (`5432`/`3306` first, then
@@ -1354,6 +1358,106 @@ Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
 Do not quote 8.28M rows/s from skip-all. Pytest: `test_iceberg_oracle_copy`
 **9 passed / 0 failed**. Combined Oracle↔Iceberg **18 passed / 0 failed**.
 
+### Named 1M fixture — PostgreSQL→Mongo COPY text + insert_many (2026-09-03)
+
+This is **not** `mongoimport`. One PostgreSQL `REPEATABLE READ` snapshot
+streams `COPY (SELECT …) TO STDOUT` text; decoded rows become BSON
+documents and `insert_many` (unordered, batch 5000) loads them. Dest
+COUNT is `count_documents({})` — never `estimatedDocumentCount`. Empty
+dest is insert, **not** upsert / `ReplaceOne`. `_id` is not invented
+from row bytes.
+
+DATE is BSON Date at **UTC midnight** (Mongo has no date-only type).
+TIMESTAMP / TIMESTAMPTZ decline (BSON Date would invent UTC). SQL NULL
+is BSON null (field present); `''` is preserved.
+
+Do not mix this 11.105 s with PostgreSQL→Iceberg 1.344 s (catalog
+snapshot vs Python `insert_many`). Do not mix either with network SQL
+engine times.
+
+Reproduce: `BENCH_SRC=bench_emp_1000000 BENCH_DEST=bench_pg_mongo python scripts/bench_pg_to_mongo_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | PostgreSQL **5432** (`bench_emp_1000000`, 10 columns, PK `employee_id`) |
+| Destination | MongoDB **27017** replica set `rs0`, create-new `dataflow.bench_pg_mongo` |
+| Rows | **1,000,000** |
+| Elapsed | **11.105 s** |
+| dest `count_documents({})` | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `copy_text_pg_insert_many_mongo` |
+| `copy_split` | `serial` |
+| `mongo_write` | `insert` |
+| `shard_mode` | `table` |
+| Artifact | `/opt/cursor/artifacts/pg_mongo_1000000_proof.json` |
+
+Occupied dest whose COUNT already equals the source snapshot is
+skip-complete. Occupied dest with a different COUNT declines.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `count_documents({})` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `mongo_write` | skip |
+| Elapsed | **0.338 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/pg_mongo_1000000_resume_skip_proof.json` |
+
+Do not quote 2.96M rows/s from skip-all. Pytest: `test_pg_mongo_copy`
+**9 passed / 0 failed**.
+
+### Named 1M fixture — Mongo→PostgreSQL snapshot find + COPY FROM STDIN (2026-09-03)
+
+Reverse of PostgreSQL→Mongo on the **same 10-col employee data** now
+sitting in `dataflow.bench_pg_mongo`. Source COUNT is `count_documents({})`
+inside a replica-set snapshot transaction (`ReadConcern("snapshot")`);
+payload is `find()` in that same session — not a second non-snapshot
+scan. Each cell is encoded as PostgreSQL COPY text into
+`COPY … FROM STDIN`. Dest proof is PostgreSQL `COUNT(*)`. This is
+**not** `mongoexport`. Standalone Mongo (no snapshot read concern)
+declines. Nested documents / arrays / binary decline. `_id` is omitted
+unless mapped. BSON Date stored as UTC midnight (from PostgreSQL DATE)
+round-trips as DATE.
+
+Do not mix this 10.633 s with Iceberg→PostgreSQL 2.898 s (Parquet +
+COPY FROM STDIN vs snapshot `find()` + COPY). Do not mix either with
+network SQL engine times.
+
+Reproduce: `BENCH_SRC=bench_pg_mongo BENCH_DEST=bench_pg_from_mongo python scripts/bench_mongo_to_pg_million.py`
+
+| Item | Value |
+|------|-------|
+| Source | MongoDB **27017** replica set `rs0` (`dataflow.bench_pg_mongo`) |
+| Destination | PostgreSQL **5432**, create-new `public.bench_pg_from_mongo` |
+| Rows | **1,000,000** |
+| Elapsed | **10.633 s** |
+| dest `COUNT(*)` | **1,000,000** |
+| Mongo source COUNT (`count_documents`) | **1,000,000** |
+| `rejected_rows` | **0** |
+| `load_method` | `mongo_snapshot_find_copy_from_stdin_pg` |
+| `copy_split` | `serial` |
+| `mongo_read` | `snapshot_find` |
+| Artifact | `/opt/cursor/artifacts/mongo_pg_1000000_proof.json` |
+
+Occupied dest whose `COUNT(*)` already equals the source snapshot COUNT
+is skip-complete. Occupied dest with a different COUNT declines.
+
+Named 1M skip-all (dest already complete, `BENCH_KEEP_DEST=1`):
+
+| Item | Value |
+|------|-------|
+| dest `COUNT(*)` | **1,000,000** |
+| `partitions_skipped` | **1 / 1** |
+| `copy_split` | skip |
+| `mongo_read` | skip |
+| Elapsed | **0.348 s** (COUNTs only — not a copy-speed figure) |
+| Artifact | `/opt/cursor/artifacts/mongo_pg_1000000_resume_skip_proof.json` |
+
+Do not quote 2.88M rows/s from skip-all. Pytest: `test_mongo_pg_copy`
+**9 passed / 0 failed**. Combined PostgreSQL↔Mongo **18 passed / 0 failed**.
+
 ### 200M named fixture — not run on this host
 
 10M source is **1.4 GB** on disk. 200M projects to **~28 GB** source plus
@@ -1522,9 +1626,11 @@ per-cell CPU in transform/validate, not database I/O.
   skip/reload job on a larger box.
 - Copy-path proof is dest COUNT vs the source snapshot, not a second
   checksum reread. SQL engines use dest `COUNT(*)`. Iceberg dest COUNT is
-  file footers, never `scan().count()`. Empty Iceberg dest is CoW snapshot
-  append, not MERGE INTO. The 1.344 s PG→Iceberg figure is a **local**
-  warehouse, not S3/Glue.
+  file footers, never `scan().count()`. Mongo dest COUNT is
+  `count_documents({})`, never `estimatedDocumentCount`. Empty Iceberg
+  dest is CoW snapshot append, not MERGE INTO. Empty Mongo dest is
+  `insert_many`, not upsert. The 1.344 s PG→Iceberg figure is a **local**
+  warehouse, not S3/Glue. DATE→Mongo is BSON Date at UTC midnight.
 - Unfit cells on SQL COPY paths fail closed (STRICT + rollback). Quarantine
   remains on the row path.
 - Profiled runs (`BENCH_PROFILE=1`) are ~2× slower by construction and are
