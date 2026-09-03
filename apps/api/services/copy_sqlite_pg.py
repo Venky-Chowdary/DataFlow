@@ -179,15 +179,15 @@ def copy_sqlite_to_postgres(
         )
         src_cur = source_conn.cursor()
         dst_cur.copy_expert(copy_sql, _SqliteCopyReader(src_cur, select_sql))
-        dest_conn.commit()
-
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
         dest_count = int(dst_cur.fetchone()[0])
         if dest_count != source_count:
+            dest_conn.rollback()
             raise ValueError(
                 "SQLite→PG COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
             )
+        dest_conn.commit()
         try:
             source_conn.commit()
         except Exception:
@@ -211,6 +211,10 @@ def copy_sqlite_to_postgres(
             proof_scope="dest_count_equals_source_snapshot_count",
         )
     except Exception:
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("PostgreSQL dest rollback skipped", exc_info=True)
         if created_here:
             try:
                 dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608

@@ -324,6 +324,52 @@ def test_live_sqlite_pg_overwrite_replaces_dest(tmp_path):
         pg.close()
 
 
+def test_live_sqlite_pg_count_mismatch_rolls_back(monkeypatch, tmp_path):
+    """Dest COUNT is checked before commit — a short COPY cannot land."""
+    monkeypatch.delenv("DATAFLOW_SQLITE_PG_COPY", raising=False)
+    pg = _pg_connect()
+    tag = uuid.uuid4().hex[:8]
+    src_path = tmp_path / "src.db"
+    dest = f"sqlite_pg_rb_{tag}"
+    _seed_sqlite(src_path, "src_t", 80)
+
+    class _EmptyReader:
+        def readable(self) -> bool:
+            return True
+
+        def read(self, size: int = -1) -> bytes:
+            return b""
+
+    monkeypatch.setattr(
+        "services.copy_sqlite_pg._SqliteCopyReader",
+        lambda *_a, **_k: _EmptyReader(),
+    )
+    try:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        with pytest.raises(ValueError, match="dest COUNT"):
+            copy_sqlite_to_postgres(
+                source_cfg=_sqlite_cfg(src_path, "src_t"),
+                source_table="src_t",
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "TEXT"],
+                replace_destination=True,
+            )
+        n = destination_row_count(
+            "postgresql", _pg_cfg(), schema="public", table_name=dest
+        )
+        assert n in {0, None}
+    finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        pg.close()
+
+
 def test_live_sqlite_pg_stream_load_method(monkeypatch, tmp_path):
     monkeypatch.delenv("DATAFLOW_SQLITE_PG_COPY", raising=False)
     pg = _pg_connect()
