@@ -513,8 +513,8 @@ def test_live_duckdb_dest_count_is_not_table_metadata(monkeypatch):
         _cleanup(src_p, dst_p)
 
 
-def test_live_duckdb_source_writer_lock_declines(monkeypatch):
-    """Another process holding the source for writing must fail closed, not guess."""
+def test_live_duckdb_in_process_source_holder_declines(monkeypatch):
+    """A holder in this process owns the file handle: decline, do not fail the job."""
     monkeypatch.delenv("DATAFLOW_DUCKDB_DUCKDB_COPY", raising=False)
     import duckdb
 
@@ -523,7 +523,7 @@ def test_live_duckdb_source_writer_lock_declines(monkeypatch):
     _seed(src_p, "src_t", 10)
     holder = duckdb.connect(src_p)
     try:
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(FastPathUnavailable, match="held by another connection"):
             copy_duckdb_to_duckdb(
                 source_cfg=_cfg(src_p, "src_t"),
                 source_table="src_t",
@@ -533,10 +533,56 @@ def test_live_duckdb_source_writer_lock_declines(monkeypatch):
                 duckdb_ddls=_ddls(),
                 replace_destination=True,
             )
-        assert "lock" in str(excinfo.value).lower()
         assert _dest_count(dst_p, "dst_t") == 0
     finally:
         holder.close()
+        _cleanup(src_p, dst_p)
+
+
+def test_live_duckdb_foreign_process_writer_declines(monkeypatch):
+    """Another OS process holding the source for writing declines the same way."""
+    monkeypatch.delenv("DATAFLOW_DUCKDB_DUCKDB_COPY", raising=False)
+    import subprocess
+    import textwrap
+    import time
+
+    tag = uuid.uuid4().hex[:8]
+    src_p, dst_p = _path(tag, "src"), _path(tag, "dst")
+    ready = _path(tag, "ready") + ".flag"
+    _seed(src_p, "src_t", 10)
+    holder_src = textwrap.dedent(
+        f"""
+        import duckdb, pathlib, time
+        c = duckdb.connect(r"{src_p}")
+        c.execute("SELECT COUNT(*) FROM src_t")
+        pathlib.Path(r"{ready}").write_text("1")
+        time.sleep(30)
+        """
+    )
+    proc = subprocess.Popen([sys.executable, "-c", holder_src])
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not Path(ready).exists():
+            time.sleep(0.2)
+        assert Path(ready).exists(), "holder process never opened the source"
+        with pytest.raises(FastPathUnavailable, match="held by another connection"):
+            copy_duckdb_to_duckdb(
+                source_cfg=_cfg(src_p, "src_t"),
+                source_table="src_t",
+                dest_cfg=_cfg(dst_p, "dst_t"),
+                dest_table="dst_t",
+                pairs=_pairs(),
+                duckdb_ddls=_ddls(),
+                replace_destination=True,
+            )
+        assert _dest_count(dst_p, "dst_t") == 0
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+        try:
+            Path(ready).unlink()
+        except OSError:
+            pass
         _cleanup(src_p, dst_p)
 
 

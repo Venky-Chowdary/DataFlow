@@ -125,8 +125,24 @@ def copy_duckdb_to_duckdb(
             )
             src_catalog = _current_catalog(conn)
         else:
-            conn.exec_driver_sql(duckdb_attach_sql(src_path, _SRC_ALIAS))
-            conn.commit()
+            # Both failure modes here are pre-mutation, so they decline to the
+            # row path instead of failing the job: another process holding the
+            # source refuses our reader lock, and another connection in this
+            # process already owns the file handle under its own alias (DuckDB
+            # shares one instance per path). Either way the source is not
+            # provably frozen, which is the only thing this path claims.
+            try:
+                conn.exec_driver_sql(duckdb_attach_sql(src_path, _SRC_ALIAS))
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.debug("DuckDB rollback after ATTACH skipped", exc_info=True)
+                raise FastPathUnavailable(
+                    "DuckDB source is held by another connection "
+                    f"(READ_ONLY attach refused): {exc}"
+                ) from exc
             attached = True
             src_ref = duckdb_table_ref(
                 catalog=_SRC_ALIAS, schema=src_schema, table=source_table
