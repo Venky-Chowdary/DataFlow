@@ -226,11 +226,15 @@ describe("Transfer Studio chrome contracts", () => {
       enterprise.replace(/\.df2-page-transforms \.df2-xform-card \{[\s\S]*?\n\}/, ""),
       /^\.df2-xform-card \{/m,
     );
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(studio, /df2-xform-step/);
     assert.match(step, /isTransportTimeout/);
     assert.match(step, /Retry preview/);
-    // A hung preview of an empty recipe must not lock Continue.
-    assert.match(step, /Boolean\(previewError\) && steps\.length > 0/);
+    assert.match(step, /disabled=\{!continueState\.enabled\}/);
+    // A hung preview of an empty recipe must not lock Continue — only a recipe
+    // with steps is gated on previewError. The owner is continueTransformState.
+    assert.match(shape, /const hasRecipe = enabledShapeSteps\(input\.steps\)\.length > 0/);
+    assert.match(shape, /if \(hasRecipe && input\.previewError\)/);
     assert.doesNotMatch(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
   });
 
@@ -238,6 +242,7 @@ describe("Transfer Studio chrome contracts", () => {
     const guide = readFileSync(join(webRoot, "components/transfer/TransformGuidePanel.tsx"), "utf8");
     const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
 
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(guide, /runs on the read, before anything is written/);
     assert.match(guide, /hash_identity/);
     assert.match(guide, /never modified/);
@@ -247,9 +252,9 @@ describe("Transfer Studio chrome contracts", () => {
     // Identity is what Execute is held to, so it is stated where it is approved.
     assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
     // A refused recipe still has no identity — Map stays locked. A transport
-    // timeout on an empty recipe does not, so Continue is not gated on any error.
-    assert.match(step, /Boolean\(preview\?\.refusal\)/);
-    assert.match(step, /\|\| \(Boolean\(previewError\) && steps\.length > 0\)/);
+    // timeout on an empty recipe does not (hasRecipe && previewError only).
+    assert.match(shape, /if \(input\.preview\?\.refusal\)/);
+    assert.match(shape, /if \(hasRecipe && input\.previewError\)/);
   });
 
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {

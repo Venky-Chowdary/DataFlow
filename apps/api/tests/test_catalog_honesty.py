@@ -265,4 +265,6 @@ def test_endpoint_gate_names_certified_env_gap(monkeypatch) -> None:
     ok, msg = cc.endpoint_allowed_for_role("postgresql", "source")
     assert ok is False
     assert "Certified" in msg
-    assert "Planned" not in msg
+    assert "environment gap" in msg.lower()
+    assert "not a Planned connector" in msg
+    assert "is Planned" not in msg
