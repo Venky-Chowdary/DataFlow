@@ -1114,6 +1114,60 @@ def assert_transfer_endpoint_honesty(
     return True, "supported"
 
 
+# Named fixture: ``transfer_live_driver_types()`` when optional SKU packages
+# (sftp, oracle, sqlserver, snowflake, bigquery, mysql) are loadable.
+# yaml + fixed_width earned this after the FE 44 freeze — bump
+# ``TRANSFER_READY_DRIVERS`` in provenEvidence.ts in the same change.
+TRANSFER_LIVE_WHEN_PACKAGES_PRESENT: FrozenSet[str] = frozenset({
+    "adls",
+    "avro",
+    "bigquery",
+    "couchbase",
+    "csv",
+    "docx",
+    "dynamodb",
+    "elasticsearch",
+    "excel",
+    "fixed_width",
+    "gcs",
+    "generic_sql",
+    "html",
+    "hubspot",
+    "iceberg",
+    "influxdb",
+    "json",
+    "jsonl",
+    "kafka",
+    "milvus",
+    "mongodb",
+    "mysql",
+    "ndjson",
+    "neo4j",
+    "oracle",
+    "orc",
+    "parquet",
+    "pdf",
+    "pgvector",
+    "pinecone",
+    "postgresql",
+    "qdrant",
+    "redis",
+    "rest_api",
+    "s3",
+    "salesforce",
+    "sftp",
+    "singer_tap",
+    "snowflake",
+    "sqlite",
+    "sqlserver",
+    "stripe",
+    "tsv",
+    "weaviate",
+    "xml",
+    "yaml",
+})
+
+
 def transfer_live_driver_types() -> list[str]:
     """Unique driver types that can run transfers *and* are package-available.
 

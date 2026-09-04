@@ -337,7 +337,9 @@ is items 1, 2, 3 and 9 — the rest widens the certified surface.
 
 - No overall readiness percentage. A single number over unaudited surfaces would
   be invented.
-- No "N connectors live". 44 drivers carry PRODUCTION_SKU evidence; the catalog
-  is larger and the difference is not capability.
+- No "N connectors live". Unique TRANSFER_READY drivers are 46 when optional
+  packages are present (`transfer_live_driver_types` /
+  `TRANSFER_LIVE_WHEN_PACKAGES_PRESENT`). PRODUCTION_SKU is 86 routes. Catalog
+  tiles are larger and the difference is not capability.
 - No claim that any Snowflake, BigQuery, S3 or Salesforce route works in a
   client environment. They have not been run against a real account here.

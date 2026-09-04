@@ -21,6 +21,12 @@ export type AuthMode =
   | "key_pair"
   | "pat";
 
+/** File sources that take a path/URI — one owner for form + default auth. */
+const FILE_FORMAT_TYPES = [
+  "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml",
+  "pdf", "docx", "html", "yaml", "fixed_width",
+] as const;
+
 /** Single form field descriptor. */
 export interface FormField {
   key: string;
@@ -173,7 +179,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isEmail = resolved === "email";
   const isSQLite = resolved === "sqlite";
   const isDuckDB = resolved === "duckdb";
-  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved);
+  const isFile = (FILE_FORMAT_TYPES as readonly string[]).includes(resolved);
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
@@ -795,7 +801,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved)) return "file_path";
+  if ((FILE_FORMAT_TYPES as readonly string[]).includes(resolved)) return "file_path";
   return "user_pass";
 }
 

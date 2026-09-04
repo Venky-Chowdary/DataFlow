@@ -134,7 +134,7 @@ export const BACKEND_SUITE = {
  * are a larger number and are never presented as live capability.
  * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
  */
-export const TRANSFER_READY_DRIVERS = 44;
+export const TRANSFER_READY_DRIVERS = 46;
 
 /**
  * Catalog slots the desktop lab can bind and exercise as source + dest.
