@@ -667,18 +667,34 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     return _module_is_installed(module)
 
 
+def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, bool]:
+    """Registry capability bitmap, ignoring whether the package is installed.
+
+    Runtime ``get_capabilities`` zeroes this when the DBAPI is missing so
+    Execute cannot claim Full transfer. Certification must still say Certified
+    — missing psycopg2 is an environment gap, not a Planned product.
+    """
+    if driver_type == "generic_sql":
+        return {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+    if driver_type in _DRIVER_CAPS:
+        return dict(_DRIVER_CAPS[driver_type])
+    if driver_type in _FILE_CAPS:
+        return dict(_FILE_CAPS[driver_type])
+    return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
+
+
 def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
     try:
         if driver_type == "generic_sql":
-            base = {"test": True, "read": True, "write": True, "introspect": True, "preflight": True}
+            base = _declared_capabilities("generic_sql", catalog_id)
             if not catalog_id:
                 return base if driver_available("generic_sql") else {k: False for k in base}
             return base if driver_available("generic_sql", catalog_id) else {k: False for k in base}
         if driver_type in _DRIVER_CAPS:
-            caps = dict(_DRIVER_CAPS[driver_type])
+            caps = _declared_capabilities(driver_type, catalog_id)
             return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
         if driver_type in _FILE_CAPS:
-            caps = dict(_FILE_CAPS[driver_type])
+            caps = _declared_capabilities(driver_type, catalog_id)
             return caps if driver_available(driver_type, catalog_id) else {k: False for k in caps}
     except Exception as exc:
         # Capability discovery should never crash the catalog; degrade gracefully.
@@ -871,7 +887,15 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     catalog_id = (entry.get("id") or "").lower().strip()
     driver = resolve_driver_type(catalog_id)
     caps = get_capabilities(driver, catalog_id)
+    package_ok = driver_available(driver, catalog_id)
     ready = _catalog_transfer_ready(catalog_id, driver, caps)
+    product_ready = (
+        not _is_uncertified_driver_alias(catalog_id, driver)
+        and _catalog_transfer_ready(
+            catalog_id, driver, _declared_capabilities(driver, catalog_id)
+        )
+    )
+    env_gap = bool(product_ready and not package_ok)
     # Brand stubs / uncertified generic_sql engines must not inherit "live".
     if _is_uncertified_driver_alias(catalog_id, driver):
         eff = "planned"
@@ -882,8 +906,15 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
         label = capability_label(caps)
         is_connect_only = connect_only(caps) and not ready
     tier = certification_tier(catalog_id, driver, caps, transfer_ready_flag=ready)
-    # Uncertified/Planned drivers must not show a "live" status or "Full transfer" label.
-    if tier == "planned":
+    if env_gap:
+        # Missing DBAPI ≠ roadmap. Transfer pickers still key off transfer_ready.
+        tier = "certified"
+        label = "Certified — driver not installed"
+        eff = "live"
+        is_connect_only = False
+        ready = False
+    elif tier == "planned":
+        # Uncertified/Planned drivers must not show "live" or "Full transfer".
         eff = "planned"
         label = "Planned"
     out = dict(entry)
@@ -906,6 +937,14 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier
+    out["driver_available"] = package_ok
+    out["environment_gap"] = env_gap
+    if env_gap:
+        out["environment_gap_reason"] = (
+            f"{catalog_id} is Certified but its driver package is not loadable here — "
+            f"{_driver_install_hint(driver)}. "
+            "This is an environment gap, not a Planned connector."
+        )
     # Phase E1 — hosted SKU twins / regional tiles are aliases, not distinct engines.
     is_alias = bool(
         catalog_id in CATALOG_ID_ALIASES

@@ -23,6 +23,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
+import { Button } from "../components/ui/Button";
 import {
   FreshnessSloPanel,
   type FreshnessAlert,
@@ -47,6 +48,7 @@ interface DashboardPageProps {
   onOpenJob?: (jobId: string) => void;
   onOpenPipeline?: (scheduleId: string) => void;
   onOpenSchedules?: () => void;
+  onStartTransfer?: () => void;
 }
 
 const JOB_LIMIT = 10;
@@ -87,6 +89,7 @@ export function DashboardPage({
   onOpenJob,
   onOpenPipeline,
   onOpenSchedules,
+  onStartTransfer,
 }: DashboardPageProps) {
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
@@ -381,7 +384,17 @@ export function DashboardPage({
               {jobs.length === 0 ? (
                 <div className="df2-overview-v3-table-empty">
                   <DtIcon name="transfer" size={22} />
-                  <p>No migrations yet. Use <strong>Transfer Studio</strong> from the sidebar when you are ready.</p>
+                  <p>No migrations yet. Open Transfer Studio when you are ready.</p>
+                  {onStartTransfer && (
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={onStartTransfer}
+                      leadingIcon={<DtIcon name="transfer" size={14} />}
+                    >
+                      Open Transfer Studio
+                    </Button>
+                  )}
                 </div>
               ) : (
                 <div className="df2-overview-v3-card-body df2-overview-v3-card-body--flush">

@@ -712,6 +712,10 @@ function AppShell({
                       navigateFromSearch({ screen: "schedules", scheduleId })
                     }
                     onOpenSchedules={() => setScreen("schedules")}
+                    onStartTransfer={() => {
+                      setTransferStudioIntent(null);
+                      setScreen("transfer");
+                    }}
                   />
                 </PageErrorBoundary>
                 </div>

@@ -29,6 +29,7 @@ import {
   parseSnowflakeUrl,
 } from "../lib/snowflakeUrl";
 import { getConnectorSetupGuide } from "../lib/connectorSetupGuide";
+import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { looksLikeUserinfoHost, parseUrlAuthority } from "../lib/urlAuthority";
 
 interface ConnectorModalProps {
@@ -228,20 +229,27 @@ export function ConnectorModal({
   };
 
   const handleCatalogPick = (item: CatalogConnector) => {
-    // Pickable = the capability SSOT says this tile can take a side or at least
-    // connect. The raw catalog `status` is not that answer: a tile shipped as
+    // Pickable = the capability SSOT says this tile can take a side, connect,
+    // or is a Certified driver whose package is missing on this host (env gap).
+    // The raw catalog `status` is not that answer: a tile shipped as
     // `status: "live"` with no registered reader/writer used to open a form that
     // could only fail at Execute, which is the catalog overclaiming to an operator.
-    const pickable =
-      item.effective_status !== "planned" &&
-      (item.transfer_ready || item.source_ready || item.dest_ready || item.connect_only);
-    if (!pickable) {
+    if (!catalogTileSelectable(item, false)) {
       toast({
         title: "Not available yet",
         message: `${item.name} is on the roadmap — no driver registered yet.`,
         tone: "info",
       });
       return;
+    }
+    if (item.environment_gap) {
+      toast({
+        title: "Driver not installed here",
+        message:
+          item.environment_gap_reason ||
+          `${item.name} is Certified but its driver package is not loadable on this host. You can still save credentials; Test and Execute fail until the package is installed.`,
+        tone: "warning",
+      });
     }
     applyType(resolveCatalogIdToType(item.id as string));
   };

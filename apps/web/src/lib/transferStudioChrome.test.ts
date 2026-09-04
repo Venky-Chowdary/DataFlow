@@ -529,8 +529,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /Continue to Transform/);
     assert.match(page, /← Back to source/);
     assert.match(xform, /Back to Destination/);
-    assert.match(xform, /Continue without transforming/);
-    assert.match(xform, /Continue with this transform/);
+    const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
+    assert.match(shape, /Continue without transforming/);
+    assert.match(shape, /Continue with this transform/);
+    assert.match(xform, /continueState\.label/);
     assert.match(mapStep, /Continue to Validate →/);
     assert.match(mapStep, /← Back/);
     assert.match(rail, /"Execute"/);
@@ -825,6 +827,9 @@ describe("Overview parked-decision attention", () => {
     assert.match(dash, /setParkedCount\(null\)/);
     assert.doesNotMatch(dash, /parked on a failed/);
     assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
+    assert.match(dash, /Open Transfer Studio/);
+    assert.match(dash, /onStartTransfer/);
+    assert.match(app, /onStartTransfer=\{\(\) => \{/);
   });
 
   it("counts whole-history totals and waits for the named workspace before the first read", () => {

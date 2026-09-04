@@ -231,3 +231,38 @@ def test_catalog_search_live_is_certified_only() -> None:
         assert data.get("certified", 0) > 0
     finally:
         _enriched_connectors.cache_clear()
+
+
+def test_certified_missing_package_is_environment_gap_not_planned(monkeypatch) -> None:
+    """Missing psycopg2 is an environment gap, not a Planned catalog tile."""
+    from src.transfer import connector_capabilities as cc
+
+    monkeypatch.setattr(cc, "driver_available", lambda *a, **k: False)
+    row = cc.enrich_catalog_entry(
+        {"id": "postgresql", "name": "PostgreSQL", "category": "database", "status": "live", "description": ""}
+    )
+    assert row["transfer_ready"] is False
+    assert row["source_ready"] is False
+    assert row["dest_ready"] is False
+    assert row["certification_tier"] == "certified"
+    assert row["environment_gap"] is True
+    assert row["driver_available"] is False
+    assert row["capability_label"] == "Certified — driver not installed"
+    assert "Planned" not in row["capability_label"]
+    assert "environment gap" in (row.get("environment_gap_reason") or "").lower()
+
+    stub = cc.enrich_catalog_entry(
+        {"id": "netsuite", "name": "NetSuite", "category": "saas", "status": "live", "description": ""}
+    )
+    assert stub["certification_tier"] == "planned"
+    assert stub.get("environment_gap") is False
+
+
+def test_endpoint_gate_names_certified_env_gap(monkeypatch) -> None:
+    from src.transfer import connector_capabilities as cc
+
+    monkeypatch.setattr(cc, "driver_available", lambda *a, **k: False)
+    ok, msg = cc.endpoint_allowed_for_role("postgresql", "source")
+    assert ok is False
+    assert "Certified" in msg
+    assert "Planned" not in msg

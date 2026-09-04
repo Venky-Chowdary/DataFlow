@@ -6,6 +6,7 @@ import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
 import { collapseHostedAliasTiles } from "../lib/catalogAliases";
+import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -50,9 +51,12 @@ function highlightMatch(text: string, query: string) {
 
 function statusBadge(item: CatalogConnector) {
   const tier = item.certification_tier || "";
-  // Green = certified full transfer only. Never greenwash REST brand stubs.
-  if (item.transfer_ready || tier === "certified") {
+  // Green = this-host transfer-ready only. Certified + missing package is a warning.
+  if (item.transfer_ready) {
     return { cls: "df2-badge-live", label: item.capability_label || "Certified" };
+  }
+  if (item.environment_gap || (tier === "certified" && !item.transfer_ready)) {
+    return { cls: "df2-badge-warn", label: item.capability_label || "Certified — driver not installed" };
   }
   if (tier === "source_only") {
     return { cls: "df2-badge-run", label: item.capability_label || "Source only" };
@@ -273,16 +277,8 @@ export function ConnectorCatalogPanel({
           <div className="df2-connector-grid">
             {visibleConnectors.map((item) => {
               const badge = statusBadge(item);
-              const tier = item.certification_tier || "";
-              const selectable =
-                item.transfer_ready ||
-                item.connect_only ||
-                tier === "source_only" ||
-                item.effective_status === "live" ||
-                item.status === "beta";
-              const blocked = requireAvailable
-                ? !item.transfer_ready && !item.connect_only && tier !== "source_only"
-                : !selectable && (tier === "planned" || item.effective_status === "planned");
+              const selectable = catalogTileSelectable(item, requireAvailable);
+              const blocked = !selectable;
               return (
                 <button
                   key={item.id}

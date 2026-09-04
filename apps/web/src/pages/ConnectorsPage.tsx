@@ -20,6 +20,7 @@ import {
   statusFromLastTest,
 } from "../lib/connectorHealth";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
+import { catalogTileSelectable } from "../lib/catalogTileEligibility";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
@@ -228,15 +229,7 @@ export function ConnectorsPage({
   };
 
   const handleCatalogSelect = (item: CatalogConnector) => {
-    const tier = item.certification_tier || "";
-    const isPlanned =
-      tier === "planned" ||
-      item.effective_status === "planned" ||
-      (!item.transfer_ready &&
-        !item.connect_only &&
-        tier !== "source_only" &&
-        item.effective_status !== "live");
-    if (isPlanned) {
+    if (!catalogTileSelectable(item, false)) {
       toast({
         title: "Connector not available yet",
         message: `${item.name} is on the roadmap. Choose a Certified or Source-only connector.`,
@@ -244,13 +237,22 @@ export function ConnectorsPage({
       });
       return;
     }
-    if (item.connect_only) {
+    const tier = item.certification_tier || "";
+    if (item.environment_gap) {
+      toast({
+        title: "Driver not installed here",
+        message:
+          item.environment_gap_reason ||
+          `${item.name} is Certified but its driver package is not loadable on this host.`,
+        tone: "warning",
+      });
+    } else if (item.connect_only) {
       toast({
         title: "Connection test only",
         message: `${item.name} can be saved and tested, but no transfer driver is registered — it cannot move data yet.`,
         tone: "warning",
       });
-    } else if (tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
+    } else if (tier === "source_only") {
       toast({
         title: "Source only",
         message: `${item.name} is certified as a source only — it cannot be used as a transfer destination.`,
