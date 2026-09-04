@@ -850,6 +850,18 @@ describe("Overview parked-decision attention", () => {
     assert.match(app, /isStaleGeneration/);
     assert.match(app, /if \(!getActiveWorkspaceId\(\)\) return;/);
   });
+
+  it("keep-alive Studio drops a deleted connection and remounts on workspace change", () => {
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const workspace = app.slice(app.indexOf("const onWorkspaceChanged"));
+    assert.match(workspace, /setTransferStudioKey/);
+    assert.match(workspace, /setTransferSeedSource\(null\)/);
+    assert.match(app, /setTransferSeedSource\(\(seed\) => \(seed\?\.connectorId === id \? null : seed\)\)/);
+    assert.match(page, /connectorsLoading\) return;/);
+    assert.match(page, /!connectors\.some\(\(c\) => c\.id === sourceConnectorId\)/);
+    assert.match(page, /!connectors\.some\(\(c\) => c\.id === connectorId\)/);
+  });
 });
 
 describe("operator surface geometry and honest empty export", () => {
