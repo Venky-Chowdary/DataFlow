@@ -73,6 +73,9 @@ describe("loadMethod labels", () => {
       /watermark/,
     );
     assert.match(loadMethodLabel("csv_copy_from_stdin_pg_incremental_deduped"), /incremental/i);
-    assert.match(loadMethodLabel("csv_load_data_mysql_incremental_append"), /LOAD DATA/);
+    assert.match(
+      loadMethodDescription("csv_load_data_mysql_incremental_append"),
+      /LOAD DATA/,
+    );
   });
 });
