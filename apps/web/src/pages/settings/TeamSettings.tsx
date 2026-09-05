@@ -407,6 +407,7 @@ export function TeamSettings() {
                   />
                 </div>
                 <Button
+                  variant="secondary"
                   disabled={creatingWorkspace || !newWorkspaceName.trim() || !manage.allowed}
                   title={manage.reason || undefined}
                   loading={creatingWorkspace}

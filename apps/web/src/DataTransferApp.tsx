@@ -620,7 +620,7 @@ function AppShell({
             >
               <DtIcon name="menu" size={20} />
             </button>
-            <WorkspaceSwitcher className="df2-topbar-workspace" id="df2-topbar-workspace" />
+            <WorkspaceSwitcher className="df2-topbar-workspace" id="df2-topbar-workspace" showLabel={false} />
             <div className="df2-breadcrumb">
               <span>Workspace</span>
               <strong> {currentNav?.label ?? "Datawrap"}</strong>
