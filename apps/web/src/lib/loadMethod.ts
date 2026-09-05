@@ -261,7 +261,7 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
 };
 
 const FILE_RECORD_COPY =
-  /^(json|yaml|fwf|excel|xml)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
+  /^(json|yaml|fwf|excel|xml|parquet|avro|orc)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
 
 const FILE_RECORD_KIND: Record<string, string> = {
   json: "JSON",
@@ -269,6 +269,9 @@ const FILE_RECORD_KIND: Record<string, string> = {
   fwf: "Fixed-width",
   excel: "Excel",
   xml: "XML",
+  parquet: "Parquet",
+  avro: "Avro",
+  orc: "ORC",
 };
 
 function fileRecordCopyInfo(method: string): LoadMethodInfo | null {

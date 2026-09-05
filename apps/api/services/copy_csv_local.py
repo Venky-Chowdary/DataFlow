@@ -18,14 +18,14 @@ staging (``replace_destination=True``), then the existing
 append / ON CONFLICT / ON DUPLICATE apply. Unbounded cursor cells
 refuse. Empty delta is a measured no-op.
 
-json / jsonl / yaml / fixed_width / excel / xml parse with the same
-identity readers as the row path, then reuse this mapped-CSV dest load.
-Nested JSON/YAML cells decline (row path keeps quarantine). Excel nested
-cells are already strings on the row path. XML that is not a unique
-record path (document XML, XXE, ambiguous siblings) declines. Windowed
-``ReadOptions`` (skip_rows / skip_footer / non-default header_row)
-decline. gzip is decompressed, then the same mapped COPY. Legacy
-``.xls`` declines.
+json / jsonl / yaml / fixed_width / excel / xml / parquet / avro / orc
+parse with the same identity readers as the row path, then reuse this
+mapped-CSV dest load. Nested JSON/YAML/struct/list cells decline (row
+path keeps quarantine). Excel nested cells are already strings on the
+row path. XML that is not a unique record path (document XML, XXE,
+ambiguous siblings) declines. Windowed ``ReadOptions`` (skip_rows /
+skip_footer / non-default header_row) decline. gzip is decompressed,
+then the same mapped COPY. Legacy ``.xls`` declines.
 """
 
 from __future__ import annotations
@@ -66,7 +66,8 @@ logger = logging.getLogger(__name__)
 
 _CSV_TYPES = frozenset({"csv", "tsv"})
 _JSON_TYPES = frozenset({"json", "jsonl", "ndjson"})
-_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset(
+_COLUMNAR_TYPES = frozenset({"parquet", "avro", "orc"})
+_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | _COLUMNAR_TYPES | frozenset(
     {"yaml", "fixed_width", "excel", "xml"}
 )
 _SQL_DEST = frozenset({"sqlite", "postgresql", "postgres", "mysql", "mariadb"})
@@ -97,9 +98,11 @@ def identity_file_copy_route(file_type: str, dest_type: str) -> bool:
     """True when local tabular identity COPY is proven for this pair.
 
     csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width/excel/xml
-    parse with the identity readers, then reuse that wire. Nested JSON/YAML
-    cells decline. Excel uses the same ``iter_excel_dicts`` population as the
-    row path. XML that is not a unique record path declines.
+    /parquet/avro/orc parse with the identity readers, then reuse that wire.
+    Nested JSON/YAML/struct/list cells decline. Excel uses the same
+    ``iter_excel_dicts`` population as the row path. XML that is not a unique
+    record path declines. Parquet/ORC use Arrow ``to_pylist`` (same as the
+    row path). Avro uses ``iter_avro_dicts`` (same as dest COUNT).
     """
     src = (file_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
@@ -120,6 +123,12 @@ def _file_kind_token(file_type: str) -> str:
         return "excel_records"
     if kind == "xml":
         return "xml_records"
+    if kind == "parquet":
+        return "parquet_records"
+    if kind == "avro":
+        return "avro_records"
+    if kind == "orc":
+        return "orc_records"
     return "csv"
 
 
@@ -402,6 +411,89 @@ def _iter_xml_records(
         raise FastPathUnavailable(str(exc)) from exc
 
 
+def _project_pylist(records: Any, source_cols: list[str]) -> Iterator[dict[str, str | None]]:
+    for rec in records:
+        if not isinstance(rec, dict):
+            raise FastPathUnavailable("columnar COPY requires an array of records")
+        yield _project_record(rec, source_cols)
+
+
+def _seekable_columnar_source(content: bytes | str | os.PathLike) -> Any:
+    """Parquet/ORC footers need random access. Gzip is spooled, not streamed."""
+    if isinstance(content, (bytes, bytearray)):
+        raw = bytes(content)
+        if raw[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                raw = gz.read()
+        return io.BytesIO(raw)
+    path = os.fspath(content)
+    with open(path, "rb") as handle:
+        head = handle.read(2)
+    if head == b"\x1f\x8b":
+        with gzip.open(path, "rb") as gz:
+            return io.BytesIO(gz.read())
+    return path
+
+
+def _iter_parquet_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+) -> Iterator[dict[str, str | None]]:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise FastPathUnavailable("parquet COPY needs pyarrow") from exc
+    pf = None
+    try:
+        pf = pq.ParquetFile(_seekable_columnar_source(content))
+        for batch in pf.iter_batches():
+            yield from _project_pylist(batch.to_pylist(), source_cols)
+    except FastPathUnavailable:
+        raise
+    except Exception as exc:
+        raise FastPathUnavailable(str(exc) or "parquet unparseable") from exc
+    finally:
+        if pf is not None:
+            try:
+                pf.close()
+            except Exception:
+                logger.debug("parquet COPY close skipped", exc_info=True)
+
+
+def _iter_orc_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+) -> Iterator[dict[str, str | None]]:
+    try:
+        from pyarrow import orc
+    except ImportError as exc:
+        raise FastPathUnavailable("orc COPY needs pyarrow") from exc
+    try:
+        source = _seekable_columnar_source(content)
+        table = orc.read_table(source)
+        yield from _project_pylist(table.to_pylist(), source_cols)
+    except FastPathUnavailable:
+        raise
+    except Exception as exc:
+        raise FastPathUnavailable(str(exc) or "orc unparseable") from exc
+
+
+def _iter_avro_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+) -> Iterator[dict[str, str | None]]:
+    from services.dest_precount import UnmeasuredArtifact, iter_avro_dicts
+
+    try:
+        yield from _project_pylist(iter_avro_dicts(content), source_cols)
+    except UnmeasuredArtifact as exc:
+        raise FastPathUnavailable(str(exc) or "avro unparseable") from exc
+    except FastPathUnavailable:
+        raise
+    except Exception as exc:
+        raise FastPathUnavailable(str(exc) or "avro unparseable") from exc
+
+
 def _iter_source_records(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -434,6 +526,15 @@ def _iter_source_records(
         return
     if kind == "xml":
         yield from _iter_xml_records(content, source_cols)
+        return
+    if kind == "parquet":
+        yield from _iter_parquet_records(content, source_cols)
+        return
+    if kind == "orc":
+        yield from _iter_orc_records(content, source_cols)
+        return
+    if kind == "avro":
+        yield from _iter_avro_records(content, source_cols)
         return
     yield from _iter_csv_source_records(
         content, filename, pairs, read_options

@@ -115,6 +115,15 @@ def test_file_copy_load_method_tokens():
     assert file_copy_load_method("xml", "mysql", "incremental_append") == (
         "xml_records_load_data_mysql_incremental_append"
     )
+    assert file_copy_load_method("parquet", "postgresql", "incremental_deduped") == (
+        "parquet_records_copy_from_stdin_pg_incremental_deduped"
+    )
+    assert file_copy_load_method("avro", "sqlite", "incremental_append") == (
+        "avro_records_executemany_sqlite_incremental_append"
+    )
+    assert file_copy_load_method("orc", "mysql", "full_refresh_overwrite") == (
+        "orc_records_load_data_mysql"
+    )
 
 
 def test_nested_json_declines_copy(tmp_path):

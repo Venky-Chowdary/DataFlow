@@ -162,7 +162,10 @@ def test_identity_file_copy_route_handover_tabular():
     assert identity_file_copy_route("fixed_width", "sqlite")
     assert identity_file_copy_route("excel", "sqlite")
     assert identity_file_copy_route("xml", "postgresql")
-    assert not identity_file_copy_route("parquet", "sqlite")
+    assert identity_file_copy_route("parquet", "sqlite")
+    assert identity_file_copy_route("avro", "mysql")
+    assert identity_file_copy_route("orc", "postgresql")
+    assert not identity_file_copy_route("pdf", "sqlite")
     assert not identity_file_copy_route("yaml", "snowflake")
 
 
@@ -186,8 +189,8 @@ def test_try_copy_declines_json_and_transforms(tmp_path):
     dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
     declined = try_copy_local_csv(
         content=_csv(DAY1),
-        filename="events.parquet",
-        file_type="parquet",
+        filename="events.pdf",
+        file_type="pdf",
         dest_type="sqlite",
         dest_cfg=dest_cfg,
         dest_table="events",
