@@ -3529,3 +3529,498 @@ def test_sqlite_sqlite_integer_incremental_append_copy_nine_then_ten(tmp_path):
         conn.close()
 
 
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_sqlite_pg_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
+    """INTEGER cursor upsert into PG: watermark 9 then versions 10."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_pg_int_dd_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_spg_intdd_{suffix}"
+    conn = sqlite3.connect(src_path)
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'one', 8), (2, 'two', 8), (3, 'three', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-intdd-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, version = ? WHERE id = 1',
+            ("ONE", 10),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (4, ?, ?)',
+            ("four", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-intdd-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f'SELECT name FROM "{dst}" WHERE id = 1')
+            name = cur.fetchone()[0]
+            cur.execute(f'SELECT version FROM "{dst}" WHERE id = 4')
+            ver = int(cur.fetchone()[0])
+        assert dest_count == 4
+        assert name == "ONE"
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-intdd-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 4
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+        pg.close()
+
+
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
+def test_sqlite_mysql_integer_incremental_append_copy_nine_then_ten(tmp_path):
+    """INTEGER cursor append into MySQL: watermark 9 then version 10; duplicate PK fails closed."""
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_mysql_int_ap_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_smy_intap_{suffix}"
+    conn = sqlite3.connect(src_path)
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'a', 8), (2, 'b', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-intap-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_append" in str(summary1.get("load_method") or "")
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 2
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (3, ?, ?)',
+            ("c", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-intap-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT version FROM `{dst}` WHERE id = 3")
+            ver = int(cur.fetchone()[0])
+        assert dest_count == 3
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-intap-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        conn.execute(f'UPDATE "{src}" SET version = 11 WHERE id = 1')
+        conn.commit()
+        with pytest.raises(Exception, match="duplicate|unique|Duplicate|Integrity"):
+            _run_inc_from_sqlite(
+                src_path=src_path,
+                src=src,
+                dst=dst,
+                dest_mysql=True,
+                sync_mode="incremental_append",
+                job_id=f"inc-sqlite-mysql-intap-dup-{suffix}",
+                cursor_type="INTEGER",
+                cursor_field="version",
+            )
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 3
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        my.close()
+
+
+def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
+    """SQLite INTEGER upsert: watermark 9 then versions 10."""
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_ssidd_{suffix}.db"
+    dst_path = tmp_path / f"inc_sdidd_{suffix}.db"
+    src = "inc_src"
+    dst = "inc_dst"
+    conn = sqlite3.connect(src_path)
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'one', 8), (2, 'two', 8), (3, 'three', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-intdd-a-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        dest = sqlite3.connect(dst_path)
+        try:
+            n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+        finally:
+            dest.close()
+        assert n == 3
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, version = ? WHERE id = 1',
+            ("ONE", 10),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (4, ?, ?)',
+            ("four", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-intdd-b-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        dest = sqlite3.connect(dst_path)
+        try:
+            dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            name = dest.execute(f'SELECT name FROM "{dst}" WHERE id = 1').fetchone()[0]
+            ver = int(
+                dest.execute(f'SELECT version FROM "{dst}" WHERE id = 4').fetchone()[0]
+            )
+        finally:
+            dest.close()
+        assert dest_count == 4
+        assert name == "ONE"
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, _ddl3, summary3, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-intdd-c-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert third == 0
+        dest = sqlite3.connect(dst_path)
+        try:
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
+        finally:
+            dest.close()
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not _pg_mysql_up(), reason="PostgreSQL/MySQL not on 5432/3306")
+def test_pg_mysql_integer_incremental_append_copy_nine_then_ten():
+    """PG INTEGER → MySQL: watermark 9 then version 10 (numeric, not lex)."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src = f"inc_pgint_{suffix}"
+    dst = f"inc_myint_{suffix}"
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+            cur.execute(
+                f'CREATE TABLE "{src}" ('
+                "id integer PRIMARY KEY, "
+                "name varchar(64) NOT NULL, "
+                "version integer NOT NULL)"
+            )
+            cur.execute(
+                f'INSERT INTO "{src}" (id, name, version) VALUES '
+                "(1, 'a', 8), (2, 'b', 9)"
+            )
+        first, ddl1, summary1, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-pg-mysql-int-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 2
+        with pg.cursor() as cur:
+            cur.execute(
+                f'INSERT INTO "{src}" (id, name, version) VALUES (3, %s, %s)',
+                ("c", 10),
+            )
+        second, ddl2, summary2, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-pg-mysql-int-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT version FROM `{dst}` WHERE id = 3")
+            ver = int(cur.fetchone()[0])
+        assert dest_count == 3
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, _ddl3, summary3, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-pg-mysql-int-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0
+        assert summary3.get("source_row_count") == 0
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 3
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        pg.close()
+        my.close()
+
+
+@pytest.mark.skipif(not _pg_mysql_up(), reason="PostgreSQL/MySQL not on 5432/3306")
+def test_mysql_pg_integer_incremental_deduped_copy_nine_then_ten():
+    """MySQL INTEGER → PG upsert: watermark 9 then versions 10."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src = f"inc_myints_{suffix}"
+    dst = f"inc_pgintd_{suffix}"
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+            cur.execute(
+                f"CREATE TABLE `{src}` ("
+                "id INT PRIMARY KEY, "
+                "name VARCHAR(64) NOT NULL, "
+                "version INT NOT NULL)"
+            )
+            cur.execute(
+                f"INSERT INTO `{src}` (id, name, version) VALUES "
+                "(%s, %s, %s), (%s, %s, %s), (%s, %s, %s)",
+                (1, "one", 8, 2, "two", 8, 3, "three", 9),
+            )
+        first, ddl1, summary1, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=False,
+            src_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-mysql-pg-int-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        with my.cursor() as cur:
+            cur.execute(
+                f"UPDATE `{src}` SET name = 'ONE', version = %s WHERE id = 1",
+                (10,),
+            )
+            cur.execute(
+                f"INSERT INTO `{src}` (id, name, version) VALUES (4, %s, %s)",
+                ("four", 10),
+            )
+        second, ddl2, summary2, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=False,
+            src_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-mysql-pg-int-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f'SELECT name FROM "{dst}" WHERE id = 1')
+            name = cur.fetchone()[0]
+            cur.execute(f'SELECT version FROM "{dst}" WHERE id = 4')
+            ver = int(cur.fetchone()[0])
+        assert dest_count == 4
+        assert name == "ONE"
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, _ddl3, summary3, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=False,
+            src_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-mysql-pg-int-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 4
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+        my.close()
+        pg.close()
+
+
