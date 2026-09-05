@@ -42,6 +42,32 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
       "Identity upsert: binary COPY into staging, then INSERT ... ON CONFLICT. "
       + "Proof is dest PK ⋈ staging, not dest COUNT(*).",
   },
+  copy_binary_server_to_server_incremental_append: {
+    label: "Server COPY incremental append",
+    description:
+      "Identity incremental: binary COPY of rows past the cursor watermark into "
+      + "staging, then INSERT (duplicate PK fails closed). Dest COUNT(*) must "
+      + "equal dest_before + staging.",
+  },
+  copy_binary_server_to_server_incremental_deduped: {
+    label: "Server COPY incremental upsert",
+    description:
+      "Identity incremental: binary COPY of rows past the cursor watermark into "
+      + "staging, then INSERT ... ON CONFLICT. Proof is dest PK ⋈ staging.",
+  },
+  copy_text_pg_to_mysql_load_data_incremental_append: {
+    label: "PostgreSQL COPY → MySQL incremental append",
+    description:
+      "Identity incremental: COPY of rows past the cursor watermark into staging, "
+      + "then INSERT (duplicate PK fails closed). Dest COUNT(*) must equal "
+      + "dest_before + staging.",
+  },
+  copy_text_pg_to_mysql_load_data_incremental_deduped: {
+    label: "PostgreSQL COPY → MySQL incremental upsert",
+    description:
+      "Identity incremental: COPY of rows past the cursor watermark into staging, "
+      + "then INSERT ... ON DUPLICATE KEY UPDATE. Proof is dest PK ⋈ staging.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {

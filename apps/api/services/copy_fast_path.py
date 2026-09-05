@@ -702,6 +702,7 @@ def copy_between_postgres(
     dest_table: str,
     pairs: list[tuple[str, str]],
     replace_destination: bool = True,
+    source_where: str = "",
 ) -> FastPathResult:
     """Copy a population between two PostgreSQL tables and prove it arrived.
 
@@ -816,22 +817,40 @@ def copy_between_postgres(
             )
 
             pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
-            if dest_occupied and pk_map is None:
+            cursor_where = (source_where or "").strip()
+            if dest_occupied and pk_map is None and not cursor_where:
                 raise FastPathUnavailable(
                     "append into non-empty PostgreSQL dest stays on the row path"
                 )
+            if cursor_where and dest_occupied:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
 
-            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
-            workers = pg_mysql_copy_workers(source_count)
-            n_parts = pg_mysql_copy_partitions(source_count, workers)
+            workers = 1 if cursor_where else pg_mysql_copy_workers(source_count)
+            n_parts = 1 if cursor_where else pg_mysql_copy_partitions(source_count, workers)
             partitions: list[dict[str, Any]] = []
             shard_mode = "serial"
             copy_split = "binary"
             predicates: list[str] = [""]
             skip_all = False
 
-            if pk_map is not None:
+            if cursor_where:
+                shard_mode = "cursor"
+                copy_split = "cursor"
+                predicates = [cursor_where]
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
                 src_pk, dest_pk = pk_map
                 src_ident = _quote(src_pk)
                 dest_ident = _quote(dest_pk)
@@ -889,7 +908,7 @@ def copy_between_postgres(
             source_digest = None
             if need_checksum:
                 source_digest = postgresql_engine_checksum(
-                    src_cur, source_ref, source_cols
+                    src_cur, source_ref, source_cols, where=cursor_where
                 )
                 if source_digest is None:
                     raise FastPathUnavailable("source digest unavailable")

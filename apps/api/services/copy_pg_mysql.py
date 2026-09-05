@@ -620,8 +620,15 @@ def copy_postgres_to_mysql(
     pairs: list[tuple[str, str]],
     mysql_ddls: list[str],
     replace_destination: bool,
+    source_where: str = "",
 ) -> FastPathResult:
-    """COPY text from PostgreSQL into MySQL LOAD DATA. Dest COUNT is the proof."""
+    """COPY text from PostgreSQL into MySQL LOAD DATA. Dest COUNT is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and COPY use that filter, dest-occupied PK skip is disabled,
+    and the load is a single shard — PK-ranging a filtered subset would miss
+    rows whose keys sit outside the planned ranges.
+    """
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
 
@@ -701,12 +708,14 @@ def copy_postgres_to_mysql(
                 created_here = True
                 dest_conn.commit()
 
-            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+            cursor_where = (source_where or "").strip()
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
             src_cur.execute("SELECT pg_export_snapshot()")
             snapshot_id = str(src_cur.fetchone()[0])
-            workers = pg_mysql_copy_workers(source_count)
-            n_parts = pg_mysql_copy_partitions(source_count, workers)
+            workers = 1 if cursor_where else pg_mysql_copy_workers(source_count)
+            n_parts = 1 if cursor_where else pg_mysql_copy_partitions(source_count, workers)
             select_list = ", ".join(
                 _pg_copy_select_expr(col, live_l[col.lower()]) for col in source_cols
             )
@@ -715,7 +724,25 @@ def copy_postgres_to_mysql(
             shard_mode = "ctid"
             copy_split = "ctid"
 
-            if pk_map is not None:
+            if cursor_where:
+                if dest_occupied:
+                    raise FastPathUnavailable(
+                        "filtered COPY into occupied dest stays on the incremental staging path"
+                    )
+                shard_mode = "cursor"
+                copy_split = "cursor"
+                copy_sqls = [
+                    _copy_select_sql(select_list, source_ref, cursor_where)
+                ]
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
                 src_pk, dest_pk = pk_map
                 src_ident = _quote(src_pk)
                 shard_mode = "pk"
@@ -877,9 +904,13 @@ def copy_postgres_to_mysql(
             ]
             skipped = sum(1 for p in partitions if p.get("action") == "skip")
             proof_scope = (
-                "partition_dest_count_equals_source_snapshot"
-                if partition_proof
-                else "dest_count_equals_source_snapshot_count"
+                "filtered_dest_count_equals_source_snapshot"
+                if cursor_where
+                else (
+                    "partition_dest_count_equals_source_snapshot"
+                    if partition_proof
+                    else "dest_count_equals_source_snapshot_count"
+                )
             )
             return FastPathResult(
                 rows_copied=dest_count,
@@ -896,6 +927,7 @@ def copy_postgres_to_mysql(
                     "shard_mode": shard_mode,
                     "copy_split": copy_split,
                     "partition_proof": partition_proof,
+                    "source_where": bool(cursor_where),
                 },
                 proof_scope=proof_scope,
             )

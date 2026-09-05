@@ -983,6 +983,30 @@ def _stream_database_transfer_impl(
 
     copy_decline: list[str] = []
     _decline_token, _ = begin_copy_decline_capture(copy_decline)
+    pre_copy_cursor_key = ""
+    pre_copy_watermark = None
+    if incremental and cursor_source_col and shape_runner is None:
+        _tbl = _source_name(source)
+        if _tbl and not (is_callable_source(source) or is_callable_source(src_cfg)):
+            from services.preflight_cursor_gate import refuse_unusable_cursor_state
+
+            _dest_obj = resolve_dest_table(dest_type, destination, _tbl)
+            _scope = resolve_incremental_read_scope(
+                sync_mode=effective_sync,
+                stream_contracts=stream_contracts,
+                source_type=src_type,
+                source_database=source.database or src_cfg.get("database", ""),
+                source_object=_tbl,
+                dest_type=dest_type,
+                dest_database=destination.database or dest_cfg.get("database", ""),
+                dest_object=_dest_obj,
+                source=src_cfg,
+            )
+            pre_copy_cursor_key = _scope.cursor_key
+            pre_copy_watermark = _scope.watermark
+            refuse_unusable_cursor_state(
+                _scope, dest_type, dest_cfg, _dest_obj
+            )
     try:
         fast = None if shape_runner is not None else _try_copy_fast_path(
             source=source,
@@ -998,12 +1022,33 @@ def _stream_database_transfer_impl(
             source_filter=source_filter,
             limit=limit,
             checkpoint=checkpoint,
+            incremental_cursor=cursor_source_col if incremental else "",
+            incremental_watermark=pre_copy_watermark,
+            incremental_pk=cursor_pk_source if incremental else "",
         )
     finally:
         reset_copy_decline_capture(_decline_token)
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        if incremental:
+            dest_summary["sync_mode"] = effective_sync
+            wm = str(dest_summary.get("incremental_watermark") or "").strip()
+            if int(rows_copied or 0) == 0:
+                stamp_incremental_no_op(dest_summary)
+                dest_summary["watermark"] = pre_copy_watermark
+            elif wm and pre_copy_cursor_key:
+                set_watermark(
+                    pre_copy_cursor_key,
+                    wm,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": effective_sync,
+                        "cursor_column": cursor_source_col,
+                    },
+                )
+                dest_summary["watermark"] = wm
+            dest_summary["cursor_key"] = pre_copy_cursor_key
         return rows_copied, ddl_log, dest_summary, columns
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
