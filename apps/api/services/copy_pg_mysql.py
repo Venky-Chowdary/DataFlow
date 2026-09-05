@@ -70,11 +70,12 @@ _SAFE_PG_BASES = frozenset({
     "BOOL",
 })
 
-_PIPE_CHUNK = 1 << 20
+_PIPE_CHUNK = 1 << 22
 _MAX_WORKERS = 32
 _MAX_PARTITIONS = 32
 _AUTO_PARALLEL_ROWS = 50_000
-_TARGET_ROWS_PER_PARTITION = 5_000_000
+_PARALLEL_8_ROWS = 1_000_000
+_TARGET_ROWS_PER_PARTITION = 1_000_000
 _INTEGER_PK_BASES = frozenset({
     "SMALLINT",
     "INT2",
@@ -184,12 +185,12 @@ def mapped_single_pk(
 
 
 def pg_mysql_copy_workers(source_count: int) -> int:
-    """Operator cap. ``auto`` uses 4 workers at ≥50k and 8 at ≥5M."""
+    """Operator cap. ``auto`` uses 4 workers at ≥50k and 8 at ≥1M."""
     raw = (getenv_brand("PG_MYSQL_COPY_WORKERS", "auto") or "auto").strip().lower()
     cpus = os.cpu_count() or 4
     if raw in {"auto", ""}:
         n = int(source_count or 0)
-        if n >= 5_000_000:
+        if n >= _PARALLEL_8_ROWS:
             return min(8, cpus)
         if n >= _AUTO_PARALLEL_ROWS:
             return min(4, cpus)
@@ -201,7 +202,7 @@ def pg_mysql_copy_workers(source_count: int) -> int:
 
 
 def pg_mysql_copy_partitions(source_count: int, workers: int) -> int:
-    """How many PK ranges to plan. At ≥5M, ~5M rows each, capped at 32.
+    """How many PK ranges to plan. At ≥1M, ~1M rows each, capped at 32.
 
     Waves of ``workers`` run those ranges. More partitions than CPUs is how a
     200M table becomes a resume-granular job on a 4-core box.
@@ -432,8 +433,17 @@ def _fifo_copy_into_mysql(
     pump = threading.Thread(target=_pump, name="pg-mysql-copy-fifo", daemon=True)
     pump.start()
     try:
-        dst_cur.execute(load_sql)
-        dst_cur.execute("SHOW WARNINGS")
+        from connectors.mysql_load_data import (
+            apply_mysql_bulk_load_session,
+            restore_mysql_bulk_load_session,
+        )
+
+        apply_mysql_bulk_load_session(dst_cur)
+        try:
+            dst_cur.execute(load_sql)
+            dst_cur.execute("SHOW WARNINGS")
+        finally:
+            restore_mysql_bulk_load_session(dst_cur)
         blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")

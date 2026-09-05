@@ -161,6 +161,21 @@ def mysql_load_data_session_ready(cursor: Any, conn: Any) -> tuple[bool, str]:
     return mysql_local_infile_on(cursor)
 
 
+def apply_mysql_bulk_load_session(cursor: Any) -> None:
+    """Skip secondary unique/FK maintenance for the LOAD DATA statement.
+
+    InnoDB still enforces PRIMARY KEY. Callers restore immediately after
+    SHOW WARNINGS so a later MERGE / COUNT session is back to default checks.
+    """
+    cursor.execute("SET SESSION unique_checks=0")
+    cursor.execute("SET SESSION foreign_key_checks=0")
+
+
+def restore_mysql_bulk_load_session(cursor: Any) -> None:
+    cursor.execute("SET SESSION unique_checks=1")
+    cursor.execute("SET SESSION foreign_key_checks=1")
+
+
 def load_data_text_value(value: Any) -> str:
     """MySQL LOAD DATA text field (tab-delimited, ``\\N`` = NULL)."""
     from services.value_serializer import (

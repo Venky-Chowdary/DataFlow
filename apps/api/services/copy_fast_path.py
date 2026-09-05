@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,8 @@ logger = logging.getLogger(__name__)
 #: Pipe buffer between the two COPY cursors. Large enough that the reader is not
 #: woken per row, small enough that a stalled destination applies backpressure to
 #: the source instead of buffering a whole table in memory.
-_PIPE_CHUNK = 1 << 20
+_PIPE_CHUNK = 1 << 22
+_COPY_DECLINE: ContextVar[list[str] | None] = ContextVar("df_copy_decline", default=None)
 
 
 class FastPathResult(NamedTuple):
@@ -86,8 +88,35 @@ class FastPathResult(NamedTuple):
         )
 
 
+def begin_copy_decline_capture(sink: list[str] | None = None) -> tuple[Token, list[str]]:
+    """Record FastPathUnavailable reasons for the operator dest_summary."""
+    bucket = sink if sink is not None else []
+    token = _COPY_DECLINE.set(bucket)
+    return token, bucket
+
+
+def reset_copy_decline_capture(token: Token) -> None:
+    _COPY_DECLINE.reset(token)
+
+
+def note_copy_decline(reason: str, *, log: bool = True) -> None:
+    """Append a COPY decline reason. Duplicate text in one capture is skipped."""
+    text = str(reason or "").strip()
+    if not text:
+        return
+    if log:
+        logger.info("COPY fast path declined: %s", text)
+    sink = _COPY_DECLINE.get()
+    if sink is not None and text not in sink:
+        sink.append(text)
+
+
 class FastPathUnavailable(Exception):
     """Raised when the route cannot be proven identical — caller falls back."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        note_copy_decline(str(message), log=False)
 
 
 def skip_complete_identity_copy(
@@ -707,6 +736,12 @@ def copy_between_postgres(
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
             )
+            # Dest WAL flush per COPY row is the 10M-row tax. LOCAL lasts this
+            # transaction; commit still writes the catalog + heap, just not
+            # fsync-per-record. Crash between commit and OS flush can lose the
+            # dest table — the source snapshot is still the proof, and the
+            # operator re-runs overwrite.
+            dst_cur.execute("SET LOCAL synchronous_commit = off")
             snapshot = _snapshot_evidence(src_cur)
             blocked = unsupported_structure(src_cur, source_schema, source_table)
             if blocked:

@@ -575,13 +575,14 @@ def _try_copy_fast_path(
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
     """
-    from services.procedure_source import is_callable_source
-    from services.sync_cursor import is_append_sync, is_overwrite_sync
-
     # Studio may set source.table to the procedure stream name (e.g. get_orders).
     # COPY of a colliding real table would move the wrong population — refuse.
+    from services.copy_fast_path import note_copy_decline
+    from services.procedure_source import is_callable_source
+    from services.sync_cursor import is_append_sync, is_overwrite_sync, normalize_sync_mode
+
     if is_callable_source(source) or is_callable_source(src_cfg):
-        logger.info("COPY fast path declined: callable source is a result set, not a table")
+        note_copy_decline("callable source is a result set, not a table")
         return None
 
     if (
@@ -590,6 +591,17 @@ def _try_copy_fast_path(
         or limit
         or (checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     ):
+        note_copy_decline(
+            "incremental, source filter, LIMIT, or resumed checkpoint stays on the row path"
+        )
+        return None
+
+    merge_upsert = normalize_sync_mode(effective_sync, default="") == "upsert"
+    insert_copy = is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)
+    if not insert_copy and not merge_upsert:
+        note_copy_decline(
+            f"sync mode {effective_sync!r} is not identity COPY (append/overwrite/upsert)"
+        )
         return None
 
     source_table = source.table or source.collection or ""
@@ -597,13 +609,12 @@ def _try_copy_fast_path(
 
     dest_table = resolve_dest_table(dest_type, destination, _source_name(source))
     if not source_table or not dest_table:
+        note_copy_decline("source or destination table name is missing")
         return None
 
     src_n = (src_type or "").strip().lower()
     dest_n = (dest_type or "").strip().lower()
     if src_n in {"postgresql", "postgres"} and dest_n in {"mysql", "mariadb"}:
-        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
-            return None
         mysql_fast = _try_pg_mysql_copy_fast_path(
             source=source,
             source_table=source_table,
@@ -613,7 +624,8 @@ def _try_copy_fast_path(
             src_cfg=src_cfg,
             dest_cfg=dest_cfg,
             dest_type=dest_n,
-            replace_destination=is_overwrite_sync(effective_sync),
+            replace_destination=is_overwrite_sync(effective_sync) and not merge_upsert,
+            merge_upsert=merge_upsert,
         )
         if mysql_fast is not None:
             return mysql_fast
@@ -2068,8 +2080,11 @@ def _try_copy_fast_path(
         return None
 
     if not (
-        is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)
+        is_overwrite_sync(effective_sync) or is_append_sync(effective_sync) or merge_upsert
     ):
+        note_copy_decline(
+            f"sync mode {effective_sync!r} is not identity COPY (append/overwrite/upsert)"
+        )
         return None
 
     from services.engine_checksum import comparable_column_pairs, engines_comparable
@@ -2115,15 +2130,29 @@ def _try_copy_fast_path(
     # proves the mapping is a plain carry but not that the *destination* agrees.
     # The destination is created from these same declarations, so it does.
     try:
-        result = copy_between_postgres(
-            source_cfg=src_cfg,
-            source_schema=source.schema or "public",
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_schema=destination.schema or "public",
-            dest_table=dest_table,
-            pairs=pairs,
-            replace_destination=is_overwrite_sync(effective_sync),
+        from services.copy_upsert import copy_between_postgres_upsert
+
+        result = (
+            copy_between_postgres_upsert(
+                source_cfg=src_cfg,
+                source_schema=source.schema or "public",
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=destination.schema or "public",
+                dest_table=dest_table,
+                pairs=pairs,
+            )
+            if merge_upsert
+            else copy_between_postgres(
+                source_cfg=src_cfg,
+                source_schema=source.schema or "public",
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=destination.schema or "public",
+                dest_table=dest_table,
+                pairs=pairs,
+                replace_destination=is_overwrite_sync(effective_sync),
+            )
         )
     except FastPathUnavailable as exc:
         logger.info("COPY fast path declined: %s", exc)
@@ -2140,14 +2169,22 @@ def _try_copy_fast_path(
         "table": dest_table,
         "rows_written": result.source_rows,
         "checksum": result.target_checksum,
-        "load_method": "copy_binary_server_to_server",
+        "load_method": (
+            "copy_binary_server_to_server_upsert"
+            if merge_upsert
+            else "copy_binary_server_to_server"
+        ),
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         "engine_source_checksum": result.source_checksum,
         "engine_target_checksum": result.target_checksum,
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": effective_sync,
+        "sync_mode": (
+            "upsert"
+            if merge_upsert
+            else ("full_refresh_overwrite" if is_overwrite_sync(effective_sync) else "full_refresh_append")
+        ),
         # The digest is only comparable because it was read in the same snapshot
         # as the rows, so the snapshot claim travels with the result.
         "source_snapshot": dict(result.source_snapshot or {}),
@@ -2164,11 +2201,20 @@ def _try_copy_fast_path(
         "proof_scope": result.proof_scope,
     }
     proof_line = (
-        "Proof: mapped-column checksum inside the source snapshot; "
-        "destination COUNT(*) equals that snapshot."
+        "Proof: staging COUNT(*) equals source snapshot; dest PK ⋈ staging "
+        "equals staging; dest COUNT(*) independently reread."
+        if merge_upsert
+        else (
+            "Proof: mapped-column checksum inside the source snapshot; "
+            "destination COUNT(*) equals that snapshot."
+        )
     )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
-    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+    if (
+        not merge_upsert
+        and dest_summary.get("shard_mode") == "pk"
+        and dest_summary.get("partition_proof")
+    ):
         proof_line = (
             "Proof: destination COUNT(*) equals source snapshot count; "
             "each PK range dest COUNT matched its source range."
@@ -2201,19 +2247,21 @@ def _try_pg_mysql_copy_fast_path(
     dest_cfg: dict[str, Any],
     dest_type: str,
     replace_destination: bool,
+    merge_upsert: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity PG→MySQL: COPY text + STRICT LOAD DATA. Dest COUNT is the proof."""
     from connectors.mysql_writer import mysql_type
-    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
     from services.copy_pg_mysql import (
         copy_postgres_to_mysql,
         mapping_is_plain_carry,
         pg_type_is_load_safe,
     )
+    from services.copy_upsert import copy_postgres_to_mysql_upsert
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PG→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"PG→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -2225,25 +2273,35 @@ def _try_pg_mysql_copy_fast_path(
             item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
         )
         if not pg_type_is_load_safe(declared):
-            logger.info(
-                "PG→MySQL COPY declined: %s type %s is not LOAD DATA safe",
-                source_col,
-                declared,
+            note_copy_decline(
+                f"PG→MySQL COPY declined: {source_col} type {declared} is not LOAD DATA safe"
             )
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared))
 
     try:
-        result = copy_postgres_to_mysql(
-            source_cfg=src_cfg,
-            source_schema=source.schema or "public",
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_table=dest_table,
-            pairs=pairs,
-            mysql_ddls=mysql_ddls,
-            replace_destination=replace_destination,
+        result = (
+            copy_postgres_to_mysql_upsert(
+                source_cfg=src_cfg,
+                source_schema=source.schema or "public",
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+            )
+            if merge_upsert
+            else copy_postgres_to_mysql(
+                source_cfg=src_cfg,
+                source_schema=source.schema or "public",
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+                replace_destination=replace_destination,
+            )
         )
     except FastPathUnavailable as exc:
         logger.info("PG→MySQL COPY declined: %s", exc)
@@ -2258,12 +2316,20 @@ def _try_pg_mysql_copy_fast_path(
         "table": dest_table,
         "rows_written": result.source_rows,
         "checksum": result.target_checksum,
-        "load_method": "copy_text_pg_to_mysql_load_data",
+        "load_method": (
+            "copy_text_pg_to_mysql_load_data_upsert"
+            if merge_upsert
+            else "copy_text_pg_to_mysql_load_data"
+        ),
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": "full_refresh_append" if not replace_destination else "full_refresh_overwrite",
+        "sync_mode": (
+            "upsert"
+            if merge_upsert
+            else ("full_refresh_append" if not replace_destination else "full_refresh_overwrite")
+        ),
         "proof_scope": result.proof_scope,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
@@ -2278,8 +2344,14 @@ def _try_pg_mysql_copy_fast_path(
     workers = int((result.source_snapshot or {}).get("copy_workers") or 1)
     shard_mode = (result.source_snapshot or {}).get("shard_mode") or "ctid"
     copy_split = (result.source_snapshot or {}).get("copy_split") or shard_mode
-    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
-    if shard_mode == "pk" and dest_summary.get("partition_proof"):
+    if merge_upsert:
+        proof_line = (
+            "Proof: staging COUNT(*) equals source snapshot; dest PK ⋈ staging "
+            "equals staging; dest COUNT(*) independently reread."
+        )
+    else:
+        proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if not merge_upsert and shard_mode == "pk" and dest_summary.get("partition_proof"):
         skipped = int(dest_summary.get("partitions_skipped") or 0)
         proof_line = (
             "Proof: destination COUNT(*) equals source snapshot count; "
@@ -2287,9 +2359,10 @@ def _try_pg_mysql_copy_fast_path(
         )
         if skipped:
             proof_line += f" Resume skipped {skipped} complete range(s)."
+    load_verb = "COPY+upsert" if merge_upsert else "text COPY + STRICT LOAD DATA"
     ddl_log = [
         f"COPY {source_table} → MySQL {dest_table} "
-        f"({result.source_rows:,} rows, text COPY + STRICT LOAD DATA, "
+        f"({result.source_rows:,} rows, {load_verb}, "
         f"{workers} worker(s), copy_split={copy_split}, proof={shard_mode})",
         proof_line,
     ]
