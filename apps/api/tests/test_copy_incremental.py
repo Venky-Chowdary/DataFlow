@@ -2911,3 +2911,235 @@ def test_sqlite_mysql_date_incremental_append_copy_delta_and_watermark(tmp_path)
         my.close()
 
 
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_sqlite_pg_date_incremental_append_copy_delta_and_watermark(tmp_path):
+    """SQLite DATE ISO calendar-day → PG DATE append. Later day 1 → dest COUNT 3."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_pg_date_ap_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_spg_date_ap_{suffix}"
+    d1 = "2026-05-01"
+    d2 = "2026-05-02"
+    conn = sqlite3.connect(src_path)
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "updated_at DATE NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES '
+            "(1, 'a', ?), (2, 'b', ?)",
+            (d1, d1),
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-date-ap-a-{suffix}",
+            cursor_type="DATE",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_append" in str(summary1.get("load_method") or "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 2
+            cur.execute(f'SELECT updated_at FROM "{dst}" WHERE id = 1')
+            assert cur.fetchone()[0] == date(2026, 5, 1)
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (3, ?, ?)',
+            ("c", d2),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-date-ap-b-{suffix}",
+            cursor_type="DATE",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f'SELECT name FROM "{dst}" ORDER BY id')
+            names = [r[0] for r in cur.fetchall()]
+            cur.execute(f'SELECT updated_at FROM "{dst}" WHERE id = 3')
+            clock = cur.fetchone()[0]
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = %s",
+                (f"_df_stg_{dst}",),
+            )
+            staging_left = cur.fetchone()
+        assert dest_count == 3
+        assert names == ["a", "b", "c"]
+        assert clock == date(2026, 5, 2)
+        assert staging_left is None
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert "2026-05-02" in stored
+        assert "T" not in stored.split("\x1f")[0]
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-date-ap-c-{suffix}",
+            cursor_type="DATE",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        conn.execute(
+            f'UPDATE "{src}" SET updated_at = ? WHERE id = 1',
+            ("2026-05-03",),
+        )
+        conn.commit()
+        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
+            _run_inc_from_sqlite(
+                src_path=src_path,
+                src=src,
+                dst=dst,
+                sync_mode="incremental_append",
+                job_id=f"inc-sqlite-pg-date-ap-dup-{suffix}",
+                cursor_type="DATE",
+            )
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+        pg.close()
+
+
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
+def test_sqlite_mysql_date_incremental_deduped_copy_delta_and_watermark(tmp_path):
+    """SQLite DATE ISO calendar-day → MySQL DATE upsert. Later day 2 → dest COUNT 4."""
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_mysql_date_dd_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_smy_date_dd_{suffix}"
+    d1 = "2026-06-01"
+    d2 = "2026-06-02"
+    d3 = "2026-06-03"
+    conn = sqlite3.connect(src_path)
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "updated_at DATE NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES '
+            "(1, 'one', ?), (2, 'two', ?), (3, 'three', ?)",
+            (d1, d1, d2),
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-date-dd-a-{suffix}",
+            cursor_type="DATE",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
+        assert wm1
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 3
+            cur.execute(f"SELECT updated_at FROM `{dst}` WHERE id = 1")
+            assert cur.fetchone()[0] == date(2026, 6, 1)
+            cur.execute(f"SELECT name FROM `{dst}` WHERE id = 1")
+            assert cur.fetchone()[0] == "one"
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, updated_at = ? WHERE id = 1',
+            ("ONE", d3),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (4, ?, ?)',
+            ("four", d3),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-date-dd-b-{suffix}",
+            cursor_type="DATE",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT name FROM `{dst}` WHERE id = 1")
+            name = cur.fetchone()[0]
+            cur.execute(f"SELECT updated_at FROM `{dst}` WHERE id = 1")
+            clock = cur.fetchone()[0]
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (f"_df_stg_{dst}",),
+            )
+            staging_left = cur.fetchone()
+        assert dest_count == 4
+        assert name == "ONE"
+        assert clock == date(2026, 6, 3)
+        assert staging_left is None
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored != wm1
+        assert "2026-06-03" in stored
+        assert "T" not in stored.split("\x1f")[0]
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-date-dd-c-{suffix}",
+            cursor_type="DATE",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 4
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        my.close()
+
+
