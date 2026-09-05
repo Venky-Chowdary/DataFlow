@@ -581,7 +581,7 @@ def _try_copy_fast_path(
     # Studio may set source.table to the procedure stream name (e.g. get_orders).
     # COPY of a colliding real table would move the wrong population — refuse.
     from services.copy_fast_path import note_copy_decline
-    from services.copy_incremental import COPY_INCREMENTAL_MODES
+    from services.copy_incremental import COPY_INCREMENTAL_MODES, identity_incremental_route
     from services.procedure_source import is_callable_source
     from services.sync_cursor import is_append_sync, is_overwrite_sync, normalize_sync_mode
 
@@ -610,13 +610,9 @@ def _try_copy_fast_path(
         if not (incremental_cursor or "").strip():
             note_copy_decline("incremental COPY requires a mapped cursor_field")
             return None
-        pg_src = src_n in {"postgresql", "postgres"}
-        pg_dest = dest_n in {"postgresql", "postgres"}
-        mysql_dest = dest_n in {"mysql", "mariadb"}
-        if not (pg_src and (pg_dest or mysql_dest)):
+        if not identity_incremental_route(src_n, dest_n):
             note_copy_decline(
-                "incremental COPY is proven for PostgreSQL→MySQL and "
-                "PostgreSQL→PostgreSQL identity only"
+                "incremental COPY is proven for PostgreSQL/MySQL identity routes only"
             )
             return None
         incremental_copy = True
@@ -1633,39 +1629,47 @@ def _try_copy_fast_path(
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"postgresql", "postgres"}:
-        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+        if incremental_copy or is_overwrite_sync(effective_sync) or is_append_sync(effective_sync):
+            pg_fast = _try_mysql_pg_copy_fast_path(
+                source=source,
+                source_table=source_table,
+                dest_table=dest_table,
+                mappings=mappings,
+                schema=schema,
+                src_cfg=src_cfg,
+                dest_cfg=dest_cfg,
+                dest_type=dest_n,
+                dest_schema=destination.schema or "public",
+                replace_destination=is_overwrite_sync(effective_sync) and not incremental_copy,
+                incremental_mode=mode if incremental_copy else "",
+                incremental_cursor=incremental_cursor,
+                incremental_watermark=incremental_watermark,
+                incremental_pk=incremental_pk,
+            )
+            if pg_fast is not None:
+                return pg_fast
             return None
-        pg_fast = _try_mysql_pg_copy_fast_path(
-            source=source,
-            source_table=source_table,
-            dest_table=dest_table,
-            mappings=mappings,
-            schema=schema,
-            src_cfg=src_cfg,
-            dest_cfg=dest_cfg,
-            dest_type=dest_n,
-            dest_schema=destination.schema or "public",
-            replace_destination=is_overwrite_sync(effective_sync),
-        )
-        if pg_fast is not None:
-            return pg_fast
         return None
 
     if src_n in {"mysql", "mariadb"} and dest_n in {"mysql", "mariadb"}:
-        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+        if incremental_copy or is_overwrite_sync(effective_sync) or is_append_sync(effective_sync):
+            mysql_mysql = _try_mysql_mysql_copy_fast_path(
+                source_table=source_table,
+                dest_table=dest_table,
+                mappings=mappings,
+                schema=schema,
+                src_cfg=src_cfg,
+                dest_cfg=dest_cfg,
+                dest_type=dest_n,
+                replace_destination=is_overwrite_sync(effective_sync) and not incremental_copy,
+                incremental_mode=mode if incremental_copy else "",
+                incremental_cursor=incremental_cursor,
+                incremental_watermark=incremental_watermark,
+                incremental_pk=incremental_pk,
+            )
+            if mysql_mysql is not None:
+                return mysql_mysql
             return None
-        mysql_mysql = _try_mysql_mysql_copy_fast_path(
-            source_table=source_table,
-            dest_table=dest_table,
-            mappings=mappings,
-            schema=schema,
-            src_cfg=src_cfg,
-            dest_cfg=dest_cfg,
-            dest_type=dest_n,
-            replace_destination=is_overwrite_sync(effective_sync),
-        )
-        if mysql_mysql is not None:
-            return mysql_mysql
         return None
 
     if (
@@ -8180,16 +8184,24 @@ def _try_mysql_pg_copy_fast_path(
     dest_type: str,
     dest_schema: str,
     replace_destination: bool,
+    incremental_mode: str = "",
+    incremental_cursor: str = "",
+    incremental_watermark: str | None = None,
+    incremental_pk: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity MySQL→PG: SELECT + COPY FROM STDIN. Dest COUNT is the proof."""
     from connectors.postgresql_writer import pg_type
-    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
+    from services.copy_incremental import (
+        COPY_INCREMENTAL_MODES,
+        copy_mysql_to_postgres_incremental,
+    )
     from services.copy_mysql_pg import copy_mysql_to_postgres, mysql_type_is_copy_safe
     from services.copy_pg_mysql import mapping_is_plain_carry
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→PG COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8201,26 +8213,40 @@ def _try_mysql_pg_copy_fast_path(
             item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
         )
         if not mysql_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
+            note_copy_decline(
+                f"MySQL→PG COPY declined: {source_col} type {declared} is not COPY-safe"
             )
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared))
 
+    inc_mode = (incremental_mode or "").strip().lower()
     try:
-        result = copy_mysql_to_postgres(
-            source_cfg=src_cfg,
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_schema=dest_schema or "public",
-            dest_table=dest_table,
-            pairs=pairs,
-            pg_ddls=pg_ddls,
-            replace_destination=replace_destination,
-        )
+        if inc_mode in COPY_INCREMENTAL_MODES:
+            result = copy_mysql_to_postgres_incremental(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema or "public",
+                dest_table=dest_table,
+                pairs=pairs,
+                pg_ddls=pg_ddls,
+                sync_mode=inc_mode,
+                cursor_column=incremental_cursor,
+                watermark=incremental_watermark,
+                pk_column=incremental_pk,
+            )
+        else:
+            result = copy_mysql_to_postgres(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema or "public",
+                dest_table=dest_table,
+                pairs=pairs,
+                pg_ddls=pg_ddls,
+                replace_destination=replace_destination,
+            )
     except FastPathUnavailable as exc:
         logger.info("MySQL→PG COPY declined: %s", exc)
         return None
@@ -8229,17 +8255,30 @@ def _try_mysql_pg_copy_fast_path(
         raise
 
     columns = [p[1] for p in pairs]
+    inc_wm = str((result.source_snapshot or {}).get("incremental_watermark") or "")
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        load_method = (
+            "copy_text_mysql_to_pg_stdin_incremental_deduped"
+            if inc_mode == "incremental_deduped"
+            else "copy_text_mysql_to_pg_stdin_incremental_append"
+        )
+        sync_label = inc_mode
+    else:
+        load_method = "copy_text_mysql_to_pg_stdin"
+        sync_label = (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        )
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
         "rows_written": result.source_rows,
         "checksum": result.target_checksum,
-        "load_method": "copy_text_mysql_to_pg_stdin",
+        "load_method": load_method,
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": "full_refresh_append" if not replace_destination else "full_refresh_overwrite",
+        "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
@@ -8252,15 +8291,35 @@ def _try_mysql_pg_copy_fast_path(
             (result.source_snapshot or {}).get("partition_proof") or []
         ),
     }
-    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
-    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        dest_summary["incremental_watermark"] = inc_wm
+    if inc_mode == "incremental_deduped":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
+            "equals staging; dest COUNT(*) independently reread."
+        )
+    elif inc_mode == "incremental_append":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
+            "equals dest_before + staging (duplicate PK fails closed)."
+        )
+    else:
+        proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if (
+        inc_mode not in COPY_INCREMENTAL_MODES
+        and dest_summary.get("shard_mode") == "pk"
+        and dest_summary.get("partition_proof")
+    ):
         proof_line = (
             "Proof: destination COUNT(*) equals source snapshot count; "
             "each PK range dest COUNT matched its source range."
         )
+    load_verb = (
+        f"COPY+{inc_mode}" if inc_mode in COPY_INCREMENTAL_MODES else "SELECT + COPY FROM STDIN"
+    )
     ddl_log = [
         f"COPY MySQL {source_table} → PostgreSQL {dest_table} "
-        f"({result.source_rows:,} rows, SELECT + COPY FROM STDIN)",
+        f"({result.source_rows:,} rows, {load_verb})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
@@ -8276,16 +8335,24 @@ def _try_mysql_mysql_copy_fast_path(
     dest_cfg: dict[str, Any],
     dest_type: str,
     replace_destination: bool,
+    incremental_mode: str = "",
+    incremental_cursor: str = "",
+    incremental_watermark: str | None = None,
+    incremental_pk: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity MySQL→MySQL: INSERT SELECT or STRICT LOAD DATA. Dest COUNT is the proof."""
     from connectors.mysql_writer import mysql_type
-    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
+    from services.copy_incremental import (
+        COPY_INCREMENTAL_MODES,
+        copy_mysql_to_mysql_incremental,
+    )
     from services.copy_mysql_mysql import copy_mysql_to_mysql
     from services.copy_pg_mysql import mapping_is_plain_carry
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→MySQL copy declined: %s", reason)
+        note_copy_decline(f"MySQL→MySQL copy declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8299,16 +8366,31 @@ def _try_mysql_mysql_copy_fast_path(
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
 
+    inc_mode = (incremental_mode or "").strip().lower()
     try:
-        result = copy_mysql_to_mysql(
-            source_cfg=src_cfg,
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_table=dest_table,
-            pairs=pairs,
-            mysql_ddls=mysql_ddls,
-            replace_destination=replace_destination,
-        )
+        if inc_mode in COPY_INCREMENTAL_MODES:
+            result = copy_mysql_to_mysql_incremental(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+                sync_mode=inc_mode,
+                cursor_column=incremental_cursor,
+                watermark=incremental_watermark,
+                pk_column=incremental_pk,
+            )
+        else:
+            result = copy_mysql_to_mysql(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+                replace_destination=replace_destination,
+            )
     except FastPathUnavailable as exc:
         logger.info("MySQL→MySQL copy declined: %s", exc)
         return None
@@ -8318,11 +8400,24 @@ def _try_mysql_mysql_copy_fast_path(
 
     columns = [p[1] for p in pairs]
     split = str((result.source_snapshot or {}).get("copy_split") or "")
-    load_method = (
+    inc_wm = str((result.source_snapshot or {}).get("incremental_watermark") or "")
+    base_method = (
         "insert_select_mysql_same_instance"
         if split == "insert_select"
         else "copy_text_mysql_to_mysql_load_data"
     )
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        load_method = (
+            f"{base_method}_incremental_deduped"
+            if inc_mode == "incremental_deduped"
+            else f"{base_method}_incremental_append"
+        )
+        sync_label = inc_mode
+    else:
+        load_method = base_method
+        sync_label = (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        )
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
@@ -8333,7 +8428,7 @@ def _try_mysql_mysql_copy_fast_path(
         "source_row_count_source": "engine_population_in_snapshot",
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": "full_refresh_append" if not replace_destination else "full_refresh_overwrite",
+        "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
@@ -8345,16 +8440,37 @@ def _try_mysql_mysql_copy_fast_path(
             (result.source_snapshot or {}).get("partition_proof") or []
         ),
     }
-    proof_line = "Proof: destination COUNT(*) equals source snapshot count."
-    if dest_summary.get("shard_mode") == "pk" and dest_summary.get("partition_proof"):
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        dest_summary["incremental_watermark"] = inc_wm
+    if inc_mode == "incremental_deduped":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
+            "equals staging; dest COUNT(*) independently reread."
+        )
+    elif inc_mode == "incremental_append":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
+            "equals dest_before + staging (duplicate PK fails closed)."
+        )
+    else:
+        proof_line = "Proof: destination COUNT(*) equals source snapshot count."
+    if (
+        inc_mode not in COPY_INCREMENTAL_MODES
+        and dest_summary.get("shard_mode") == "pk"
+        and dest_summary.get("partition_proof")
+    ):
         proof_line = (
             "Proof: destination COUNT(*) equals source snapshot count; "
             "each PK range dest COUNT matched its source range."
         )
     how = (
-        "INSERT SELECT (same instance)"
-        if split == "insert_select"
-        else "SELECT + STRICT LOAD DATA"
+        f"COPY+{inc_mode}"
+        if inc_mode in COPY_INCREMENTAL_MODES
+        else (
+            "INSERT SELECT (same instance)"
+            if split == "insert_select"
+            else "SELECT + STRICT LOAD DATA"
+        )
     )
     ddl_log = [
         f"COPY MySQL {source_table} → MySQL {dest_table} "

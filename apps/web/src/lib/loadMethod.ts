@@ -68,6 +68,42 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
       "Identity incremental: COPY of rows past the cursor watermark into staging, "
       + "then INSERT ... ON DUPLICATE KEY UPDATE. Proof is dest PK ⋈ staging.",
   },
+  copy_text_mysql_to_pg_stdin_incremental_append: {
+    label: "MySQL → PostgreSQL incremental append",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of rows past the "
+      + "cursor watermark into staging COPY, then INSERT (duplicate PK fails closed).",
+  },
+  copy_text_mysql_to_pg_stdin_incremental_deduped: {
+    label: "MySQL → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: MySQL consistent-snapshot SELECT of rows past the "
+      + "cursor watermark into staging COPY, then INSERT ... ON CONFLICT.",
+  },
+  insert_select_mysql_same_instance_incremental_append: {
+    label: "MySQL INSERT SELECT incremental append",
+    description:
+      "Identity incremental: same-instance INSERT SELECT of rows past the cursor "
+      + "watermark into staging, then INSERT (duplicate PK fails closed).",
+  },
+  insert_select_mysql_same_instance_incremental_deduped: {
+    label: "MySQL INSERT SELECT incremental upsert",
+    description:
+      "Identity incremental: same-instance INSERT SELECT of rows past the cursor "
+      + "watermark into staging, then INSERT ... ON DUPLICATE KEY UPDATE.",
+  },
+  copy_text_mysql_to_mysql_load_data_incremental_append: {
+    label: "MySQL LOAD DATA incremental append",
+    description:
+      "Identity incremental: cross-host LOAD DATA of rows past the cursor "
+      + "watermark into staging, then INSERT (duplicate PK fails closed).",
+  },
+  copy_text_mysql_to_mysql_load_data_incremental_deduped: {
+    label: "MySQL LOAD DATA incremental upsert",
+    description:
+      "Identity incremental: cross-host LOAD DATA of rows past the cursor "
+      + "watermark into staging, then INSERT ... ON DUPLICATE KEY UPDATE.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {

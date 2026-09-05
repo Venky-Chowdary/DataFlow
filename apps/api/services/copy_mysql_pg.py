@@ -382,8 +382,14 @@ def copy_mysql_to_postgres(
     pairs: list[tuple[str, str]],
     pg_ddls: list[str],
     replace_destination: bool,
+    source_where: str = "",
 ) -> FastPathResult:
-    """Stream MySQL rows into PostgreSQL COPY. Dest COUNT is the proof."""
+    """Stream MySQL rows into PostgreSQL COPY. Dest COUNT is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and SELECT use that filter, dest-occupied PK skip is
+    disabled, and the load is a single shard.
+    """
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
 
@@ -449,15 +455,31 @@ def copy_mysql_to_postgres(
                 created_here = True
                 dest_conn.commit()
 
-            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
+            cursor_where = (source_where or "").strip()
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
             workers = pg_mysql_copy_workers(source_count)
             n_parts = pg_mysql_copy_partitions(source_count, workers)
             partitions: list[dict[str, Any]] = []
             shard_mode = "ctid"
-            select_sql = _select_sql(table_q, source_cols, "")
+            select_sql = _select_sql(table_q, source_cols, cursor_where)
 
-            if pk_map is not None:
+            if cursor_where:
+                if dest_occupied:
+                    raise FastPathUnavailable(
+                        "filtered COPY into occupied dest stays on the incremental staging path"
+                    )
+                shard_mode = "cursor"
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
                 src_pk, dest_pk = pk_map
                 src_ident = _mysql_ident(src_pk)
                 shard_mode = "pk"
@@ -563,13 +585,14 @@ def copy_mysql_to_postgres(
                 source_snapshot={
                     "mysql_consistent_snapshot": True,
                     "copy_workers": 1,
-                    "copy_split": "serial",
+                    "copy_split": "cursor" if cursor_where else "serial",
                     "copy_partitions": len(partitions) or 1,
                     "partitions_skipped": sum(
                         1 for p in partitions if p.get("action") == "skip"
                     ),
                     "shard_mode": shard_mode if partitions else "serial",
                     "tsv_encoder": "fast_copy_text",
+                    "source_where": bool(cursor_where),
                     "partition_proof": partition_proof,
                 },
                 proof_scope=(

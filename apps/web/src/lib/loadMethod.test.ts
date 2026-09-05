@@ -19,5 +19,13 @@ describe("loadMethod labels", () => {
       loadMethodDescription("copy_binary_server_to_server_incremental_append"),
       /watermark/,
     );
+    assert.match(
+      loadMethodLabel("copy_text_mysql_to_pg_stdin_incremental_deduped"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodLabel("insert_select_mysql_same_instance_incremental_append"),
+      /INSERT SELECT/i,
+    );
   });
 });
