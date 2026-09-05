@@ -170,8 +170,11 @@ def test_file_parser_preview_yaml_and_fwf() -> None:
 def test_yaml_to_sqlite_dest_count(tmp_path: Path) -> None:
     import sqlite3
 
+    from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
+
+    ensure_memory_job_store_if_mongo_down()
 
     db = tmp_path / "ledger.db"
     body = b'- id: "1"\n  amount: "1000.00"\n- id: "2"\n  amount: "2000.50"\n'
@@ -191,6 +194,13 @@ def test_yaml_to_sqlite_dest_count(tmp_path: Path) -> None:
     )
     result = UniversalTransferEngine().execute_tracked(request, "yaml-sqlite")
     assert result.success, getattr(result, "error", result)
+    summary = result.destination_summary or {}
+    assert summary.get("copy_fast_path") == "used"
+    assert summary.get("engine_source_checksum") == "dest_count:2"
+    assert summary.get("engine_target_checksum") == "dest_count:2"
+    assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
     conn = sqlite3.connect(str(db))
     try:
         n = conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0]
@@ -204,8 +214,11 @@ def test_yaml_to_sqlite_dest_count(tmp_path: Path) -> None:
 def test_fixed_width_to_sqlite_dest_count(tmp_path: Path) -> None:
     import sqlite3
 
+    from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
+
+    ensure_memory_job_store_if_mongo_down()
 
     db = tmp_path / "ledger.db"
     request = TransferRequest(
@@ -224,6 +237,13 @@ def test_fixed_width_to_sqlite_dest_count(tmp_path: Path) -> None:
     )
     result = UniversalTransferEngine().execute_tracked(request, "fwf-sqlite")
     assert result.success, getattr(result, "error", result)
+    summary = result.destination_summary or {}
+    assert summary.get("copy_fast_path") == "used"
+    assert summary.get("engine_source_checksum") == "dest_count:2"
+    assert summary.get("engine_target_checksum") == "dest_count:2"
+    assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
     conn = sqlite3.connect(str(db))
     try:
         n = conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0]

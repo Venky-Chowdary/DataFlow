@@ -240,6 +240,9 @@ def test_csv_sqlite_overwrite_dest_count_equals_source(tmp_path):
     assert written == 3
     assert summary.get("copy_fast_path") == "used"
     assert summary.get("load_method") == "csv_executemany_sqlite"
+    assert summary.get("engine_source_checksum") == "dest_count:3"
+    assert summary.get("engine_target_checksum") == "dest_count:3"
+    assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
     conn = sqlite3.connect(dest_path)
     try:
         assert int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]) == 3

@@ -1346,6 +1346,10 @@ def _format_csv_copy(
         "load_method": load_method,
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
+        # Same pair SQL COPY stamps. Without it Gate-8 re-hashes dest rows
+        # and compares that fingerprint to dest_count:N.
+        "engine_source_checksum": result.source_checksum,
+        "engine_target_checksum": result.target_checksum,
         "rejected_rows": 0,
         "coerced_null_rows": 0,
         "sync_mode": sync_mode if incremental else (

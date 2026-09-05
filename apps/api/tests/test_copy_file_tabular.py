@@ -227,6 +227,9 @@ def test_json_sqlite_overwrite_dest_count(tmp_path):
     assert first == 3, summary1
     assert summary1.get("copy_fast_path") == "used"
     assert summary1.get("load_method") == "json_records_executemany_sqlite"
+    assert summary1.get("engine_source_checksum") == "dest_count:3"
+    assert summary1.get("engine_target_checksum") == "dest_count:3"
+    assert summary1.get("proof_scope") == "dest_count_equals_source_snapshot_count"
     conn = sqlite3.connect(dest_path)
     try:
         assert int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]) == 3
