@@ -6,7 +6,9 @@ The COPY router used to decline every incremental route, so the second run paid
 the row-path tax and never advanced a watermark when COPY had succeeded.
 
 This module is the missing second run for the handover SQL core
-(PostgreSQL and MySQL, either direction, plus SQLite→SQLite):
+(PostgreSQL and MySQL either direction, those engines into SQLite, and
+SQLite→SQLite). SQLite→PostgreSQL / SQLite→MySQL stay on the row path
+until DATETIME is COPY-safe on those routes.
 
 1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
    the engine reader uses (Airbyte timestamp-cursor trap).
@@ -48,10 +50,17 @@ APPEND_PROOF_SCOPE = (
 
 
 def identity_incremental_route(src_type: str, dest_type: str) -> bool:
-    """True when identity incremental COPY is proven for this pair."""
+    """True when identity incremental COPY is proven for this pair.
+
+    SQLite as destination is COPY-safe from PostgreSQL (DATE, not TIMESTAMP)
+    and MySQL (DATETIME, not TIMESTAMP). SQLite as source is only proven
+    back into SQLite — SQLite→PG/MySQL decline DATETIME.
+    """
     src = (src_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
     if src in _SQL_CORE and dest in _SQL_CORE:
+        return True
+    if src in _SQL_CORE and dest == "sqlite":
         return True
     return src == "sqlite" and dest == "sqlite"
 
@@ -643,6 +652,135 @@ def _apply_staging_to_sqlite(
     )
 
 
+def _sqlite_incremental_idents(dest_table: str) -> tuple[str, str, str]:
+    from services.copy_sqlite_common import sqlite_ident
+    from services.copy_upsert import staging_table_name
+
+    dest_q = sqlite_ident(dest_table)
+    staging = staging_table_name(dest_table)
+    return dest_q, staging, sqlite_ident(staging)
+
+
+def _prepare_sqlite_incremental_dest(
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    sqlite_ddls: list[str],
+    dest_pk: str,
+) -> tuple[bool, int]:
+    """Create dest with PK if missing. Returns (created_here, dest_count_before)."""
+    from services.copy_sqlite_common import (
+        sqlite_connect,
+        sqlite_create_sql,
+        sqlite_ident,
+        sqlite_table_exists,
+        sqlite_table_pk_columns,
+    )
+
+    dest_q = sqlite_ident(dest_table)
+    dest_conn = sqlite_connect(dest_cfg)
+    created_dest = False
+    dest_count_before = 0
+    try:
+        dest_conn.execute("BEGIN IMMEDIATE")
+        if not sqlite_table_exists(dest_conn, dest_table):
+            dest_conn.execute(
+                sqlite_create_sql(dest_table, pairs, sqlite_ddls, [dest_pk])
+            )
+            created_dest = True
+        else:
+            dest_pks = sqlite_table_pk_columns(dest_conn, dest_table)
+            if not any(c.lower() == dest_pk.lower() for c in dest_pks):
+                raise FastPathUnavailable(
+                    "incremental COPY dest must enforce the mapped primary key"
+                )
+            dest_count_before = int(
+                dest_conn.execute(f"SELECT COUNT(*) FROM {dest_q}").fetchone()[0]  # nosec B608
+            )
+        dest_conn.commit()
+        return created_dest, dest_count_before
+    except Exception:
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("sqlite incremental dest probe rollback skipped", exc_info=True)
+        raise
+    finally:
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("sqlite incremental dest probe close skipped", exc_info=True)
+
+
+def _finish_sqlite_incremental_staging(
+    dest_cfg: dict[str, Any],
+    *,
+    dest_table: str,
+    dest_pk: str,
+    dest_cursor: str,
+    dest_pk_col: str,
+    dest_count_before: int,
+    target_cols: list[str],
+    mode: str,
+    result: FastPathResult,
+    created_dest: bool,
+) -> FastPathResult:
+    from services.copy_sqlite_common import sqlite_connect
+
+    dest_q, staging, staging_q = _sqlite_incremental_idents(dest_table)
+    dest_conn = None
+    try:
+        dest_conn = sqlite_connect(dest_cfg)
+        dest_conn.execute("BEGIN IMMEDIATE")
+        dst_cur = dest_conn.cursor()
+        out = _apply_staging_to_sqlite(
+            dst_cur,
+            dest_q=dest_q,
+            staging_q=staging_q,
+            staging_name=staging,
+            dest_table=dest_table,
+            target_cols=target_cols,
+            dest_pk=dest_pk,
+            dest_cursor=dest_cursor,
+            dest_pk_col=dest_pk_col,
+            dest_count_before=dest_count_before,
+            mode=mode,
+            result=result,
+        )
+        dest_conn.commit()
+        return out
+    except Exception:
+        if dest_conn is not None:
+            try:
+                dest_conn.rollback()
+            except Exception:
+                logger.debug("sqlite incremental apply rollback skipped", exc_info=True)
+        cleanup = dest_conn
+        opened = False
+        if cleanup is None:
+            cleanup = sqlite_connect(dest_cfg)
+            opened = True
+        try:
+            cleanup.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
+            if created_dest:
+                cleanup.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
+            cleanup.commit()
+        except Exception:
+            logger.debug("sqlite incremental cleanup skipped", exc_info=True)
+        if opened:
+            try:
+                cleanup.close()
+            except Exception:
+                logger.debug("sqlite incremental cleanup close skipped", exc_info=True)
+        raise
+    finally:
+        if dest_conn is not None:
+            try:
+                dest_conn.close()
+            except Exception:
+                logger.debug("sqlite incremental dest close skipped", exc_info=True)
+
+
 def copy_postgres_to_mysql_incremental(
     *,
     source_cfg: dict[str, Any],
@@ -1189,15 +1327,8 @@ def copy_sqlite_to_sqlite_incremental(
 ) -> FastPathResult:
     """Filtered SQLite INSERT SELECT into staging, then append or ON CONFLICT."""
     from services.copy_pg_mysql import mapped_single_pk
-    from services.copy_sqlite_common import (
-        sqlite_connect,
-        sqlite_create_sql,
-        sqlite_ident,
-        sqlite_table_exists,
-        sqlite_table_pk_columns,
-    )
+    from services.copy_sqlite_common import sqlite_connect, sqlite_table_pk_columns
     from services.copy_sqlite_sqlite import copy_sqlite_to_sqlite
-    from services.copy_upsert import staging_table_name
 
     mode = (sync_mode or "").strip().lower()
     if mode not in COPY_INCREMENTAL_MODES:
@@ -1222,99 +1353,184 @@ def copy_sqlite_to_sqlite_incremental(
     finally:
         source_conn.close()
 
-    dest_q = sqlite_ident(dest_table)
-    staging = staging_table_name(dest_table)
-    staging_q = sqlite_ident(staging)
-    dest_conn = sqlite_connect(dest_cfg)
-    created_dest = False
-    dest_count_before = 0
-    try:
-        dest_conn.execute("BEGIN IMMEDIATE")
-        if not sqlite_table_exists(dest_conn, dest_table):
-            dest_conn.execute(
-                sqlite_create_sql(dest_table, pairs, sqlite_ddls, [dest_pk])
-            )
-            created_dest = True
-        else:
-            dest_pks = sqlite_table_pk_columns(dest_conn, dest_table)
-            if not any(c.lower() == dest_pk.lower() for c in dest_pks):
-                raise FastPathUnavailable(
-                    "incremental COPY dest must enforce the mapped primary key"
-                )
-            dest_count_before = int(
-                dest_conn.execute(f"SELECT COUNT(*) FROM {dest_q}").fetchone()[0]  # nosec B608
-            )
-        dest_conn.commit()
-    except Exception:
-        try:
-            dest_conn.rollback()
-        except Exception:
-            logger.debug("sqlite incremental dest probe rollback skipped", exc_info=True)
-        try:
-            dest_conn.close()
-        except Exception:
-            logger.debug("sqlite incremental dest probe close skipped", exc_info=True)
-        raise
-    else:
-        try:
-            dest_conn.close()
-        except Exception:
-            logger.debug("sqlite incremental dest probe close skipped", exc_info=True)
+    _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
+    created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+    )
+    result = copy_sqlite_to_sqlite(
+        source_cfg=source_cfg,
+        source_table=source_table,
+        dest_cfg=dest_cfg,
+        dest_table=staging,
+        pairs=pairs,
+        sqlite_ddls=sqlite_ddls,
+        replace_destination=True,
+        source_where=source_where,
+    )
+    return _finish_sqlite_incremental_staging(
+        dest_cfg,
+        dest_table=dest_table,
+        dest_pk=dest_pk,
+        dest_cursor=dest_cursor,
+        dest_pk_col=dest_pk_col,
+        dest_count_before=dest_count_before,
+        target_cols=target_cols,
+        mode=mode,
+        result=result,
+        created_dest=created_dest,
+    )
 
-    dest_conn = None
+
+def copy_postgres_to_sqlite_incremental(
+    *,
+    source_cfg: dict[str, Any],
+    source_schema: str,
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    sqlite_ddls: list[str],
+    sync_mode: str,
+    cursor_column: str,
+    watermark: str | None,
+    pk_column: str = "",
+) -> FastPathResult:
+    """Filtered PG COPY text into SQLite staging, then append or ON CONFLICT."""
+    from services.copy_fast_path import source_table_shape
+    from services.copy_pg_mysql import mapped_single_pk, _pg_connect
+    from services.copy_pg_sqlite import copy_postgres_to_sqlite
+
+    mode = (sync_mode or "").strip().lower()
+    if mode not in COPY_INCREMENTAL_MODES:
+        raise FastPathUnavailable(f"incremental COPY does not cover {sync_mode!r}")
+    src_cursor, dest_cursor, _src_pk, dest_pk_col = _require_mapped_cursor(
+        pairs, cursor_column, pk_column
+    )
+    source_cols = [p[0] for p in pairs]
+    target_cols = [p[1] for p in pairs]
+    source_where = _source_where(
+        source_cfg,
+        source_schema or "public",
+        source_table,
+        src_cursor,
+        watermark,
+        pk_column,
+    )
+
+    source_conn = _pg_connect(source_cfg)
     try:
-        result = copy_sqlite_to_sqlite(
-            source_cfg=source_cfg,
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_table=staging,
-            pairs=pairs,
-            sqlite_ddls=sqlite_ddls,
-            replace_destination=True,
-            source_where=source_where,
-        )
-        dest_conn = sqlite_connect(dest_cfg)
-        dest_conn.execute("BEGIN IMMEDIATE")
-        dst_cur = dest_conn.cursor()
-        out = _apply_staging_to_sqlite(
-            dst_cur,
-            dest_q=dest_q,
-            staging_q=staging_q,
-            staging_name=staging,
-            dest_table=dest_table,
-            target_cols=target_cols,
-            dest_pk=dest_pk,
-            dest_cursor=dest_cursor,
-            dest_pk_col=dest_pk_col,
-            dest_count_before=dest_count_before,
-            mode=mode,
-            result=result,
-        )
-        dest_conn.commit()
-        return out
-    except Exception:
-        if dest_conn is not None:
-            try:
-                dest_conn.rollback()
-            except Exception:
-                logger.debug("sqlite incremental apply rollback skipped", exc_info=True)
-        cleanup = dest_conn or sqlite_connect(dest_cfg)
-        try:
-            cleanup.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
-            if created_dest:
-                cleanup.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
-            cleanup.commit()
-        except Exception:
-            logger.debug("sqlite incremental cleanup skipped", exc_info=True)
-        if cleanup is not dest_conn:
-            try:
-                cleanup.close()
-            except Exception:
-                logger.debug("sqlite incremental cleanup close skipped", exc_info=True)
-        raise
+        source_conn.autocommit = True
+        with source_conn.cursor() as src_cur:
+            shape = source_table_shape(
+                src_cur, source_schema or "public", source_table, source_cols
+            )
+        pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
+        if pk_map is None:
+            raise FastPathUnavailable(
+                "incremental COPY requires exactly one mapped primary key"
+            )
+        _src_pk_table, dest_pk = pk_map
     finally:
-        if dest_conn is not None:
-            try:
-                dest_conn.close()
-            except Exception:
-                logger.debug("sqlite incremental dest close skipped", exc_info=True)
+        source_conn.close()
+
+    _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
+    created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+    )
+    result = copy_postgres_to_sqlite(
+        source_cfg=source_cfg,
+        source_schema=source_schema,
+        source_table=source_table,
+        dest_cfg=dest_cfg,
+        dest_table=staging,
+        pairs=pairs,
+        sqlite_ddls=sqlite_ddls,
+        replace_destination=True,
+        source_where=source_where,
+    )
+    return _finish_sqlite_incremental_staging(
+        dest_cfg,
+        dest_table=dest_table,
+        dest_pk=dest_pk,
+        dest_cursor=dest_cursor,
+        dest_pk_col=dest_pk_col,
+        dest_count_before=dest_count_before,
+        target_cols=target_cols,
+        mode=mode,
+        result=result,
+        created_dest=created_dest,
+    )
+
+
+def copy_mysql_to_sqlite_incremental(
+    *,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    sqlite_ddls: list[str],
+    sync_mode: str,
+    cursor_column: str,
+    watermark: str | None,
+    pk_column: str = "",
+) -> FastPathResult:
+    """Filtered MySQL snapshot SELECT into SQLite staging, then append or ON CONFLICT."""
+    from services.copy_mysql_pg import _mysql_connect, _mysql_table_pk_and_types
+    from services.copy_mysql_sqlite import copy_mysql_to_sqlite
+    from services.copy_pg_mysql import mapped_single_pk
+
+    mode = (sync_mode or "").strip().lower()
+    if mode not in COPY_INCREMENTAL_MODES:
+        raise FastPathUnavailable(f"incremental COPY does not cover {sync_mode!r}")
+    src_cursor, dest_cursor, _src_pk, dest_pk_col = _require_mapped_cursor(
+        pairs, cursor_column, pk_column
+    )
+    source_cols = [p[0] for p in pairs]
+    target_cols = [p[1] for p in pairs]
+    source_where = _mysql_source_where(
+        source_cfg, source_table, src_cursor, watermark, pk_column
+    )
+
+    source_conn = _mysql_connect(source_cfg)
+    try:
+        source_conn.autocommit = True
+        with source_conn.cursor() as src_cur:
+            pk_cols, _live = _mysql_table_pk_and_types(
+                src_cur, source_table, source_cols
+            )
+        pk_map = mapped_single_pk(pk_cols, pairs)
+        if pk_map is None:
+            raise FastPathUnavailable(
+                "incremental COPY requires exactly one mapped primary key"
+            )
+        _src_pk_table, dest_pk = pk_map
+    finally:
+        source_conn.close()
+
+    _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
+    created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+    )
+    result = copy_mysql_to_sqlite(
+        source_cfg=source_cfg,
+        source_table=source_table,
+        dest_cfg=dest_cfg,
+        dest_table=staging,
+        pairs=pairs,
+        sqlite_ddls=sqlite_ddls,
+        replace_destination=True,
+        source_where=source_where,
+    )
+    return _finish_sqlite_incremental_staging(
+        dest_cfg,
+        dest_table=dest_table,
+        dest_pk=dest_pk,
+        dest_cursor=dest_cursor,
+        dest_pk_col=dest_pk_col,
+        dest_count_before=dest_count_before,
+        target_cols=target_cols,
+        mode=mode,
+        result=result,
+        created_dest=created_dest,
+    )

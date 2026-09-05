@@ -35,5 +35,21 @@ describe("loadMethod labels", () => {
       loadMethodDescription("attach_insert_select_sqlite_incremental_append"),
       /watermark/,
     );
+    assert.match(
+      loadMethodLabel("copy_text_pg_executemany_sqlite_incremental_append"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodDescription("copy_text_pg_executemany_sqlite_incremental_deduped"),
+      /DATE/,
+    );
+    assert.match(
+      loadMethodLabel("select_mysql_executemany_sqlite_incremental_deduped"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodDescription("select_mysql_executemany_sqlite_incremental_append"),
+      /DATETIME/,
+    );
   });
 });

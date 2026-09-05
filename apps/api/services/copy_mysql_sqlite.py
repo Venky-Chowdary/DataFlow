@@ -97,8 +97,13 @@ def copy_mysql_to_sqlite(
     sqlite_ddls: list[str],
     replace_destination: bool,
     source_schema: str | None = None,
+    source_where: str = "",
 ) -> FastPathResult:
-    """INSERT MySQL snapshot rows into SQLite. Dest COUNT(*) before commit is the proof."""
+    """INSERT MySQL snapshot rows into SQLite. Dest COUNT(*) before commit is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
+    """
     del source_schema
     if not pairs or len(pairs) != len(sqlite_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
@@ -128,7 +133,8 @@ def copy_mysql_to_sqlite(
     col_sql = ", ".join(sqlite_ident(c) for c in target_cols)
     placeholders = ", ".join(["?"] * len(target_cols))
     insert_sql = f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-    select_sql = _select_sql(table_q, source_cols, "")
+    cursor_where = (source_where or "").strip()
+    select_sql = _select_sql(table_q, source_cols, cursor_where)
     batch_size = mysql_sqlite_copy_batch()
 
     source_conn = _mysql_connect(source_cfg)
@@ -146,7 +152,8 @@ def copy_mysql_to_sqlite(
                     raise FastPathUnavailable(
                         f"source column {col!r} type {declared} is not SQLite COPY-safe"
                     )
-            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
 
         dest_conn.execute("BEGIN IMMEDIATE")
@@ -158,6 +165,10 @@ def copy_mysql_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            if cursor_where:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
             if dest_count_before == source_count:
                 dest_conn.rollback()
                 return skip_complete_sqlite(
@@ -232,11 +243,12 @@ def copy_mysql_to_sqlite(
             target_checksum=proof,
             source_snapshot={
                 "copy_workers": 1,
-                "copy_split": "serial",
+                "copy_split": "cursor" if cursor_where else "serial",
                 "copy_partitions": 1,
                 "partitions_skipped": 0,
                 "partitions_loaded": 1,
-                "shard_mode": "table",
+                "shard_mode": "cursor" if cursor_where else "table",
+                "source_where": bool(cursor_where),
                 "mysql_read": "consistent_snapshot",
                 "sqlite_write": sqlite_write,
             },

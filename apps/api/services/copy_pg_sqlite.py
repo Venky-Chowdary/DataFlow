@@ -75,8 +75,13 @@ def copy_postgres_to_sqlite(
     sqlite_ddls: list[str],
     replace_destination: bool,
     source_schema: str | None = None,
+    source_where: str = "",
 ) -> FastPathResult:
-    """COPY text from PostgreSQL into SQLite. Dest COUNT(*) is the proof."""
+    """COPY text from PostgreSQL into SQLite. Dest COUNT(*) is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and COPY use that filter and dest-occupied skip is disabled.
+    """
     if not pairs or len(pairs) != len(sqlite_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
     if not pg_sqlite_copy_enabled():
@@ -121,7 +126,9 @@ def copy_postgres_to_sqlite(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not SQLite COPY-safe"
                 )
-        src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+        cursor_where = (source_where or "").strip()
+        where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+        src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
         source_count = int(src_cur.fetchone()[0])
         src_cur.execute("SELECT pg_export_snapshot()")
         snapshot_id = str(src_cur.fetchone()[0])
@@ -137,6 +144,10 @@ def copy_postgres_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            if cursor_where:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
             if dest_count_before == source_count:
                 dest_conn.rollback()
                 return skip_complete_sqlite(
@@ -161,7 +172,7 @@ def copy_postgres_to_sqlite(
         select_list = ", ".join(
             _pg_copy_select_expr(col, live_l[col.lower()]) for col in source_cols
         )
-        copy_sql = _copy_select_sql(select_list, source_ref, "")
+        copy_sql = _copy_select_sql(select_list, source_ref, cursor_where)
         dst_cur = dest_conn.cursor()
         sink = _CopyExecutemanySink(
             dst_cur,
@@ -203,11 +214,12 @@ def copy_postgres_to_sqlite(
             source_snapshot={
                 "pg_snapshot": snapshot_id,
                 "copy_workers": 1,
-                "copy_split": "serial",
+                "copy_split": "cursor" if cursor_where else "serial",
                 "copy_partitions": 1,
                 "partitions_skipped": 0,
                 "partitions_loaded": 1,
-                "shard_mode": "table",
+                "shard_mode": "cursor" if cursor_where else "table",
+                "source_where": bool(cursor_where),
                 "sqlite_write": sqlite_write,
             },
             proof_scope="dest_count_equals_source_snapshot_count",
