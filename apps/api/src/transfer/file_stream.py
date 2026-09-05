@@ -1185,6 +1185,11 @@ def stream_file_to_database(
     if source_filter:
         batch_iter = (apply_row_filter(batch, source_filter) for batch in batch_iter)
 
+    try:
+        from .stream_row_accounting import stamp_incremental_no_op
+    except ImportError:
+        from transfer.stream_row_accounting import stamp_incremental_no_op  # type: ignore
+
     # An incremental sync of a file source is bounded after the parse — the file
     # arrives whole, so without this the mode appends every row it still holds
     # and the second run duplicates the first. Same resolver, same watermark key
@@ -1230,6 +1235,60 @@ def stream_file_to_database(
             if reset_issue:
                 raise ValueError(reset_issue)
 
+    pk_for_copy = ""
+    if contract:
+        pks = [c for c in (contract.primary_key_columns() or []) if c]
+        if len(pks) == 1:
+            pk_for_copy = pks[0]
+    try:
+        from services.copy_csv_local import try_copy_local_csv
+    except ImportError:
+        from src.services.copy_csv_local import try_copy_local_csv  # type: ignore
+    csv_fast = try_copy_local_csv(
+        content=content,
+        filename=filename,
+        file_type=file_type,
+        dest_type=dest_type,
+        dest_cfg=dest_cfg,
+        dest_table=dest_table,
+        dest_schema=str(
+            getattr(destination, "schema", "") or dest_cfg.get("schema") or "public"
+        ),
+        mappings=mappings,
+        schema=schema,
+        effective_sync=effective_sync,
+        cursor_column=cursor_source_col if incremental else "",
+        watermark=watermark if incremental else None,
+        pk_column=pk_for_copy if incremental else "",
+        source_filter=source_filter,
+        shape_runner=shape_runner,
+        resumed=resumed,
+        read_options=read_options,
+    )
+    if csv_fast is not None:
+        rows_copied, copy_ddl, dest_summary, columns = csv_fast
+        dest_summary["copy_fast_path"] = "used"
+        if incremental:
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["cursor_key"] = cursor_key
+            wm = str(dest_summary.get("incremental_watermark") or "").strip()
+            if int(rows_copied or 0) == 0:
+                stamp_incremental_no_op(dest_summary)
+                dest_summary["watermark"] = watermark or ""
+            elif wm and cursor_key:
+                set_watermark(
+                    cursor_key,
+                    wm,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": effective_sync,
+                        "cursor_column": cursor_source_col,
+                    },
+                )
+                dest_summary["watermark"] = wm
+        return rows_copied, copy_ddl, dest_summary, columns
+
+    if incremental and cursor_source_col:
         def _bounded_batches(batches):
             nonlocal running_cursor
             for raw in batches:

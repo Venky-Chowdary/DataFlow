@@ -131,6 +131,7 @@ def test_identity_incremental_route_sql_core_only():
     assert identity_incremental_route("sqlite", "postgresql")
     assert identity_incremental_route("sqlite", "mysql")
     assert not identity_incremental_route("mysql", "snowflake")
+    assert not identity_incremental_route("csv", "sqlite")
 
 
 def test_copy_route_declines_cdc_incremental():

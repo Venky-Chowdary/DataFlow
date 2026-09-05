@@ -67,5 +67,12 @@ describe("loadMethod labels", () => {
       loadMethodDescription("select_sqlite_load_data_mysql_incremental_deduped"),
       /DATETIME/,
     );
+    assert.match(loadMethodLabel("csv_executemany_sqlite_incremental_deduped"), /CSV/);
+    assert.match(
+      loadMethodDescription("csv_executemany_sqlite_incremental_append"),
+      /watermark/,
+    );
+    assert.match(loadMethodLabel("csv_copy_from_stdin_pg_incremental_deduped"), /incremental/i);
+    assert.match(loadMethodLabel("csv_load_data_mysql_incremental_append"), /LOAD DATA/);
   });
 });

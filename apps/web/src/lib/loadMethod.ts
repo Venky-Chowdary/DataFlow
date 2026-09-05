@@ -194,6 +194,60 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
       "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
       + "into staging LOAD DATA, then INSERT ... ON DUPLICATE KEY UPDATE. DATETIME is COPY-unsafe.",
   },
+  csv_executemany_sqlite: {
+    label: "CSV → SQLite",
+    description:
+      "Identity append/overwrite: local CSV parsed into SQLite executemany. "
+      + "Dest COUNT(*) must equal the mapped source COUNT. Not pandas.",
+  },
+  csv_executemany_sqlite_incremental_append: {
+    label: "CSV → SQLite incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_executemany_sqlite_incremental_deduped: {
+    label: "CSV → SQLite incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging, "
+      + "then INSERT ... ON CONFLICT. Not a SQL WHERE on the file.",
+  },
+  csv_copy_from_stdin_pg: {
+    label: "CSV → PostgreSQL COPY",
+    description:
+      "Identity append/overwrite: local CSV piped into COPY FROM STDIN. "
+      + "Dest COUNT(*) must equal the mapped source COUNT.",
+  },
+  csv_copy_from_stdin_pg_incremental_append: {
+    label: "CSV → PostgreSQL incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging COPY, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_copy_from_stdin_pg_incremental_deduped: {
+    label: "CSV → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging COPY, "
+      + "then INSERT ... ON CONFLICT. Not a SQL WHERE on the file.",
+  },
+  csv_load_data_mysql: {
+    label: "CSV → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: local CSV into STRICT LOAD DATA. "
+      + "Dest COUNT(*) must equal the mapped source COUNT.",
+  },
+  csv_load_data_mysql_incremental_append: {
+    label: "CSV → MySQL incremental append",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging LOAD DATA, "
+      + "then INSERT (duplicate PK fails closed). Not a SQL WHERE on the file.",
+  },
+  csv_load_data_mysql_incremental_deduped: {
+    label: "CSV → MySQL incremental upsert",
+    description:
+      "Identity incremental: CSV rows past the cursor watermark into staging LOAD DATA, "
+      + "then INSERT ... ON DUPLICATE KEY UPDATE. Not a SQL WHERE on the file.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {
