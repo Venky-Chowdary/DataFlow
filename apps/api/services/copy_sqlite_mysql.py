@@ -6,12 +6,14 @@ Dest ``COUNT(*)`` must equal the source COUNT **before commit**. Empty
 dest is LOAD DATA, **not** upsert / ``.dump`` / sqlldr. Occupied dest
 whose COUNT already equals the source COUNT is skip-complete. Occupied
 dest with a different COUNT declines. ``:memory:`` / BLOB decline.
-DATE ISO text or a calendar day loads as MySQL DATE. DATETIME /
-TIMESTAMP decline (would invent a MySQL datetime). JSON declines.
+DATE ISO text or a calendar day loads as MySQL DATE. Naive ISO DATETIME
+loads as MySQL ``DATETIME(6)`` (not session-TZ ``TIMESTAMP``). INTEGER
+unix, REAL julian, tz-aware, and date-only DATETIME decline. JSON
+declines.
 
 Declines (row path keeps quarantine): transforms that change values,
-BLOB/DATETIME/JSON, public proxy, occupied dest with dest COUNT ≠ source,
-``:memory:``, LOAD DATA ineligible sessions.
+BLOB/unix DATETIME/JSON, public proxy, occupied dest with dest COUNT ≠
+source, ``:memory:``, LOAD DATA ineligible sessions.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from datetime import date
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -30,6 +31,9 @@ from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
 from services.copy_sqlite_common import (
     skip_complete_sqlite,
     sqlite_connect,
+    sqlite_copy_date_value,
+    sqlite_copy_naive_datetime_value,
+    sqlite_ddl_base,
     sqlite_ident,
     sqlite_pragma_types,
     sqlite_resolved_path,
@@ -40,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 _FETCH_BATCH = 8192
 _UNSAFE_SQLITE_MYSQL_BASES = frozenset({
-    "DATETIME",
     "TIMESTAMP",
     "TIMESTAMPTZ",
     "JSON",
@@ -56,29 +59,25 @@ def sqlite_mysql_copy_enabled() -> bool:
 def sqlite_mysql_type_is_copy_safe(declared: str) -> bool:
     if not sqlite_type_is_copy_safe(declared):
         return False
-    base = (declared or "").strip().upper().replace(" ", "").split("(", 1)[0]
+    base = sqlite_ddl_base(declared)
     return base not in _UNSAFE_SQLITE_MYSQL_BASES
 
 
 def sqlite_value_to_load_data(value: Any, ddl: str) -> str:
-    """SQLite cell → LOAD DATA TSV. DATE ISO is a calendar day; DATETIME declines."""
+    """SQLite cell → LOAD DATA TSV. DATE is a calendar day; DATETIME is naive ISO."""
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("BLOB values are not MySQL COPY-safe")
-    base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
+    base = sqlite_ddl_base(ddl)
     if base in _UNSAFE_SQLITE_MYSQL_BASES:
         raise FastPathUnavailable(
             f"{base} SQLite value is not MySQL COPY-safe"
         )
     if base == "DATE":
-        if value is None:
-            return "\\N"
-        if isinstance(value, str):
-            try:
-                value = date.fromisoformat(value[:10])
-            except ValueError as exc:
-                raise FastPathUnavailable(
-                    f"DATE cell {value!r} is not ISO calendar-day COPY-safe"
-                ) from exc
+        parsed = sqlite_copy_date_value(value)
+        return "\\N" if parsed is None else parsed.isoformat()
+    if base == "DATETIME":
+        parsed = sqlite_copy_naive_datetime_value(value)
+        return "\\N" if parsed is None else str(parsed)
     return fast_load_data_text_value(value)
 
 

@@ -6,6 +6,7 @@ import socket
 import sqlite3
 import sys
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,16 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
-from services.copy_sqlite_common import sqlite_pg_type_is_copy_safe  # noqa: E402
-from services.copy_sqlite_pg import copy_sqlite_to_postgres, sqlite_pg_copy_enabled  # noqa: E402
+from services.copy_sqlite_common import (  # noqa: E402
+    sqlite_copy_date_value,
+    sqlite_copy_naive_datetime_value,
+    sqlite_pg_type_is_copy_safe,
+)
+from services.copy_sqlite_pg import (  # noqa: E402
+    copy_sqlite_to_postgres,
+    sqlite_pg_copy_enabled,
+    sqlite_value_to_pg_copy,
+)
 from services.dest_precount import destination_row_count  # noqa: E402
 
 
@@ -90,11 +99,47 @@ def test_sqlite_pg_copy_safe_types():
     assert sqlite_pg_type_is_copy_safe("TEXT") is True
     assert sqlite_pg_type_is_copy_safe("VARCHAR(32)") is True
     assert sqlite_pg_type_is_copy_safe("") is True
+    assert sqlite_pg_type_is_copy_safe("DATE") is True
+    assert sqlite_pg_type_is_copy_safe("DATETIME") is True
+    assert sqlite_pg_type_is_copy_safe("TIMESTAMP") is True
     assert sqlite_pg_type_is_copy_safe("BLOB") is False
-    assert sqlite_pg_type_is_copy_safe("DATE") is False
     assert sqlite_pg_type_is_copy_safe("BOOLEAN") is False
-    assert sqlite_pg_type_is_copy_safe("DATETIME") is False
     assert sqlite_pg_type_is_copy_safe("JSON") is False
+    assert sqlite_pg_type_is_copy_safe("TIMESTAMPTZ") is False
+    assert sqlite_pg_type_is_copy_safe("TIMESTAMP WITH TIME ZONE") is False
+
+
+def test_sqlite_pg_temporal_cell_proof():
+    assert sqlite_copy_date_value("2024-03-15") == date(2024, 3, 15)
+    assert sqlite_copy_date_value(date(2024, 3, 15)) == date(2024, 3, 15)
+    assert sqlite_copy_date_value(None) is None
+    with pytest.raises(FastPathUnavailable, match="DATETIME"):
+        sqlite_copy_date_value("2024-03-15 12:00:00")
+    with pytest.raises(FastPathUnavailable, match="ISO calendar-day"):
+        sqlite_copy_date_value(1710460800)
+    parsed = sqlite_copy_naive_datetime_value("2024-10-01 12:00:00")
+    assert parsed == datetime(2024, 10, 1, 12, 0, 0)
+    assert sqlite_copy_naive_datetime_value("2024-10-01T12:00:00") == datetime(
+        2024, 10, 1, 12, 0, 0
+    )
+    assert sqlite_copy_naive_datetime_value(None) is None
+    with pytest.raises(FastPathUnavailable, match="unix"):
+        sqlite_copy_naive_datetime_value(1711929600)
+    with pytest.raises(FastPathUnavailable, match="tz-aware"):
+        sqlite_copy_naive_datetime_value("2024-10-01T12:00:00Z")
+    with pytest.raises(FastPathUnavailable, match="tz-aware"):
+        sqlite_copy_naive_datetime_value("2024-10-01 12:00:00+00:00")
+    with pytest.raises(FastPathUnavailable, match="date-only"):
+        sqlite_copy_naive_datetime_value("2024-10-01")
+    with pytest.raises(FastPathUnavailable, match="invent 00:00:00"):
+        sqlite_copy_naive_datetime_value(date(2024, 10, 1))
+    assert sqlite_value_to_pg_copy("2024-03-15", "DATE") == "2024-03-15"
+    assert sqlite_value_to_pg_copy("2024-10-01 12:00:00", "TIMESTAMP") == (
+        "2024-10-01 12:00:00"
+    )
+    assert sqlite_value_to_pg_copy(None, "DATETIME") == "\\N"
+    with pytest.raises(FastPathUnavailable, match="not PostgreSQL COPY-safe"):
+        sqlite_value_to_pg_copy("2024-10-01 12:00:00", "TIMESTAMPTZ")
 
 
 def test_sqlite_pg_copy_kill_switch(monkeypatch, tmp_path):
@@ -146,29 +191,115 @@ def test_live_sqlite_pg_dest_count(monkeypatch, tmp_path):
         pg.close()
 
 
-def test_live_sqlite_pg_date_affinity_declines(tmp_path):
+def test_live_sqlite_pg_date_iso_dest_count(tmp_path):
     pg = _pg_connect()
     tag = uuid.uuid4().hex[:8]
     src_path = tmp_path / "src.db"
     dest = f"sqlite_pg_date_{tag}"
     conn = sqlite3.connect(src_path)
     conn.execute("CREATE TABLE src_t (id INTEGER NOT NULL PRIMARY KEY, hired DATE)")
-    conn.execute("INSERT INTO src_t (id, hired) VALUES (1, '2024-03-15')")
+    conn.execute("INSERT INTO src_t (id, hired) VALUES (1, '2024-03-15'), (2, NULL)")
     conn.commit()
     conn.close()
     try:
-        with pytest.raises(FastPathUnavailable, match="not PostgreSQL COPY-safe"):
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        result = copy_sqlite_to_postgres(
+            source_cfg=_sqlite_cfg(src_path, "src_t"),
+            source_table="src_t",
+            dest_cfg=_pg_cfg(),
+            dest_schema="public",
+            dest_table=dest,
+            pairs=[("id", "id"), ("hired", "hired")],
+            pg_ddls=["BIGINT", "DATE"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 2
+        assert _dest_count(dest) == 2
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT id, hired FROM public."{dest}" ORDER BY id')
+            rows = cur.fetchall()
+        assert rows[0] == (1, date(2024, 3, 15))
+        assert rows[1] == (2, None)
+    finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        pg.close()
+
+
+def test_live_sqlite_pg_datetime_iso_dest_count(tmp_path):
+    pg = _pg_connect()
+    tag = uuid.uuid4().hex[:8]
+    src_path = tmp_path / "src.db"
+    dest = f"sqlite_pg_dt_{tag}"
+    conn = sqlite3.connect(src_path)
+    conn.execute(
+        "CREATE TABLE src_t (id INTEGER NOT NULL PRIMARY KEY, updated_at DATETIME)"
+    )
+    conn.execute(
+        "INSERT INTO src_t (id, updated_at) VALUES (1, '2024-10-01 12:00:00'), (2, NULL)"
+    )
+    conn.commit()
+    conn.close()
+    try:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        result = copy_sqlite_to_postgres(
+            source_cfg=_sqlite_cfg(src_path, "src_t"),
+            source_table="src_t",
+            dest_cfg=_pg_cfg(),
+            dest_schema="public",
+            dest_table=dest,
+            pairs=[("id", "id"), ("updated_at", "updated_at")],
+            pg_ddls=["BIGINT", "TIMESTAMP"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 2
+        assert result.source_checksum == "dest_count:2"
+        assert _dest_count(dest) == 2
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT id, updated_at FROM public."{dest}" ORDER BY id')
+            rows = cur.fetchall()
+        assert rows[0] == (1, datetime(2024, 10, 1, 12, 0, 0))
+        assert rows[1] == (2, None)
+    finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        pg.close()
+
+
+def test_live_sqlite_pg_unix_datetime_declines(tmp_path):
+    pg = _pg_connect()
+    tag = uuid.uuid4().hex[:8]
+    src_path = tmp_path / "src.db"
+    dest = f"sqlite_pg_unix_{tag}"
+    conn = sqlite3.connect(src_path)
+    conn.execute(
+        "CREATE TABLE src_t (id INTEGER NOT NULL PRIMARY KEY, updated_at DATETIME)"
+    )
+    conn.execute("INSERT INTO src_t (id, updated_at) VALUES (1, 1711929600)")
+    conn.commit()
+    conn.close()
+    try:
+        with pytest.raises(FastPathUnavailable, match="unix"):
             copy_sqlite_to_postgres(
                 source_cfg=_sqlite_cfg(src_path, "src_t"),
                 source_table="src_t",
                 dest_cfg=_pg_cfg(),
                 dest_schema="public",
                 dest_table=dest,
-                pairs=[("id", "id"), ("hired", "hired")],
-                pg_ddls=["BIGINT", "DATE"],
+                pairs=[("id", "id"), ("updated_at", "updated_at")],
+                pg_ddls=["BIGINT", "TIMESTAMP"],
                 replace_destination=True,
             )
     finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
         pg.close()
 
 

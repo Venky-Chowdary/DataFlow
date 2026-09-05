@@ -167,14 +167,14 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   select_sqlite_copy_from_stdin_pg_incremental_append: {
     label: "SQLite → PostgreSQL incremental append",
     description:
-      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
-      + "into staging COPY, then INSERT (duplicate PK fails closed). DATETIME is COPY-unsafe.",
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging COPY, then INSERT (duplicate PK fails closed). Unix-epoch, tz-aware, and date-only DATETIME decline.",
   },
   select_sqlite_copy_from_stdin_pg_incremental_deduped: {
     label: "SQLite → PostgreSQL incremental upsert",
     description:
-      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
-      + "into staging COPY, then INSERT ... ON CONFLICT. DATETIME is COPY-unsafe.",
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging COPY, then INSERT ... ON CONFLICT. Unix-epoch, tz-aware, and date-only DATETIME decline.",
   },
   select_sqlite_load_data_mysql: {
     label: "SQLite → MySQL LOAD DATA",
@@ -185,14 +185,14 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   select_sqlite_load_data_mysql_incremental_append: {
     label: "SQLite → MySQL incremental append",
     description:
-      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
-      + "into staging LOAD DATA, then INSERT (duplicate PK fails closed). DATETIME is COPY-unsafe.",
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT (duplicate PK fails closed). Unix-epoch, tz-aware, and date-only DATETIME decline.",
   },
   select_sqlite_load_data_mysql_incremental_deduped: {
     label: "SQLite → MySQL incremental upsert",
     description:
-      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
-      + "into staging LOAD DATA, then INSERT ... ON DUPLICATE KEY UPDATE. DATETIME is COPY-unsafe.",
+      "Identity incremental: SQLite SELECT of TEXT or naive-ISO DATETIME rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT ... ON DUPLICATE KEY UPDATE. Unix-epoch, tz-aware, and date-only DATETIME decline.",
   },
   csv_executemany_sqlite: {
     label: "CSV → SQLite",

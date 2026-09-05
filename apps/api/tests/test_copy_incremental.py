@@ -120,6 +120,23 @@ def test_sqlite_cursor_predicate_matches_lexicographic():
     assert "," not in single.split(">")[0]
 
 
+def test_sqlite_cursor_predicate_normalizes_iso_t_watermark():
+    """PG TIMESTAMP high-water is isoformat T; SQLite TEXT DATETIME uses space."""
+    sql = sqlite_cursor_predicate_sql(
+        cursor_column="updated_at",
+        watermark="2024-10-02T12:00:00\x1f1",
+        pk_column="id",
+    )
+    assert "'2024-10-02 12:00:00'" in sql
+    assert "T12:00:00" not in sql
+    space = sqlite_cursor_predicate_sql(
+        cursor_column="updated_at",
+        watermark="2024-10-02 12:00:00\x1f1",
+        pk_column="id",
+    )
+    assert "'2024-10-02 12:00:00'" in space
+
+
 def test_identity_incremental_route_sql_core_only():
     assert identity_incremental_route("mysql", "postgresql")
     assert identity_incremental_route("mariadb", "postgres")
@@ -172,8 +189,8 @@ def test_copy_route_declines_cdc_incremental():
     assert "incremental_deduped" in COPY_INCREMENTAL_MODES
 
 
-def test_copy_route_declines_sqlite_datetime_to_pg_incremental() -> None:
-    """SQLite DATETIME is COPY-unsafe into PostgreSQL; TEXT is the proven cursor."""
+def test_copy_route_declines_sqlite_timestamptz_to_pg_incremental() -> None:
+    """SQLite TIMESTAMPTZ dest invents a clock; naive DATETIME is the proven cursor."""
     from src.transfer.copy_route import _try_copy_fast_path
     from src.transfer.models import EndpointConfig
 
@@ -193,9 +210,9 @@ def test_copy_route_declines_sqlite_datetime_to_pg_incremental() -> None:
             destination=dest,
             mappings=[
                 {"source": "id", "target": "id", "type": "INTEGER"},
-                {"source": "updated_at", "target": "updated_at", "type": "DATETIME"},
+                {"source": "updated_at", "target": "updated_at", "type": "TIMESTAMPTZ"},
             ],
-            schema={"id": "INTEGER", "updated_at": "DATETIME"},
+            schema={"id": "INTEGER", "updated_at": "TIMESTAMPTZ"},
             src_type="sqlite",
             dest_type="postgresql",
             src_cfg={"type": "sqlite", "table": "orders", "database": "/tmp/x.db"},
@@ -212,11 +229,11 @@ def test_copy_route_declines_sqlite_datetime_to_pg_incremental() -> None:
     finally:
         reset_copy_decline_capture(token)
     assert result is None
-    assert any("DATETIME" in r or "COPY-safe" in r for r in sink)
+    assert any("TIMESTAMPTZ" in r or "COPY-safe" in r for r in sink)
 
 
-def test_copy_route_declines_sqlite_datetime_to_mysql_incremental() -> None:
-    """SQLite DATETIME is COPY-unsafe into MySQL; TEXT is the proven cursor."""
+def test_copy_route_declines_sqlite_timestamp_to_mysql_incremental() -> None:
+    """MySQL TIMESTAMP is session-TZ; naive DATETIME is the proven cursor."""
     from src.transfer.copy_route import _try_copy_fast_path
     from src.transfer.models import EndpointConfig
 
@@ -236,9 +253,9 @@ def test_copy_route_declines_sqlite_datetime_to_mysql_incremental() -> None:
             destination=dest,
             mappings=[
                 {"source": "id", "target": "id", "type": "INTEGER"},
-                {"source": "updated_at", "target": "updated_at", "type": "DATETIME"},
+                {"source": "updated_at", "target": "updated_at", "type": "TIMESTAMP"},
             ],
-            schema={"id": "INTEGER", "updated_at": "DATETIME"},
+            schema={"id": "INTEGER", "updated_at": "TIMESTAMP"},
             src_type="sqlite",
             dest_type="mysql",
             src_cfg={"type": "sqlite", "table": "orders", "database": "/tmp/x.db"},
@@ -255,7 +272,7 @@ def test_copy_route_declines_sqlite_datetime_to_mysql_incremental() -> None:
     finally:
         reset_copy_decline_capture(token)
     assert result is None
-    assert any("DATETIME" in r or "COPY-safe" in r or "MySQL COPY-safe" in r for r in sink)
+    assert any("TIMESTAMP" in r or "COPY-safe" in r or "MySQL COPY-safe" in r for r in sink)
 
 
 def test_copy_route_declines_pg_timestamp_sqlite_incremental() -> None:
@@ -990,6 +1007,7 @@ def _run_inc_from_sqlite(
     sync_mode: str,
     job_id: str,
     dest_mysql: bool = False,
+    cursor_type: str = "TEXT",
 ):
     from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.models import EndpointConfig
@@ -1007,11 +1025,11 @@ def _run_inc_from_sqlite(
         {
             "source": "updated_at",
             "target": "updated_at",
-            "type": "TEXT",
+            "type": cursor_type,
             "transform": "none",
         },
     ]
-    schema = {"id": "INTEGER", "name": "TEXT", "updated_at": "TEXT"}
+    schema = {"id": "INTEGER", "name": "TEXT", "updated_at": cursor_type}
     contracts = [
         {
             "name": "stream",
@@ -1533,7 +1551,7 @@ def test_mysql_sqlite_incremental_append_copy_delta_and_watermark(tmp_path):
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
 def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
-    """SQLite TEXT → PostgreSQL: DATETIME is COPY-unsafe. Delta then no-op."""
+    """SQLite TEXT → PostgreSQL: delta then no-op. DATETIME has a sibling test."""
     psycopg2 = pytest.importorskip("psycopg2")
     suffix = uuid.uuid4().hex[:8]
     src_path = tmp_path / f"inc_sqlite_pg_{suffix}.db"
@@ -1635,7 +1653,7 @@ def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
 
 @pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
 def test_sqlite_mysql_incremental_append_copy_delta_and_watermark(tmp_path):
-    """SQLite TEXT → MySQL: DATETIME is COPY-unsafe. 2 → 1 dest COUNT 3."""
+    """SQLite TEXT → MySQL: 2 → 1 dest COUNT 3. DATETIME has a sibling test."""
     pymysql = pytest.importorskip("pymysql")
     suffix = uuid.uuid4().hex[:8]
     src_path = tmp_path / f"inc_sqlite_mysql_{suffix}.db"
@@ -1713,3 +1731,199 @@ def test_sqlite_mysql_incremental_append_copy_delta_and_watermark(tmp_path):
         with my.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
         my.close()
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_sqlite_pg_datetime_incremental_deduped_copy_delta_and_watermark(tmp_path):
+    """SQLite naive ISO DATETIME → PG TIMESTAMP. Same-day later clock must not skip."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_pg_dt_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_spg_dt_{suffix}"
+    t1 = "2024-10-01 12:00:00"
+    t2 = "2024-10-01 15:00:00"
+    t3 = "2024-10-01 18:00:00"
+    conn = sqlite3.connect(src_path)
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "updated_at DATETIME NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES '
+            "(1, 'one', ?), (2, 'two', ?), (3, 'three', ?)",
+            (t1, t1, t2),
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-dt-a-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+            cur.execute(f'SELECT updated_at FROM "{dst}" WHERE id = 3')
+            clock = cur.fetchone()[0]
+            assert clock == datetime(2024, 10, 1, 15, 0, 0)
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, updated_at = ? WHERE id = 1',
+            ("ONE", t3),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (4, ?, ?)',
+            ("four", t3),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-dt-b-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        assert summary2.get("copy_fast_path") == "used"
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT name FROM "{dst}" WHERE id = 1')
+            assert cur.fetchone()[0] == "ONE"
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-pg-dt-c-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = %s",
+                (f"_df_stg_{dst}",),
+            )
+            assert cur.fetchone() is None
+        assert get_watermark(str(summary2.get("cursor_key") or ""))
+    finally:
+        conn.close()
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+        pg.close()
+
+
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
+def test_sqlite_mysql_datetime_incremental_append_copy_delta_and_watermark(tmp_path):
+    """SQLite naive ISO DATETIME → MySQL DATETIME. Same-day later clock; dest COUNT 3."""
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_mysql_dt_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_smy_dt_{suffix}"
+    t1 = "2024-11-01 08:00:00"
+    t2 = "2024-11-01 18:00:00"
+    conn = sqlite3.connect(src_path)
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "updated_at DATETIME NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (1, ?, ?), (2, ?, ?)',
+            ("a", t1, "b", t1),
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-dt-a-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 2
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (3, ?, ?)',
+            ("c", t2),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-dt-b-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT name FROM `{dst}` ORDER BY id")
+            names = [r[0] for r in cur.fetchall()]
+            cur.execute(f"SELECT updated_at FROM `{dst}` WHERE id = 3")
+            clock = cur.fetchone()[0]
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (f"_df_stg_{dst}",),
+            )
+            staging_left = cur.fetchone()
+        assert dest_count == 3
+        assert names == ["a", "b", "c"]
+        assert clock == datetime(2024, 11, 1, 18, 0, 0)
+        assert staging_left is None
+        assert int((summary2.get("source_snapshot") or {}).get("dest_count") or 0) == 3
+        assert get_watermark(str(summary2.get("cursor_key") or ""))
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-dt-c-{suffix}",
+            cursor_type="DATETIME",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 3
+    finally:
+        conn.close()
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        my.close()
+

@@ -257,9 +257,10 @@ def _try_copy_fast_path(
     Dest ``COUNT(*)`` is the proof.
 
     SQLite→PostgreSQL identity append/overwrite: ``SELECT`` encoded as
-    COPY text into ``COPY FROM STDIN``. DATE/BOOLEAN/BLOB decline
-    (SQLite affinity would invent a PostgreSQL type). Dest ``COUNT(*)``
-    is the proof.
+    COPY text into ``COPY FROM STDIN``. DATE ISO calendar-day lands as
+    PostgreSQL DATE. Naive ISO DATETIME lands as ``TIMESTAMP`` (not
+    ``TIMESTAMPTZ``). BOOLEAN/BLOB/unix DATETIME decline. Dest
+    ``COUNT(*)`` is the proof.
 
     S3→S3 identity append/overwrite: server-side ``CopyObject`` /
     ``UploadPartCopy``. Dest COUNT is object-store artifact COUNT (GET
@@ -457,7 +458,8 @@ def _try_copy_fast_path(
     encoded as LOAD DATA TSV into a tempfile, then STRICT
     ``LOAD DATA LOCAL INFILE``. Dest ``COUNT(*)`` runs **before commit**.
     DATE ISO/calendar day loads as MySQL DATE when mapped DATE; TEXT ISO
-    stays a string. DATETIME / TIMESTAMP / BLOB / JSON decline. Occupied
+    stays a string. Naive ISO DATETIME loads as MySQL ``DATETIME(6)``.
+    TIMESTAMP / BLOB / JSON / unix DATETIME decline. Occupied
     dest with a different COUNT declines. Empty dest is LOAD DATA, not
     upsert / sqlite3 ``.dump`` / sqlldr. ``:memory:`` declines.
 
@@ -4287,6 +4289,7 @@ def _try_sqlite_pg_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
+        note_copy_decline(f"SQLite→PG COPY declined: {exc}")
         logger.info("SQLite→PG COPY declined: %s", exc)
         return None
     except Exception as exc:
@@ -4335,12 +4338,14 @@ def _try_sqlite_pg_copy_fast_path(
     if inc_mode == "incremental_deduped":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
-            "equals staging; dest COUNT(*) independently reread. TEXT cursor; DATETIME is COPY-unsafe."
+            "equals staging; dest COUNT(*) independently reread. Naive ISO DATETIME "
+            "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed). TEXT cursor; DATETIME is COPY-unsafe."
+            "equals dest_before + staging (duplicate PK fails closed). Naive ISO DATETIME "
+            "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     else:
         proof_line = (
@@ -4640,6 +4645,7 @@ def _try_sqlite_mysql_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
+        note_copy_decline(f"SQLite→MySQL COPY declined: {exc}")
         logger.info("SQLite→MySQL COPY declined: %s", exc)
         return None
     except Exception as exc:
@@ -4691,12 +4697,14 @@ def _try_sqlite_mysql_copy_fast_path(
     if inc_mode == "incremental_deduped":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
-            "equals staging; dest COUNT(*) independently reread. TEXT cursor; DATETIME is COPY-unsafe."
+            "equals staging; dest COUNT(*) independently reread. Naive ISO DATETIME "
+            "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed). TEXT cursor; DATETIME is COPY-unsafe."
+            "equals dest_before + staging (duplicate PK fails closed). Naive ISO DATETIME "
+            "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     else:
         proof_line = (

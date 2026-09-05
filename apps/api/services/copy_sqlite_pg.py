@@ -5,15 +5,18 @@ SQLite has no server COPY. One ``BEGIN`` on the source file streams
 ``COPY … FROM STDIN``. Dest ``COUNT(*)`` must equal the source COUNT.
 Empty dest COPYs once. Occupied dest whose COUNT already equals the
 source COUNT is skip-complete. Occupied dest with a different COUNT
-declines. DATE/DATETIME/BLOB/BOOLEAN decline (SQLite affinity would
-invent a PostgreSQL type). This is **not** ``.dump``.
+declines. DATE ISO calendar-day lands as PostgreSQL DATE. Naive ISO
+DATETIME lands as ``TIMESTAMP`` (not ``TIMESTAMPTZ``). INTEGER unix,
+REAL julian, tz-aware, and date-only DATETIME decline (would invent a
+clock). BOOLEAN / BLOB / JSON / TIMESTAMPTZ decline. This is **not**
+``.dump``.
 
 ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
 When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
 
 Declines (row path keeps quarantine): transforms that change values,
-BLOB/DATE/BOOLEAN, public proxy, occupied dest with dest COUNT ≠ source,
-``:memory:``.
+BLOB/BOOLEAN/unix DATETIME, public proxy, occupied dest with dest
+COUNT ≠ source, ``:memory:``.
 """
 
 from __future__ import annotations
@@ -29,6 +32,9 @@ from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
     skip_complete_sqlite,
     sqlite_connect,
+    sqlite_copy_date_value,
+    sqlite_copy_naive_datetime_value,
+    sqlite_ddl_base,
     sqlite_ident,
     sqlite_pg_type_is_copy_safe,
     sqlite_pragma_types,
@@ -50,16 +56,40 @@ def _pg_ident(name: str) -> str:
     return _quote(name)
 
 
+def _pg_ddl_is_timestamptz(ddl: str) -> bool:
+    upper = (ddl or "").strip().upper()
+    compact = upper.replace(" ", "")
+    if compact.startswith("TIMESTAMPTZ") or compact.startswith("TIMETZ"):
+        return True
+    return "WITH TIME ZONE" in upper and "WITHOUT TIME ZONE" not in upper
+
+
+def sqlite_value_to_pg_copy(value: Any, ddl: str) -> str:
+    """SQLite cell → PostgreSQL COPY text. DATE/naive DATETIME are proven first."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise FastPathUnavailable("BLOB values are not PostgreSQL COPY-safe")
+    if _pg_ddl_is_timestamptz(ddl):
+        raise FastPathUnavailable(f"{ddl} is not PostgreSQL COPY-safe")
+    base = sqlite_ddl_base(ddl)
+    if base == "DATE":
+        parsed = sqlite_copy_date_value(value)
+        return "\\N" if parsed is None else parsed.isoformat()
+    if base in {"DATETIME", "TIMESTAMP"} or base.startswith("TIMESTAMP"):
+        parsed = sqlite_copy_naive_datetime_value(value)
+        return "\\N" if parsed is None else str(parsed)
+    return fast_copy_text_value(value)
+
+
 class _SqliteCopyReader:
     """File-like: encode SQLite fetch batches as COPY text on read()."""
 
-    def __init__(self, cursor: Any, select_sql: str) -> None:
+    def __init__(self, cursor: Any, select_sql: str, ddls: list[str]) -> None:
         self._cursor = cursor
         self._select_sql = select_sql
+        self._ddls = ddls
         self._buf = b""
         self._started = False
         self._done = False
-        self._encode = fast_copy_text_value
 
     def readable(self) -> bool:
         return True
@@ -70,13 +100,19 @@ class _SqliteCopyReader:
             self._cursor.execute(self._select_sql)
             self._started = True
         join = "\t".join
-        encode = self._encode
+        ddls = self._ddls
         while not self._done and len(self._buf) < want:
             batch = self._cursor.fetchmany(_FETCH_BATCH)
             if not batch:
                 self._done = True
                 break
-            payload = "\n".join(join(encode(v) for v in row) for row in batch)
+            payload = "\n".join(
+                join(
+                    sqlite_value_to_pg_copy(v, ddl)
+                    for v, ddl in zip(row, ddls, strict=True)
+                )
+                for row in batch
+            )
             if payload:
                 self._buf += (payload + "\n").encode("utf-8")
         out = self._buf[:want]
@@ -136,13 +172,17 @@ def copy_sqlite_to_postgres(
         source_conn.execute("BEGIN")
         live = sqlite_pragma_types(source_conn, source_table)
         live_l = {k.lower(): v for k, v in live.items()}
-        for col in source_cols:
+        for col, ddl in zip(source_cols, pg_ddls, strict=True):
             declared = live_l.get(col.lower())
             if declared is None:
                 raise FastPathUnavailable(f"source column {col!r} absent")
             if not sqlite_pg_type_is_copy_safe(declared):
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not PostgreSQL COPY-safe"
+                )
+            if ddl and (not sqlite_pg_type_is_copy_safe(ddl) or _pg_ddl_is_timestamptz(ddl)):
+                raise FastPathUnavailable(
+                    f"dest column type {ddl} is not PostgreSQL COPY-safe"
                 )
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
@@ -192,7 +232,7 @@ def copy_sqlite_to_postgres(
             "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
         )
         src_cur = source_conn.cursor()
-        dst_cur.copy_expert(copy_sql, _SqliteCopyReader(src_cur, select_sql))
+        dst_cur.copy_expert(copy_sql, _SqliteCopyReader(src_cur, select_sql, pg_ddls))
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
         dest_count = int(dst_cur.fetchone()[0])
         if dest_count != source_count:

@@ -7,8 +7,9 @@ the row-path tax and never advanced a watermark when COPY had succeeded.
 
 This module is the missing second run for the handover SQL core
 (PostgreSQL, MySQL, and SQLite any direction). SQLite as source uses a
-TEXT cursor — DATETIME/TIMESTAMP stay COPY-unsafe, and DATE is COPY-unsafe
-into PostgreSQL (SQLite affinity would invent a PG type).
+TEXT or naive-ISO DATETIME cursor. INTEGER unix, tz-aware, and
+date-only DATETIME stay COPY-unsafe. DATE into PostgreSQL is an ISO
+calendar day (same proof as SQLite DATE → MySQL).
 
 1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
    the engine reader uses (Airbyte timestamp-cursor trap).
@@ -54,8 +55,9 @@ def identity_incremental_route(src_type: str, dest_type: str) -> bool:
     """True when identity incremental COPY is proven for this pair.
 
     PostgreSQL DATE (not TIMESTAMP) and MySQL DATETIME (not TIMESTAMP) are
-    COPY-safe into SQLite. SQLite as source uses TEXT (not DATETIME, and
-    not DATE into PostgreSQL).
+    COPY-safe into SQLite. SQLite as source uses TEXT or naive-ISO DATETIME
+    (not unix-epoch, tz-aware, or date-only DATETIME). DATE into PostgreSQL
+    is ISO calendar-day.
     """
     src = (src_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
@@ -149,6 +151,20 @@ def _sqlite_quoted_literal(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def sqlite_normalize_cursor_watermark(value: str) -> str:
+    """Naive ISO watermarks use space so they match SQLite TEXT DATETIME cells.
+
+    ``datetime.isoformat()`` emits ``T``. SQLite ``datetime()`` and the
+    sqlite3 default adapter emit space. Lexicographic ``>`` on mixed
+    separators skips same-day later rows (space < ``T``) — silent
+    incremental loss.
+    """
+    text = (value or "").strip()
+    if len(text) >= 19 and text[10] == "T" and text[4] == "-" and text[7] == "-":
+        return text[:10] + " " + text[11:]
+    return text
+
+
 def sqlite_cursor_predicate_sql(
     *,
     cursor_column: str,
@@ -159,6 +175,7 @@ def sqlite_cursor_predicate_sql(
 
     Tuple comparison is equivalent to the reader's OR/AND keyset for non-NULL
     cursors. Values are quoted — INSERT SELECT cannot bind through ATTACH COPY.
+    Naive ISO ``T`` watermarks are normalized to space (SQLite TEXT DATETIME).
     """
     from services.copy_sqlite_common import sqlite_ident
 
@@ -170,11 +187,13 @@ def sqlite_cursor_predicate_sql(
     if pk and pk != cursor_column:
         cur_val, pk_val = split_cursor_bookmark(bookmark, has_tiebreak=True)
         pk_ident = sqlite_ident(pk)
+        cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
         return (
             f"({cursor_ident}, {pk_ident}) > "
             f"({_sqlite_quoted_literal(cur_val)}, {_sqlite_quoted_literal(pk_val)})"
         )
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
+    cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
     return f"{cursor_ident} > {_sqlite_quoted_literal(cur_val)}"
 
 
