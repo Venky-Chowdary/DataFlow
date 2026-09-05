@@ -261,12 +261,19 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
 };
 
 const FILE_RECORD_COPY =
-  /^(json|yaml|fwf)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
+  /^(json|yaml|fwf|excel)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
+
+const FILE_RECORD_KIND: Record<string, string> = {
+  json: "JSON",
+  yaml: "YAML",
+  fwf: "Fixed-width",
+  excel: "Excel",
+};
 
 function fileRecordCopyInfo(method: string): LoadMethodInfo | null {
   const match = method.match(FILE_RECORD_COPY);
   if (!match) return null;
-  const kind = match[1] === "fwf" ? "Fixed-width" : match[1].toUpperCase();
+  const kind = FILE_RECORD_KIND[match[1]] ?? match[1].toUpperCase();
   const dest = match[2].includes("sqlite")
     ? "SQLite"
     : match[2].includes("pg")

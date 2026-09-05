@@ -18,11 +18,12 @@ staging (``replace_destination=True``), then the existing
 append / ON CONFLICT / ON DUPLICATE apply. Unbounded cursor cells
 refuse. Empty delta is a measured no-op.
 
-json / jsonl / yaml / fixed_width parse with the same identity readers as
-the row path, then reuse this mapped-CSV dest load. Nested JSON/YAML
-cells decline (row path keeps quarantine). Windowed ``ReadOptions``
+json / jsonl / yaml / fixed_width / excel parse with the same identity
+readers as the row path, then reuse this mapped-CSV dest load. Nested
+JSON/YAML cells decline (row path keeps quarantine). Excel nested cells
+are already strings on the row path. Windowed ``ReadOptions``
 (skip_rows / skip_footer / non-default header_row) decline. gzip is
-decompressed, then the same mapped COPY.
+decompressed, then the same mapped COPY. Legacy ``.xls`` declines.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 _CSV_TYPES = frozenset({"csv", "tsv"})
 _JSON_TYPES = frozenset({"json", "jsonl", "ndjson"})
-_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset({"yaml", "fixed_width"})
+_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset({"yaml", "fixed_width", "excel"})
 _SQL_DEST = frozenset({"sqlite", "postgresql", "postgres", "mysql", "mariadb"})
 _FILTER_BATCH = 5000
 
@@ -91,8 +92,10 @@ def identity_csv_copy_route(file_type: str, dest_type: str) -> bool:
 def identity_file_copy_route(file_type: str, dest_type: str) -> bool:
     """True when local tabular identity COPY is proven for this pair.
 
-    csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width parse with
-    the identity readers, then reuse that wire. Nested cells decline.
+    csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width/excel parse
+    with the identity readers, then reuse that wire. Nested JSON/YAML cells
+    decline. Excel uses the same ``iter_excel_dicts`` population as the row
+    path (blank/formatting rows are not records).
     """
     src = (file_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
@@ -109,6 +112,8 @@ def _file_kind_token(file_type: str) -> str:
         return "yaml_records"
     if kind == "fixed_width":
         return "fwf_records"
+    if kind == "excel":
+        return "excel_records"
     return "csv"
 
 
@@ -350,6 +355,27 @@ def _iter_fwf_records(
         raise FastPathUnavailable(str(exc)) from exc
 
 
+def _iter_excel_records(
+    content: bytes | str | os.PathLike,
+    filename: str,
+    source_cols: list[str],
+    read_options: Any = None,
+) -> Iterator[dict[str, str | None]]:
+    from services.excel_parser import iter_excel_dicts, require_xlsx
+    from services.read_options import ReadOptionsError
+
+    try:
+        require_xlsx(filename)
+        with _open_binary(content) as handle:
+            raw = handle.read()
+        for rec in iter_excel_dicts(raw, read_options):
+            if not isinstance(rec, dict):
+                continue
+            yield _project_record(rec, source_cols)
+    except (ValueError, ReadOptionsError) as exc:
+        raise FastPathUnavailable(str(exc)) from exc
+
+
 def _iter_source_records(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -376,6 +402,9 @@ def _iter_source_records(
         return
     if kind == "fixed_width":
         yield from _iter_fwf_records(content, source_cols, read_options)
+        return
+    if kind == "excel":
+        yield from _iter_excel_records(content, filename, source_cols, read_options)
         return
     yield from _iter_csv_source_records(
         content, filename, pairs, read_options

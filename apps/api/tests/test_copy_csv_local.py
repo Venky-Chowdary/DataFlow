@@ -160,6 +160,7 @@ def test_identity_file_copy_route_handover_tabular():
     assert identity_file_copy_route("jsonl", "mysql")
     assert identity_file_copy_route("yaml", "postgresql")
     assert identity_file_copy_route("fixed_width", "sqlite")
+    assert identity_file_copy_route("excel", "sqlite")
     assert not identity_file_copy_route("parquet", "sqlite")
     assert not identity_file_copy_route("yaml", "snowflake")
 

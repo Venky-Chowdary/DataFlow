@@ -1,8 +1,8 @@
-"""json / yaml / fixed-width identity COPY into SQLite, PostgreSQL, MySQL."""
+"""Excel (.xlsx) identity COPY into SQLite, PostgreSQL, MySQL."""
 
 from __future__ import annotations
 
-import json
+import io
 import socket
 import sqlite3
 import sys
@@ -15,11 +15,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.copy_csv_local import (  # noqa: E402
-    file_copy_load_method,
-    try_copy_local_csv,
-)
-from services.fixed_width_layout import layout_header_line  # noqa: E402
+openpyxl = pytest.importorskip("openpyxl")
+
+from services.copy_csv_local import try_copy_local_csv  # noqa: E402
+from services.read_options import ReadOptions  # noqa: E402
 from services.sync_cursor import get_watermark  # noqa: E402
 from src.transfer.file_stream import stream_file_to_database  # noqa: E402
 from src.transfer.models import EndpointConfig  # noqa: E402
@@ -29,10 +28,10 @@ from tests.test_copy_csv_local import (  # noqa: E402
     DAY1,
     DAY2,
     _FakeCheckpointService,
+    _contracts,
     _isolate_cursor_store,
     _mappings,
     _schema,
-    _contracts,
 )
 
 
@@ -52,35 +51,35 @@ def _mysql_up() -> bool:
         return False
 
 
-def _yaml(rows: list[tuple[int, str, str]]) -> bytes:
-    chunks = [
-        f'- id: "{i}"\n  name: {name}\n  updated_at: "{ts}"' for i, name, ts in rows
-    ]
-    return ("\n".join(chunks) + "\n").encode("utf-8")
-
-
-def _json_docs(rows: list[tuple[int, str, str]]) -> bytes:
-    return json.dumps(
-        [{"id": i, "name": name, "updated_at": ts} for i, name, ts in rows]
-    ).encode("utf-8")
-
-
-def _fwf(rows: list[tuple[int, str, str]]) -> bytes:
-    layout = (("id", 8), ("name", 8), ("updated_at", 20))
-    body = layout_header_line(layout) + "\n"
+def _xlsx(
+    rows: list[tuple[int, str, str]],
+    *,
+    extra_cell: bool = False,
+    phantom_rows: int = 0,
+) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["id", "name", "updated_at"])
     for i, name, ts in rows:
-        body += str(i).ljust(8) + name.ljust(8) + ts.ljust(20) + "\n"
-    return body.encode("utf-8")
+        row: list[object] = [i, name, ts]
+        if extra_cell:
+            row.append("extra")
+        ws.append(row)
+    for r in range(2 + len(rows), 2 + len(rows) + phantom_rows):
+        ws.cell(row=r, column=1).number_format = "0.00"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def _run(
     payload: bytes,
-    filename: str,
     dest: EndpointConfig,
     cp: _FakeCheckpointService,
     *,
     sync_mode: str,
     job_id: str,
+    filename: str = "events.xlsx",
 ) -> tuple[int, dict]:
     from services.million_row_proof import ensure_memory_job_store_if_mongo_down
 
@@ -99,30 +98,12 @@ def _run(
     return written, summary
 
 
-def test_file_copy_load_method_tokens():
-    assert file_copy_load_method("yaml", "sqlite", "incremental_deduped") == (
-        "yaml_records_executemany_sqlite_incremental_deduped"
-    )
-    assert file_copy_load_method("json", "postgresql", "incremental_deduped") == (
-        "json_records_copy_from_stdin_pg_incremental_deduped"
-    )
-    assert file_copy_load_method("fixed_width", "mysql", "incremental_append") == (
-        "fwf_records_load_data_mysql_incremental_append"
-    )
-    assert file_copy_load_method("excel", "sqlite", "incremental_deduped") == (
-        "excel_records_executemany_sqlite_incremental_deduped"
-    )
-
-
-def test_nested_json_declines_copy(tmp_path):
-    dest_cfg = {"format": "sqlite", "database": str(tmp_path / "n.db"), "table": "events"}
-    nested = json.dumps(
-        [{"id": 1, "name": {"inner": "x"}, "updated_at": "2024-06-01T00:00:00"}]
-    ).encode()
+def test_xls_declines_copy(tmp_path):
+    dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
     declined = try_copy_local_csv(
-        content=nested,
-        filename="events.json",
-        file_type="json",
+        content=_xlsx(APPEND_DAY1),
+        filename="events.xls",
+        file_type="excel",
         dest_type="sqlite",
         dest_cfg=dest_cfg,
         dest_table="events",
@@ -134,84 +115,56 @@ def test_nested_json_declines_copy(tmp_path):
     assert declined is None
 
 
-def test_yaml_sqlite_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
-    _isolate_cursor_store(monkeypatch, tmp_path)
-    dest_path = tmp_path / "yaml.db"
-    dest = EndpointConfig(
-        kind="database",
-        format="sqlite",
-        database=str(dest_path),
-        table="events",
+def test_windowed_excel_declines_copy(tmp_path):
+    dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
+    declined = try_copy_local_csv(
+        content=_xlsx(APPEND_DAY1),
+        filename="events.xlsx",
+        file_type="excel",
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="events",
+        dest_schema="",
+        mappings=_mappings(),
+        schema=_schema(),
+        effective_sync="full_refresh_overwrite",
+        read_options=ReadOptions(skip_rows=1),
     )
-    cp = _FakeCheckpointService()
-    first, summary1 = _run(
-        _yaml(DAY1),
-        "events.yaml",
-        dest,
-        cp,
-        sync_mode="incremental_deduped",
-        job_id="yaml-sqlite-a",
+    assert declined is None
+
+
+def test_unmapped_excel_column_is_ignored(tmp_path):
+    dest_path = tmp_path / "extra.db"
+    dest_cfg = {"format": "sqlite", "database": str(dest_path), "table": "events"}
+    used = try_copy_local_csv(
+        content=_xlsx(APPEND_DAY1, extra_cell=True),
+        filename="events.xlsx",
+        file_type="excel",
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="events",
+        dest_schema="",
+        mappings=_mappings(),
+        schema=_schema(),
+        effective_sync="full_refresh_overwrite",
     )
-    assert first == 3, summary1
-    assert summary1.get("copy_fast_path") == "used"
-    assert summary1.get("load_method") == (
-        "yaml_records_executemany_sqlite_incremental_deduped"
-    )
+    assert used is not None
+    written, _ddl, summary, _cols = used
+    assert written == 2
+    assert summary.get("copy_fast_path") == "used"
     conn = sqlite3.connect(dest_path)
     try:
-        tick1 = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-        flag_like = conn.execute(
-            "SELECT name FROM events WHERE id = 1"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert tick1 == 3
-    assert flag_like == "one"
-    second, summary2 = _run(
-        _yaml(DAY2),
-        "events.yaml",
-        dest,
-        cp,
-        sync_mode="incremental_deduped",
-        job_id="yaml-sqlite-b",
-    )
-    assert second == 2, summary2
-    conn = sqlite3.connect(dest_path)
-    try:
+        names = [r[1] for r in conn.execute("PRAGMA table_info(events)")]
         dest_count = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-        name = conn.execute("SELECT name FROM events WHERE id = 1").fetchone()[0]
-        staging_left = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            ("_df_stg_events",),
-        ).fetchone()
     finally:
         conn.close()
-    assert dest_count == 4
-    assert name == "ONE"
-    assert staging_left is None
-    cursor_key = str(summary2.get("cursor_key") or "")
-    stored = get_watermark(cursor_key)
-    assert stored
-    third, summary3 = _run(
-        _yaml(DAY2),
-        "events.yaml",
-        dest,
-        cp,
-        sync_mode="incremental_deduped",
-        job_id="yaml-sqlite-c",
-    )
-    assert third == 0
-    assert summary3.get("source_row_count") == 0
-    assert get_watermark(cursor_key) == stored
-    conn = sqlite3.connect(dest_path)
-    try:
-        assert int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]) == 4
-    finally:
-        conn.close()
+    assert dest_count == 2
+    assert "extra" not in names
+    assert set(names) <= {"id", "name", "updated_at"}
 
 
-def test_json_sqlite_overwrite_dest_count(tmp_path):
-    dest_path = tmp_path / "json.db"
+def test_excel_sqlite_overwrite_dest_count_excludes_phantom(tmp_path):
+    dest_path = tmp_path / "excel.db"
     dest = EndpointConfig(
         kind="database",
         format="sqlite",
@@ -220,16 +173,15 @@ def test_json_sqlite_overwrite_dest_count(tmp_path):
     )
     cp = _FakeCheckpointService()
     first, summary1 = _run(
-        _json_docs(DAY1),
-        "events.json",
+        _xlsx(DAY1, phantom_rows=17),
         dest,
         cp,
         sync_mode="full_refresh_overwrite",
-        job_id="json-ow-a",
+        job_id="excel-ow-a",
     )
     assert first == 3, summary1
     assert summary1.get("copy_fast_path") == "used"
-    assert summary1.get("load_method") == "json_records_executemany_sqlite"
+    assert summary1.get("load_method") == "excel_records_executemany_sqlite"
     assert summary1.get("engine_source_checksum") == "dest_count:3"
     assert summary1.get("engine_target_checksum") == "dest_count:3"
     assert summary1.get("proof_scope") == "dest_count_equals_source_snapshot_count"
@@ -239,12 +191,11 @@ def test_json_sqlite_overwrite_dest_count(tmp_path):
     finally:
         conn.close()
     second, summary2 = _run(
-        _json_docs(APPEND_DAY1),
-        "events.json",
+        _xlsx(APPEND_DAY1),
         dest,
         cp,
         sync_mode="full_refresh_overwrite",
-        job_id="json-ow-b",
+        job_id="excel-ow-b",
     )
     assert second == 2, summary2
     conn = sqlite3.connect(dest_path)
@@ -255,9 +206,9 @@ def test_json_sqlite_overwrite_dest_count(tmp_path):
     assert dest_count == 2
 
 
-def test_fwf_sqlite_incremental_append_delta_and_noop(monkeypatch, tmp_path):
+def test_excel_sqlite_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
     _isolate_cursor_store(monkeypatch, tmp_path)
-    dest_path = tmp_path / "fwf.db"
+    dest_path = tmp_path / "excel-inc.db"
     dest = EndpointConfig(
         kind="database",
         format="sqlite",
@@ -266,64 +217,99 @@ def test_fwf_sqlite_incremental_append_delta_and_noop(monkeypatch, tmp_path):
     )
     cp = _FakeCheckpointService()
     first, summary1 = _run(
-        _fwf(APPEND_DAY1),
-        "events.fwf",
+        _xlsx(DAY1),
         dest,
         cp,
-        sync_mode="incremental_append",
-        job_id="fwf-sqlite-a",
+        sync_mode="incremental_deduped",
+        job_id="excel-sqlite-a",
     )
-    assert first == 2, summary1
+    assert first == 3, summary1
     assert summary1.get("copy_fast_path") == "used"
-    assert "fwf_records" in str(summary1.get("load_method") or "")
+    assert summary1.get("load_method") == (
+        "excel_records_executemany_sqlite_incremental_deduped"
+    )
     conn = sqlite3.connect(dest_path)
     try:
         tick1 = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
     finally:
         conn.close()
-    assert tick1 == 2
+    assert tick1 == 3
     second, summary2 = _run(
-        _fwf(APPEND_DAY2),
-        "events.fwf",
+        _xlsx(DAY2),
         dest,
         cp,
-        sync_mode="incremental_append",
-        job_id="fwf-sqlite-b",
+        sync_mode="incremental_deduped",
+        job_id="excel-sqlite-b",
     )
-    assert second == 1, summary2
+    assert second == 2, summary2
     conn = sqlite3.connect(dest_path)
     try:
         dest_count = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-        names = [r[0] for r in conn.execute("SELECT name FROM events ORDER BY id")]
+        name = conn.execute("SELECT name FROM events WHERE id = 1").fetchone()[0]
     finally:
         conn.close()
-    assert dest_count == 3
-    assert names == ["a", "b", "c"]
+    assert dest_count == 4
+    assert name == "ONE"
     stored = get_watermark(str(summary2.get("cursor_key") or ""))
     assert stored
     third, summary3 = _run(
-        _fwf(APPEND_DAY2),
-        "events.fwf",
+        _xlsx(DAY2),
         dest,
         cp,
-        sync_mode="incremental_append",
-        job_id="fwf-sqlite-c",
+        sync_mode="incremental_deduped",
+        job_id="excel-sqlite-c",
     )
     assert third == 0
     assert summary3.get("source_row_count") == 0
     conn = sqlite3.connect(dest_path)
     try:
-        assert int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]) == 3
+        assert int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]) == 4
     finally:
         conn.close()
 
 
+def test_excel_to_sqlite_execute_tracked_gate8(tmp_path):
+    from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    ensure_memory_job_store_if_mongo_down()
+    db = tmp_path / "ledger.db"
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="excel"),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(db), table="ledger"
+        ),
+        source_content=_xlsx([(1, "a", "2024-06-01T00:00:00"), (2, "b", "2024-06-02T00:00:00")]),
+        source_filename="ledger.xlsx",
+        sync_mode="full_refresh_overwrite",
+        skip_preflight=True,
+        mappings=_mappings(),
+    )
+    result = UniversalTransferEngine().execute_tracked(request, "excel-sqlite")
+    assert result.success, getattr(result, "error", result)
+    summary = result.destination_summary or {}
+    assert summary.get("copy_fast_path") == "used"
+    assert summary.get("engine_source_checksum") == "dest_count:2"
+    assert summary.get("engine_target_checksum") == "dest_count:2"
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
+    conn = sqlite3.connect(str(db))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM ledger").fetchone()[0]
+        names = [row[0] for row in conn.execute("SELECT name FROM ledger ORDER BY id")]
+    finally:
+        conn.close()
+    assert n == 2
+    assert names == ["a", "b"]
+
+
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
-def test_json_pg_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
+def test_excel_pg_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
     _isolate_cursor_store(monkeypatch, tmp_path)
     psycopg2 = pytest.importorskip("psycopg2")
     suffix = uuid.uuid4().hex[:8]
-    table = f"json_inc_{suffix}"
+    table = f"excel_inc_{suffix}"
     dest = EndpointConfig.from_dict(
         "database",
         {
@@ -348,29 +334,27 @@ def test_json_pg_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
     conn.autocommit = True
     try:
         first, summary1 = _run(
-            _json_docs(DAY1),
-            "events.json",
+            _xlsx(DAY1),
             dest,
             cp,
             sync_mode="incremental_deduped",
-            job_id=f"json-pg-a-{suffix}",
+            job_id=f"excel-pg-a-{suffix}",
         )
         assert first == 3, summary1
         assert summary1.get("copy_fast_path") == "used"
         assert summary1.get("load_method") == (
-            "json_records_copy_from_stdin_pg_incremental_deduped"
+            "excel_records_copy_from_stdin_pg_incremental_deduped"
         )
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{table}"')
             tick1 = int(cur.fetchone()[0])
         assert tick1 == 3
         second, summary2 = _run(
-            _json_docs(DAY2),
-            "events.json",
+            _xlsx(DAY2),
             dest,
             cp,
             sync_mode="incremental_deduped",
-            job_id=f"json-pg-b-{suffix}",
+            job_id=f"excel-pg-b-{suffix}",
         )
         assert second == 2, summary2
         with conn.cursor() as cur:
@@ -383,12 +367,11 @@ def test_json_pg_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
         stored = get_watermark(str(summary2.get("cursor_key") or ""))
         assert stored
         third, summary3 = _run(
-            _json_docs(DAY2),
-            "events.json",
+            _xlsx(DAY2),
             dest,
             cp,
             sync_mode="incremental_deduped",
-            job_id=f"json-pg-c-{suffix}",
+            job_id=f"excel-pg-c-{suffix}",
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
@@ -402,11 +385,11 @@ def test_json_pg_incremental_deduped_delta_and_noop(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
-def test_yaml_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
+def test_excel_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
     _isolate_cursor_store(monkeypatch, tmp_path)
     pymysql = pytest.importorskip("pymysql")
     suffix = uuid.uuid4().hex[:8]
-    table = f"yaml_inc_{suffix}"
+    table = f"excel_inc_{suffix}"
     dest = EndpointConfig.from_dict(
         "database",
         {
@@ -430,27 +413,25 @@ def test_yaml_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
     )
     try:
         first, summary1 = _run(
-            _yaml(APPEND_DAY1),
-            "events.yaml",
+            _xlsx(APPEND_DAY1),
             dest,
             cp,
             sync_mode="incremental_append",
-            job_id=f"yaml-mysql-a-{suffix}",
+            job_id=f"excel-mysql-a-{suffix}",
         )
         assert first == 2, summary1
         assert summary1.get("copy_fast_path") == "used"
-        assert "yaml_records" in str(summary1.get("load_method") or "")
+        assert "excel_records" in str(summary1.get("load_method") or "")
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{table}`")
             tick1 = int(cur.fetchone()[0])
         assert tick1 == 2
         second, summary2 = _run(
-            _yaml(APPEND_DAY2),
-            "events.yaml",
+            _xlsx(APPEND_DAY2),
             dest,
             cp,
             sync_mode="incremental_append",
-            job_id=f"yaml-mysql-b-{suffix}",
+            job_id=f"excel-mysql-b-{suffix}",
         )
         assert second == 1, summary2
         with conn.cursor() as cur:
@@ -463,12 +444,11 @@ def test_yaml_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
         stored = get_watermark(str(summary2.get("cursor_key") or ""))
         assert stored
         third, summary3 = _run(
-            _yaml(APPEND_DAY2),
-            "events.yaml",
+            _xlsx(APPEND_DAY2),
             dest,
             cp,
             sync_mode="incremental_append",
-            job_id=f"yaml-mysql-c-{suffix}",
+            job_id=f"excel-mysql-c-{suffix}",
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
