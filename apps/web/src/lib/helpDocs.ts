@@ -173,7 +173,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Confirm the workspace is healthy",
             pin: "Sidebar → Overview",
-            body: "Open **Overview** and confirm connection health, recent jobs, and throughput for your tenant. If metrics fail to load, fix connectivity with your Owner before creating connectors.\n\nYou should see live **rows moved**, success rate, and connection status cards before you continue.",
+            body: "Open **Overview** and confirm connection health, recent jobs, and throughput for your tenant. If metrics fail to load, fix connectivity with a workspace admin before creating connectors.\n\nYou should see live **rows moved**, success rate, and connection status cards before you continue.",
             figure: {
               src: "/docs/screenshots/app-overview.png",
               alt: "Workspace Overview with live metrics and connection health",
@@ -273,12 +273,12 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Receive your tenant URL and role",
             pin: "IT / Datawrap admin → invite email",
-            body: "A workspace **Owner** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, and open **Job Theater**.\n\n**Owner** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team**, and API keys.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
+            body: "A workspace **admin** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, add non-admin members, and open **Job Theater**.\n\n**Admin** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team** roles, and API keys. There is no Owner role in the product.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.",
           },
           {
             title: "Sign in with SSO",
             pin: "Login → Continue with SSO",
-            body: "On the login screen choose **Continue with SSO** (or your company's branded SSO button). Authenticate with your work account. Datawrap issues a workspace session that inherits your RBAC role from the invite or from IdP group claims.\n\nA successful sign-in lands on **Overview**. Confirm the top bar shows your tenant name and that the left sidebar lists **Platform** surfaces (Connectors, Transfer, Pipelines) and **Operations → Jobs**. If you only see a blank or permission error, stop and ask an Owner to verify your role under **Settings → Team**.",
+            body: "On the login screen choose **Continue with SSO** (or your company's branded SSO button). Authenticate with your work account. Datawrap issues a workspace session that inherits your RBAC role from the invite or from IdP group claims.\n\nA successful sign-in lands on **Overview**. Confirm the top bar shows your **workspace** name (switcher, when you belong to more than one) and that the left sidebar lists **Platform** surfaces (Connectors, Transfer, Pipelines) and **Operations → Jobs**. If you only see a blank or permission error, stop and ask a workspace admin to verify your role under **Settings → Team**.",
             figure: {
               src: "/docs/screenshots/app-overview.png",
               alt: "Workspace after successful enterprise sign-in",
@@ -291,30 +291,30 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Confirm you can reach Connectors and Transfer",
             pin: "Sidebar → Platform → Connectors  ·  Transfer",
-            body: "In the left sidebar open **Platform → Connectors**. You should see health cards and either an empty Connections table or existing rows. Then open **Platform → Transfer** (Transfer Studio) or click **New transfer** if shown.\n\nYou are ready for day-one work when:\n\n**1.** **New connection** is visible on Connectors (Editors and Owners).\n\n**2.** Transfer Studio opens the **Source → Destination → Transform → Map → Validate → Run** wizard.\n\n**3.** **Operations → Jobs** opens Job Theater for past and live runs.\n\nIf Connectors or Transfer is missing from the sidebar, your role is likely **Viewer** — ask an Owner to raise it to **Editor** under **Settings → Team**.",
+            body: "In the left sidebar open **Platform → Connectors**. You should see health cards and either an empty Connections table or existing rows. Then open **Platform → Transfer** (Transfer Studio) or click **New transfer** if shown.\n\nYou are ready for day-one work when:\n\n**1.** **New connection** is visible on Connectors (Editors and Admins).\n\n**2.** Transfer Studio opens the **Source → Destination → Transform → Map → Validate → Run** wizard.\n\n**3.** **Operations → Jobs** opens Job Theater for past and live runs.\n\nIf Connectors or Transfer is missing from the sidebar, your role is likely **Viewer** — ask a workspace admin to raise it to **Editor** under **Settings → Team**.",
             figure: {
               src: "/docs/screenshots/app-connectors.png",
               alt: "Connectors available in the enterprise sidebar",
-              caption: "Marker 1 = Connectors · Marker 2 = New connection (Editor and Owner).",
+              caption: "Marker 1 = Connectors · Marker 2 = New connection (Editor and Admin).",
               markers: [
                 { n: 1, label: "Connectors", x: "8%", y: "32%" },
                 { n: 2, label: "New connection", x: "90%", y: "28%" },
               ],
             },
-            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers and manage connectors. **Owner** — SSO, BYOK, Team invites, and enterprise controls under **Settings**.",
+            tip: "**Viewer** — inspect Jobs and proof only. **Editor** — run transfers, manage connectors, and invite non-admin members. **Admin** — SSO, BYOK, Team roles, and enterprise controls under **Settings**. Switching workspace in the top bar (or on Team) is live for every Settings tab.",
           },
         ],
       },
       {
         id: "admin-setup",
-        title: "Admin checklist (Owners)",
-        body: "Tenant **Owners** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.",
+        title: "Admin checklist (workspace admins)",
+        body: "Workspace **admins** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.",
         steps: [
           "**Settings → SSO** — choose SAML or OIDC, paste IdP metadata URL (or upload XML), map roles if your IdP sends group claims, then click **Test login** and **Save**.",
-          "**Settings → Enterprise** — set tenant display name, data **region**, MFA policy, session timeout, and optional IP allowlist.",
+          "**Settings → Enterprise** — set tenant display name, data **region**, MFA policy, session timeout, and optional IP allowlist. The workspace picker here is the same live workspace as Team.",
           "**Settings → Enterprise → BYOK** — upload your customer KMS key when procurement requires customer-managed encryption for connector secrets.",
-          "**Settings → Team** — invite Editors and Viewers with least privilege; re-check IdP group → role mapping after SSO enforce.",
-          "**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires.",
+          "**Settings → Team** — invite Viewers, Editors, and Admins with least privilege; re-check IdP group → role mapping after SSO enforce. Member and login lists refresh while the tab is open.",
+          "**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires. Controls are implemented; no third-party certificate is claimed.",
         ],
         tip: "If your tenant URL is not live yet, email **sales@datawrap.io**. Provisioning is handled by Datawrap — operators never install or run a local API.",
       },
@@ -447,7 +447,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Full overwrite** — replace the target, then load.",
           "**Incremental append** — cursor-based new rows only.",
           "**Incremental deduped** — cursor + primary-key upserts.",
-          "**CDC / SCD Type 2 / Mirror** — advanced identity modes (PK required where noted).",
+          "**CDC** — log-based changes when the source supports it. Default is at-least-once upsert until a named route proves dest-owned exactly-once.",
+          "**SCD Type 2 / Mirror** — advanced identity modes (primary key required where noted).",
           "**Destination write → Query** — one INSERT/MERGE/UPDATE with `:binds` mapped to source columns. Failed rows quarantine. Not CDC.",
           "**Destination write → Stored procedure** — one CALL/EXEC per row (Informatica connected SQL). SQLite has no dest procedures; dest query INSERT is allowed.",
         ],
@@ -878,7 +879,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Full append** — keep existing rows; append the full snapshot",
           "**Incremental append** — cursor/watermark new rows only",
           "**Incremental deduped** — cursor + primary-key upserts",
-          "**CDC** — log-based changes (when the source supports it)",
+          "**CDC** — log-based changes (when the source supports it). Default is at-least-once upsert until a named route proves dest-owned exactly-once.",
           "**SCD Type 2** — versioned history (primary key required)",
           "**Mirror** — soft-delete dest keys missing from source (`_deleted`; physical COUNT(*) stays; primary key required)",
         ],
@@ -938,7 +939,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Inspect contract detail",
             pin: "Contract card → detail drawer",
-            body: "Click a contract card/row to open its **detail drawer** (right side). Confirm field types, version, and signature state (**Draft** vs **Signed**). Sign when Owners are ready for production schedules.",
+            body: "Click a contract card/row to open its **detail drawer** (right side). Confirm field types, version, and signature state (**Draft** vs **Signed**). Sign when workspace admins are ready for production schedules.",
             figure: {
               src: "/docs/screenshots/app-contracts.png",
               alt: "Contracts page used to open contract detail",
@@ -1195,18 +1196,18 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
     slug: "enterprise",
     category: "Enterprise",
     title: "Enterprise controls",
-    description: "SSO, Team RBAC, BYOK, region pinning, audit — configured in Settings by Owners.",
+    description: "SSO, Team RBAC, BYOK, region pinning, audit — configured in Settings by workspace admins.",
     readTime: "12 min",
     icon: "shield",
     sections: [
       {
         id: "where",
         title: "Where enterprise settings live",
-        body: "Signed-in Owners open **System → Settings**. Tabs typically include General, Security, Enterprise, SSO, Team, Notifications, AI Models, API Keys, and Audit Logs. Day-to-day operators usually stay on Connectors, Transfer, Pipelines, and Jobs.",
+        body: "Signed-in **admins** open **System → Settings**. Tabs include General, Security, Enterprise, SSO, Team, Notifications, AI Models, API Keys, and Audit Logs. The top-bar workspace switcher (and the picker on Team / Enterprise / Notifications) is one live workspace — switching it reloads each tab. Day-to-day operators usually stay on Connectors, Transfer, Pipelines, and Jobs.",
         figure: {
           src: "/docs/screenshots/app-settings.png",
           alt: "Settings page in the workspace",
-          caption: "System → Settings — Owners configure SSO, Team, Enterprise, and API keys here.",
+          caption: "System → Settings — admins configure SSO, Team, Enterprise, and API keys here.",
           markers: [
             { n: 1, label: "Settings nav", x: "8%", y: "68%" },
             { n: 2, label: "Settings tabs", x: "40%", y: "20%" },
@@ -1233,23 +1234,23 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             title: "Test, then Save",
             pin: "SSO → Test · Save",
             body: "Run Test login with a pilot user. On success you see SSO ready. Save to enforce SSO for the tenant.",
-            tip: "Keep a break-glass Owner account path documented with IT before enforcing SSO-only.",
+            tip: "Keep a break-glass admin account path documented with IT before enforcing SSO-only.",
           },
         ],
       },
       {
         id: "team",
         title: "Team roles",
-        body: "Open **Settings → Team** to invite members by email and assign roles.",
+        body: "Open **Settings → Team** to invite members by email and assign roles. The workspace picker on this tab is the same live workspace as the top bar — member lists refresh while the tab is open.",
         steps: [
           "Viewer — inspect Jobs, proof, and connectors (no execute)",
-          "Editor — create connectors, run Transfer Studio and Pipelines",
-          "Owner — SSO, BYOK, Enterprise tab, API keys, Team admin",
+          "Editor — create connectors, run Transfer Studio and Pipelines, invite non-admin members",
+          "Admin — SSO, BYOK, Enterprise tab, API keys, grant Admin roles",
         ],
         figure: {
           src: "/docs/screenshots/app-settings-team.png",
           alt: "Settings Team tab",
-          caption: "Team — invite members and assign Viewer / Editor / Owner.",
+          caption: "Team — invite members and assign Viewer / Editor / Admin.",
         },
       },
       {
@@ -1322,7 +1323,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "q2",
         title: "Who can run transfers?",
-        body: "Editors and Owners can create connectors and execute Transfer Studio / Pipelines. Viewers can open Jobs and review MATCH / quarantine proof. Roles are assigned under Settings → Team (and can come from IdP group claims when SSO is configured).",
+        body: "Editors and Admins can create connectors and execute Transfer Studio / Pipelines. Viewers can open Jobs and review MATCH / quarantine proof. Roles are assigned under Settings → Team (Viewer, Editor, Admin — there is no Owner role) and can come from IdP group claims when SSO is configured.",
       },
       {
         id: "q3",

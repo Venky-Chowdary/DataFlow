@@ -10,6 +10,7 @@ import { ToastProvider, useToast } from "./components/Toast";
 import { ConfirmProvider, useConfirm } from "./components/ui/ConfirmDialog";
 import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
+import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { ForcePasswordChange } from "./components/ForcePasswordChange";
@@ -619,6 +620,7 @@ function AppShell({
             >
               <DtIcon name="menu" size={20} />
             </button>
+            <WorkspaceSwitcher className="df2-topbar-workspace" id="df2-topbar-workspace" />
             <div className="df2-breadcrumb">
               <span>Workspace</span>
               <strong> {currentNav?.label ?? "Datawrap"}</strong>

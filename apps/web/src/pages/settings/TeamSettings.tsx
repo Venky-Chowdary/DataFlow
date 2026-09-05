@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { Button } from "../../components/ui/Button";
 import { SectionLoader } from "../../components/LoadingState";
 import { useToast } from "../../components/Toast";
 import { useConfirm } from "../../components/ui/ConfirmDialog";
@@ -19,7 +20,13 @@ import {
   type WorkspaceMember,
   type WorkspaceRole,
 } from "../../lib/api";
-import { getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import {
+  getActiveWorkspaceId,
+  notifyWorkspaceDirectory,
+  setActiveWorkspaceId,
+  useActiveWorkspaceId,
+} from "../../lib/workspace";
+import { useVisibleRefresh } from "../../lib/visibleRefresh";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
@@ -36,6 +43,30 @@ const ACCOUNT_LABELS: Record<string, string> = {
   no_account: "No login yet",
 };
 
+function memberInitials(name?: string, email?: string): string {
+  const src = (name || email || "?").trim();
+  const parts = src.split(/[\s@.]+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+  return src.slice(0, 2).toUpperCase();
+}
+
+function accountTone(status?: string): string {
+  if (status === "active") return "df2-badge-live";
+  if (status === "disabled") return "df2-badge-warn";
+  return "df2-badge-muted";
+}
+
+function relativeTime(iso?: string): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "—";
+  const delta = Date.now() - then;
+  if (delta < 60_000) return "Just now";
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export function TeamSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
@@ -45,16 +76,14 @@ export function TeamSettings() {
   // disabled a control the API would have honoured for an editor.
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const membership = useWriteGate(PERMISSIONS.memberInvite);
+  const activeWorkspace = useActiveWorkspaceId();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
-  // The workspace being administered here is also the workspace every other
-  // request is decided in: authority is per workspace, so a page that showed one
-  // workspace's members while the API answered for another would gate wrongly.
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string>(() => getActiveWorkspaceId());
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>("");
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -73,7 +102,10 @@ export function TeamSettings() {
     const { workspaces: rows, platformAdmin: isAdmin } = await fetchWorkspaces();
     setWorkspaces(rows);
     setPlatformAdmin(isAdmin);
-    setSelectedWorkspace((current) => (current && rows.some((w) => w.id === current) ? current : (rows[0]?.id ?? "")));
+    const current = getActiveWorkspaceId();
+    if (rows.length && (!current || !rows.some((w) => w.id === current))) {
+      setActiveWorkspaceId(rows[0].id);
+    }
     return isAdmin;
   }, []);
 
@@ -85,17 +117,6 @@ export function TeamSettings() {
     setUsers(await fetchPlatformUsers().catch(() => []));
   }, []);
 
-  useEffect(() => {
-    setLoading(true);
-    loadWorkspaces()
-      .then(async (isAdmin) => {
-        await loadUsers(isAdmin);
-        setLoadError("");
-      })
-      .catch((err) => setLoadError(err instanceof Error ? err.message : "Could not load team settings."))
-      .finally(() => setLoading(false));
-  }, [loadWorkspaces, loadUsers]);
-
   const refreshMembers = useCallback(async (workspaceId: string) => {
     if (!workspaceId) {
       setMembers([]);
@@ -104,6 +125,7 @@ export function TeamSettings() {
     try {
       setMembers(await fetchWorkspaceMembers(workspaceId));
       setLoadError("");
+      setUpdatedAt(Date.now());
     } catch (err) {
       // An unreadable member list is not an empty workspace.
       setMembers([]);
@@ -111,12 +133,25 @@ export function TeamSettings() {
     }
   }, []);
 
+  const refreshAll = useCallback(async () => {
+    try {
+      const isAdmin = await loadWorkspaces();
+      await Promise.all([loadUsers(isAdmin), refreshMembers(getActiveWorkspaceId())]);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Could not load team settings.");
+    }
+  }, [loadWorkspaces, loadUsers, refreshMembers]);
+
   useEffect(() => {
-    // Administering a workspace here also chooses it for the rest of the client,
-    // so every later request is decided by this workspace's membership role.
-    setActiveWorkspaceId(selectedWorkspace);
-    void refreshMembers(selectedWorkspace);
-  }, [selectedWorkspace, refreshMembers]);
+    setLoading(true);
+    refreshAll().finally(() => setLoading(false));
+  }, [refreshAll]);
+
+  useEffect(() => {
+    void refreshMembers(activeWorkspace);
+  }, [activeWorkspace, refreshMembers]);
+
+  useVisibleRefresh(refreshAll, 8_000, !loading);
 
   /** Refuse in words rather than sending a request that will be refused. */
   const refuse = (reason: string) => {
@@ -135,8 +170,9 @@ export function TeamSettings() {
     try {
       const ws = await createWorkspace(name);
       setNewWorkspaceName("");
-      await loadWorkspaces();
-      setSelectedWorkspace(ws.id);
+      setActiveWorkspaceId(ws.id);
+      notifyWorkspaceDirectory();
+      await refreshAll();
       toast({ title: "Workspace created", message: `${ws.name} is ready — you are its admin.`, tone: "success" });
     } catch (err) {
       toast({
@@ -153,7 +189,7 @@ export function TeamSettings() {
     if (!membership.allowed) return void refuse(membership.reason);
     if (inviteRole === "admin" && !canGrantAdmin) return void refuse(manage.reason);
     const email = inviteEmail.trim();
-    if (!selectedWorkspace) {
+    if (!activeWorkspace) {
       toast({
         title: "Choose a workspace first",
         message: "Create a workspace above — members belong to a workspace, not to the deployment.",
@@ -167,7 +203,7 @@ export function TeamSettings() {
     }
     setInviting(true);
     try {
-      const result = await addWorkspaceMember(selectedWorkspace, email, inviteRole, {
+      const result = await addWorkspaceMember(activeWorkspace, email, inviteRole, {
         createAccount: createLogin,
         name: inviteName.trim(),
       });
@@ -189,7 +225,8 @@ export function TeamSettings() {
           tone: result.hasAccount ? "success" : "info",
         });
       }
-      await Promise.all([refreshMembers(selectedWorkspace), loadUsers(platformAdmin), loadWorkspaces()]);
+      notifyWorkspaceDirectory();
+      await refreshAll();
     } catch (err) {
       toast({
         title: "Add member failed",
@@ -203,7 +240,7 @@ export function TeamSettings() {
 
   const remove = async (email: string) => {
     if (!membership.allowed) return void refuse(membership.reason);
-    if (!selectedWorkspace) return;
+    if (!activeWorkspace) return;
     const ok = await confirm({
       title: `Remove ${email}?`,
       message: "They will lose access to this workspace’s connectors, pipelines, and jobs. The login itself is kept.",
@@ -214,9 +251,10 @@ export function TeamSettings() {
     if (!ok) return;
     setRemovingEmail(email);
     try {
-      await removeWorkspaceMember(selectedWorkspace, email);
+      await removeWorkspaceMember(activeWorkspace, email);
       toast({ title: "Member removed", tone: "info" });
-      await Promise.all([refreshMembers(selectedWorkspace), loadWorkspaces()]);
+      notifyWorkspaceDirectory();
+      await refreshAll();
     } catch (err) {
       toast({
         title: "Remove failed",
@@ -231,19 +269,19 @@ export function TeamSettings() {
   const changeRole = async (email: string, role: WorkspaceRole) => {
     if (!membership.allowed) return void refuse(membership.reason);
     if (role === "admin" && !canGrantAdmin) return void refuse(manage.reason);
-    if (!selectedWorkspace) return;
+    if (!activeWorkspace) return;
     setRoleChangeEmail(email);
     try {
-      const membership = await updateWorkspaceMemberRole(selectedWorkspace, email, role);
-      toast({ title: `${email} is now ${ROLE_LABELS[membership.role] ?? membership.role}`, tone: "success" });
-      await refreshMembers(selectedWorkspace);
+      const next = await updateWorkspaceMemberRole(activeWorkspace, email, role);
+      toast({ title: `${email} is now ${ROLE_LABELS[next.role] ?? next.role}`, tone: "success" });
+      await refreshMembers(activeWorkspace);
     } catch (err) {
       toast({
         title: "Role change failed",
         message: err instanceof Error ? err.message : "Could not change role.",
         tone: "error",
       });
-      await refreshMembers(selectedWorkspace);
+      await refreshMembers(activeWorkspace);
     } finally {
       setRoleChangeEmail(null);
     }
@@ -255,7 +293,7 @@ export function TeamSettings() {
       await updatePlatformUser(user.email, { status });
       toast({ title: status === "active" ? "Sign-in enabled" : "Sign-in disabled", tone: "info" });
       await loadUsers(platformAdmin);
-      await refreshMembers(selectedWorkspace);
+      await refreshMembers(activeWorkspace);
     } catch (err) {
       toast({ title: "Update failed", message: err instanceof Error ? err.message : "Request failed.", tone: "error" });
     } finally {
@@ -285,16 +323,27 @@ export function TeamSettings() {
     );
   }
 
+  const workspaceName = workspaces.find((w) => w.id === activeWorkspace)?.name;
+
   return (
     <section className="df2-settings-section">
       <div className="df2-settings-section-head">
         <div>
           <h2>Team &amp; access</h2>
-          <p>Workspaces isolate one client's connectors, jobs and audit trail. Members hold a role inside a workspace; a login lets them sign in at all.</p>
+          <p>
+            Workspaces isolate connectors, jobs, and audit. Members hold a role inside a workspace;
+            a login lets them sign in at all. Switching workspace here is live for every Settings tab
+            and the rest of the product.
+          </p>
         </div>
+        {updatedAt ? (
+          <span className="df2-badge df2-badge-muted" data-testid="team-live-stamp">
+            Live · {relativeTime(new Date(updatedAt).toISOString())}
+          </span>
+        ) : null}
       </div>
-      <div className="df2-settings-section-body">
-        {loadError && <div className="df2-team-error df2-mb-md">{loadError}</div>}
+      <div className="df2-settings-section-body df2-team-body">
+        {loadError && <div className="df2-team-error">{loadError}</div>}
 
         <PermissionNotice
           allowed={membership.allowed}
@@ -303,62 +352,73 @@ export function TeamSettings() {
         />
 
         {issuedPassword && (
-          <div className="df2-team-secret df2-mb-md">
-            <strong>One-time password for {issuedPassword.email}</strong>
+          <div className="df2-team-secret">
+            <div>
+              <strong>One-time password for {issuedPassword.email}</strong>
+              <span>Shown once. They will be asked to change it at first sign-in.</span>
+            </div>
             <code className="df2-team-secret-value">{issuedPassword.password}</code>
-            <span>Shown once. They will be asked to change it at first sign-in.</span>
-            <button type="button" className="df2-btn df2-btn-sm" onClick={() => setIssuedPassword(null)}>
+            <Button size="sm" onClick={() => setIssuedPassword(null)}>
               Done
-            </button>
+            </Button>
           </div>
         )}
 
-        <div className="df2-team-toolbar df2-mb-md">
-          <div className="df2-settings-field">
-            <label htmlFor="df2-team-workspace">Workspace</label>
-            <select
-              id="df2-team-workspace"
-              className="df2-select"
-              value={selectedWorkspace}
-              onChange={(e) => setSelectedWorkspace(e.target.value)}
-              disabled={workspaces.length === 0}
-            >
-              {workspaces.length === 0 && <option value="">No workspace yet</option>}
-              {workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                  {typeof w.member_count === "number" ? ` — ${w.member_count} member(s)` : ""}
-                </option>
-              ))}
-            </select>
+        <div className="df2-team-block">
+          <div className="df2-team-block-head">
+            <div>
+              <h3>Workspace</h3>
+              <p>The workspace every later request is decided in — including General, SSO, and notifications.</p>
+            </div>
           </div>
-          {platformAdmin && (
-            <>
-              <div className="df2-settings-field">
-                <label htmlFor="df2-team-new-workspace">New workspace</label>
-                <input
-                  id="df2-team-new-workspace"
-                  className="df2-input"
-                  placeholder="Client or business unit name"
-                  value={newWorkspaceName}
-                  onChange={(e) => setNewWorkspaceName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void addWorkspace();
-                  }}
-                />
-              </div>
-              <button
-                type="button"
-                className="df2-btn"
-                disabled={creatingWorkspace || !newWorkspaceName.trim() || !manage.allowed}
-                title={manage.reason || undefined}
-                onClick={() => void addWorkspace()}
+          <div className="df2-team-workspace-grid">
+            <div className="df2-settings-field">
+              <label htmlFor="df2-team-workspace">Active workspace</label>
+              <select
+                id="df2-team-workspace"
+                className="df2-select"
+                data-testid="team-workspace-select"
+                value={activeWorkspace}
+                onChange={(e) => setActiveWorkspaceId(e.target.value)}
+                disabled={workspaces.length === 0}
               >
-                <DtIcon name="plus" size={14} />
-                {creatingWorkspace ? "Creating…" : "Create workspace"}
-              </button>
-            </>
-          )}
+                {workspaces.length === 0 && <option value="">No workspace yet</option>}
+                {workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                    {typeof w.member_count === "number" ? ` — ${w.member_count} member(s)` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {platformAdmin && (
+              <div className="df2-team-create">
+                <div className="df2-settings-field">
+                  <label htmlFor="df2-team-new-workspace">Create workspace</label>
+                  <input
+                    id="df2-team-new-workspace"
+                    className="df2-input"
+                    placeholder="Client or business unit name"
+                    value={newWorkspaceName}
+                    onChange={(e) => setNewWorkspaceName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void addWorkspace();
+                    }}
+                  />
+                </div>
+                <Button
+                  disabled={creatingWorkspace || !newWorkspaceName.trim() || !manage.allowed}
+                  title={manage.reason || undefined}
+                  loading={creatingWorkspace}
+                  loadingLabel="Creating…"
+                  leadingIcon={<DtIcon name="plus" size={14} />}
+                  onClick={() => void addWorkspace()}
+                >
+                  Create
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
 
         {workspaces.length === 0 ? (
@@ -374,138 +434,165 @@ export function TeamSettings() {
           />
         ) : (
           <>
-            <div className="df2-team-toolbar df2-mb-md">
-              <div className="df2-settings-field">
-                <label htmlFor="df2-team-email">Email address</label>
-                <input
-                  id="df2-team-email"
-                  className="df2-input"
-                  type="email"
-                  placeholder="colleague@company.com"
-                  value={inviteEmail}
-                  onChange={(e) => setInviteEmail(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void invite();
-                  }}
-                />
+            <div className="df2-team-block">
+              <div className="df2-team-block-head">
+                <div>
+                  <h3>Invite a member</h3>
+                  <p>
+                    {workspaceName ? `Add someone to ${workspaceName}.` : "Add someone to this workspace."}{" "}
+                    Viewer / Editor / Admin are the product roles — there is no Owner role.
+                  </p>
+                </div>
               </div>
-              <div className="df2-settings-field">
-                <label htmlFor="df2-team-name">Full name</label>
-                <input
-                  id="df2-team-name"
-                  className="df2-input"
-                  placeholder="Optional"
-                  value={inviteName}
-                  onChange={(e) => setInviteName(e.target.value)}
-                />
+              <div className="df2-team-invite-grid">
+                <div className="df2-settings-field">
+                  <label htmlFor="df2-team-email">Email address</label>
+                  <input
+                    id="df2-team-email"
+                    className="df2-input"
+                    type="email"
+                    placeholder="colleague@company.com"
+                    value={inviteEmail}
+                    onChange={(e) => setInviteEmail(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void invite();
+                    }}
+                  />
+                </div>
+                <div className="df2-settings-field">
+                  <label htmlFor="df2-team-name">Full name</label>
+                  <input
+                    id="df2-team-name"
+                    className="df2-input"
+                    placeholder="Optional"
+                    value={inviteName}
+                    onChange={(e) => setInviteName(e.target.value)}
+                  />
+                </div>
+                <div className="df2-settings-field">
+                  <label htmlFor="df2-team-role">Role</label>
+                  <select
+                    id="df2-team-role"
+                    className="df2-select"
+                    value={inviteRole}
+                    onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
+                  >
+                    <option value="viewer">Viewer — read jobs, connectors and proofs</option>
+                    <option value="editor">Editor — run transfers, edit connectors, add non-admin members</option>
+                    <option value="admin" disabled={!canGrantAdmin}>
+                      Admin — full workspace access incl. roles{canGrantAdmin ? "" : " (workspace admin only)"}
+                    </option>
+                  </select>
+                </div>
               </div>
-              <div className="df2-settings-field">
-                <label htmlFor="df2-team-role">Role</label>
-                <select
-                  id="df2-team-role"
-                  className="df2-select"
-                  value={inviteRole}
-                  onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
+              <div className="df2-team-invite-footer">
+                <label className="df2-team-check" htmlFor="df2-team-create-login">
+                  <input
+                    id="df2-team-create-login"
+                    type="checkbox"
+                    checked={createLogin}
+                    onChange={(e) => setCreateLogin(e.target.checked)}
+                  />
+                  Create a login (one-time password)
+                </label>
+                <Button
+                  variant="primary"
+                  disabled={inviting || !membership.allowed}
+                  title={membership.reason || undefined}
+                  loading={inviting}
+                  loadingLabel="Adding…"
+                  leadingIcon={<DtIcon name="plus" size={14} />}
+                  onClick={() => void invite()}
                 >
-                  <option value="viewer">Viewer — read jobs, connectors and proofs</option>
-                  <option value="editor">Editor — run transfers, edit connectors, add non-admin members</option>
-                  <option value="admin" disabled={!canGrantAdmin}>
-                    Admin — full workspace access incl. roles{canGrantAdmin ? "" : " (workspace admin only)"}
-                  </option>
-                </select>
+                  Add member
+                </Button>
               </div>
-              <label className="df2-team-check" htmlFor="df2-team-create-login">
-                <input
-                  id="df2-team-create-login"
-                  type="checkbox"
-                  checked={createLogin}
-                  onChange={(e) => setCreateLogin(e.target.checked)}
-                />
-                Create a login (one-time password)
-              </label>
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
-                disabled={inviting || !membership.allowed}
-                title={membership.reason || undefined}
-                onClick={() => void invite()}
-              >
-                <DtIcon name="plus" size={14} />
-                {inviting ? "Adding…" : "Add member"}
-              </button>
             </div>
 
-            {members.length === 0 ? (
-              <EmptyState
-                compact
-                icon="connectors"
-                title="No members yet"
-                description="Add colleagues to this workspace as admin, editor, or viewer."
-              />
-            ) : (
-              <div className="df2-settings-table-wrap">
-                <table className="df2-settings-logs-table">
-                  <thead>
-                    <tr>
-                      <th>Email</th>
-                      <th>Role</th>
-                      <th>Login</th>
-                      <th>Added</th>
-                      <th style={{ width: 120 }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {members.map((m) => (
-                      <tr key={m.email}>
-                        <td>
-                          {m.email}
-                          {m.name ? <span className="df2-muted"> · {m.name}</span> : null}
-                        </td>
-                        <td>
-                          <select
-                            className="df2-select df2-team-role-select"
-                            aria-label={`Role for ${m.email}`}
-                            value={m.role}
-                            disabled={roleChangeEmail === m.email || !membership.allowed}
-                            title={membership.reason || undefined}
-                            onChange={(e) => void changeRole(m.email, e.target.value as WorkspaceRole)}
-                          >
-                            <option value="viewer">Viewer</option>
-                            <option value="editor">Editor</option>
-                            <option value="admin" disabled={!canGrantAdmin && m.role !== "admin"}>
-                              Admin
-                            </option>
-                          </select>
-                        </td>
-                        <td>{ACCOUNT_LABELS[m.account_status ?? "no_account"]}</td>
-                        <td>{m.added_at ? new Date(m.added_at).toLocaleString() : "—"}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="df2-btn df2-btn-sm df2-btn-danger"
-                            disabled={removingEmail === m.email || !membership.allowed}
-                            title={membership.reason || undefined}
-                            onClick={() => void remove(m.email)}
-                          >
-                            {removingEmail === m.email ? "Removing…" : "Remove"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div className="df2-team-block">
+              <div className="df2-team-block-head">
+                <div>
+                  <h3>Members</h3>
+                  <p>Role changes apply immediately. Remove keeps the login but drops this workspace.</p>
+                </div>
+                <span className="df2-cell-meta">{members.length} member{members.length === 1 ? "" : "s"}</span>
               </div>
-            )}
+              {members.length === 0 ? (
+                <EmptyState
+                  compact
+                  icon="connectors"
+                  title="No members yet"
+                  description="Add colleagues to this workspace as admin, editor, or viewer."
+                />
+              ) : (
+                <div className="df2-team-list" data-testid="team-member-list">
+                  <div className="df2-team-list-head">
+                    <span>Person</span>
+                    <span>Role</span>
+                    <span>Login</span>
+                    <span>Added</span>
+                    <span>Actions</span>
+                  </div>
+                  {members.map((m) => (
+                    <div className="df2-team-member-row" data-testid="team-member-row" key={m.email}>
+                      <div className="df2-team-identity">
+                        <span className="df2-team-avatar" aria-hidden>
+                          {memberInitials(m.name, m.email)}
+                        </span>
+                        <div className="df2-team-identity-text">
+                          <strong>{m.name || m.email}</strong>
+                          {m.name ? <span>{m.email}</span> : null}
+                        </div>
+                      </div>
+                      <select
+                        className="df2-select df2-team-role-select"
+                        aria-label={`Role for ${m.email}`}
+                        value={m.role}
+                        disabled={roleChangeEmail === m.email || !membership.allowed}
+                        title={membership.reason || undefined}
+                        onChange={(e) => void changeRole(m.email, e.target.value as WorkspaceRole)}
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="editor">Editor</option>
+                        <option value="admin" disabled={!canGrantAdmin && m.role !== "admin"}>
+                          Admin
+                        </option>
+                      </select>
+                      <span className={`df2-badge ${accountTone(m.account_status)}`}>
+                        {ACCOUNT_LABELS[m.account_status ?? "no_account"]}
+                      </span>
+                      <span className="df2-cell-meta">{relativeTime(m.added_at)}</span>
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        disabled={removingEmail === m.email || !membership.allowed}
+                        title={membership.reason || undefined}
+                        loading={removingEmail === m.email}
+                        loadingLabel="Removing…"
+                        onClick={() => void remove(m.email)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </>
         )}
 
         {platformAdmin && (
-          <div className="df2-team-subsection">
-            <h3>Logins</h3>
-            <p className="df2-muted">
-              Every account that can sign in to this deployment. Disabling a login blocks sign-in immediately and keeps
-              the audit trail.
-            </p>
+          <div className="df2-team-block">
+            <div className="df2-team-block-head">
+              <div>
+                <h3>Platform logins</h3>
+                <p>
+                  Every account that can sign in to this deployment. Disabling a login blocks sign-in
+                  immediately and keeps the audit trail.
+                </p>
+              </div>
+              <span className="df2-cell-meta">{users.length} login{users.length === 1 ? "" : "s"}</span>
+            </div>
             {users.length === 0 ? (
               <EmptyState
                 compact
@@ -514,55 +601,54 @@ export function TeamSettings() {
                 description="Members you add with “Create a login” appear here, alongside any environment-provisioned admin."
               />
             ) : (
-              <div className="df2-settings-table-wrap">
-                <table className="df2-settings-logs-table">
-                  <thead>
-                    <tr>
-                      <th>Email</th>
-                      <th>Platform role</th>
-                      <th>Status</th>
-                      <th>Workspaces</th>
-                      <th>Last sign-in</th>
-                      <th style={{ width: 200 }}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((u) => (
-                      <tr key={u.email}>
-                        <td>
-                          {u.email}
-                          {u.name ? <span className="df2-muted"> · {u.name}</span> : null}
-                        </td>
-                        <td>
-                          <span className={`df2-badge ${u.role === "admin" ? "df2-badge-live" : "df2-badge-muted"}`}>
-                            {u.role === "admin" ? "Platform admin" : "Member"}
-                          </span>
-                        </td>
-                        <td>{u.status === "active" ? "Active" : "Disabled"}</td>
-                        <td>{u.workspaces?.length ?? 0}</td>
-                        <td>{u.last_login_at ? new Date(u.last_login_at).toLocaleString() : "Never"}</td>
-                        <td>
-                          <button
-                            type="button"
-                            className="df2-btn df2-btn-sm"
-                            disabled={busyAccount === u.email}
-                            onClick={() => void resetPassword(u)}
-                          >
-                            Reset password
-                          </button>{" "}
-                          <button
-                            type="button"
-                            className={`df2-btn df2-btn-sm ${u.status === "active" ? "df2-btn-danger" : ""}`}
-                            disabled={busyAccount === u.email}
-                            onClick={() => void setStatus(u, u.status === "active" ? "disabled" : "active")}
-                          >
-                            {u.status === "active" ? "Disable" : "Enable"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="df2-team-list" data-testid="team-login-list">
+                <div className="df2-team-list-head df2-team-list-head--logins">
+                  <span>Person</span>
+                  <span>Platform</span>
+                  <span>Status</span>
+                  <span>Workspaces</span>
+                  <span>Last sign-in</span>
+                  <span>Actions</span>
+                </div>
+                {users.map((u) => (
+                  <div className="df2-team-member-row df2-team-member-row--logins" data-testid="team-login-row" key={u.email}>
+                    <div className="df2-team-identity">
+                      <span className="df2-team-avatar" aria-hidden>
+                        {memberInitials(u.name, u.email)}
+                      </span>
+                      <div className="df2-team-identity-text">
+                        <strong>{u.name || u.email}</strong>
+                        {u.name ? <span>{u.email}</span> : null}
+                      </div>
+                    </div>
+                    <span className={`df2-badge ${u.role === "admin" ? "df2-badge-live" : "df2-badge-muted"}`}>
+                      {u.role === "admin" ? "Platform admin" : "Member"}
+                    </span>
+                    <span className={`df2-badge ${u.status === "active" ? "df2-badge-live" : "df2-badge-warn"}`}>
+                      {u.status === "active" ? "Active" : "Disabled"}
+                    </span>
+                    <span className="df2-cell-meta">{u.workspaces?.length ?? 0}</span>
+                    <span className="df2-cell-meta">{u.last_login_at ? relativeTime(u.last_login_at) : "Never"}</span>
+                    <div className="df2-team-row-actions">
+                      <Button
+                        size="sm"
+                        disabled={busyAccount === u.email}
+                        loading={busyAccount === u.email}
+                        onClick={() => void resetPassword(u)}
+                      >
+                        Reset password
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant={u.status === "active" ? "danger" : "secondary"}
+                        disabled={busyAccount === u.email}
+                        onClick={() => void setStatus(u, u.status === "active" ? "disabled" : "active")}
+                      >
+                        {u.status === "active" ? "Disable" : "Enable"}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
