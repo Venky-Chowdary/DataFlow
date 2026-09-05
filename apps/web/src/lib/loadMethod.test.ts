@@ -51,5 +51,21 @@ describe("loadMethod labels", () => {
       loadMethodDescription("select_mysql_executemany_sqlite_incremental_append"),
       /DATETIME/,
     );
+    assert.match(
+      loadMethodLabel("select_sqlite_copy_from_stdin_pg_incremental_deduped"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodDescription("select_sqlite_copy_from_stdin_pg_incremental_append"),
+      /TEXT/,
+    );
+    assert.match(
+      loadMethodLabel("select_sqlite_load_data_mysql_incremental_append"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodDescription("select_sqlite_load_data_mysql_incremental_deduped"),
+      /DATETIME/,
+    );
   });
 });

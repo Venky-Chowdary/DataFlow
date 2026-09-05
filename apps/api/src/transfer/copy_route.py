@@ -612,8 +612,7 @@ def _try_copy_fast_path(
             return None
         if not identity_incremental_route(src_n, dest_n):
             note_copy_decline(
-                "incremental COPY is proven for PostgreSQL/MySQL identity routes, "
-                "those engines into SQLite, and SQLite→SQLite only"
+                "incremental COPY is proven for PostgreSQL/MySQL/SQLite identity routes only"
             )
             return None
         incremental_copy = True
@@ -968,21 +967,25 @@ def _try_copy_fast_path(
         return None
 
     if src_n == "sqlite" and dest_n in {"postgresql", "postgres"}:
-        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+        if incremental_copy or is_overwrite_sync(effective_sync) or is_append_sync(effective_sync):
+            sqlite_pg = _try_sqlite_pg_copy_fast_path(
+                source_table=source_table,
+                dest_table=dest_table,
+                mappings=mappings,
+                schema=schema,
+                src_cfg=src_cfg,
+                dest_cfg=dest_cfg,
+                dest_type=dest_n,
+                dest_schema=destination.schema or dest_cfg.get("schema") or "public",
+                replace_destination=is_overwrite_sync(effective_sync) and not incremental_copy,
+                incremental_mode=mode if incremental_copy else "",
+                incremental_cursor=incremental_cursor,
+                incremental_watermark=incremental_watermark,
+                incremental_pk=incremental_pk,
+            )
+            if sqlite_pg is not None:
+                return sqlite_pg
             return None
-        sqlite_pg = _try_sqlite_pg_copy_fast_path(
-            source_table=source_table,
-            dest_table=dest_table,
-            mappings=mappings,
-            schema=schema,
-            src_cfg=src_cfg,
-            dest_cfg=dest_cfg,
-            dest_type=dest_n,
-            dest_schema=destination.schema or dest_cfg.get("schema") or "public",
-            replace_destination=is_overwrite_sync(effective_sync),
-        )
-        if sqlite_pg is not None:
-            return sqlite_pg
         return None
 
     if src_n == "sqlite" and s3_family_name(dest_n) == "s3":
@@ -1020,20 +1023,24 @@ def _try_copy_fast_path(
         return None
 
     if src_n == "sqlite" and dest_n in {"mysql", "mariadb"}:
-        if not (is_overwrite_sync(effective_sync) or is_append_sync(effective_sync)):
+        if incremental_copy or is_overwrite_sync(effective_sync) or is_append_sync(effective_sync):
+            sqlite_mysql = _try_sqlite_mysql_copy_fast_path(
+                source_table=source_table,
+                dest_table=dest_table,
+                mappings=mappings,
+                schema=schema,
+                src_cfg=src_cfg,
+                dest_cfg=dest_cfg,
+                dest_type=dest_n,
+                replace_destination=is_overwrite_sync(effective_sync) and not incremental_copy,
+                incremental_mode=mode if incremental_copy else "",
+                incremental_cursor=incremental_cursor,
+                incremental_watermark=incremental_watermark,
+                incremental_pk=incremental_pk,
+            )
+            if sqlite_mysql is not None:
+                return sqlite_mysql
             return None
-        sqlite_mysql = _try_sqlite_mysql_copy_fast_path(
-            source_table=source_table,
-            dest_table=dest_table,
-            mappings=mappings,
-            schema=schema,
-            src_cfg=src_cfg,
-            dest_cfg=dest_cfg,
-            dest_type=dest_n,
-            replace_destination=is_overwrite_sync(effective_sync),
-        )
-        if sqlite_mysql is not None:
-            return sqlite_mysql
         return None
 
     if src_n == "sqlite" and dest_n in {"iceberg", "apache_iceberg"}:
@@ -4215,17 +4222,25 @@ def _try_sqlite_pg_copy_fast_path(
     dest_type: str,
     dest_schema: str,
     replace_destination: bool,
+    incremental_mode: str = "",
+    incremental_cursor: str = "",
+    incremental_watermark: str | None = None,
+    incremental_pk: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity SQLite→PG: SELECT + COPY FROM STDIN. Dest COUNT is the proof."""
     from connectors.postgresql_writer import pg_type
-    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
+    from services.copy_incremental import (
+        COPY_INCREMENTAL_MODES,
+        copy_sqlite_to_postgres_incremental,
+    )
     from services.copy_pg_mysql import mapping_is_plain_carry
     from services.copy_sqlite_common import sqlite_pg_type_is_copy_safe
     from services.copy_sqlite_pg import copy_sqlite_to_postgres
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→PG COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4237,26 +4252,40 @@ def _try_sqlite_pg_copy_fast_path(
             item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
         )
         if declared and not sqlite_pg_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
+            note_copy_decline(
+                f"SQLite→PG COPY declined: {source_col} type {declared} is not COPY-safe"
             )
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
 
+    inc_mode = (incremental_mode or "").strip().lower()
     try:
-        result = copy_sqlite_to_postgres(
-            source_cfg=src_cfg,
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_schema=dest_schema,
-            dest_table=dest_table,
-            pairs=pairs,
-            pg_ddls=pg_ddls,
-            replace_destination=replace_destination,
-        )
+        if inc_mode in COPY_INCREMENTAL_MODES:
+            result = copy_sqlite_to_postgres_incremental(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema,
+                dest_table=dest_table,
+                pairs=pairs,
+                pg_ddls=pg_ddls,
+                sync_mode=inc_mode,
+                cursor_column=incremental_cursor,
+                watermark=incremental_watermark,
+                pk_column=incremental_pk,
+            )
+        else:
+            result = copy_sqlite_to_postgres(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema,
+                dest_table=dest_table,
+                pairs=pairs,
+                pg_ddls=pg_ddls,
+                replace_destination=replace_destination,
+            )
     except FastPathUnavailable as exc:
         logger.info("SQLite→PG COPY declined: %s", exc)
         return None
@@ -4266,19 +4295,30 @@ def _try_sqlite_pg_copy_fast_path(
 
     columns = [p[1] for p in pairs]
     snapshot = dict(result.source_snapshot or {})
+    inc_wm = str(snapshot.get("incremental_watermark") or "")
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        load_method = (
+            "select_sqlite_copy_from_stdin_pg_incremental_deduped"
+            if inc_mode == "incremental_deduped"
+            else "select_sqlite_copy_from_stdin_pg_incremental_append"
+        )
+        sync_label = inc_mode
+    else:
+        load_method = "select_sqlite_copy_from_stdin_pg"
+        sync_label = (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        )
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
         "rows_written": result.source_rows,
         "checksum": result.target_checksum,
-        "load_method": "select_sqlite_copy_from_stdin_pg",
+        "load_method": load_method,
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": (
-            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
-        ),
+        "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
@@ -4289,18 +4329,33 @@ def _try_sqlite_pg_copy_fast_path(
         "sqlite_read": snapshot.get("sqlite_read"),
         "partition_proof": list(snapshot.get("partition_proof") or []),
     }
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        dest_summary["incremental_watermark"] = inc_wm
     split = dest_summary.get("copy_split") or "serial"
-    proof_line = (
-        "Proof: PostgreSQL dest COUNT(*) equals SQLite source COUNT(*). "
-        "Not .dump. Empty dest is COPY FROM STDIN, not upsert."
-    )
+    if inc_mode == "incremental_deduped":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
+            "equals staging; dest COUNT(*) independently reread. TEXT cursor; DATETIME is COPY-unsafe."
+        )
+    elif inc_mode == "incremental_append":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
+            "equals dest_before + staging (duplicate PK fails closed). TEXT cursor; DATETIME is COPY-unsafe."
+        )
+    else:
+        proof_line = (
+            "Proof: PostgreSQL dest COUNT(*) equals SQLite source COUNT(*). "
+            "Not .dump. Empty dest is COPY FROM STDIN, not upsert."
+        )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
-    if split == "skip" and skipped:
+    if inc_mode not in COPY_INCREMENTAL_MODES and split == "skip" and skipped:
         proof_line += " Resume skipped complete dest (COUNT only)."
+    load_verb = (
+        f"COPY+{inc_mode}" if inc_mode in COPY_INCREMENTAL_MODES else "SELECT + COPY FROM STDIN"
+    )
     ddl_log = [
         f"COPY SQLite {source_table} → PostgreSQL {dest_table} "
-        f"({result.source_rows:,} rows, SELECT + COPY FROM STDIN, "
-        f"copy_split={split})",
+        f"({result.source_rows:,} rows, {load_verb}, copy_split={split})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns
@@ -4516,17 +4571,25 @@ def _try_sqlite_mysql_copy_fast_path(
     dest_cfg: dict[str, Any],
     dest_type: str,
     replace_destination: bool,
+    incremental_mode: str = "",
+    incremental_cursor: str = "",
+    incremental_watermark: str | None = None,
+    incremental_pk: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity SQLite→MySQL: SELECT TSV + STRICT LOAD DATA. Dest COUNT(*) before commit is the proof."""
     from connectors.mysql_writer import mysql_type
-    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
+    from services.copy_incremental import (
+        COPY_INCREMENTAL_MODES,
+        copy_sqlite_to_mysql_incremental,
+    )
     from services.copy_mysql_pg import mysql_type_is_copy_safe
     from services.copy_pg_mysql import mapping_is_plain_carry
     from services.copy_sqlite_mysql import copy_sqlite_to_mysql, sqlite_mysql_type_is_copy_safe
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4538,33 +4601,44 @@ def _try_sqlite_mysql_copy_fast_path(
             item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
         )
         if declared and not sqlite_mysql_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→MySQL COPY declined: %s type %s is not MySQL COPY-safe",
-                source_col,
-                declared,
+            note_copy_decline(
+                f"SQLite→MySQL COPY declined: {source_col} type {declared} is not MySQL COPY-safe"
             )
             return None
         dest_ddl = mysql_type(declared) if declared else "TEXT"
         if not mysql_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "SQLite→MySQL COPY declined: dest %s type %s is not LOAD DATA safe",
-                target_col,
-                dest_ddl,
+            note_copy_decline(
+                f"SQLite→MySQL COPY declined: dest {target_col} type {dest_ddl} is not LOAD DATA safe"
             )
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(dest_ddl)
 
+    inc_mode = (incremental_mode or "").strip().lower()
     try:
-        result = copy_sqlite_to_mysql(
-            source_cfg=src_cfg,
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_table=dest_table,
-            pairs=pairs,
-            mysql_ddls=mysql_ddls,
-            replace_destination=replace_destination,
-        )
+        if inc_mode in COPY_INCREMENTAL_MODES:
+            result = copy_sqlite_to_mysql_incremental(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+                sync_mode=inc_mode,
+                cursor_column=incremental_cursor,
+                watermark=incremental_watermark,
+                pk_column=incremental_pk,
+            )
+        else:
+            result = copy_sqlite_to_mysql(
+                source_cfg=src_cfg,
+                source_table=source_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=pairs,
+                mysql_ddls=mysql_ddls,
+                replace_destination=replace_destination,
+            )
     except FastPathUnavailable as exc:
         logger.info("SQLite→MySQL COPY declined: %s", exc)
         return None
@@ -4574,19 +4648,30 @@ def _try_sqlite_mysql_copy_fast_path(
 
     columns = [p[1] for p in pairs]
     snapshot = dict(result.source_snapshot or {})
+    inc_wm = str(snapshot.get("incremental_watermark") or "")
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        load_method = (
+            "select_sqlite_load_data_mysql_incremental_deduped"
+            if inc_mode == "incremental_deduped"
+            else "select_sqlite_load_data_mysql_incremental_append"
+        )
+        sync_label = inc_mode
+    else:
+        load_method = "select_sqlite_load_data_mysql"
+        sync_label = (
+            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
+        )
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
         "rows_written": result.source_rows,
         "checksum": result.target_checksum,
-        "load_method": "select_sqlite_load_data_mysql",
+        "load_method": load_method,
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         "rejected_rows": 0,
         "coerced_null_rows": 0,
-        "sync_mode": (
-            "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
-        ),
+        "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
@@ -4599,19 +4684,36 @@ def _try_sqlite_mysql_copy_fast_path(
         "mysql_write": snapshot.get("mysql_write"),
         "partition_proof": list(snapshot.get("partition_proof") or []),
     }
+    if inc_mode in COPY_INCREMENTAL_MODES:
+        dest_summary["incremental_watermark"] = inc_wm
     split = dest_summary.get("copy_split") or "serial"
     write = dest_summary.get("mysql_write") or "insert"
-    proof_line = (
-        "Proof: MySQL dest COUNT(*) equals SQLite source COUNT(*). "
-        "Not .dump / sqlldr. Empty dest is STRICT LOAD DATA, not upsert."
-    )
+    if inc_mode == "incremental_deduped":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest PK ⋈ staging "
+            "equals staging; dest COUNT(*) independently reread. TEXT cursor; DATETIME is COPY-unsafe."
+        )
+    elif inc_mode == "incremental_append":
+        proof_line = (
+            "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
+            "equals dest_before + staging (duplicate PK fails closed). TEXT cursor; DATETIME is COPY-unsafe."
+        )
+    else:
+        proof_line = (
+            "Proof: MySQL dest COUNT(*) equals SQLite source COUNT(*). "
+            "Not .dump / sqlldr. Empty dest is STRICT LOAD DATA, not upsert."
+        )
     skipped = int(dest_summary.get("partitions_skipped") or 0)
-    if split == "skip" and skipped:
+    if inc_mode not in COPY_INCREMENTAL_MODES and split == "skip" and skipped:
         proof_line += " Resume skipped complete dest (COUNT only)."
+    load_verb = (
+        f"COPY+{inc_mode}"
+        if inc_mode in COPY_INCREMENTAL_MODES
+        else f"SELECT TSV + {write} LOAD DATA"
+    )
     ddl_log = [
         f"COPY SQLite {source_table} → MySQL {dest_table} "
-        f"({result.source_rows:,} rows, SELECT TSV + {write} LOAD DATA, "
-        f"copy_split={split})",
+        f"({result.source_rows:,} rows, {load_verb}, copy_split={split})",
         proof_line,
     ]
     return result.rows_copied, ddl_log, dest_summary, columns

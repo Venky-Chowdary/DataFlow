@@ -6,9 +6,9 @@ The COPY router used to decline every incremental route, so the second run paid
 the row-path tax and never advanced a watermark when COPY had succeeded.
 
 This module is the missing second run for the handover SQL core
-(PostgreSQL and MySQL either direction, those engines into SQLite, and
-SQLite→SQLite). SQLite→PostgreSQL / SQLite→MySQL stay on the row path
-until DATETIME is COPY-safe on those routes.
+(PostgreSQL, MySQL, and SQLite any direction). SQLite as source uses a
+TEXT cursor — DATETIME/TIMESTAMP stay COPY-unsafe, and DATE is COPY-unsafe
+into PostgreSQL (SQLite affinity would invent a PG type).
 
 1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
    the engine reader uses (Airbyte timestamp-cursor trap).
@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 COPY_INCREMENTAL_MODES = frozenset({"incremental_append", "incremental_deduped"})
 _SQL_CORE = frozenset({"postgresql", "postgres", "mysql", "mariadb"})
+_SQL_FAMILY = _SQL_CORE | {"sqlite"}
 APPEND_PROOF_SCOPE = (
     "staging_count_equals_filtered_source_and_dest_count_equals_before_plus_staging"
 )
@@ -52,17 +53,13 @@ APPEND_PROOF_SCOPE = (
 def identity_incremental_route(src_type: str, dest_type: str) -> bool:
     """True when identity incremental COPY is proven for this pair.
 
-    SQLite as destination is COPY-safe from PostgreSQL (DATE, not TIMESTAMP)
-    and MySQL (DATETIME, not TIMESTAMP). SQLite as source is only proven
-    back into SQLite — SQLite→PG/MySQL decline DATETIME.
+    PostgreSQL DATE (not TIMESTAMP) and MySQL DATETIME (not TIMESTAMP) are
+    COPY-safe into SQLite. SQLite as source uses TEXT (not DATETIME, and
+    not DATE into PostgreSQL).
     """
     src = (src_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
-    if src in _SQL_CORE and dest in _SQL_CORE:
-        return True
-    if src in _SQL_CORE and dest == "sqlite":
-        return True
-    return src == "sqlite" and dest == "sqlite"
+    return src in _SQL_FAMILY and dest in _SQL_FAMILY
 
 
 def mapped_pair(
@@ -343,6 +340,30 @@ def _sqlite_source_where(
             conn.close()
         except Exception:
             logger.debug("sqlite incremental WHERE probe close skipped", exc_info=True)
+
+
+def _sqlite_mapped_dest_pk(
+    source_cfg: dict[str, Any],
+    source_table: str,
+    pairs: list[tuple[str, str]],
+) -> str:
+    from services.copy_pg_mysql import mapped_single_pk
+    from services.copy_sqlite_common import sqlite_connect, sqlite_table_pk_columns
+
+    conn = sqlite_connect(source_cfg)
+    try:
+        pk_cols = sqlite_table_pk_columns(conn, source_table)
+        pk_map = mapped_single_pk(pk_cols, pairs)
+        if pk_map is None:
+            raise FastPathUnavailable(
+                "incremental COPY requires exactly one mapped primary key"
+            )
+        return pk_map[1]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("sqlite incremental PK probe close skipped", exc_info=True)
 
 
 def _stamp_incremental(
@@ -1326,8 +1347,6 @@ def copy_sqlite_to_sqlite_incremental(
     pk_column: str = "",
 ) -> FastPathResult:
     """Filtered SQLite INSERT SELECT into staging, then append or ON CONFLICT."""
-    from services.copy_pg_mysql import mapped_single_pk
-    from services.copy_sqlite_common import sqlite_connect, sqlite_table_pk_columns
     from services.copy_sqlite_sqlite import copy_sqlite_to_sqlite
 
     mode = (sync_mode or "").strip().lower()
@@ -1340,18 +1359,7 @@ def copy_sqlite_to_sqlite_incremental(
     source_where = _sqlite_source_where(
         source_cfg, source_table, src_cursor, watermark, pk_column
     )
-
-    source_conn = sqlite_connect(source_cfg)
-    try:
-        pk_cols = sqlite_table_pk_columns(source_conn, source_table)
-        pk_map = mapped_single_pk(pk_cols, pairs)
-        if pk_map is None:
-            raise FastPathUnavailable(
-                "incremental COPY requires exactly one mapped primary key"
-            )
-        _src_pk_table, dest_pk = pk_map
-    finally:
-        source_conn.close()
+    dest_pk = _sqlite_mapped_dest_pk(source_cfg, source_table, pairs)
 
     _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
     created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
@@ -1534,3 +1542,228 @@ def copy_mysql_to_sqlite_incremental(
         result=result,
         created_dest=created_dest,
     )
+
+
+def copy_sqlite_to_postgres_incremental(
+    *,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_schema: str,
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    pg_ddls: list[str],
+    sync_mode: str,
+    cursor_column: str,
+    watermark: str | None,
+    pk_column: str = "",
+) -> FastPathResult:
+    """Filtered SQLite SELECT into PG staging COPY, then append or ON CONFLICT."""
+    from services.copy_fast_path import _connect, _table_ref
+    from services.copy_mysql_pg import _pg_create_sql
+    from services.copy_sqlite_pg import copy_sqlite_to_postgres
+    from services.copy_upsert import staging_table_name
+
+    mode = (sync_mode or "").strip().lower()
+    if mode not in COPY_INCREMENTAL_MODES:
+        raise FastPathUnavailable(f"incremental COPY does not cover {sync_mode!r}")
+    src_cursor, dest_cursor, _src_pk, dest_pk_col = _require_mapped_cursor(
+        pairs, cursor_column, pk_column
+    )
+    target_cols = [p[1] for p in pairs]
+    source_where = _sqlite_source_where(
+        source_cfg, source_table, src_cursor, watermark, pk_column
+    )
+    dest_pk = _sqlite_mapped_dest_pk(source_cfg, source_table, pairs)
+
+    dest_ref = _table_ref(dest_schema, dest_table)
+    staging = staging_table_name(dest_table)
+    staging_ref = _table_ref(dest_schema, staging)
+    dest_conn = _connect(dest_cfg)
+    created_dest = False
+    dest_count_before = 0
+    try:
+        dest_conn.autocommit = True
+        with dest_conn.cursor() as dst_cur:
+            dst_cur.execute(
+                "SELECT to_regclass(%s)",
+                (f"{dest_schema or 'public'}.{dest_table}",),
+            )
+            if dst_cur.fetchone()[0] is None:
+                dst_cur.execute(
+                    _pg_create_sql(
+                        dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
+                    )
+                )
+                created_dest = True
+            else:
+                dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
+                dest_count_before = int(dst_cur.fetchone()[0])
+    finally:
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("sqlite→pg incremental dest probe close skipped", exc_info=True)
+
+    result = copy_sqlite_to_postgres(
+        source_cfg=source_cfg,
+        source_table=source_table,
+        dest_cfg=dest_cfg,
+        dest_schema=dest_schema,
+        dest_table=staging,
+        pairs=pairs,
+        pg_ddls=pg_ddls,
+        replace_destination=True,
+        source_where=source_where,
+    )
+
+    dest_conn = _connect(dest_cfg)
+    try:
+        dest_conn.autocommit = False
+        with dest_conn.cursor() as dst_cur:
+            out = _apply_staging_to_pg(
+                dst_cur,
+                dest_ref=dest_ref,
+                staging_ref=staging_ref,
+                staging_name=staging,
+                dest_table=dest_table,
+                target_cols=target_cols,
+                dest_pk=dest_pk,
+                dest_cursor=dest_cursor,
+                dest_pk_col=dest_pk_col,
+                dest_count_before=dest_count_before,
+                mode=mode,
+                result=result,
+            )
+            dest_conn.commit()
+            return out
+    except Exception:
+        dest_conn.rollback()
+        try:
+            dest_conn.autocommit = True
+            with dest_conn.cursor() as dst_cur:
+                dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
+                if created_dest:
+                    dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+        except Exception:
+            logger.debug("sqlite→pg incremental cleanup skipped", exc_info=True)
+        raise
+    finally:
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("sqlite→pg incremental dest close skipped", exc_info=True)
+
+
+def copy_sqlite_to_mysql_incremental(
+    *,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+    mysql_ddls: list[str],
+    sync_mode: str,
+    cursor_column: str,
+    watermark: str | None,
+    pk_column: str = "",
+) -> FastPathResult:
+    """Filtered SQLite SELECT TSV into MySQL staging LOAD DATA, then append or upsert."""
+    from services.copy_mysql_pg import _mysql_connect
+    from services.copy_pg_mysql import _mysql_create_sql, _mysql_ident
+    from services.copy_sqlite_mysql import copy_sqlite_to_mysql
+    from services.copy_upsert import staging_table_name
+
+    mode = (sync_mode or "").strip().lower()
+    if mode not in COPY_INCREMENTAL_MODES:
+        raise FastPathUnavailable(f"incremental COPY does not cover {sync_mode!r}")
+    src_cursor, dest_cursor, _src_pk, dest_pk_col = _require_mapped_cursor(
+        pairs, cursor_column, pk_column
+    )
+    target_cols = [p[1] for p in pairs]
+    source_where = _sqlite_source_where(
+        source_cfg, source_table, src_cursor, watermark, pk_column
+    )
+    dest_pk = _sqlite_mapped_dest_pk(source_cfg, source_table, pairs)
+
+    dest_q = _mysql_ident(dest_table)
+    staging = staging_table_name(dest_table)
+    staging_q = _mysql_ident(staging)
+    dest_conn = _mysql_connect(dest_cfg)
+    created_dest = False
+    dest_count_before = 0
+    try:
+        with dest_conn.cursor() as dst_cur:
+            dst_cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s LIMIT 1",
+                (dest_table,),
+            )
+            if dst_cur.fetchone() is None:
+                dst_cur.execute(
+                    _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                )
+                dest_conn.commit()
+                created_dest = True
+            else:
+                dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
+                dest_count_before = int(dst_cur.fetchone()[0])
+    finally:
+        try:
+            dest_conn.close()
+        except Exception:
+            logger.debug("sqlite→mysql incremental dest probe close skipped", exc_info=True)
+
+    dest_conn = None
+    try:
+        result = copy_sqlite_to_mysql(
+            source_cfg=source_cfg,
+            source_table=source_table,
+            dest_cfg=dest_cfg,
+            dest_table=staging,
+            pairs=pairs,
+            mysql_ddls=mysql_ddls,
+            replace_destination=True,
+            source_where=source_where,
+        )
+        dest_conn = _mysql_connect(dest_cfg)
+        with dest_conn.cursor() as dst_cur:
+            out = _apply_staging_to_mysql(
+                dst_cur,
+                dest_q=dest_q,
+                staging_q=staging_q,
+                staging_name=staging,
+                dest_table=dest_table,
+                target_cols=target_cols,
+                dest_pk=dest_pk,
+                dest_cursor=dest_cursor,
+                dest_pk_col=dest_pk_col,
+                dest_count_before=dest_count_before,
+                mode=mode,
+                result=result,
+                quote=_mysql_ident,
+            )
+            dest_conn.commit()
+            return out
+    except Exception:
+        cleanup = dest_conn or _mysql_connect(dest_cfg)
+        try:
+            with cleanup.cursor() as dst_cur:
+                dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
+                if created_dest:
+                    dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
+            cleanup.commit()
+        except Exception:
+            logger.debug("sqlite→mysql incremental cleanup skipped", exc_info=True)
+        if cleanup is not dest_conn:
+            try:
+                cleanup.close()
+            except Exception:
+                logger.debug("sqlite→mysql incremental cleanup close skipped", exc_info=True)
+        raise
+    finally:
+        if dest_conn is not None:
+            try:
+                dest_conn.close()
+            except Exception:
+                logger.debug("sqlite→mysql incremental dest close skipped", exc_info=True)

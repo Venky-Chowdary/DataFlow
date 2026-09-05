@@ -131,8 +131,13 @@ def copy_sqlite_to_mysql(
     mysql_ddls: list[str],
     replace_destination: bool,
     source_schema: str | None = None,
+    source_where: str = "",
 ) -> FastPathResult:
-    """SELECT SQLite into MySQL LOAD DATA. Dest COUNT(*) before commit is the proof."""
+    """SELECT SQLite into MySQL LOAD DATA. Dest COUNT(*) before commit is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
+    """
     del source_schema
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
@@ -155,7 +160,9 @@ def copy_sqlite_to_mysql(
     src_ref = sqlite_ident(source_table)
     dest_q = _mysql_ident(dest_table)
     src_col_sql = ", ".join(sqlite_ident(c) for c in source_cols)
-    select_sql = f"SELECT {src_col_sql} FROM {src_ref}"  # nosec B608
+    cursor_where = (source_where or "").strip()
+    where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+    select_sql = f"SELECT {src_col_sql} FROM {src_ref}{where_sql}"  # nosec B608
 
     source_conn = sqlite_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)
@@ -177,7 +184,7 @@ def copy_sqlite_to_mysql(
                     f"source column {col!r} type {declared} is not MySQL COPY-safe"
                 )
         source_count = int(
-            source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
+            source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )
 
         exists = _mysql_table_exists(dst_cur, dest_table)
@@ -187,6 +194,10 @@ def copy_sqlite_to_mysql(
             dest_count_before = int(dst_cur.fetchone()[0])
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            if cursor_where:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
             if dest_count_before == source_count:
                 return skip_complete_sqlite(
                     source_count=source_count,
@@ -262,11 +273,12 @@ def copy_sqlite_to_mysql(
             target_checksum=proof,
             source_snapshot={
                 "copy_workers": 1,
-                "copy_split": "serial",
+                "copy_split": "cursor" if cursor_where else "serial",
                 "copy_partitions": 1,
                 "partitions_skipped": 0,
                 "partitions_loaded": 1,
-                "shard_mode": "table",
+                "shard_mode": "cursor" if cursor_where else "table",
+                "source_where": bool(cursor_where),
                 "sqlite_read": "select",
                 "load_data": "tempfile",
                 "mysql_write": mysql_write,

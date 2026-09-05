@@ -158,6 +158,42 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
       "Identity incremental: MySQL consistent-snapshot SELECT of DATETIME rows "
       + "past the cursor watermark into staging, then INSERT ... ON CONFLICT.",
   },
+  select_sqlite_copy_from_stdin_pg: {
+    label: "SQLite → PostgreSQL COPY",
+    description:
+      "Identity append/overwrite: SQLite SELECT encoded as PostgreSQL COPY FROM "
+      + "STDIN. Dest COUNT(*) must equal the source snapshot. Not .dump.",
+  },
+  select_sqlite_copy_from_stdin_pg_incremental_append: {
+    label: "SQLite → PostgreSQL incremental append",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
+      + "into staging COPY, then INSERT (duplicate PK fails closed). DATETIME is COPY-unsafe.",
+  },
+  select_sqlite_copy_from_stdin_pg_incremental_deduped: {
+    label: "SQLite → PostgreSQL incremental upsert",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
+      + "into staging COPY, then INSERT ... ON CONFLICT. DATETIME is COPY-unsafe.",
+  },
+  select_sqlite_load_data_mysql: {
+    label: "SQLite → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: SQLite SELECT encoded as STRICT LOAD DATA. "
+      + "Dest COUNT(*) must equal the source snapshot. Not .dump / sqlldr.",
+  },
+  select_sqlite_load_data_mysql_incremental_append: {
+    label: "SQLite → MySQL incremental append",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT (duplicate PK fails closed). DATETIME is COPY-unsafe.",
+  },
+  select_sqlite_load_data_mysql_incremental_deduped: {
+    label: "SQLite → MySQL incremental upsert",
+    description:
+      "Identity incremental: SQLite SELECT of TEXT rows past the cursor watermark "
+      + "into staging LOAD DATA, then INSERT ... ON DUPLICATE KEY UPDATE. DATETIME is COPY-unsafe.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {
