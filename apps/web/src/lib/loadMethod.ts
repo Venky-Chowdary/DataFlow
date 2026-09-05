@@ -104,6 +104,24 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
       "Identity incremental: cross-host LOAD DATA of rows past the cursor "
       + "watermark into staging, then INSERT ... ON DUPLICATE KEY UPDATE.",
   },
+  attach_insert_select_sqlite: {
+    label: "SQLite ATTACH INSERT SELECT",
+    description:
+      "Identity append/overwrite: ATTACH the source file and INSERT SELECT. "
+      + "Dest COUNT(*) must equal the source snapshot. Not .dump / .import.",
+  },
+  attach_insert_select_sqlite_incremental_append: {
+    label: "SQLite incremental append",
+    description:
+      "Identity incremental: INSERT SELECT of rows past the cursor watermark "
+      + "into staging, then INSERT (duplicate PK fails closed).",
+  },
+  attach_insert_select_sqlite_incremental_deduped: {
+    label: "SQLite incremental upsert",
+    description:
+      "Identity incremental: INSERT SELECT of rows past the cursor watermark "
+      + "into staging, then INSERT ... ON CONFLICT DO UPDATE.",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {

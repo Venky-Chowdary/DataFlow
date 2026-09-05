@@ -53,6 +53,18 @@ def test_pg_upsert_sql_conflicts_on_pk():
     assert '"name"=EXCLUDED."name"' in sql
 
 
+def test_sqlite_upsert_sql_conflicts_on_pk():
+    from services.copy_upsert import sqlite_upsert_from_staging_sql
+
+    sql = sqlite_upsert_from_staging_sql(
+        '"dest"', '"_df_stg_dest"', ["id", "name"], "id", lambda c: f'"{c}"'
+    )
+    assert 'ON CONFLICT ("id") DO UPDATE SET' in sql
+    assert '"name"=excluded."name"' in sql
+    assert "WHERE true" in sql
+    assert "IGNORE" not in sql
+
+
 def test_pk_join_count_sql():
     sql = pk_join_count_sql("`dest`", "`stg`", "`id`")
     assert "INNER JOIN" in sql

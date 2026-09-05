@@ -147,16 +147,30 @@ def sqlite_pragma_types(conn: sqlite3.Connection, table: str) -> dict[str, str]:
     return {str(r[1]): str(r[2] or "TEXT") for r in rows}
 
 
+def sqlite_table_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    rows = conn.execute(f"PRAGMA table_info({sqlite_ident(table)})").fetchall()
+    ranked = sorted(
+        (int(r[5] or 0), str(r[1])) for r in rows if int(r[5] or 0) > 0
+    )
+    return [name for _ord, name in ranked]
+
+
 def sqlite_create_sql(
     table: str,
     pairs: list[tuple[str, str]],
     sqlite_ddls: list[str],
+    primary_key: list[str] | None = None,
 ) -> str:
     from connectors.sqlite_writer import sqlite_type
 
     cols = []
+    targets = [t for _s, t in pairs]
     for (_src, target), ddl in zip(pairs, sqlite_ddls, strict=True):
         cols.append(f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}")
+    pk = [c for c in (primary_key or []) if c in targets]
+    if pk:
+        pk_sql = ", ".join(sqlite_ident(c) for c in pk)
+        cols.append(f"PRIMARY KEY ({pk_sql})")
     return f"CREATE TABLE {sqlite_ident(table)} ({', '.join(cols)})"
 
 

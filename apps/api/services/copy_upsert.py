@@ -88,6 +88,31 @@ def pg_upsert_from_staging_sql(
     )
 
 
+def sqlite_upsert_from_staging_sql(
+    dest_q: str,
+    staging_q: str,
+    columns: list[str],
+    pk_col: str,
+    quote,
+) -> str:
+    cols = ", ".join(quote(c) for c in columns)
+    updates = ", ".join(
+        f"{quote(c)}=excluded.{quote(c)}"
+        for c in columns
+        if c.lower() != pk_col.lower()
+    )
+    conflict = quote(pk_col)
+    if not updates:
+        return (
+            f"INSERT INTO {dest_q} ({cols}) SELECT {cols} FROM {staging_q} WHERE true "
+            f"ON CONFLICT ({conflict}) DO NOTHING"
+        )
+    return (
+        f"INSERT INTO {dest_q} ({cols}) SELECT {cols} FROM {staging_q} WHERE true "
+        f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}"
+    )
+
+
 def pk_join_count_sql(dest_q: str, staging_q: str, pk_ident: str) -> str:
     return (
         f"SELECT COUNT(*) FROM {dest_q} d "

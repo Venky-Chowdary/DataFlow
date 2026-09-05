@@ -27,5 +27,13 @@ describe("loadMethod labels", () => {
       loadMethodLabel("insert_select_mysql_same_instance_incremental_append"),
       /INSERT SELECT/i,
     );
+    assert.match(
+      loadMethodLabel("attach_insert_select_sqlite_incremental_deduped"),
+      /incremental/i,
+    );
+    assert.match(
+      loadMethodDescription("attach_insert_select_sqlite_incremental_append"),
+      /watermark/,
+    );
   });
 });

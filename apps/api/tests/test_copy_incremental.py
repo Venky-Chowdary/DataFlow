@@ -1,10 +1,12 @@
-"""Identity incremental COPY: cursor predicate, fail-closed append, live PG/MySQL."""
+"""Identity incremental COPY: cursor predicate, fail-closed append, live PG/MySQL/SQLite."""
 
 from __future__ import annotations
 
+import sqlite3
 import socket
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,7 @@ from services.copy_incremental import (
     mysql_insert_from_staging_sql,
     pg_cursor_predicate_sql,
     pg_insert_from_staging_sql,
+    sqlite_cursor_predicate_sql,
 )
 from services.sync_cursor import get_watermark
 
@@ -97,11 +100,32 @@ def test_mysql_cursor_predicate_matches_reader_lexicographic():
     assert "," not in single.split(">")[0]
 
 
+def test_sqlite_cursor_predicate_matches_lexicographic():
+    sql = sqlite_cursor_predicate_sql(
+        cursor_column="updated_at",
+        watermark="2024-06-01 00:00:00\x1f42",
+        pk_column="id",
+    )
+    assert '("updated_at", "id") >' in sql
+    assert "'2024-06-01 00:00:00'" in sql
+    assert "'42'" in sql
+    empty = sqlite_cursor_predicate_sql(
+        cursor_column="updated_at", watermark=None, pk_column="id"
+    )
+    assert empty == ""
+    single = sqlite_cursor_predicate_sql(
+        cursor_column="id", watermark="100", pk_column="id"
+    )
+    assert single.startswith('"id" >')
+    assert "," not in single.split(">")[0]
+
+
 def test_identity_incremental_route_sql_core_only():
     assert identity_incremental_route("mysql", "postgresql")
     assert identity_incremental_route("mariadb", "postgres")
     assert identity_incremental_route("mysql", "mysql")
     assert identity_incremental_route("postgresql", "mysql")
+    assert identity_incremental_route("sqlite", "sqlite")
     assert not identity_incremental_route("mysql", "sqlite")
     assert not identity_incremental_route("sqlite", "postgresql")
     assert not identity_incremental_route("mysql", "snowflake")
@@ -705,4 +729,157 @@ def test_mysql_mysql_incremental_append_copy_delta_and_watermark():
     finally:
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{src}`, `{dst}`")
+        conn.close()
+
+
+def _run_inc_sqlite(
+    *,
+    src_path: Path,
+    dst_path: Path,
+    src: str,
+    dst: str,
+    sync_mode: str,
+    job_id: str,
+):
+    from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+    from src.transfer.models import EndpointConfig
+    from src.transfer.stream import stream_database_transfer
+
+    ensure_memory_job_store_if_mongo_down()
+    source = EndpointConfig.from_dict(
+        "database",
+        {"format": "sqlite", "database": str(src_path), "table": src},
+    )
+    destination = EndpointConfig.from_dict(
+        "database",
+        {"format": "sqlite", "database": str(dst_path), "table": dst},
+    )
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "name", "target": "name", "type": "TEXT", "transform": "none"},
+        {
+            "source": "updated_at",
+            "target": "updated_at",
+            "type": "TEXT",
+            "transform": "none",
+        },
+    ]
+    schema = {"id": "INTEGER", "name": "TEXT", "updated_at": "TEXT"}
+    contracts = [
+        {
+            "name": "stream",
+            "selected": True,
+            "sync_mode": sync_mode,
+            "cursor_field": "updated_at",
+            "primary_key": "id",
+        }
+    ]
+    return stream_database_transfer(
+        source,
+        destination,
+        mappings,
+        schema,
+        sync_mode=sync_mode,
+        stream_contracts=contracts,
+        job_id=job_id,
+    )
+
+
+def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_ss_{suffix}.db"
+    dst_path = tmp_path / f"inc_sd_{suffix}.db"
+    src = "inc_src"
+    dst = "inc_dst"
+    t1 = "2024-05-01 12:00:00"
+    t2 = "2024-05-02 12:00:00"
+    t3 = "2024-05-03 12:00:00"
+    conn = sqlite3.connect(src_path)
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES '
+            "(1, 'one', ?), (2, 'two', ?), (3, 'three', ?)",
+            (t1, t1, t2),
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-a-{suffix}",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
+        assert wm1
+        dest = sqlite3.connect(dst_path)
+        try:
+            n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            name = dest.execute(f'SELECT name FROM "{dst}" WHERE id = 1').fetchone()[0]
+        finally:
+            dest.close()
+        assert n == 3
+        assert name == "one"
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, updated_at = ? WHERE id = 1',
+            ("ONE", t3),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, updated_at) VALUES (4, ?, ?)',
+            ("four", t3),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-b-{suffix}",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        assert summary2.get("copy_fast_path") == "used"
+        dest = sqlite3.connect(dst_path)
+        try:
+            dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            name = dest.execute(f'SELECT name FROM "{dst}" WHERE id = 1').fetchone()[0]
+            staging_left = dest.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (f"_df_stg_{dst}",),
+            ).fetchone()
+        finally:
+            dest.close()
+        assert dest_count == 4
+        assert name == "ONE"
+        assert staging_left is None
+        cursor_key = str(summary2.get("cursor_key") or "")
+        stored = get_watermark(cursor_key)
+        assert stored
+        assert stored != wm1
+        third, _ddl3, summary3, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-c-{suffix}",
+        )
+        assert third == 0
+        assert summary3.get("source_row_count") == 0
+        assert get_watermark(cursor_key) == stored
+        dest = sqlite3.connect(dst_path)
+        try:
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
+        finally:
+            dest.close()
+    finally:
         conn.close()
