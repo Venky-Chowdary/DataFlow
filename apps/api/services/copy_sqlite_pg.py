@@ -265,7 +265,7 @@ def copy_sqlite_to_postgres(
             },
             proof_scope="dest_count_equals_source_snapshot_count",
         )
-    except Exception:
+    except FastPathUnavailable:
         try:
             dest_conn.rollback()
         except Exception:
@@ -276,6 +276,21 @@ def copy_sqlite_to_postgres(
                 dest_conn.commit()
             except Exception:
                 logger.debug("PG dest drop after copy failure skipped", exc_info=True)
+        raise
+    except Exception as exc:
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("PostgreSQL dest rollback skipped", exc_info=True)
+        if created_here:
+            try:
+                dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug("PG dest drop after copy failure skipped", exc_info=True)
+        wrapped = str(exc)
+        if "FastPathUnavailable" in wrapped or "not COPY-safe" in wrapped:
+            raise FastPathUnavailable(wrapped) from exc
         raise
     finally:
         try:
