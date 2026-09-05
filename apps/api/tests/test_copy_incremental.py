@@ -1232,3 +1232,200 @@ def test_pg_sqlite_incremental_append_copy_delta_and_watermark(tmp_path):
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{src}"')
         conn.close()
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_pg_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
+    """PG DATE → SQLite upsert: 3 → 2 dest COUNT 4 → no-op."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid.uuid4().hex[:8]
+    src = f"inc_pgsd_{suffix}"
+    dst = "inc_dst"
+    dst_path = tmp_path / f"inc_pg_sqlite_dedupe_{suffix}.db"
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    conn.autocommit = True
+    d1 = date(2024, 8, 1)
+    d2 = date(2024, 8, 2)
+    d3 = date(2024, 8, 3)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+            cur.execute(
+                f'CREATE TABLE "{src}" ('
+                "id integer PRIMARY KEY, "
+                "name varchar(64) NOT NULL, "
+                "updated_at date NOT NULL)"
+            )
+            cur.execute(
+                f'INSERT INTO "{src}" (id, name, updated_at) VALUES '
+                f"(1, 'one', %s), (2, 'two', %s), (3, 'three', %s)",
+                (d1, d1, d2),
+            )
+        first, ddl1, summary1, _ = _run_inc_into_sqlite(
+            src=src,
+            dst_path=dst_path,
+            dst=dst,
+            src_mysql=False,
+            cursor_type="DATE",
+            sync_mode="incremental_deduped",
+            job_id=f"inc-pg-sqlite-d-a-{suffix}",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        dest = sqlite3.connect(dst_path)
+        try:
+            n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            name = dest.execute(f'SELECT name FROM "{dst}" WHERE id = 1').fetchone()[0]
+        finally:
+            dest.close()
+        assert n == 3
+        assert name == "one"
+        wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
+        with conn.cursor() as cur:
+            cur.execute(
+                f'UPDATE "{src}" SET name = %s, updated_at = %s WHERE id = 1',
+                ("ONE", d3),
+            )
+            cur.execute(
+                f'INSERT INTO "{src}" (id, name, updated_at) VALUES (4, %s, %s)',
+                ("four", d3),
+            )
+        second, ddl2, summary2, _ = _run_inc_into_sqlite(
+            src=src,
+            dst_path=dst_path,
+            dst=dst,
+            src_mysql=False,
+            cursor_type="DATE",
+            sync_mode="incremental_deduped",
+            job_id=f"inc-pg-sqlite-d-b-{suffix}",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        dest = sqlite3.connect(dst_path)
+        try:
+            dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            name = dest.execute(f'SELECT name FROM "{dst}" WHERE id = 1').fetchone()[0]
+            staging_left = dest.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (f"_df_stg_{dst}",),
+            ).fetchone()
+        finally:
+            dest.close()
+        assert dest_count == 4
+        assert name == "ONE"
+        assert staging_left is None
+        cursor_key = str(summary2.get("cursor_key") or "")
+        stored = get_watermark(cursor_key)
+        assert stored and stored != wm1
+        third, _ddl3, summary3, _ = _run_inc_into_sqlite(
+            src=src,
+            dst_path=dst_path,
+            dst=dst,
+            src_mysql=False,
+            cursor_type="DATE",
+            sync_mode="incremental_deduped",
+            job_id=f"inc-pg-sqlite-d-c-{suffix}",
+        )
+        assert third == 0
+        assert summary3.get("source_row_count") == 0
+        assert get_watermark(cursor_key) == stored
+        dest = sqlite3.connect(dst_path)
+        try:
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
+        finally:
+            dest.close()
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+        conn.close()
+
+
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
+def test_mysql_sqlite_incremental_append_copy_delta_and_watermark(tmp_path):
+    """MySQL DATETIME → SQLite append: 2 → 1 dest COUNT 3. Duplicate PK fails closed."""
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src = f"inc_msqla_{suffix}"
+    dst = "inc_dst"
+    dst_path = tmp_path / f"inc_mysql_sqlite_append_{suffix}.db"
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    t1 = datetime(2024, 9, 1, 8, 0, 0)
+    t2 = datetime(2024, 9, 2, 8, 0, 0)
+    try:
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+            cur.execute(
+                f"CREATE TABLE `{src}` ("
+                "id INT PRIMARY KEY, "
+                "name VARCHAR(64) NOT NULL, "
+                "updated_at DATETIME NOT NULL)"
+            )
+            cur.execute(
+                f"INSERT INTO `{src}` (id, name, updated_at) VALUES "
+                "(%s, %s, %s), (%s, %s, %s)",
+                (1, "a", t1, 2, "b", t1),
+            )
+        first, ddl1, summary1, _ = _run_inc_into_sqlite(
+            src=src,
+            dst_path=dst_path,
+            dst=dst,
+            src_mysql=True,
+            cursor_type="DATETIME",
+            sync_mode="incremental_append",
+            job_id=f"inc-mysql-sqlite-ap-a-{suffix}",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_append" in str(summary1.get("load_method") or "")
+        dest = sqlite3.connect(dst_path)
+        try:
+            n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+        finally:
+            dest.close()
+        assert n == 2
+        with my.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO `{src}` (id, name, updated_at) VALUES (3, %s, %s)",
+                ("c", t2),
+            )
+        second, ddl2, summary2, _ = _run_inc_into_sqlite(
+            src=src,
+            dst_path=dst_path,
+            dst=dst,
+            src_mysql=True,
+            cursor_type="DATETIME",
+            sync_mode="incremental_append",
+            job_id=f"inc-mysql-sqlite-ap-b-{suffix}",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        dest = sqlite3.connect(dst_path)
+        try:
+            dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            names = [
+                r[0]
+                for r in dest.execute(f'SELECT name FROM "{dst}" ORDER BY id').fetchall()
+            ]
+            staging_left = dest.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (f"_df_stg_{dst}",),
+            ).fetchone()
+        finally:
+            dest.close()
+        assert dest_count == 3
+        assert names == ["a", "b", "c"]
+        assert staging_left is None
+        assert int((summary2.get("source_snapshot") or {}).get("dest_count") or 0) == 3
+        assert get_watermark(str(summary2.get("cursor_key") or ""))
+    finally:
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+        my.close()
