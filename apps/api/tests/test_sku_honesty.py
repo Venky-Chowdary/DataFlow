@@ -52,3 +52,15 @@ def test_classify_core_pg_mysql_is_sold() -> None:
     row = classify_sku_route(("database", "postgresql", "database", "mysql"))
     assert row["status"] == "sold"
     assert row["sold"] is True
+
+
+def test_core_driver_missing_is_gap_not_refused(monkeypatch) -> None:
+    """psycopg2/pymysql missing is driver_missing, not a refused SKU."""
+    import services.sku_honesty as sh
+
+    monkeypatch.setattr(sh, "driver_available", lambda *a, **k: False)
+    row = sh.classify_sku_route(("database", "postgresql", "database", "mysql"))
+    assert row["status"] == "driver_missing"
+    assert row["sold"] is False
+    assert row["driver_gap"]
+    assert "postgresql" in row["driver_gap"] or "mysql" in row["driver_gap"]

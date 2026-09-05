@@ -325,6 +325,9 @@ function AppShell({
       void hydrate();
     }
     const onWorkspaceChanged = () => {
+      setTransferStudioKey((k) => k + 1);
+      setTransferSeedSource(null);
+      setTransferStudioIntent(null);
       void hydrate();
     };
     window.addEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
@@ -712,6 +715,10 @@ function AppShell({
                       navigateFromSearch({ screen: "schedules", scheduleId })
                     }
                     onOpenSchedules={() => setScreen("schedules")}
+                    onStartTransfer={() => {
+                      setTransferStudioIntent(null);
+                      setScreen("transfer");
+                    }}
                   />
                 </PageErrorBoundary>
                 </div>
@@ -926,6 +933,7 @@ function AppShell({
     try {
       await deleteConnector(id);
       await loadConnectors();
+      setTransferSeedSource((seed) => (seed?.connectorId === id ? null : seed));
       toast({ title: "Connector removed", tone: "success" });
     } catch {
       toast({ title: "Delete failed", message: "Could not remove this connector.", tone: "error" });

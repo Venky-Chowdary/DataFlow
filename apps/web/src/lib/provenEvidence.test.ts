@@ -131,6 +131,16 @@ test("docs help never invents 130 live drivers or 734 catalog tiles", () => {
   assert.doesNotMatch(help, /Redshift.*ship with upsert/);
 });
 
+test("offline form routing includes yaml and fixed-width; degraded live excludes email", () => {
+  const types = readFileSync(path.join(SRC, "lib", "connectorTypes.ts"), "utf8");
+  assert.match(types, /"yaml"/);
+  assert.match(types, /"fixed_width"/);
+  assert.match(types, /"kafka"/);
+  assert.match(types, /d !== "email"/);
+  const forms = readFileSync(path.join(SRC, "lib", "connectorFormConfig.ts"), "utf8");
+  assert.match(forms, /"yaml", "fixed_width"/);
+});
+
 test("degraded transfer-live check does not greenwash certified:false brands", async () => {
   const { CATALOG_PLANNED_DRIVER_TYPES, isTransferLiveType, setTransferLiveDrivers } =
     await import("./connectorTypes.ts");

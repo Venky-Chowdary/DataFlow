@@ -870,6 +870,22 @@ export function TransferPage({
     }
   }, [toast]);
 
+  // Keep-alive leaves Studio mounted. A deleted or workspace-switched
+  // connection must not keep a selected id the list no longer holds.
+  useEffect(() => {
+    if (connectorsLoading) return;
+    if (sourceConnectorId && !connectors.some((c) => c.id === sourceConnectorId)) {
+      setSourceConnectorId("");
+    }
+  }, [connectors, connectorsLoading, sourceConnectorId]);
+
+  useEffect(() => {
+    if (connectorsLoading) return;
+    if (connectorId && !connectors.some((c) => c.id === connectorId)) {
+      setConnectorId("");
+    }
+  }, [connectors, connectorsLoading, connectorId]);
+
   useEffect(() => {
     // Never invent a destination type. Only coerce when an already-chosen type
     // disappeared from the live capability list.

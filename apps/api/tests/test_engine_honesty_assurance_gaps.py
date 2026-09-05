@@ -69,22 +69,46 @@ def test_email_is_not_transfer_ready_without_preflight():
 
 
 def test_transfer_live_driver_count_excludes_email_and_matches_fe_constant():
-    from src.transfer.connector_capabilities import driver_available
+    import re
+
+    from src.transfer.connector_capabilities import (
+        TRANSFER_LIVE_WHEN_PACKAGES_PRESENT,
+        driver_available,
+    )
 
     live = transfer_live_driver_types()
     assert "email" not in live
+    assert "email" not in TRANSFER_LIVE_WHEN_PACKAGES_PRESENT
     # Package-available list, not a marketing constant. Missing paramiko must
     # not invent a transfer-ready SFTP tile (catalog count ≠ live).
     if driver_available("sftp"):
         assert "sftp" in live
     else:
         assert "sftp" not in live
-    # FE TRANSFER_READY_DRIVERS=44 is the count when SKU packages are present.
-    # A runner missing oracledb/paramiko/snowflake/… must not invent tiles and
-    # must not fail CI on a library that is not installed here.
+    # FE TRANSFER_READY_DRIVERS must equal the named fixture. A runner missing
+    # oracledb/paramiko/snowflake/… must not invent tiles and must not fail CI
+    # on a library that is not installed here.
     sku_packages = ("sftp", "oracle", "sqlserver", "snowflake", "bigquery", "mysql")
     if all(driver_available(k) for k in sku_packages):
-        assert len(live) == 44
+        assert set(live) == set(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT), (
+            f"live extra={sorted(set(live) - TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)} "
+            f"missing={sorted(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT - set(live))}"
+        )
+        assert len(live) == len(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
+    else:
+        assert set(live) <= set(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
+
+    proven = (
+        Path(__file__).resolve().parents[2]
+        / "web"
+        / "src"
+        / "lib"
+        / "provenEvidence.ts"
+    )
+    body = proven.read_text(encoding="utf-8")
+    match = re.search(r"export const TRANSFER_READY_DRIVERS = (\d+);", body)
+    assert match, f"TRANSFER_READY_DRIVERS missing in {proven}"
+    assert int(match.group(1)) == len(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
 
 
 def test_mongodb_registry_does_not_claim_sql_merge():

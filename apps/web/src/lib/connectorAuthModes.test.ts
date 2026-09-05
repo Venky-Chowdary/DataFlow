@@ -72,7 +72,7 @@ describe("connector auth modes", () => {
   });
 
   it("gives file formats a file-path mode so Test cannot skip a path", () => {
-    for (const type of ["csv", "parquet", "avro", "pdf", "docx", "html"]) {
+    for (const type of ["csv", "parquet", "avro", "pdf", "docx", "html", "yaml", "fixed_width"]) {
       assert.equal(getAuthModes(type).some((m) => m.value === "file_path"), true, type);
     }
   });

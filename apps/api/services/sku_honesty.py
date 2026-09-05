@@ -16,6 +16,9 @@ from src.transfer.registry import PRODUCTION_SKU, validate_transfer
 
 # Destinations / sources that require optional packages; classify as
 # driver_missing (not refused, not sold) when the package is absent.
+# Optional warehouses / CDC-adjacent packages. Classification now uses
+# ``driver_available`` for every endpoint; this set remains the operator-facing
+# list of packages that are commonly absent on demo hosts.
 OPTIONAL_DRIVERS = frozenset({
     "sqlserver",
     "oracle",
@@ -34,31 +37,20 @@ OPTIONAL_DRIVERS = frozenset({
     "kafka",
 })
 
-_CORE_SOURCES = frozenset({
-    "csv", "json", "jsonl", "tsv", "parquet", "ndjson", "excel", "avro", "orc", "xml",
-    "sqlite", "postgresql", "mysql", "mongodb", "rest_api", "iceberg",
-})
-
-_CORE_DESTS = frozenset({
-    "sqlite", "postgresql", "mysql", "mongodb",
-    "csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml",
-    "iceberg", "rest_api",
-})
-
 SkuRoute = tuple[str, str, str, str]
 
 
 def route_driver_gap(src_fmt: str, dst_fmt: str) -> str | None:
-    """Why this host cannot execute the route, or None when drivers are present."""
+    """Why this host cannot execute the route, or None when drivers are present.
+
+    Core OLTP packages (psycopg2 / pymysql / pymongo) are the same class of
+    gap as optional warehouses: environment, not a refused SKU and not Planned.
+    """
     src = resolve_driver_type(src_fmt)
     dst = resolve_driver_type(dst_fmt)
-    if src in OPTIONAL_DRIVERS and not driver_available(src, src_fmt):
+    if not driver_available(src, src_fmt):
         return f"source driver {src} not installed"
-    if dst in OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
-        return f"destination driver {dst} not installed"
-    if src not in _CORE_SOURCES and src not in OPTIONAL_DRIVERS and not driver_available(src, src_fmt):
-        return f"source driver {src} not installed"
-    if dst not in _CORE_DESTS and dst not in OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
+    if not driver_available(dst, dst_fmt):
         return f"destination driver {dst} not installed"
     return None
 

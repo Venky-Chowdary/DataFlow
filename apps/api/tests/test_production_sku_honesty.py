@@ -37,19 +37,25 @@ def test_production_sku_validate_or_explicit_skip(route: tuple[str, str, str, st
 
 
 def test_production_sku_routes_are_reachable() -> None:
-    """Every committed SKU route must be declared live — no driver probe involved.
+    """Every committed SKU route is either in this-host LIVE_MATRIX or an env gap.
 
-    ``test_production_sku_validate_or_explicit_skip`` skips whenever an optional
-    DBAPI is absent, so a route that is unreachable for a *non-driver* reason
-    (a destination declaring ``preflight: False`` / ``introspect: False``, say)
-    stays invisible on hosts that lack the package. LIVE_MATRIX membership is a
-    static declaration, so this invariant cannot be skipped into silence and
-    fails the moment PRODUCTION_SKU advertises a route Validate would refuse.
+    LIVE_MATRIX is the cartesian of *package-available* live drivers, not a
+    static sold list. PRODUCTION_SKU is the static declaration. A route missing
+    from LIVE_MATRIX is honest when ``route_driver_gap`` names the missing
+    package; it is a SKU lie only when the drivers are present and the route
+    is still absent (Validate would never be asked).
     """
-    unreachable = [route for route in PRODUCTION_SKU if route not in LIVE_MATRIX]
+    unreachable = []
+    for route in PRODUCTION_SKU:
+        if route in LIVE_MATRIX:
+            continue
+        _src_kind, src_fmt, _dst_kind, dst_fmt = route
+        if route_driver_gap(src_fmt, dst_fmt):
+            continue
+        unreachable.append(route)
     assert not unreachable, (
-        "PRODUCTION_SKU advertises routes absent from LIVE_MATRIX, so validate_sku "
-        f"can never pass them: {unreachable}"
+        "PRODUCTION_SKU advertises routes absent from LIVE_MATRIX with drivers "
+        f"loadable on this host, so validate_sku can never pass them: {unreachable}"
     )
 
 

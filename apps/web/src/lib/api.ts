@@ -1041,6 +1041,11 @@ export interface CatalogConnector {
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  /** False when the Certified driver package is not loadable on this host. */
+  driver_available?: boolean;
+  /** Certified product, missing package here — not Planned. */
+  environment_gap?: boolean;
+  environment_gap_reason?: string;
   is_hosted_alias?: boolean;
   alias_of?: string | null;
   capabilities?: {

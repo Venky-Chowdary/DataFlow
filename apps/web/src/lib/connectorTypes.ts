@@ -15,10 +15,13 @@ import { GENERIC_SQL_INFO } from "./genericSqlMap";
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
   "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
+  "yaml", "fixed_width",
   "pdf", "docx", "html",
   "dynamodb", "s3", "gcs", "google_cloud_storage", "redis", "elasticsearch",
   "adls", "sqlite", "generic_sql", "sftp", "email", "sqlserver", "oracle",
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
+  "singer_tap",
+  "kafka",
   "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
   "iceberg",
 ]);
@@ -100,7 +103,7 @@ export async function loadTransferLiveCatalog(
       // Never greenwash certified:false brands as transfer-live.
       const offline = [...TRANSFER_LIVE_TYPES]
         .map((d) => d.toLowerCase())
-        .filter((d) => !CATALOG_PLANNED_DRIVER_TYPES.has(d));
+        .filter((d) => !CATALOG_PLANNED_DRIVER_TYPES.has(d) && d !== "email");
       _liveDriversFromCatalog = new Set(offline);
       _capsState = "error";
       return offline;
