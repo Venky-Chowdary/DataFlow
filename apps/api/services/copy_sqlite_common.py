@@ -10,8 +10,10 @@ DATE cells must be an ISO calendar day (Python ``date``, or TEXT
 ``YYYY-MM-DD`` / midnight). DATETIME cells must be a naive wall-clock
 (Python ``datetime`` without ``tzinfo``, or TEXT ISO with a time
 component and no ``Z`` / offset). INTEGER unix and REAL julian decline
-— those would invent a destination clock. BOOLEAN / JSON / BYTEA stay
-COPY-unsafe. TIMESTAMPTZ dest DDL stays COPY-unsafe.
+— those would invent a destination clock. BOOLEAN cells must be
+SQL-boolean 0/1 (Python ``bool``, INTEGER 0/1, or TEXT ``'0'``/``'1'``).
+``true``/``yes``/``t`` synonyms decline (would invent a boolean). JSON /
+BYTEA / TIMESTAMPTZ dest DDL stay COPY-unsafe.
 """
 
 from __future__ import annotations
@@ -38,8 +40,6 @@ _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
     "TIMETZ",
     "JSON",
     "JSONB",
-    "BOOLEAN",
-    "BOOL",
 })
 
 _DATE_MIDNIGHT_CLOCKS = frozenset({
@@ -213,6 +213,32 @@ def sqlite_copy_naive_datetime_value(value: Any) -> datetime | None:
         return parsed
     raise FastPathUnavailable(
         f"DATETIME cell {value!r} is not naive ISO COPY-safe"
+    )
+
+
+def sqlite_copy_bool_value(value: Any) -> bool | None:
+    """Prove a SQLite cell is SQL-boolean 0/1. Synonyms and other ints decline."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise FastPathUnavailable(
+            f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
+        )
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "0":
+            return False
+        if text == "1":
+            return True
+        raise FastPathUnavailable(
+            f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
+        )
+    raise FastPathUnavailable(
+        f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
     )
 
 

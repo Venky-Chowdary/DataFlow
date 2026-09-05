@@ -259,7 +259,8 @@ def _try_copy_fast_path(
     SQLite→PostgreSQL identity append/overwrite: ``SELECT`` encoded as
     COPY text into ``COPY FROM STDIN``. DATE ISO calendar-day lands as
     PostgreSQL DATE. Naive ISO DATETIME lands as ``TIMESTAMP`` (not
-    ``TIMESTAMPTZ``). BOOLEAN/BLOB/unix DATETIME decline. Dest
+    ``TIMESTAMPTZ``). BOOLEAN 0/1 lands as PostgreSQL BOOLEAN.
+    BLOB/unix DATETIME/boolean synonyms decline. Dest
     ``COUNT(*)`` is the proof.
 
     S3→S3 identity append/overwrite: server-side ``CopyObject`` /
@@ -459,7 +460,8 @@ def _try_copy_fast_path(
     ``LOAD DATA LOCAL INFILE``. Dest ``COUNT(*)`` runs **before commit**.
     DATE ISO/calendar day loads as MySQL DATE when mapped DATE; TEXT ISO
     stays a string. Naive ISO DATETIME loads as MySQL ``DATETIME(6)``.
-    TIMESTAMP / BLOB / JSON / unix DATETIME decline. Occupied
+    BOOLEAN 0/1 loads as MySQL BOOLEAN. TIMESTAMP / BLOB / JSON / unix
+    DATETIME / boolean synonyms decline. Occupied
     dest with a different COUNT declines. Empty dest is LOAD DATA, not
     upsert / sqlite3 ``.dump`` / sqlldr. ``:memory:`` declines.
 

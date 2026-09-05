@@ -8,11 +8,12 @@ whose COUNT already equals the source COUNT is skip-complete. Occupied
 dest with a different COUNT declines. ``:memory:`` / BLOB decline.
 DATE ISO text or a calendar day loads as MySQL DATE. Naive ISO DATETIME
 loads as MySQL ``DATETIME(6)`` (not session-TZ ``TIMESTAMP``). INTEGER
-unix, REAL julian, tz-aware, and date-only DATETIME decline. JSON
-declines.
+unix, REAL julian, tz-aware, and date-only DATETIME decline. BOOLEAN
+0/1 loads as MySQL BOOLEAN (TINYINT). ``true``/``yes`` synonyms
+decline. JSON declines.
 
 Declines (row path keeps quarantine): transforms that change values,
-BLOB/unix DATETIME/JSON, public proxy, occupied dest with dest COUNT ≠
+BLOB/unix DATETIME/boolean synonyms/JSON, public proxy, occupied dest with dest COUNT ≠
 source, ``:memory:``, LOAD DATA ineligible sessions.
 """
 
@@ -31,6 +32,7 @@ from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
 from services.copy_sqlite_common import (
     skip_complete_sqlite,
     sqlite_connect,
+    sqlite_copy_bool_value,
     sqlite_copy_date_value,
     sqlite_copy_naive_datetime_value,
     sqlite_ddl_base,
@@ -64,7 +66,7 @@ def sqlite_mysql_type_is_copy_safe(declared: str) -> bool:
 
 
 def sqlite_value_to_load_data(value: Any, ddl: str) -> str:
-    """SQLite cell → LOAD DATA TSV. DATE is a calendar day; DATETIME is naive ISO."""
+    """SQLite cell → LOAD DATA TSV. DATE/naive DATETIME/BOOLEAN 0/1 are proven."""
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("BLOB values are not MySQL COPY-safe")
     base = sqlite_ddl_base(ddl)
@@ -78,6 +80,9 @@ def sqlite_value_to_load_data(value: Any, ddl: str) -> str:
     if base == "DATETIME":
         parsed = sqlite_copy_naive_datetime_value(value)
         return "\\N" if parsed is None else str(parsed)
+    if base in {"BOOLEAN", "BOOL"}:
+        parsed = sqlite_copy_bool_value(value)
+        return "\\N" if parsed is None else ("1" if parsed else "0")
     return fast_load_data_text_value(value)
 
 

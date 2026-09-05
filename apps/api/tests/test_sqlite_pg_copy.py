@@ -17,6 +17,7 @@ if str(_API_ROOT) not in sys.path:
 
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
 from services.copy_sqlite_common import (  # noqa: E402
+    sqlite_copy_bool_value,
     sqlite_copy_date_value,
     sqlite_copy_naive_datetime_value,
     sqlite_pg_type_is_copy_safe,
@@ -102,8 +103,9 @@ def test_sqlite_pg_copy_safe_types():
     assert sqlite_pg_type_is_copy_safe("DATE") is True
     assert sqlite_pg_type_is_copy_safe("DATETIME") is True
     assert sqlite_pg_type_is_copy_safe("TIMESTAMP") is True
+    assert sqlite_pg_type_is_copy_safe("BOOLEAN") is True
+    assert sqlite_pg_type_is_copy_safe("BOOL") is True
     assert sqlite_pg_type_is_copy_safe("BLOB") is False
-    assert sqlite_pg_type_is_copy_safe("BOOLEAN") is False
     assert sqlite_pg_type_is_copy_safe("JSON") is False
     assert sqlite_pg_type_is_copy_safe("TIMESTAMPTZ") is False
     assert sqlite_pg_type_is_copy_safe("TIMESTAMP WITH TIME ZONE") is False
@@ -140,6 +142,22 @@ def test_sqlite_pg_temporal_cell_proof():
     assert sqlite_value_to_pg_copy(None, "DATETIME") == "\\N"
     with pytest.raises(FastPathUnavailable, match="not PostgreSQL COPY-safe"):
         sqlite_value_to_pg_copy("2024-10-01 12:00:00", "TIMESTAMPTZ")
+    assert sqlite_copy_bool_value(0) is False
+    assert sqlite_copy_bool_value(1) is True
+    assert sqlite_copy_bool_value(False) is False
+    assert sqlite_copy_bool_value(True) is True
+    assert sqlite_copy_bool_value("0") is False
+    assert sqlite_copy_bool_value("1") is True
+    assert sqlite_copy_bool_value(None) is None
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_copy_bool_value(2)
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_copy_bool_value("true")
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_copy_bool_value("t")
+    assert sqlite_value_to_pg_copy(1, "BOOLEAN") == "1"
+    assert sqlite_value_to_pg_copy(0, "BOOL") == "0"
+    assert sqlite_value_to_pg_copy(None, "BOOLEAN") == "\\N"
 
 
 def test_sqlite_pg_copy_kill_switch(monkeypatch, tmp_path):
@@ -294,6 +312,79 @@ def test_live_sqlite_pg_unix_datetime_declines(tmp_path):
                 dest_table=dest,
                 pairs=[("id", "id"), ("updated_at", "updated_at")],
                 pg_ddls=["BIGINT", "TIMESTAMP"],
+                replace_destination=True,
+            )
+    finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        pg.close()
+
+
+def test_live_sqlite_pg_boolean_0_1_dest_count(tmp_path):
+    pg = _pg_connect()
+    tag = uuid.uuid4().hex[:8]
+    src_path = tmp_path / "src.db"
+    dest = f"sqlite_pg_bool_{tag}"
+    conn = sqlite3.connect(src_path)
+    conn.execute(
+        "CREATE TABLE src_t (id INTEGER NOT NULL PRIMARY KEY, flag BOOLEAN)"
+    )
+    conn.execute("INSERT INTO src_t (id, flag) VALUES (1, 1), (2, 0), (3, NULL)")
+    conn.commit()
+    conn.close()
+    try:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        result = copy_sqlite_to_postgres(
+            source_cfg=_sqlite_cfg(src_path, "src_t"),
+            source_table="src_t",
+            dest_cfg=_pg_cfg(),
+            dest_schema="public",
+            dest_table=dest,
+            pairs=[("id", "id"), ("flag", "flag")],
+            pg_ddls=["BIGINT", "BOOLEAN"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 3
+        assert result.source_checksum == "dest_count:3"
+        assert _dest_count(dest) == 3
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT id, flag FROM public."{dest}" ORDER BY id')
+            rows = cur.fetchall()
+        assert rows[0] == (1, True)
+        assert rows[1] == (2, False)
+        assert rows[2] == (3, None)
+    finally:
+        with pg.cursor() as cur:
+            _drop_pg(cur, dest)
+        pg.commit()
+        pg.close()
+
+
+def test_live_sqlite_pg_boolean_synonym_declines(tmp_path):
+    pg = _pg_connect()
+    tag = uuid.uuid4().hex[:8]
+    src_path = tmp_path / "src.db"
+    dest = f"sqlite_pg_boolsyn_{tag}"
+    conn = sqlite3.connect(src_path)
+    conn.execute(
+        "CREATE TABLE src_t (id INTEGER NOT NULL PRIMARY KEY, flag BOOLEAN)"
+    )
+    conn.execute("INSERT INTO src_t (id, flag) VALUES (1, 'true')")
+    conn.commit()
+    conn.close()
+    try:
+        with pytest.raises(FastPathUnavailable, match="0/1"):
+            copy_sqlite_to_postgres(
+                source_cfg=_sqlite_cfg(src_path, "src_t"),
+                source_table="src_t",
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("flag", "flag")],
+                pg_ddls=["BIGINT", "BOOLEAN"],
                 replace_destination=True,
             )
     finally:

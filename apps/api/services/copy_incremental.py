@@ -9,7 +9,8 @@ This module is the missing second run for the handover SQL core
 (PostgreSQL, MySQL, and SQLite any direction). SQLite as source uses a
 TEXT or naive-ISO DATETIME cursor. INTEGER unix, tz-aware, and
 date-only DATETIME stay COPY-unsafe. DATE into PostgreSQL is an ISO
-calendar day (same proof as SQLite DATE → MySQL).
+calendar day (same proof as SQLite DATE → MySQL). BOOLEAN 0/1 is
+COPY-safe; boolean synonyms decline.
 
 1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
    the engine reader uses (Airbyte timestamp-cursor trap).
@@ -57,7 +58,8 @@ def identity_incremental_route(src_type: str, dest_type: str) -> bool:
     PostgreSQL DATE (not TIMESTAMP) and MySQL DATETIME (not TIMESTAMP) are
     COPY-safe into SQLite. SQLite as source uses TEXT or naive-ISO DATETIME
     (not unix-epoch, tz-aware, or date-only DATETIME). DATE into PostgreSQL
-    is ISO calendar-day.
+    is ISO calendar-day. BOOLEAN 0/1 is COPY-safe; ``true``/``yes`` synonyms
+    decline.
     """
     src = (src_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()

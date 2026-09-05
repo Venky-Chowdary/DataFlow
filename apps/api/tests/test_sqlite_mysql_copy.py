@@ -134,6 +134,13 @@ def test_sqlite_mysql_date_iso_to_load_data():
         sqlite_value_to_load_data("2020-01-02", "DATETIME")
     with pytest.raises(FastPathUnavailable, match="TIMESTAMP"):
         sqlite_value_to_load_data("2020-01-02 12:00:00", "TIMESTAMP")
+    assert sqlite_value_to_load_data(1, "BOOLEAN") == "1"
+    assert sqlite_value_to_load_data(0, "BOOLEAN") == "0"
+    assert sqlite_value_to_load_data(None, "BOOLEAN") == "\\N"
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_value_to_load_data("true", "BOOLEAN")
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_value_to_load_data(2, "BOOLEAN")
 
 
 def test_sqlite_mysql_copy_kill_switch(monkeypatch, tmp_path):
@@ -223,6 +230,44 @@ def test_live_sqlite_mysql_datetime_iso_dest_count(tmp_path):
         assert rows[0][0] == 1
         assert rows[0][1] == datetime(2024, 11, 1, 8, 0, 0)
         assert rows[1] == (2, None)
+    finally:
+        mysql.close()
+        _drop_mysql(dest)
+
+
+def test_live_sqlite_mysql_boolean_0_1_dest_count(tmp_path):
+    tag = uuid.uuid4().hex[:8]
+    src = tmp_path / "src.db"
+    dest = f"sqlite_mysql_bool_{tag}"
+    conn = sqlite3.connect(src)
+    conn.execute(
+        'CREATE TABLE "src_t" (id INTEGER NOT NULL PRIMARY KEY, flag BOOLEAN)'
+    )
+    conn.execute(
+        'INSERT INTO "src_t" (id, flag) VALUES (1, 1), (2, 0), (3, NULL)'
+    )
+    conn.commit()
+    conn.close()
+    mysql = _mysql_connect()
+    try:
+        result = copy_sqlite_to_mysql(
+            source_cfg=_cfg(src, "src_t"),
+            source_table="src_t",
+            dest_cfg=_mysql_cfg(),
+            dest_table=dest,
+            pairs=[("id", "id"), ("flag", "flag")],
+            mysql_ddls=["BIGINT", "BOOLEAN"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 3
+        assert result.source_checksum == "dest_count:3"
+        assert _dest_count(dest) == 3
+        with mysql.cursor() as cur:
+            cur.execute(f"SELECT id, flag FROM `{dest}` ORDER BY id")
+            rows = cur.fetchall()
+        assert rows[0] == (1, 1)
+        assert rows[1] == (2, 0)
+        assert rows[2] == (3, None)
     finally:
         mysql.close()
         _drop_mysql(dest)

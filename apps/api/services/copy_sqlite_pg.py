@@ -6,16 +6,16 @@ SQLite has no server COPY. One ``BEGIN`` on the source file streams
 Empty dest COPYs once. Occupied dest whose COUNT already equals the
 source COUNT is skip-complete. Occupied dest with a different COUNT
 declines. DATE ISO calendar-day lands as PostgreSQL DATE. Naive ISO
-DATETIME lands as ``TIMESTAMP`` (not ``TIMESTAMPTZ``). INTEGER unix,
-REAL julian, tz-aware, and date-only DATETIME decline (would invent a
-clock). BOOLEAN / BLOB / JSON / TIMESTAMPTZ decline. This is **not**
-``.dump``.
+DATETIME lands as ``TIMESTAMP`` (not ``TIMESTAMPTZ``). BOOLEAN 0/1
+lands as PostgreSQL BOOLEAN. INTEGER unix, REAL julian, tz-aware, and
+date-only DATETIME decline (would invent a clock). BLOB / JSON /
+TIMESTAMPTZ decline. This is **not** ``.dump``.
 
 ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
 When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
 
 Declines (row path keeps quarantine): transforms that change values,
-BLOB/BOOLEAN/unix DATETIME, public proxy, occupied dest with dest
+BLOB/unix DATETIME/boolean synonyms, public proxy, occupied dest with dest
 COUNT ≠ source, ``:memory:``.
 """
 
@@ -32,6 +32,7 @@ from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
     skip_complete_sqlite,
     sqlite_connect,
+    sqlite_copy_bool_value,
     sqlite_copy_date_value,
     sqlite_copy_naive_datetime_value,
     sqlite_ddl_base,
@@ -74,6 +75,9 @@ def sqlite_value_to_pg_copy(value: Any, ddl: str) -> str:
     if base == "DATE":
         parsed = sqlite_copy_date_value(value)
         return "\\N" if parsed is None else parsed.isoformat()
+    if base in {"BOOLEAN", "BOOL"}:
+        parsed = sqlite_copy_bool_value(value)
+        return "\\N" if parsed is None else ("1" if parsed else "0")
     if base in {"DATETIME", "TIMESTAMP"} or base.startswith("TIMESTAMP"):
         parsed = sqlite_copy_naive_datetime_value(value)
         return "\\N" if parsed is None else str(parsed)

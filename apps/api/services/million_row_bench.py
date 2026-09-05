@@ -6261,10 +6261,10 @@ def run_sqlite_pg_volume(
     """Identity SQLite→PostgreSQL through stream_database_transfer.
 
     Dest COUNT is ``SELECT COUNT(*)``. Empty dest is ``COPY FROM STDIN``,
-    not upsert / ``.dump``. BOOLEAN/BLOB/unix DATETIME on the SQLite
-    source decline. Naive ISO DATE/DATETIME copy. Seeds from
-    PostgreSQL→SQLite when the source file/table is missing — hire_date
-    is TEXT after that hop.
+    not upsert / ``.dump``. BLOB/unix DATETIME/boolean synonyms on the
+    SQLite source decline. Naive ISO DATE/DATETIME and BOOLEAN 0/1 copy.
+    Seeds from PostgreSQL→SQLite when the source file/table is missing —
+    hire_date is TEXT after that hop.
     """
     import socket
 
