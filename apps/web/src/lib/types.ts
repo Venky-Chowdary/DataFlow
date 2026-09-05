@@ -1298,6 +1298,9 @@ export interface TransferResult {
     filename?: string;
     download_url?: string;
     load_method?: string;
+    copy_fast_path?: string;
+    copy_decline_reason?: string;
+    copy_decline_reasons?: string[];
     chunk_size?: number;
     batches?: number;
     records_per_second?: number;

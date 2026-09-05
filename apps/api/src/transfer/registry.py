@@ -380,11 +380,13 @@ def get_capabilities() -> dict:
         sku_missing = sku_counts["production_sku_driver_missing"]
         sku_refused = sku_counts["production_sku_refused"]
         sku_note = sku_counts["note"]
+        sku_handover = sku_counts.get("customer_handover_sold") or 0
     except Exception:
         sku_sold = 0
         sku_missing = 0
         sku_refused = 0
         sku_note = "SKU honesty summary unavailable"
+        sku_handover = 0
 
     return {
         "live_combinations": combos,
@@ -399,6 +401,7 @@ def get_capabilities() -> dict:
         "production_sku_sold": sku_sold,
         "production_sku_driver_missing": sku_missing,
         "production_sku_refused": sku_refused,
+        "customer_handover_sold": sku_handover,
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
@@ -410,7 +413,7 @@ def get_capabilities() -> dict:
             f"({summary['transfer_live_count']} catalog aliases). "
             f"{sku_sold} of {len(PRODUCTION_SKU)} PRODUCTION_SKU routes sold on this host "
             f"(validate_transfer + driver present; {sku_missing} driver-missing, "
-            f"{sku_refused} refused). "
+            f"{sku_refused} refused; {sku_handover} customer-handover sqlite/PostgreSQL/MySQL/file). "
             f"{summary['live_route_combinations']} capability combinations. "
             "Catalog tiles are not transfer-live."
         ),

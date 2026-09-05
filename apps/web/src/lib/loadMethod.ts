@@ -24,6 +24,24 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   },
   copy: { label: "COPY", description: "Bulk COPY into the destination." },
   bulk_copy: { label: "Bulk COPY", description: "Bulk COPY into the destination." },
+  copy_text_pg_to_mysql_load_data: {
+    label: "PostgreSQL COPY → MySQL LOAD DATA",
+    description:
+      "Identity append/overwrite: PostgreSQL COPY text piped into STRICT "
+      + "LOAD DATA LOCAL INFILE. Dest COUNT(*) must equal the source snapshot.",
+  },
+  copy_text_pg_to_mysql_load_data_upsert: {
+    label: "PostgreSQL COPY → MySQL upsert",
+    description:
+      "Identity upsert: LOAD DATA into a staging table, then INSERT ... ON "
+      + "DUPLICATE KEY UPDATE. Proof is dest PK ⋈ staging, not dest COUNT(*).",
+  },
+  copy_binary_server_to_server_upsert: {
+    label: "Server COPY then upsert",
+    description:
+      "Identity upsert: binary COPY into staging, then INSERT ... ON CONFLICT. "
+      + "Proof is dest PK ⋈ staging, not dest COUNT(*).",
+  },
   insert: { label: "Insert", description: "Row batches inserted into the destination." },
   upsert: { label: "Upsert", description: "Row batches merged on the identity key." },
   merge_batch: {

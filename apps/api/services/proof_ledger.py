@@ -180,6 +180,8 @@ def build_proof_ledger() -> dict[str, Any]:
             "validate_ok": row["validate_ok"],
             "driver_gap": row["driver_gap"],
             "sold": row["sold"],
+            "customer_handover": bool(row.get("customer_handover")),
+            "customer_handover_eligible": bool(row.get("customer_handover_eligible")),
         }
         for row in sku_classified
     ]
@@ -207,6 +209,8 @@ def build_proof_ledger() -> dict[str, Any]:
             "production_sku_driver_missing": sku_summary["production_sku_driver_missing"],
             "production_sku_refused": sku_summary["production_sku_refused"],
             "production_sku_note": sku_summary["note"],
+            "customer_handover_sold": sku_summary.get("customer_handover_sold") or 0,
+            "customer_handover_eligible": sku_summary.get("customer_handover_eligible") or 0,
             "fidelity_proofs_on_disk": len(fidelity_proofs),
             "fidelity_proofs_passed": fidelity_ok,
             "planned_catalog_entries": catalog.get("planned"),
@@ -223,6 +227,7 @@ def build_proof_ledger() -> dict[str, Any]:
             "Open Job Theater after a transfer — quarantine rows and Gate-8 checksum must match.",
             "Catalog badges: Certified = full transfer; Source-only = read path; Planned = roadmap.",
             "Sell only routes with status=sold (validate_transfer + driver present). driver_missing is an environment gap, not Planned.",
+            "Customer handover is sqlite/PostgreSQL/MySQL/file SKU with dest COUNT proof. Warehouse, SaaS, and vector PRODUCTION_SKU on this host is desktop-lab, not a tenant cutover.",
             "CI exercises PRODUCTION_SKU when local emulators are up (test_production_sku_matrix).",
         ],
     }

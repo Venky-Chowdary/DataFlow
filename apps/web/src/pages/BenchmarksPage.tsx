@@ -233,6 +233,12 @@ export function BenchmarksPage() {
                         sub={`${metrics?.production_sku_sold ?? 0} of ${metrics?.production_sku_routes ?? 0} claimed — validate_transfer + driver present`}
                       />
                       <StatCard
+                        label="Customer handover SKU"
+                        value={formatNumber(metrics?.customer_handover_sold ?? 0)}
+                        icon="shield"
+                        sub={`${metrics?.customer_handover_sold ?? 0} of ${metrics?.customer_handover_eligible ?? 0} sqlite/PostgreSQL/MySQL/file routes sold — warehouse/SaaS/vector is desktop-lab`}
+                      />
+                      <StatCard
                         label="Fidelity proofs passed"
                         value={`${metrics?.fidelity_proofs_passed ?? 0}/${metrics?.fidelity_proofs_on_disk ?? 0}`}
                         icon="shield"
@@ -477,7 +483,7 @@ export function BenchmarksPage() {
                                     title={r.driver_gap || undefined}
                                   >
                                     {r.status === "sold"
-                                      ? "sold now"
+                                      ? (r.customer_handover ? "handover" : "lab SKU")
                                       : r.status === "driver_missing"
                                         ? "driver missing"
                                         : "refused"}
