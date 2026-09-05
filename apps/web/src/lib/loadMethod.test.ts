@@ -77,5 +77,12 @@ describe("loadMethod labels", () => {
       loadMethodDescription("csv_load_data_mysql_incremental_append"),
       /LOAD DATA/,
     );
+    assert.match(loadMethodLabel("yaml_records_executemany_sqlite_incremental_deduped"), /YAML/);
+    assert.match(loadMethodLabel("json_records_copy_from_stdin_pg_incremental_deduped"), /JSON/);
+    assert.match(loadMethodLabel("fwf_records_load_data_mysql_incremental_append"), /Fixed-width/);
+    assert.match(
+      loadMethodDescription("yaml_records_executemany_sqlite_incremental_append"),
+      /watermark/,
+    );
   });
 });

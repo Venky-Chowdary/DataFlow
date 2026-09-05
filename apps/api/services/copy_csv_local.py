@@ -18,9 +18,11 @@ staging (``replace_destination=True``), then the existing
 append / ON CONFLICT / ON DUPLICATE apply. Unbounded cursor cells
 refuse. Empty delta is a measured no-op.
 
-json / yaml / fixed_width stay on the row path (CSV is the COPY-native
-wire). Windowed ``ReadOptions`` (skip_rows / skip_footer / non-default
-header_row) decline. gzip is decompressed, then the same mapped COPY.
+json / jsonl / yaml / fixed_width parse with the same identity readers as
+the row path, then reuse this mapped-CSV dest load. Nested JSON/YAML
+cells decline (row path keeps quarantine). Windowed ``ReadOptions``
+(skip_rows / skip_footer / non-default header_row) decline. gzip is
+decompressed, then the same mapped COPY.
 """
 
 from __future__ import annotations
@@ -60,6 +62,8 @@ from services.sync_cursor import (
 logger = logging.getLogger(__name__)
 
 _CSV_TYPES = frozenset({"csv", "tsv"})
+_JSON_TYPES = frozenset({"json", "jsonl", "ndjson"})
+_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset({"yaml", "fixed_width"})
 _SQL_DEST = frozenset({"sqlite", "postgresql", "postgres", "mysql", "mariadb"})
 _FILTER_BATCH = 5000
 
@@ -78,20 +82,51 @@ def csv_local_copy_batch() -> int:
 
 
 def identity_csv_copy_route(file_type: str, dest_type: str) -> bool:
-    """True when local CSV identity COPY is proven for this pair."""
+    """True when local CSV/TSV identity COPY is proven for this pair."""
     src = (file_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
     return src in _CSV_TYPES and dest in _SQL_DEST
 
 
-def csv_copy_load_method(dest_type: str, sync_mode: str) -> str:
+def identity_file_copy_route(file_type: str, dest_type: str) -> bool:
+    """True when local tabular identity COPY is proven for this pair.
+
+    csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width parse with
+    the identity readers, then reuse that wire. Nested cells decline.
+    """
+    src = (file_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
+    return src in _TABULAR_TYPES and dest in _SQL_DEST
+
+
+def _file_kind_token(file_type: str) -> str:
+    kind = (file_type or "csv").strip().lower()
+    if kind in _CSV_TYPES:
+        return "csv"
+    if kind in _JSON_TYPES:
+        return "json_records"
+    if kind == "yaml":
+        return "yaml_records"
+    if kind == "fixed_width":
+        return "fwf_records"
+    return "csv"
+
+
+def csv_copy_load_method(dest_type: str, sync_mode: str) -> str:
+    return file_copy_load_method("csv", dest_type, sync_mode)
+
+
+def file_copy_load_method(file_type: str, dest_type: str, sync_mode: str) -> str:
+    dest = (dest_type or "").strip().lower()
+    prefix = _file_kind_token(file_type)
     if dest in {"postgresql", "postgres"}:
-        base = "csv_copy_from_stdin_pg"
+        base = f"{prefix}_copy_from_stdin_pg" if prefix != "csv" else "csv_copy_from_stdin_pg"
     elif dest in {"mysql", "mariadb"}:
-        base = "csv_load_data_mysql"
+        base = f"{prefix}_load_data_mysql" if prefix != "csv" else "csv_load_data_mysql"
     else:
-        base = "csv_executemany_sqlite"
+        base = (
+            f"{prefix}_executemany_sqlite" if prefix != "csv" else "csv_executemany_sqlite"
+        )
     mode = (sync_mode or "").strip().lower()
     if mode in COPY_INCREMENTAL_MODES:
         return f"{base}_{mode}"
@@ -186,7 +221,168 @@ def _csv_text(
                 logger.debug("CSV binary close skipped", exc_info=True)
 
 
+@contextmanager
+def _open_binary(content: bytes | str | os.PathLike) -> Iterator[Any]:
+    closer = None
+    if isinstance(content, (bytes, bytearray)):
+        raw = bytes(content)
+        if raw[:2] == b"\x1f\x8b":
+            handle: Any = gzip.GzipFile(fileobj=io.BytesIO(raw))
+            closer = handle
+        else:
+            handle = io.BytesIO(raw)
+    else:
+        path = os.fspath(content)
+        raw_handle = open(path, "rb")
+        head = raw_handle.read(2)
+        raw_handle.seek(0)
+        if head == b"\x1f\x8b":
+            handle = gzip.GzipFile(fileobj=raw_handle)
+            closer = handle
+        else:
+            handle = raw_handle
+            closer = raw_handle
+    try:
+        yield handle
+    finally:
+        if closer is not None:
+            try:
+                closer.close()
+            except Exception:
+                logger.debug("COPY binary close skipped", exc_info=True)
+
+
+def _identity_cell(value: Any, *, column: str) -> str | None:
+    if isinstance(value, (dict, list, tuple, set, frozenset)):
+        raise FastPathUnavailable(
+            f"nested value in {column!r} is not COPY-identity "
+            "(row path keeps quarantine)"
+        )
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _empty_to_none(value)
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value)
+
+
+def _project_record(
+    raw: dict[str, Any], source_cols: list[str]
+) -> dict[str, str | None]:
+    index = {str(k).lower(): k for k in raw.keys()}
+    out: dict[str, str | None] = {}
+    for col in source_cols:
+        key = index.get(col.lower())
+        if key is None:
+            out[col] = None
+            continue
+        out[col] = _identity_cell(raw.get(key), column=col)
+    return out
+
+
+def _iter_json_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+) -> Iterator[dict[str, str | None]]:
+    from services.json_tabular import iter_json_record_dicts
+
+    for batch in iter_json_record_dicts(_open_binary, content, chunk_size=_FILTER_BATCH):
+        for raw in batch:
+            if not isinstance(raw, dict):
+                raise FastPathUnavailable("JSON COPY requires an array of objects")
+            yield _project_record(raw, source_cols)
+
+
+def _iter_jsonl_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+    read_options: Any = None,
+) -> Iterator[dict[str, str | None]]:
+    from services.value_serializer import json_loads_exact
+
+    encoding = str(getattr(read_options, "encoding", "") or "").strip() or "utf-8"
+    with _csv_text(content, encoding=encoding) as handle:
+        for line_no, line in enumerate(handle, start=1):
+            text = line.strip()
+            if not text:
+                continue
+            obj = json_loads_exact(text)
+            if not isinstance(obj, dict):
+                raise FastPathUnavailable(
+                    f"JSONL line {line_no} is not an object (COPY-identity)"
+                )
+            yield _project_record(obj, source_cols)
+
+
+def _iter_yaml_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+    read_options: Any = None,
+) -> Iterator[dict[str, str | None]]:
+    from services.yaml_tabular import YAMLTabularError, iter_yaml_dicts
+
+    encoding = str(getattr(read_options, "encoding", "") or "").strip() or "utf-8"
+    try:
+        for raw in iter_yaml_dicts(content, encoding=encoding):
+            if not isinstance(raw, dict):
+                continue
+            yield _project_record(raw, source_cols)
+    except YAMLTabularError as exc:
+        raise FastPathUnavailable(str(exc)) from exc
+
+
+def _iter_fwf_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+    read_options: Any = None,
+) -> Iterator[dict[str, str | None]]:
+    from services.fixed_width_layout import FixedWidthError, iter_fixed_width_dicts
+
+    encoding = str(getattr(read_options, "encoding", "") or "").strip() or "utf-8"
+    layout = getattr(read_options, "fixed_width_layout", ()) if read_options else ()
+    try:
+        for raw in iter_fixed_width_dicts(content, layout, encoding=encoding):
+            if not isinstance(raw, dict):
+                continue
+            yield _project_record(raw, source_cols)
+    except FixedWidthError as exc:
+        raise FastPathUnavailable(str(exc)) from exc
+
+
 def _iter_source_records(
+    content: bytes | str | os.PathLike,
+    filename: str,
+    pairs: list[tuple[str, str]],
+    read_options: Any = None,
+    *,
+    file_type: str = "",
+) -> Iterator[dict[str, str | None]]:
+    kind = (file_type or "").strip().lower()
+    if not kind:
+        from services.file_parser import FileParser
+
+        raw = content if isinstance(content, (bytes, bytearray)) else b""
+        kind = FileParser.detect_file_type(filename, raw or None)
+    source_cols = [p[0] for p in pairs]
+    if kind in _JSON_TYPES and kind != "json":
+        yield from _iter_jsonl_records(content, source_cols, read_options)
+        return
+    if kind == "json":
+        yield from _iter_json_records(content, source_cols)
+        return
+    if kind == "yaml":
+        yield from _iter_yaml_records(content, source_cols, read_options)
+        return
+    if kind == "fixed_width":
+        yield from _iter_fwf_records(content, source_cols, read_options)
+        return
+    yield from _iter_csv_source_records(
+        content, filename, pairs, read_options
+    )
+
+
+def _iter_csv_source_records(
     content: bytes | str | os.PathLike,
     filename: str,
     pairs: list[tuple[str, str]],
@@ -260,9 +456,11 @@ def _write_mapped_csv(
     cursor_column: str = "",
     watermark: str | None = None,
     pk_column: str = "",
+    file_type: str = "",
 ) -> int:
     """Write dest-ordered CSV with HEADER. Returns data-row COUNT."""
-    delim = "\t" if _csv_ext(filename) == "tsv" else ","
+    kind = (file_type or "").strip().lower()
+    delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
     source_cols = [p[0] for p in pairs]
     dest_cols = [p[1] for p in pairs]
     count = 0
@@ -279,7 +477,9 @@ def _write_mapped_csv(
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter=delim, lineterminator="\n")
         writer.writerow(dest_cols)
-        for record in _iter_source_records(content, filename, pairs, read_options):
+        for record in _iter_source_records(
+            content, filename, pairs, read_options, file_type=file_type
+        ):
             if incremental:
                 pending.append(record)
                 if len(pending) >= _FILTER_BATCH:
@@ -325,8 +525,10 @@ def _mapped_csv_file(
     cursor_column: str = "",
     watermark: str | None = None,
     pk_column: str = "",
+    file_type: str = "",
 ) -> Iterator[tuple[str, int, str]]:
-    ext = _csv_ext(filename)
+    kind = (file_type or "").strip().lower()
+    ext = "tsv" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else "csv"
     fd, path = tempfile.mkstemp(prefix="df-csv-local-", suffix=f".{ext}")
     os.close(fd)
     try:
@@ -340,6 +542,7 @@ def _mapped_csv_file(
             cursor_column=cursor_column,
             watermark=watermark,
             pk_column=pk_column,
+            file_type=file_type,
         )
         yield path, count, ext
     finally:
@@ -763,6 +966,7 @@ def copy_csv_to_sqlite_incremental(
     watermark: str | None,
     pk_column: str = "",
     read_options: Any = None,
+    file_type: str = "",
 ) -> FastPathResult:
     mode = (sync_mode or "").strip().lower()
     if mode not in COPY_INCREMENTAL_MODES:
@@ -783,6 +987,7 @@ def copy_csv_to_sqlite_incremental(
         cursor_column=cursor_column,
         watermark=watermark,
         pk_column=pk_column,
+        file_type=file_type,
     ) as (path, source_count, ext):
         if source_count == 0:
             return _empty_incremental(_sqlite_existing_count(dest_cfg, dest_table), mode)
@@ -830,6 +1035,7 @@ def copy_csv_to_postgres_incremental(
     watermark: str | None,
     pk_column: str = "",
     read_options: Any = None,
+    file_type: str = "",
 ) -> FastPathResult:
     from services.copy_fast_path import _table_ref
     from services.copy_mysql_pg import _pg_connect, _pg_create_sql
@@ -858,6 +1064,7 @@ def copy_csv_to_postgres_incremental(
         cursor_column=cursor_column,
         watermark=watermark,
         pk_column=pk_column,
+        file_type=file_type,
     ) as (path, source_count, ext):
         dest_conn = _pg_connect(dest_cfg)
         try:
@@ -953,6 +1160,7 @@ def copy_csv_to_mysql_incremental(
     watermark: str | None,
     pk_column: str = "",
     read_options: Any = None,
+    file_type: str = "",
 ) -> FastPathResult:
     from services.copy_mysql_pg import _mysql_connect, _mysql_ident
     from services.copy_pg_mysql import _mysql_create_sql
@@ -980,6 +1188,7 @@ def copy_csv_to_mysql_incremental(
         cursor_column=cursor_column,
         watermark=watermark,
         pk_column=pk_column,
+        file_type=file_type,
     ) as (path, source_count, ext):
         dest_conn = _mysql_connect(dest_cfg)
         try:
@@ -1120,11 +1329,14 @@ def _format_csv_copy(
     filename: str,
     sync_mode: str,
     replace_destination: bool,
+    file_type: str = "csv",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     snapshot = dict(result.source_snapshot or {})
     inc_mode = (sync_mode or "").strip().lower()
     incremental = inc_mode in COPY_INCREMENTAL_MODES
-    load_method = csv_copy_load_method(dest_type, sync_mode if incremental else "")
+    load_method = file_copy_load_method(
+        file_type, dest_type, sync_mode if incremental else ""
+    )
     dest_n = (dest_type or "").strip().lower()
     dest_summary: dict[str, Any] = {
         "type": dest_type,
@@ -1155,19 +1367,19 @@ def _format_csv_copy(
         dest_summary["sync_mode"] = inc_mode
         if inc_mode == "incremental_deduped":
             proof_line = (
-                "Proof: staging COUNT(*) equals filtered CSV rows past the cursor; "
+                "Proof: staging COUNT(*) equals filtered file rows past the cursor; "
                 "dest PK ⋈ staging equals staging; dest COUNT(*) independently reread. "
                 "Not a SQL WHERE on the file."
             )
         else:
             proof_line = (
-                "Proof: staging COUNT(*) equals filtered CSV rows past the cursor; "
+                "Proof: staging COUNT(*) equals filtered file rows past the cursor; "
                 "dest COUNT(*) equals dest_before + staging (duplicate PK fails closed). "
                 "Not a SQL WHERE on the file."
             )
     else:
         proof_line = (
-            "Proof: dest COUNT(*) equals mapped CSV source COUNT. "
+            "Proof: dest COUNT(*) equals mapped source COUNT. "
             "Not pandas / COPY of an unmapped file. Empty dest is bulk load, not upsert."
         )
     if dest_n in {"postgresql", "postgres"}:
@@ -1177,8 +1389,9 @@ def _format_csv_copy(
     else:
         wire = "executemany"
     verb = f"COPY+{inc_mode}" if incremental else wire
+    kind = (file_type or "csv").strip().lower() or "csv"
     ddl_log = [
-        f"COPY CSV {filename} → {dest_type} {dest_table} "
+        f"COPY {kind} {filename} → {dest_type} {dest_table} "
         f"({result.source_rows:,} rows, local {verb})",
         proof_line,
     ]
@@ -1209,7 +1422,7 @@ def try_copy_local_csv(
     """Identity local CSV COPY, or None to keep the row path."""
     if not csv_local_copy_enabled():
         return None
-    if not identity_csv_copy_route(file_type, dest_type):
+    if not identity_file_copy_route(file_type, dest_type):
         return None
     if shape_runner is not None:
         return None
@@ -1265,6 +1478,7 @@ def try_copy_local_csv(
                     watermark=watermark,
                     pk_column=pk_column,
                     read_options=read_options,
+                    file_type=file_type,
                 )
             elif dest_n in {"mysql", "mariadb"}:
                 result = copy_csv_to_mysql_incremental(
@@ -1279,6 +1493,7 @@ def try_copy_local_csv(
                     watermark=watermark,
                     pk_column=pk_column,
                     read_options=read_options,
+                    file_type=file_type,
                 )
             else:
                 result = copy_csv_to_sqlite_incremental(
@@ -1293,10 +1508,15 @@ def try_copy_local_csv(
                     watermark=watermark,
                     pk_column=pk_column,
                     read_options=read_options,
+                    file_type=file_type,
                 )
         else:
             with _mapped_csv_file(
-                content, filename, pairs, read_options=read_options
+                content,
+                filename,
+                pairs,
+                read_options=read_options,
+                file_type=file_type,
             ) as (path, source_count, ext):
                 if dest_n in {"postgresql", "postgres"}:
                     result = copy_csv_to_postgres(
@@ -1346,6 +1566,7 @@ def try_copy_local_csv(
         filename=filename,
         sync_mode=effective_sync,
         replace_destination=replace_destination,
+        file_type=file_type,
     )
     columns = [p[1] for p in pairs]
     return rows, ddl_log, dest_summary, columns

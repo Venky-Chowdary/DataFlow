@@ -260,14 +260,46 @@ const LOAD_METHODS: Record<string, LoadMethodInfo> = {
   },
 };
 
+const FILE_RECORD_COPY =
+  /^(json|yaml|fwf)_records_(executemany_sqlite|copy_from_stdin_pg|load_data_mysql)(?:_incremental_(append|deduped))?$/;
+
+function fileRecordCopyInfo(method: string): LoadMethodInfo | null {
+  const match = method.match(FILE_RECORD_COPY);
+  if (!match) return null;
+  const kind = match[1] === "fwf" ? "Fixed-width" : match[1].toUpperCase();
+  const dest = match[2].includes("sqlite")
+    ? "SQLite"
+    : match[2].includes("pg")
+      ? "PostgreSQL"
+      : "MySQL";
+  const inc = match[3] === "append"
+    ? " incremental append"
+    : match[3] === "deduped"
+      ? " incremental upsert"
+      : "";
+  return {
+    label: `${kind} → ${dest}${inc}`,
+    description: inc
+      ? `Identity incremental: ${kind} records past the cursor watermark into staging, `
+        + "then the dest bulk apply. Nested cells stay on the row path. "
+        + "Not a SQL WHERE on the file."
+      : `Identity append/overwrite: ${kind} records mapped into the dest bulk load. `
+        + "Dest COUNT(*) must equal the mapped source COUNT. Nested cells stay on the row path.",
+  };
+}
+
 export function loadMethodLabel(method: string | null | undefined): string {
   const key = String(method || "").trim();
   if (!key) return "";
-  return LOAD_METHODS[key]?.label ?? key;
+  return LOAD_METHODS[key]?.label ?? fileRecordCopyInfo(key)?.label ?? key;
 }
 
 export function loadMethodDescription(method: string | null | undefined): string {
   const key = String(method || "").trim();
   if (!key) return "";
-  return LOAD_METHODS[key]?.description ?? `Load path for this job: ${key}.`;
+  return (
+    LOAD_METHODS[key]?.description
+    ?? fileRecordCopyInfo(key)?.description
+    ?? `Load path for this job: ${key}.`
+  );
 }

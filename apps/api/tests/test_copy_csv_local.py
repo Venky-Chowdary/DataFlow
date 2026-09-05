@@ -17,6 +17,7 @@ if str(_API_ROOT) not in sys.path:
 from services.copy_csv_local import (  # noqa: E402
     csv_copy_load_method,
     identity_csv_copy_route,
+    identity_file_copy_route,
     try_copy_local_csv,
 )
 from services.sync_cursor import get_watermark  # noqa: E402
@@ -154,6 +155,15 @@ def test_identity_csv_copy_route_sql_core_only():
     assert not identity_csv_copy_route("yaml", "postgresql")
 
 
+def test_identity_file_copy_route_handover_tabular():
+    assert identity_file_copy_route("json", "sqlite")
+    assert identity_file_copy_route("jsonl", "mysql")
+    assert identity_file_copy_route("yaml", "postgresql")
+    assert identity_file_copy_route("fixed_width", "sqlite")
+    assert not identity_file_copy_route("parquet", "sqlite")
+    assert not identity_file_copy_route("yaml", "snowflake")
+
+
 def test_csv_copy_load_method_tokens():
     assert csv_copy_load_method("sqlite", "incremental_deduped") == (
         "csv_executemany_sqlite_incremental_deduped"
@@ -174,8 +184,8 @@ def test_try_copy_declines_json_and_transforms(tmp_path):
     dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
     declined = try_copy_local_csv(
         content=_csv(DAY1),
-        filename="events.json",
-        file_type="json",
+        filename="events.parquet",
+        file_type="parquet",
         dest_type="sqlite",
         dest_cfg=dest_cfg,
         dest_table="events",
