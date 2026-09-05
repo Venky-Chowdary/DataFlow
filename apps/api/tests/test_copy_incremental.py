@@ -16,7 +16,10 @@ from services.copy_fast_path import (
 )
 from services.copy_incremental import (
     COPY_INCREMENTAL_MODES,
+    identity_incremental_cursor_reason,
     identity_incremental_route,
+    incremental_cursor_type_base,
+    mapped_cursor_declared_type,
     mysql_cursor_predicate_sql,
     mysql_insert_from_staging_sql,
     pg_cursor_predicate_sql,
@@ -150,6 +153,77 @@ def test_identity_incremental_route_sql_core_only():
     assert identity_incremental_route("sqlite", "mysql")
     assert not identity_incremental_route("mysql", "snowflake")
     assert not identity_incremental_route("csv", "sqlite")
+
+
+def test_identity_incremental_cursor_type_gate():
+    """BOOLEAN payload COPY is proven; BOOLEAN as a cursor skips after watermark 1."""
+    assert identity_incremental_cursor_reason("INTEGER") == ""
+    assert identity_incremental_cursor_reason("BIGINT") == ""
+    assert identity_incremental_cursor_reason("DATE") == ""
+    assert identity_incremental_cursor_reason("DATETIME") == ""
+    assert identity_incremental_cursor_reason("TIMESTAMP") == ""
+    assert identity_incremental_cursor_reason("TEXT") == ""
+    assert identity_incremental_cursor_reason("VARCHAR(64)") == ""
+    assert identity_incremental_cursor_reason("") == ""
+    assert "BOOLEAN" in identity_incremental_cursor_reason("BOOLEAN")
+    assert identity_incremental_cursor_reason("BOOL")
+    assert identity_incremental_cursor_reason("FLOAT")
+    assert identity_incremental_cursor_reason("DOUBLE PRECISION")
+    assert identity_incremental_cursor_reason("DECIMAL(10,2)")
+    assert identity_incremental_cursor_reason("JSON")
+    assert identity_incremental_cursor_reason("TIMESTAMPTZ")
+    assert identity_incremental_cursor_reason("TIMESTAMP WITH TIME ZONE")
+    assert identity_incremental_cursor_reason("TIME")
+    assert incremental_cursor_type_base("TIMESTAMP WITHOUT TIME ZONE") == "TIMESTAMP"
+    assert incremental_cursor_type_base("TIMESTAMP WITH TIME ZONE") == "TIMESTAMPTZ"
+    assert mapped_cursor_declared_type(
+        [{"source": "version", "target": "version", "type": "INTEGER"}],
+        {"version": "INTEGER"},
+        "version",
+    ) == "INTEGER"
+
+
+def test_copy_route_declines_boolean_incremental_cursor() -> None:
+    """BOOLEAN 0/1 COPY is payload-safe; as a cursor it is not monotonic."""
+    from src.transfer.copy_route import _try_copy_fast_path
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {"format": "sqlite", "table": "flags", "database": "/tmp/x.db"},
+    )
+    dest = EndpointConfig.from_dict(
+        "database",
+        {"format": "postgresql", "table": "flags", "schema": "public"},
+    )
+    sink: list[str] = []
+    token, _ = begin_copy_decline_capture(sink)
+    try:
+        result = _try_copy_fast_path(
+            source=source,
+            destination=dest,
+            mappings=[
+                {"source": "id", "target": "id", "type": "INTEGER"},
+                {"source": "flag", "target": "flag", "type": "BOOLEAN"},
+            ],
+            schema={"id": "INTEGER", "flag": "BOOLEAN"},
+            src_type="sqlite",
+            dest_type="postgresql",
+            src_cfg={"type": "sqlite", "table": "flags", "database": "/tmp/x.db"},
+            dest_cfg={"type": "postgresql", "table": "flags"},
+            effective_sync="incremental_deduped",
+            incremental=True,
+            source_filter=None,
+            limit=0,
+            checkpoint=None,
+            incremental_cursor="flag",
+            incremental_watermark="1\x1f1",
+            incremental_pk="id",
+        )
+    finally:
+        reset_copy_decline_capture(token)
+    assert result is None
+    assert any("BOOLEAN" in r or "monotonic" in r for r in sink)
 
 
 def test_copy_route_declines_cdc_incremental():
@@ -461,6 +535,7 @@ def _run_inc(
     job_id: str,
     src_mysql: bool = False,
     cursor_type: str = "TIMESTAMP",
+    cursor_field: str = "updated_at",
 ):
     from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.models import EndpointConfig
@@ -469,23 +544,24 @@ def _run_inc(
     ensure_memory_job_store_if_mongo_down()
     source = EndpointConfig.from_dict("database", _cfg(src, mysql=src_mysql))
     destination = EndpointConfig.from_dict("database", _cfg(dst, mysql=dest_mysql))
+    name_type = "VARCHAR"
     mappings = [
         {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
-        {"source": "name", "target": "name", "type": "VARCHAR", "transform": "none"},
+        {"source": "name", "target": "name", "type": name_type, "transform": "none"},
         {
-            "source": "updated_at",
-            "target": "updated_at",
+            "source": cursor_field,
+            "target": cursor_field,
             "type": cursor_type,
             "transform": "none",
         },
     ]
-    schema = {"id": "INTEGER", "name": "VARCHAR", "updated_at": cursor_type}
+    schema = {"id": "INTEGER", "name": name_type, cursor_field: cursor_type}
     contracts = [
         {
             "name": "stream",
             "selected": True,
             "sync_mode": sync_mode,
-            "cursor_field": "updated_at",
+            "cursor_field": cursor_field,
             "primary_key": "id",
         }
     ]
@@ -955,6 +1031,8 @@ def _run_inc_sqlite(
     dst: str,
     sync_mode: str,
     job_id: str,
+    cursor_field: str = "updated_at",
+    cursor_type: str = "TEXT",
 ):
     from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.models import EndpointConfig
@@ -973,19 +1051,19 @@ def _run_inc_sqlite(
         {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
         {"source": "name", "target": "name", "type": "TEXT", "transform": "none"},
         {
-            "source": "updated_at",
-            "target": "updated_at",
-            "type": "TEXT",
+            "source": cursor_field,
+            "target": cursor_field,
+            "type": cursor_type,
             "transform": "none",
         },
     ]
-    schema = {"id": "INTEGER", "name": "TEXT", "updated_at": "TEXT"}
+    schema = {"id": "INTEGER", "name": "TEXT", cursor_field: cursor_type}
     contracts = [
         {
             "name": "stream",
             "selected": True,
             "sync_mode": sync_mode,
-            "cursor_field": "updated_at",
+            "cursor_field": cursor_field,
             "primary_key": "id",
         }
     ]
@@ -1009,6 +1087,7 @@ def _run_inc_from_sqlite(
     job_id: str,
     dest_mysql: bool = False,
     cursor_type: str = "TEXT",
+    cursor_field: str = "updated_at",
 ):
     from services.million_row_proof import ensure_memory_job_store_if_mongo_down
     from src.transfer.models import EndpointConfig
@@ -1024,19 +1103,19 @@ def _run_inc_from_sqlite(
         {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
         {"source": "name", "target": "name", "type": "TEXT", "transform": "none"},
         {
-            "source": "updated_at",
-            "target": "updated_at",
+            "source": cursor_field,
+            "target": cursor_field,
             "type": cursor_type,
             "transform": "none",
         },
     ]
-    schema = {"id": "INTEGER", "name": "TEXT", "updated_at": cursor_type}
+    schema = {"id": "INTEGER", "name": "TEXT", cursor_field: cursor_type}
     contracts = [
         {
             "name": "stream",
             "selected": True,
             "sync_mode": sync_mode,
-            "cursor_field": "updated_at",
+            "cursor_field": cursor_field,
             "primary_key": "id",
         }
     ]
@@ -3141,5 +3220,312 @@ def test_sqlite_mysql_date_incremental_deduped_copy_delta_and_watermark(tmp_path
         with my.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
         my.close()
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_sqlite_pg_integer_incremental_append_copy_nine_then_ten(tmp_path):
+    """INTEGER cursor must compare numerically: watermark 9 then version 10."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_pg_int_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_spg_int_{suffix}"
+    conn = sqlite3.connect(src_path)
+    pg = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    pg.autocommit = True
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'a', 8), (2, 'b', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-int-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_append" in str(summary1.get("load_method") or "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 2
+            cur.execute(f'SELECT version FROM "{dst}" WHERE id = 2')
+            assert int(cur.fetchone()[0]) == 9
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (3, ?, ?)',
+            ("c", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-int-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f'SELECT name FROM "{dst}" ORDER BY id')
+            names = [r[0] for r in cur.fetchall()]
+            cur.execute(f'SELECT version FROM "{dst}" WHERE id = 3')
+            ver = int(cur.fetchone()[0])
+        assert dest_count == 3
+        assert names == ["a", "b", "c"]
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-int-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        conn.execute(f'UPDATE "{src}" SET version = 11 WHERE id = 1')
+        conn.commit()
+        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
+            _run_inc_from_sqlite(
+                src_path=src_path,
+                src=src,
+                dst=dst,
+                sync_mode="incremental_append",
+                job_id=f"inc-sqlite-pg-int-dup-{suffix}",
+                cursor_type="INTEGER",
+                cursor_field="version",
+            )
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
+            assert int(cur.fetchone()[0]) == 3
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with pg.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{dst}"')
+        pg.close()
+
+
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL not on 3306")
+def test_sqlite_mysql_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
+    """INTEGER cursor upsert: watermark 9 then versions 10 must not skip."""
+    pymysql = pytest.importorskip("pymysql")
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_sqlite_mysql_int_{suffix}.db"
+    src = "inc_src"
+    dst = f"inc_smy_int_{suffix}"
+    conn = sqlite3.connect(src_path)
+    my = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'one', 8), (2, 'two', 8), (3, 'three', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-int-a-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert first == 3, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 3
+        conn.execute(
+            f'UPDATE "{src}" SET name = ?, version = ? WHERE id = 1',
+            ("ONE", 10),
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (4, ?, ?)',
+            ("four", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-int-b-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert second == 2, (second, ddl2, summary2)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            dest_count = int(cur.fetchone()[0])
+            cur.execute(f"SELECT name FROM `{dst}` WHERE id = 1")
+            name = cur.fetchone()[0]
+            cur.execute(f"SELECT version FROM `{dst}` WHERE id = 4")
+            ver = int(cur.fetchone()[0])
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (f"_df_stg_{dst}",),
+            )
+            staging_left = cur.fetchone()
+        assert dest_count == 4
+        assert name == "ONE"
+        assert ver == 10
+        assert staging_left is None
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, ddl3, summary3, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_deduped",
+            job_id=f"inc-sqlite-mysql-int-c-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert third == 0, (third, ddl3, summary3)
+        with my.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
+            assert int(cur.fetchone()[0]) == 4
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
+        with my.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        my.close()
+
+
+def test_sqlite_sqlite_integer_incremental_append_copy_nine_then_ten(tmp_path):
+    """SQLite INTEGER affinity: quoted watermark '9' must still select version 10."""
+    suffix = uuid.uuid4().hex[:8]
+    src_path = tmp_path / f"inc_ssi_{suffix}.db"
+    dst_path = tmp_path / f"inc_sdi_{suffix}.db"
+    src = "inc_src"
+    dst = "inc_dst"
+    conn = sqlite3.connect(src_path)
+    try:
+        conn.execute(
+            f'CREATE TABLE "{src}" ('
+            "id INTEGER PRIMARY KEY, "
+            "name TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES '
+            "(1, 'a', 8), (2, 'b', 9)"
+        )
+        conn.commit()
+        first, ddl1, summary1, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-int-a-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert first == 2, (first, ddl1, summary1)
+        assert summary1.get("copy_fast_path") == "used"
+        dest = sqlite3.connect(dst_path)
+        try:
+            n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+        finally:
+            dest.close()
+        assert n == 2
+        conn.execute(
+            f'INSERT INTO "{src}" (id, name, version) VALUES (3, ?, ?)',
+            ("c", 10),
+        )
+        conn.commit()
+        second, ddl2, summary2, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-int-b-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert second == 1, (second, ddl2, summary2)
+        dest = sqlite3.connect(dst_path)
+        try:
+            dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
+            names = [
+                r[0]
+                for r in dest.execute(f'SELECT name FROM "{dst}" ORDER BY id').fetchall()
+            ]
+            ver = int(
+                dest.execute(f'SELECT version FROM "{dst}" WHERE id = 3').fetchone()[0]
+            )
+        finally:
+            dest.close()
+        assert dest_count == 3
+        assert names == ["a", "b", "c"]
+        assert ver == 10
+        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        assert stored
+        assert stored.split("\x1f")[0] == "10"
+        third, _ddl3, summary3, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-int-c-{suffix}",
+            cursor_field="version",
+            cursor_type="INTEGER",
+        )
+        assert third == 0
+        assert summary3.get("source_row_count") == 0
+        dest = sqlite3.connect(dst_path)
+        try:
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 3
+        finally:
+            dest.close()
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+    finally:
+        conn.close()
 
 

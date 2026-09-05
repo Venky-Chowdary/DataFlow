@@ -6,11 +6,13 @@ The COPY router used to decline every incremental route, so the second run paid
 the row-path tax and never advanced a watermark when COPY had succeeded.
 
 This module is the missing second run for the handover SQL core
-(PostgreSQL, MySQL, and SQLite any direction). SQLite as source uses a
-TEXT or naive-ISO DATETIME cursor. INTEGER unix, tz-aware, and
-date-only DATETIME stay COPY-unsafe. DATE into PostgreSQL is an ISO
-calendar day (same proof as SQLite DATE → MySQL). BOOLEAN 0/1 is
-COPY-safe; boolean synonyms decline.
+(PostgreSQL, MySQL, and SQLite any direction). Proven incremental
+cursors are DATE, naive DATETIME/TIMESTAMP, TEXT, and INTEGER (numeric
+compare so ``9`` then ``10`` is not the string trap). INTEGER unix
+stored as DATETIME, tz-aware, date-only DATETIME, BOOLEAN, float, JSON,
+and TIME stay unsafe as cursors. BOOLEAN 0/1 is COPY-safe as payload;
+as a cursor it would skip rows after watermark ``1``. DATE into
+PostgreSQL is an ISO calendar day.
 
 1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
    the engine reader uses (Airbyte timestamp-cursor trap).
@@ -56,14 +58,86 @@ def identity_incremental_route(src_type: str, dest_type: str) -> bool:
     """True when identity incremental COPY is proven for this pair.
 
     PostgreSQL DATE (not TIMESTAMP) and MySQL DATETIME (not TIMESTAMP) are
-    COPY-safe into SQLite. SQLite as source uses TEXT or naive-ISO DATETIME
-    (not unix-epoch, tz-aware, or date-only DATETIME). DATE into PostgreSQL
-    is ISO calendar-day. BOOLEAN 0/1 is COPY-safe; ``true``/``yes`` synonyms
-    decline.
+    COPY-safe into SQLite. SQLite as source uses TEXT, naive-ISO DATETIME,
+    DATE, or INTEGER (not unix-epoch DATETIME, tz-aware, BOOLEAN cursor,
+    or float). DATE into PostgreSQL is ISO calendar-day. BOOLEAN 0/1 is
+    COPY-safe as payload; ``true``/``yes`` synonyms decline.
     """
     src = (src_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
     return src in _SQL_FAMILY and dest in _SQL_FAMILY
+
+
+#: Cursor types that would skip or invent rows under lexicographic COPY.
+#: BOOLEAN payload COPY is proven; BOOLEAN as a cursor is not (2 values).
+_UNSAFE_INCREMENTAL_CURSOR_BASES = frozenset({
+    "BOOLEAN",
+    "BOOL",
+    "FLOAT",
+    "REAL",
+    "DOUBLE",
+    "DOUBLEPRECISION",
+    "NUMERIC",
+    "DECIMAL",
+    "BLOB",
+    "BINARY",
+    "VARBINARY",
+    "BYTEA",
+    "JSON",
+    "JSONB",
+    "TIMESTAMPTZ",
+    "TIMETZ",
+    "TIME",
+})
+
+
+def incremental_cursor_type_base(declared: str) -> str:
+    """Normalize a mapping/schema type for incremental cursor gating."""
+    text = " ".join((declared or "").strip().upper().split())
+    if not text:
+        return ""
+    if text in {"TIMESTAMPTZ", "TIMETZ"} or (
+        "WITH TIME ZONE" in text and "WITHOUT" not in text
+    ):
+        return "TIMETZ" if text == "TIMETZ" or text.startswith("TIME WITH") else "TIMESTAMPTZ"
+    text = text.replace("WITHOUT TIME ZONE", "").replace(" ", "")
+    return text.split("(", 1)[0]
+
+
+def mapped_cursor_declared_type(
+    mappings: list[dict[str, Any]] | None,
+    schema: dict[str, Any] | None,
+    cursor_column: str,
+) -> str:
+    """Declared type of the incremental cursor column (mapping, then schema)."""
+    want = (cursor_column or "").strip().lower()
+    if not want:
+        return ""
+    schema = schema or {}
+    for item in mappings or []:
+        src = str(item.get("source") or "").strip()
+        if src.lower() != want:
+            continue
+        tgt = str(item.get("target") or "").strip()
+        return str(
+            item.get("type") or schema.get(src) or schema.get(tgt) or ""
+        )
+    return str(schema.get(cursor_column) or schema.get(want) or "")
+
+
+def identity_incremental_cursor_reason(declared: str) -> str:
+    """Refusal when this declared type is not a monotonic COPY cursor.
+
+    Empty declared type stays allowed — payload COPY-safe checks still apply.
+    """
+    base = incremental_cursor_type_base(declared)
+    if not base or base not in _UNSAFE_INCREMENTAL_CURSOR_BASES:
+        return ""
+    return (
+        f"incremental COPY declined: cursor type {declared or base} is not a "
+        "monotonic COPY cursor (BOOLEAN/float/JSON/tz-aware invent or skip "
+        "rows). Use DATE, naive DATETIME/TIMESTAMP, TEXT, or INTEGER."
+    )
 
 
 def mapped_pair(

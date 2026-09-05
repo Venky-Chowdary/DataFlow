@@ -585,7 +585,12 @@ def _try_copy_fast_path(
     # Studio may set source.table to the procedure stream name (e.g. get_orders).
     # COPY of a colliding real table would move the wrong population — refuse.
     from services.copy_fast_path import note_copy_decline
-    from services.copy_incremental import COPY_INCREMENTAL_MODES, identity_incremental_route
+    from services.copy_incremental import (
+        COPY_INCREMENTAL_MODES,
+        identity_incremental_cursor_reason,
+        identity_incremental_route,
+        mapped_cursor_declared_type,
+    )
     from services.procedure_source import is_callable_source
     from services.sync_cursor import is_append_sync, is_overwrite_sync, normalize_sync_mode
 
@@ -618,6 +623,12 @@ def _try_copy_fast_path(
             note_copy_decline(
                 "incremental COPY is proven for PostgreSQL/MySQL/SQLite identity routes only"
             )
+            return None
+        cursor_reason = identity_incremental_cursor_reason(
+            mapped_cursor_declared_type(mappings, schema, incremental_cursor)
+        )
+        if cursor_reason:
+            note_copy_decline(cursor_reason)
             return None
         incremental_copy = True
 
