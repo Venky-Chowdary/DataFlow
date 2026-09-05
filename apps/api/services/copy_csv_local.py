@@ -18,12 +18,14 @@ staging (``replace_destination=True``), then the existing
 append / ON CONFLICT / ON DUPLICATE apply. Unbounded cursor cells
 refuse. Empty delta is a measured no-op.
 
-json / jsonl / yaml / fixed_width / excel parse with the same identity
-readers as the row path, then reuse this mapped-CSV dest load. Nested
-JSON/YAML cells decline (row path keeps quarantine). Excel nested cells
-are already strings on the row path. Windowed ``ReadOptions``
-(skip_rows / skip_footer / non-default header_row) decline. gzip is
-decompressed, then the same mapped COPY. Legacy ``.xls`` declines.
+json / jsonl / yaml / fixed_width / excel / xml parse with the same
+identity readers as the row path, then reuse this mapped-CSV dest load.
+Nested JSON/YAML cells decline (row path keeps quarantine). Excel nested
+cells are already strings on the row path. XML that is not a unique
+record path (document XML, XXE, ambiguous siblings) declines. Windowed
+``ReadOptions`` (skip_rows / skip_footer / non-default header_row)
+decline. gzip is decompressed, then the same mapped COPY. Legacy
+``.xls`` declines.
 """
 
 from __future__ import annotations
@@ -64,7 +66,9 @@ logger = logging.getLogger(__name__)
 
 _CSV_TYPES = frozenset({"csv", "tsv"})
 _JSON_TYPES = frozenset({"json", "jsonl", "ndjson"})
-_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset({"yaml", "fixed_width", "excel"})
+_TABULAR_TYPES = _CSV_TYPES | _JSON_TYPES | frozenset(
+    {"yaml", "fixed_width", "excel", "xml"}
+)
 _SQL_DEST = frozenset({"sqlite", "postgresql", "postgres", "mysql", "mariadb"})
 _FILTER_BATCH = 5000
 
@@ -92,10 +96,10 @@ def identity_csv_copy_route(file_type: str, dest_type: str) -> bool:
 def identity_file_copy_route(file_type: str, dest_type: str) -> bool:
     """True when local tabular identity COPY is proven for this pair.
 
-    csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width/excel parse
-    with the identity readers, then reuse that wire. Nested JSON/YAML cells
-    decline. Excel uses the same ``iter_excel_dicts`` population as the row
-    path (blank/formatting rows are not records).
+    csv/tsv are the COPY-native wire. json/jsonl/yaml/fixed_width/excel/xml
+    parse with the identity readers, then reuse that wire. Nested JSON/YAML
+    cells decline. Excel uses the same ``iter_excel_dicts`` population as the
+    row path. XML that is not a unique record path declines.
     """
     src = (file_type or "").strip().lower()
     dest = (dest_type or "").strip().lower()
@@ -114,6 +118,8 @@ def _file_kind_token(file_type: str) -> str:
         return "fwf_records"
     if kind == "excel":
         return "excel_records"
+    if kind == "xml":
+        return "xml_records"
     return "csv"
 
 
@@ -376,6 +382,26 @@ def _iter_excel_records(
         raise FastPathUnavailable(str(exc)) from exc
 
 
+def _iter_xml_records(
+    content: bytes | str | os.PathLike,
+    source_cols: list[str],
+) -> Iterator[dict[str, str | None]]:
+    from services.dest_precount import UnmeasuredArtifact
+    from services.file_parser import iter_xml_dicts
+
+    try:
+        with _open_binary(content) as handle:
+            raw = handle.read()
+        for rec in iter_xml_dicts(raw):
+            if not isinstance(rec, dict):
+                continue
+            yield _project_record(rec, source_cols)
+    except UnmeasuredArtifact as exc:
+        raise FastPathUnavailable(str(exc) or "xml is not a unique record path") from exc
+    except ValueError as exc:
+        raise FastPathUnavailable(str(exc)) from exc
+
+
 def _iter_source_records(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -405,6 +431,9 @@ def _iter_source_records(
         return
     if kind == "excel":
         yield from _iter_excel_records(content, filename, source_cols, read_options)
+        return
+    if kind == "xml":
+        yield from _iter_xml_records(content, source_cols)
         return
     yield from _iter_csv_source_records(
         content, filename, pairs, read_options

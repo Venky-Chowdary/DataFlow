@@ -81,6 +81,7 @@ describe("loadMethod labels", () => {
     assert.match(loadMethodLabel("json_records_copy_from_stdin_pg_incremental_deduped"), /JSON/);
     assert.match(loadMethodLabel("fwf_records_load_data_mysql_incremental_append"), /Fixed-width/);
     assert.match(loadMethodLabel("excel_records_executemany_sqlite_incremental_deduped"), /Excel/);
+    assert.match(loadMethodLabel("xml_records_copy_from_stdin_pg_incremental_append"), /XML/);
     assert.match(
       loadMethodDescription("yaml_records_executemany_sqlite_incremental_append"),
       /watermark/,
