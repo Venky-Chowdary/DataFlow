@@ -695,9 +695,9 @@
 .df2-team-member-row {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) 140px minmax(120px, 0.9fr) 110px auto;
-  gap: var(--df-list-row-gap, 12px);
+  gap: var(--df-list-row-gap);
   align-items: center;
-  padding: 10px 16px;
+  padding: var(--df-list-row-pad-y) 16px;
 }
 
 .df2-team-list-head--logins,
@@ -722,7 +722,7 @@
 }
 
 .df2-team-member-row {
-  min-height: var(--df-list-row-min-h, 52px);
+  min-height: var(--df-list-row-min-h);
   border-top: 1px solid var(--df-border, #eef1f5);
   box-sizing: border-box;
 }
@@ -757,7 +757,7 @@
 }
 
 .df2-team-identity-text strong {
-  font-size: var(--df-list-row-title, 13px);
+  font-size: var(--df-list-row-title);
   font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   overflow: hidden;
