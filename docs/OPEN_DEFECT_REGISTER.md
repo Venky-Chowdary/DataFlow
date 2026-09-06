@@ -120,9 +120,33 @@ file — so a healthy fleet still produced dozens of silent `skip`s. Export what
 the script prints, or a live matrix will grade itself green while proving
 nothing. `--check` exits non-zero when a declared port is unreachable.
 
-## 5. Closure protocol
+## 5. Pre-handover gate wave (2026-09-06, PR [#168](https://github.com/Venky-Chowdary/DataFlow/pull/168))
+
+Found by driving the real application, not by reading it. Every closure below was
+proved on a live Postgres source and a live MySQL destination, with the
+destination re-read on a `mysql` connection the transfer engine never touched.
+
+| # | Defect | Owner module | Closure evidence |
+|---|--------|--------------|------------------|
+| ~~D21~~ | **Closed.** A declared G21 control total failed the whole job on a MySQL destination: the scan SQL was hard-coded PostgreSQL text casting (`CAST(SUM(col) AS TEXT)`), which MySQL rejects with error 1064. The control-total scan now goes through the destination-dialect helper the rest of the engine already uses, so MySQL reads `CAST(... AS CHAR)`, SQL Server `CONVERT(VARCHAR(64), ...)`, Oracle `TO_CHAR(...)`, and an unknown engine keeps the uncast expression so exact parsing refuses a float payload rather than certifying it. The executed scan expression is recorded in the evidence. | `services/control_totals.py`, `services/decimal_identity.py` | live PG→MySQL: `SUM(amount)` read back as exact `'618.75'` off an independent `mysql` connection, `1064` count 0 in the API log; a one-cent destination (`618.76`) still fails closed with both sums named |
+| ~~D22~~ | **Closed.** G20 could never be *asked* for an ordinary code column. Map offered no way to declare a crosswalk for a plain character carrier (`VARCHAR(4)`), so codes landed untranslated and the gate reported the column as not asked. An eligible undeclared character column now carries an explicit `Declare code crosswalk` action. Eligibility is not a declaration: nothing is inferred from the type, `A → A` must still be entered explicitly, and an uncovered population value still blocks. | `apps/web/src/lib/mapping.ts`, `apps/web/src/components/ColumnReviewPanel.tsx` | live browser run: a partial mapping blocks naming both uncovered codes, a complete mapping passes with `(3 distinct value(s), population scan)`, translated values re-read from MySQL, and the declaration survives Map → Validate → Map |
+| ~~D23~~ | **Closed.** A *proven* control total was invisible to the operator — it existed only in the exported pack. The panel had been added to `JobTheater`, which no successful Transfer Studio run mounts. It now lives on the Gate-8 card itself, the one card Transfer Studio, Jobs, Validate and the Theater all render. The evidence wording was also dishonest by accident: the engine writes `unmeasured` for any unproven run, mismatches included, so two cent-exact sums sat under a label that read as if nothing had been measured. Sums are carried as decimal strings end to end, never JavaScript numbers. | `apps/web/src/components/transfer/Gate8ProofCard.tsx`, `apps/web/src/lib/gate8Population.ts` | live browser run on the surface that was previously empty: `Proven` / `population SUM, exact` / `618.75` / `618.75` on both the Transfer Studio terminal and Jobs detail; the mismatch run reads `Mismatch` / `measured, sums disagree`; a run with no control total declared shows no panel at all |
+| ~~D24~~ | **Closed.** The MySQL COPY fast paths raised `AttributeError: module 'os' has no attribute 'mkfifo'` out of the fast path on Windows instead of declining it, so the row-writer fallback never ran: the destination was created and left empty. The FIFO-streamed routes now check the precondition before any connection or DDL and decline as an unavailable fast path. Same-instance MySQL `INSERT...SELECT` is untouched, because it needs no named pipe. | `services/copy_fast_path.py`, `services/copy_pg_mysql.py`, `services/copy_mysql_pg.py`, `services/copy_mysql_mysql.py` | 5 passed / 1 skipped in `tests/test_copy_fifo_platform_guard.py`; live PG→MySQL declines at INFO and the row writer commits all 6 rows with Gate-8 count and checksum proof |
+
+### Still open after this wave
+
+| # | Item | Kind | What is known |
+|---|------|------|---------------|
+| D25 | A freshly exported signed proof pack fails the product's own **verify** control with `content_sha256 mismatch; HMAC signature invalid; chain_anchor digest does not match`. | defect | Reproduced in the browser on several jobs across three testing rounds. Unowned. This is the governance surface a client will click first, so it must not reach handover unexplained. |
+| D26 | A destination-type override (widening `VARCHAR(4)` → `VARCHAR(255)`) is included in the Validate request and honoured by a direct Execute, but navigating Map → Validate → Map restores the inferred type. Crosswalk and control-total declarations survive the same round trip. | defect | The narrowing direction is not yet reproduced. |
+| — | The Gate-8 card on a **completed** Theater. | not measured | `JobTheater` renders it only on `isComplete && job.reconciliation`, and `handleJobComplete()` clears `activeJobId` immediately, so the state is transient by construction: a 250 ms polling observer caught the Theater host live before the surface swapped to the terminal dashboard. Either the surface stops being cleared, or it is documented as unreachable — it must not be left as an unverified surface. |
+| — | Em-dash rendering for a missing control-total SUM. | not measured | No natural case arises on a SQL→SQL route: `control_totals.py` nulls a sum only when the SUM query itself fails. Unit-covered, not browser-proven. |
+| — | Schedules, retries, overlap and DST; job cancellation; quarantine and replay; the Evidence Chain, Operations, Contracts and Proofs pages; workspace roles and member removal; G19 hard-block reachability; Mongo and MinIO routes. | not measured | Untouched by this wave. |
+
+## 6. Closure protocol
 
 For each defect: reproduce on a live engine → fix in the one canonical owner →
 re-run the failing cell(s) → read the destination back independently → record
 the measured numbers next to the item. Items in §2 are closed by measurement
-only; items in §3 stay open with their reason and are never counted as green.
+only; items in §3 and the open half of §5 stay open with their reason and are
+never counted as green.
