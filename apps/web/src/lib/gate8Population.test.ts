@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   formatProofScope,
   controlTotalEvidenceLabel,
+  controlTotalEvidenceTitle,
   readControlTotals,
   readGate8Population,
   readJobLineage,
@@ -157,6 +158,18 @@ describe("controlTotalEvidenceLabel", () => {
     );
     assert.equal(label, "measured, sums disagree");
     assert.doesNotMatch(label, /unmeasured/);
+    // The auditor tooltip keeps the engine token, and explains it rather
+    // than contradicting the two measured sums beside it.
+    const title = controlTotalEvidenceTitle(
+      view({
+        declared: true,
+        evidence: "unmeasured",
+        any_mismatch: true,
+        columns: [{ source: "amount", source_sum: "618.75", dest_sum: "618.76", proven: false }],
+      }),
+    );
+    assert.match(title, /^engine evidence token: unmeasured — /);
+    assert.match(title, /both sums were measured and they disagree/);
   });
 
   it("says a sample is not proof, and says when no population sum ran", () => {

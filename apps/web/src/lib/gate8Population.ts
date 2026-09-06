@@ -132,10 +132,44 @@ export function readControlTotals(
  * contradiction. The raw token stays available for the auditor.
  */
 export function controlTotalEvidenceLabel(view: ControlTotalsView): string {
-  if (view.evidence === "exact") return "population SUM, exact";
-  if (view.evidence === "sampled") return "sample SUM — not proof";
-  if (view.mismatch) return "measured, sums disagree";
-  return "no exact population SUM";
+  return CONTROL_TOTAL_EVIDENCE[evidenceKey(view)].label;
+}
+
+/**
+ * The engine's own token, said in a way that cannot contradict the panel:
+ * a mismatch carries `unmeasured`, so the tooltip has to explain that the
+ * token is about *proof*, not about whether anything was summed.
+ */
+export function controlTotalEvidenceTitle(view: ControlTotalsView): string {
+  const { evidence } = view;
+  return `engine evidence token: ${evidence || "unmeasured"} — ${CONTROL_TOTAL_EVIDENCE[evidenceKey(view)].why}`;
+}
+
+type EvidenceKey = "exact" | "sampled" | "mismatch" | "none";
+
+const CONTROL_TOTAL_EVIDENCE: Record<EvidenceKey, { label: string; why: string }> = {
+  exact: {
+    label: "population SUM, exact",
+    why: "every row was summed on both sides with exact decimal arithmetic",
+  },
+  sampled: {
+    label: "sample SUM — not proof",
+    why: "only a sample was summed, so the population total is unproven",
+  },
+  mismatch: {
+    label: "measured, sums disagree",
+    why: "both sums were measured and they disagree, so nothing is proven",
+  },
+  none: {
+    label: "no exact population SUM",
+    why: "no exact population SUM was recorded for this run",
+  },
+};
+
+function evidenceKey(view: ControlTotalsView): EvidenceKey {
+  if (view.evidence === "exact") return "exact";
+  if (view.evidence === "sampled") return "sampled";
+  return view.mismatch ? "mismatch" : "none";
 }
 
 export type LineageEventView = {
