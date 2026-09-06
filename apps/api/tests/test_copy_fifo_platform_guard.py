@@ -1,8 +1,11 @@
-"""A host without named pipes declines the FIFO COPY routes, it does not fail the job.
+"""The COPY routes hand rows over a path: a named pipe, or a spill file.
 
-``os.mkfifo`` is POSIX-only. Learning that inside the copy raised OSError after
-the destination had already been recreated, so the row writer never ran and a
-MySQL destination was unusable on Windows rather than merely slower.
+``os.mkfifo`` is POSIX-only, and the FIFO routes (PG→MySQL, MySQL→PG,
+cross-instance MySQL→MySQL) used to decline on a host without it — a
+Windows-hosted DataFlow lost the server-side copy entirely and fell back to
+the per-row writer. The payload now spills to a real file there and is read
+once the producer finishes: the same bytes in the same order, sequential
+instead of overlapped.
 """
 from __future__ import annotations
 
@@ -14,9 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest  # noqa: E402
 
 from services.copy_fast_path import (  # noqa: E402
-    FastPathUnavailable,
+    copy_spill_dir,
     fifo_streaming_supported,
-    require_fifo_streaming,
+    stream_between_cursors,
 )
 
 
@@ -24,70 +27,147 @@ def test_fifo_support_follows_the_platform() -> None:
     assert fifo_streaming_supported() is hasattr(os, "mkfifo")
 
 
-def test_a_host_with_named_pipes_does_not_decline() -> None:
-    if not fifo_streaming_supported():
-        pytest.skip("host has no os.mkfifo")
-    require_fifo_streaming("PG→MySQL")
+def _payload(count: int) -> bytes:
+    return b"".join(f"{i}\tvalue-{i}\n".encode() for i in range(count))
 
 
-def test_a_host_without_named_pipes_declines_and_names_the_route(
+def test_handoff_delivers_every_byte_in_order() -> None:
+    """Whichever handoff the host has, the consumer reads what was written."""
+    written = _payload(5000)
+    read: list[bytes] = []
+
+    def producer(path: str) -> None:
+        with open(path, "wb") as writer:
+            writer.write(written)
+
+    def consumer(path: str) -> None:
+        with open(path, "rb") as reader:
+            read.append(reader.read())
+
+    mode = stream_between_cursors(
+        prefix="df_test_handoff_", producer=producer, consumer=consumer
+    )
+    assert mode == ("fifo" if fifo_streaming_supported() else "spill")
+    assert read == [written]
+
+
+def test_pipeless_host_spills_and_still_delivers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delattr(os, "mkfifo", raising=False)
-    assert fifo_streaming_supported() is False
-    with pytest.raises(FastPathUnavailable) as err:
-        require_fifo_streaming("PG→MySQL")
-    # The decline reason is what the operator reads in dest_summary.
-    assert "PG→MySQL" in str(err.value)
-    assert "mkfifo" in str(err.value)
+    written = _payload(1000)
+    read: list[bytes] = []
+    seen_paths: list[str] = []
+
+    def producer(path: str) -> None:
+        seen_paths.append(path)
+        with open(path, "wb") as writer:
+            writer.write(written)
+
+    def consumer(path: str) -> None:
+        seen_paths.append(path)
+        with open(path, "rb") as reader:
+            read.append(reader.read())
+
+    assert (
+        stream_between_cursors(
+            prefix="df_test_spill_", producer=producer, consumer=consumer
+        )
+        == "spill"
+    )
+    assert read == [written]
+    assert seen_paths[0] == seen_paths[1]
+    # A whole table was on disk: leaving it there fills the volume on the next run.
+    assert not os.path.exists(seen_paths[0])
+    assert not os.path.exists(os.path.dirname(seen_paths[0]))
 
 
-@pytest.mark.parametrize(
-    "route",
-    [
-        ("services.copy_pg_mysql", "copy_postgres_to_mysql"),
-        ("services.copy_mysql_pg", "copy_mysql_to_postgres"),
-    ],
-)
-def test_route_declines_before_touching_the_destination(
-    route: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+def test_spill_directory_is_operator_chosen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """No connection, no DDL: the guard runs before anything is written."""
-    import importlib
-
-    module = importlib.import_module(route[0])
-    fn = getattr(module, route[1])
+    """The spill can be moved off the system volume for a large migration."""
     monkeypatch.delattr(os, "mkfifo", raising=False)
+    monkeypatch.setenv("DATAFLOW_COPY_SPILL_DIR", str(tmp_path))
+    assert copy_spill_dir() == str(tmp_path)
+    where: list[str] = []
 
-    def _explode(*_a: object, **_k: object) -> None:
-        raise AssertionError("the route connected before declining")
+    def producer(path: str) -> None:
+        where.append(path)
+        with open(path, "wb") as writer:
+            writer.write(b"1\tx\n")
 
-    monkeypatch.setattr(module, "_mysql_connect", _explode, raising=False)
-    monkeypatch.setattr(module, "_pg_connect", _explode, raising=False)
+    def consumer(path: str) -> None:
+        with open(path, "rb") as reader:
+            assert reader.read() == b"1\tx\n"
 
-    kwargs: dict[str, object] = {
-        "source_cfg": {"host": "127.0.0.1", "database": "dataflow"},
-        "source_table": "t",
-        "dest_cfg": {"host": "127.0.0.1", "database": "dataflow"},
-        "dest_table": "t_copy",
-        "pairs": [("id", "id")],
-        "replace_destination": True,
-    }
-    if route[1] == "copy_postgres_to_mysql":
-        kwargs["source_schema"] = "public"
-        kwargs["mysql_ddls"] = ["BIGINT"]
-    else:
-        kwargs["dest_schema"] = "public"
-        kwargs["pg_ddls"] = ["BIGINT"]
-
-    with pytest.raises(FastPathUnavailable, match="mkfifo"):
-        fn(**kwargs)
+    stream_between_cursors(
+        prefix="df_test_spilldir_", producer=producer, consumer=consumer
+    )
+    assert os.path.dirname(os.path.dirname(where[0])) == str(tmp_path)
 
 
-def test_same_instance_mysql_insert_select_is_not_declined(
+def test_a_producer_failure_reaches_the_caller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """INSERT…SELECT never opens a pipe, so the guard must leave it alone."""
+    """A source read that dies must fail the copy, not load a truncated table."""
+    monkeypatch.delattr(os, "mkfifo", raising=False)
+    consumed: list[str] = []
+
+    def producer(_path: str) -> None:
+        raise RuntimeError("source read died")
+
+    def consumer(path: str) -> None:
+        consumed.append(path)
+
+    with pytest.raises(RuntimeError, match="source read died"):
+        stream_between_cursors(
+            prefix="df_test_prodfail_", producer=producer, consumer=consumer
+        )
+    # Spilling is sequential, so a dead producer never reaches the load.
+    assert consumed == []
+
+
+def test_a_consumer_failure_reaches_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(os, "mkfifo", raising=False)
+
+    def producer(path: str) -> None:
+        with open(path, "wb") as writer:
+            writer.write(b"1\tx\n")
+
+    def consumer(_path: str) -> None:
+        raise RuntimeError("LOAD DATA died")
+
+    with pytest.raises(RuntimeError, match="LOAD DATA died"):
+        stream_between_cursors(
+            prefix="df_test_consfail_", producer=producer, consumer=consumer
+        )
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="host has no os.mkfifo")
+def test_named_pipe_producer_failure_reaches_the_caller() -> None:
+    """On a FIFO the producer runs in a thread; its exception is still raised."""
+
+    def producer(path: str) -> None:
+        with open(path, "wb"):
+            pass
+        raise RuntimeError("source read died")
+
+    def consumer(path: str) -> None:
+        with open(path, "rb") as reader:
+            reader.read()
+
+    with pytest.raises(RuntimeError, match="source read died"):
+        stream_between_cursors(
+            prefix="df_test_fifofail_", producer=producer, consumer=consumer
+        )
+
+
+def test_same_instance_mysql_insert_select_needs_no_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INSERT…SELECT never opens a handoff at all."""
     import services.copy_mysql_mysql as mod
 
     monkeypatch.delattr(os, "mkfifo", raising=False)

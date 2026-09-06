@@ -252,8 +252,28 @@ def test_live_pgvector_pgvector_empty_dest_copy():
             source_table=src,
             dest_cfg=_pgvector_cfg(dest),
             dest_table=dest,
-            pairs=[("id", "id"), ("content", "content"), ("embedding", "embedding")],
-            pgvector_ddls=["text", "text", "vector(4)"],
+            # A pgvector table is the writer's whole shape: an identity copy
+            # that mapped only id/content/embedding would hand back a store
+            # without its metadata, provenance or chunk order, so the route
+            # requires every column and the proof covers all of them.
+            pairs=[
+                ("id", "id"),
+                ("content", "content"),
+                ("embedding", "embedding"),
+                ("metadata", "metadata"),
+                ("source_id", "source_id"),
+                ("chunk_index", "chunk_index"),
+                ("created_at", "created_at"),
+            ],
+            pgvector_ddls=[
+                "text",
+                "text",
+                "vector(4)",
+                "jsonb",
+                "text",
+                "integer",
+                "timestamp",
+            ],
             replace_destination=True,
         )
         assert copy_result.source_rows == 25
@@ -320,12 +340,20 @@ def test_live_pgvector_pgvector_stream_load_method(monkeypatch):
         destination = EndpointConfig.from_dict(
             "database", {**_pgvector_cfg(dest), "format": "pgvector"}
         )
+        columns = {
+            "id": "TEXT",
+            "content": "TEXT",
+            "embedding": "VECTOR",
+            "metadata": "JSONB",
+            "source_id": "TEXT",
+            "chunk_index": "INTEGER",
+            "created_at": "TIMESTAMP",
+        }
         mappings = [
-            {"source": "id", "target": "id", "type": "TEXT", "transform": "none"},
-            {"source": "content", "target": "content", "type": "TEXT", "transform": "none"},
-            {"source": "embedding", "target": "embedding", "type": "VECTOR", "transform": "none"},
+            {"source": name, "target": name, "type": declared, "transform": "none"}
+            for name, declared in columns.items()
         ]
-        schema = {"id": "TEXT", "content": "TEXT", "embedding": "VECTOR"}
+        schema = dict(columns)
         transferred, _ddl, summary, _cols = stream_database_transfer(
             source,
             destination,

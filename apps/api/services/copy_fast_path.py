@@ -45,8 +45,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
+import tempfile
 import threading
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
@@ -151,20 +152,89 @@ def fifo_streaming_supported() -> bool:
     return hasattr(os, "mkfifo")
 
 
-def require_fifo_streaming(route: str) -> None:
-    """Decline a FIFO-streamed route on a host without named pipes.
+def copy_spill_dir() -> str | None:
+    """Directory for the COPY spill file, when the operator names one.
 
-    ``os.mkfifo`` is POSIX-only. Discovering that inside the copy is a *job*
-    failure, not a decline: by then the destination may already have been
-    recreated, so the row writer never gets its turn and the route is simply
-    unusable on Windows. Refusing here is the same contract as every other
-    unmet precondition — the caller falls back and the rows still land.
+    A whole table lands here on a host without named pipes, and the default
+    temp directory is on the system volume. ``DATAFLOW_COPY_SPILL_DIR`` moves
+    it to a volume sized for the migration.
+    """
+    return (os.environ.get("DATAFLOW_COPY_SPILL_DIR") or "").strip() or None
+
+
+def stream_between_cursors(
+    *,
+    prefix: str,
+    producer: Callable[[str], None],
+    consumer: Callable[[str], None],
+    join_timeout: float = 120.0,
+) -> str:
+    """Move a COPY payload from ``producer`` to ``consumer`` through a path.
+
+    The two engines never speak to each other: one writes a TSV/binary stream,
+    the other reads it, and the only thing they share is a filesystem path.
+    Where the host has named pipes that path is a FIFO, so nothing is ever
+    fully materialised and a slow destination backpressures the source.
+
+    Windows has no ``os.mkfifo``, and every named-pipe route used to decline
+    there — a Windows-hosted DataFlow silently lost the server-side copy on
+    PG→MySQL, MySQL→PG and cross-instance MySQL→MySQL and fell back to the
+    3,200-row/sec Python writer. The payload is spilled to a real file
+    instead and read once the producer has finished: the same bytes in the
+    same order, sequential instead of overlapped, at the cost of the table's
+    text size on disk (see :func:`copy_spill_dir`).
+
+    Returns ``"fifo"`` or ``"spill"`` so the route can record which handoff
+    produced its rows; the proof is unaffected either way.
     """
     if not fifo_streaming_supported():
-        raise FastPathUnavailable(
-            f"{route} COPY streams through a named pipe (os.mkfifo), "
-            f"which {sys.platform} does not provide"
-        )
+        tmp = tempfile.mkdtemp(prefix=prefix, dir=copy_spill_dir())
+        path = os.path.join(tmp, "stream.tsv")
+        try:
+            producer(path)
+            consumer(path)
+        finally:
+            _discard_stream_path(path, tmp)
+        return "spill"
+
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    path = os.path.join(tmp, "stream.tsv")
+    os.mkfifo(path, 0o600)  # type: ignore[attr-defined]  # guarded above
+    failure: list[BaseException] = []
+
+    def _pump() -> None:
+        try:
+            producer(path)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
+            failure.append(exc)
+
+    pump = threading.Thread(target=_pump, name=f"{prefix}fifo", daemon=True)
+    pump.start()
+    try:
+        consumer(path)
+    except BaseException:
+        # Opening a FIFO blocks until the other end appears: a producer that
+        # never got there would hold this join forever, so the failing path
+        # waits briefly and lets the real exception out.
+        pump.join(timeout=30)
+        raise
+    finally:
+        pump.join(timeout=join_timeout)
+        _discard_stream_path(path, tmp)
+    if failure:
+        raise failure[0]
+    return "fifo"
+
+
+def _discard_stream_path(path: str, directory: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug("copy stream unlink skipped", exc_info=True)
+    try:
+        os.rmdir(directory)
+    except OSError:
+        logger.debug("copy stream rmdir skipped", exc_info=True)
 
 
 def skip_complete_identity_copy(

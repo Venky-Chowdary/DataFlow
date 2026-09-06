@@ -22,9 +22,6 @@ from __future__ import annotations
 
 import datetime
 import logging
-import os
-import tempfile
-import threading
 from typing import Any
 
 from services.copy_fast_path import (
@@ -32,7 +29,7 @@ from services.copy_fast_path import (
     FastPathUnavailable,
     _quote,
     _table_ref,
-    require_fifo_streaming,
+    stream_between_cursors,
 )
 from services.copy_pg_mysql import (
     _INTEGER_PK_BASES,
@@ -184,55 +181,34 @@ def _fifo_mysql_into_pg(
     dest_ref: str,
     columns: list[str],
 ) -> None:
-    tmp = tempfile.mkdtemp(prefix="df_mysql_pg_")
-    path = os.path.join(tmp, "stream.tsv")
-    os.mkfifo(path, 0o600)
     col_list = ", ".join(_pg_ident(c) for c in columns)
     copy_sql = (
         f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
         "(FORMAT text, DELIMITER E'\\t', NULL '\\N')"
     )
-    failure: list[BaseException] = []
 
-    def _pump() -> None:
-        try:
-            from pymysql.cursors import SSCursor
+    def _produce(path: str) -> None:
+        from pymysql.cursors import SSCursor
 
-            encode = fast_copy_text_value
-            join = "\t".join
-            conn = source_conn
-            with conn.cursor(SSCursor) as stream:
-                stream.execute(select_sql)
-                with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-                    while True:
-                        batch = stream.fetchmany(_FETCH_BATCH)
-                        if not batch:
-                            break
-                        payload = "\n".join(join(encode(v) for v in row) for row in batch)
-                        writer.write((payload + "\n").encode("utf-8"))
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
-            failure.append(exc)
+        encode = fast_copy_text_value
+        join = "\t".join
+        with source_conn.cursor(SSCursor) as stream:
+            stream.execute(select_sql)
+            with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
+                while True:
+                    batch = stream.fetchmany(_FETCH_BATCH)
+                    if not batch:
+                        break
+                    payload = "\n".join(join(encode(v) for v in row) for row in batch)
+                    writer.write((payload + "\n").encode("utf-8"))
 
-    pump = threading.Thread(target=_pump, name="mysql-pg-copy-fifo", daemon=True)
-    pump.start()
-    try:
+    def _consume(path: str) -> None:
         with open(path, "rb", buffering=_PIPE_CHUNK) as reader:
             dst_cur.copy_expert(copy_sql, reader)
-    except BaseException:
-        pump.join(timeout=30)
-        raise
-    finally:
-        pump.join(timeout=120)
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("fifo unlink skipped", exc_info=True)
-        try:
-            os.rmdir(tmp)
-        except OSError:
-            logger.debug("fifo dir rmdir skipped", exc_info=True)
-    if failure:
-        raise failure[0]
+
+    stream_between_cursors(
+        prefix="df_mysql_pg_", producer=_produce, consumer=_consume
+    )
 
 
 def _mysql_connect(cfg: dict[str, Any]) -> Any:
@@ -398,7 +374,6 @@ def copy_mysql_to_postgres(
     """
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
-    require_fifo_streaming("MySQL→PG")
 
     from connectors.write_resilience import is_public_proxy_host
 

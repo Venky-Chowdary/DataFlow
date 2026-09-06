@@ -8,7 +8,8 @@ Python never materializes a row. Dest ``COUNT(*)`` in the same operator
 proof must equal the source snapshot count. Warning/Error from LOAD DATA
 rolls the destination back and raises — never silent coerce.
 
-Large tables overlap COPY and LOAD DATA on a FIFO (no full tempfile).
+Large tables overlap COPY and LOAD DATA on a FIFO where the host has one,
+and spill to a file where it does not (Windows).
 A mapped single PK is the dest-COUNT proof (integer: Spark-style min/max
 cuts; else ``percentile_disc``). An **empty** dest COPYs by ``ctid`` heap
 page ranges (sequential I/O). A **non-empty** dest resumes by PK range
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 import threading
 from typing import Any
 
@@ -41,7 +41,7 @@ from services.copy_fast_path import (
     FastPathUnavailable,
     _quote,
     _table_ref,
-    require_fifo_streaming,
+    stream_between_cursors,
 )
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
@@ -414,36 +414,23 @@ def _fifo_copy_into_mysql(
 ) -> None:
     """Overlap PG COPY writes with MySQL LOCAL INFILE reads. No full tempfile."""
     from connectors.mysql_load_data import (
+        apply_mysql_bulk_load_session,
         blocking_load_data_warnings,
         build_load_data_sql,
         quote_load_data_path,
+        restore_mysql_bulk_load_session,
     )
 
-    tmp = tempfile.mkdtemp(prefix="df_pg_mysql_")
-    path = os.path.join(tmp, "stream.tsv")
-    os.mkfifo(path, 0o600)
-    load_sql = build_load_data_sql(
-        table_q=table_q,
-        columns=columns,
-        infile_sql=quote_load_data_path(path),
-    )
-    failure: list[BaseException] = []
+    def _produce(path: str) -> None:
+        with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
+            src_cur.copy_expert(copy_sql, writer)
 
-    def _pump() -> None:
-        try:
-            with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-                src_cur.copy_expert(copy_sql, writer)
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
-            failure.append(exc)
-
-    pump = threading.Thread(target=_pump, name="pg-mysql-copy-fifo", daemon=True)
-    pump.start()
-    try:
-        from connectors.mysql_load_data import (
-            apply_mysql_bulk_load_session,
-            restore_mysql_bulk_load_session,
+    def _consume(path: str) -> None:
+        load_sql = build_load_data_sql(
+            table_q=table_q,
+            columns=columns,
+            infile_sql=quote_load_data_path(path),
         )
-
         apply_mysql_bulk_load_session(dst_cur)
         try:
             dst_cur.execute(load_sql)
@@ -453,21 +440,10 @@ def _fifo_copy_into_mysql(
         blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
-    except BaseException:
-        pump.join(timeout=30)
-        raise
-    finally:
-        pump.join(timeout=120)
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("fifo unlink skipped", exc_info=True)
-        try:
-            os.rmdir(tmp)
-        except OSError:
-            logger.debug("fifo dir rmdir skipped", exc_info=True)
-    if failure:
-        raise failure[0]
+
+    stream_between_cursors(
+        prefix="df_pg_mysql_", producer=_produce, consumer=_consume
+    )
 
 
 def _pg_connect(cfg: dict[str, Any]) -> Any:
@@ -637,7 +613,6 @@ def copy_postgres_to_mysql(
     """
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
-    require_fifo_streaming("PG→MySQL")
 
     from connectors.mysql_load_data import mysql_load_data_session_ready
     from connectors.write_resilience import is_public_proxy_host
