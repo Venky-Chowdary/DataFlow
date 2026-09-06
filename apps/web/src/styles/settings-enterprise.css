@@ -602,52 +602,212 @@
 }
 
 /* ─── Team & access ────────────────────────────────────────────────────────
-   The workspace / member rows carry a variable number of controls (workspace
-   picker, create field, email, name, role, login checkbox, submit), so they
-   wrap on their own instead of borrowing the two-column API-key toolbar grid,
-   which pushed the submit button off a narrow viewport. */
-.df2-team-toolbar {
+   Stacked blocks (workspace, invite, members, logins) instead of a wrapping
+   toolbar that jammed picker + create + invite into one flex row. Member
+   rows follow list-row density — not the audit-log table. */
+.df2-team-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.df2-team-block {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-card, 12px);
+  background: var(--df-surface, #fff);
+}
+
+.df2-team-block-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.df2-team-block-head h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-team-block-head p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-team-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px 18px;
+  align-items: end;
+}
+
+@media (min-width: 768px) {
+  .df2-team-workspace-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.df2-team-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.df2-team-invite-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px 18px;
+}
+
+@media (min-width: 768px) {
+  .df2-team-invite-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.1fr);
+  }
+}
+
+.df2-team-invite-footer {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  width: 100%;
 }
 
-.df2-team-toolbar .df2-settings-field {
-  flex: 1 1 220px;
+.df2-team-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 12px;
+  background: var(--df-surface, #fff);
+  overflow: hidden;
+}
+
+.df2-team-list-head,
+.df2-team-member-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) 140px minmax(120px, 0.9fr) 110px auto;
+  gap: var(--df-list-row-gap, 12px);
+  align-items: center;
+  padding: 10px 16px;
+}
+
+.df2-team-list-head--logins,
+.df2-team-member-row--logins {
+  grid-template-columns: minmax(0, 1.4fr) 140px 110px 88px 110px auto;
+}
+
+.df2-team-list-head--channels,
+.df2-team-member-row--channels {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) 72px auto;
+}
+
+.df2-team-list-head {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: var(--df-surface-subtle, #f8fafc);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--df-text-tertiary, #94a3b8);
+}
+
+.df2-team-member-row {
+  min-height: var(--df-list-row-min-h, 52px);
+  border-top: 1px solid var(--df-border, #eef1f5);
+  box-sizing: border-box;
+}
+
+.df2-team-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
-  width: auto !important;
-  max-width: none;
 }
 
-.df2-team-toolbar > .df2-btn {
+.df2-team-avatar {
   flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-deep, #0f766e);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.df2-team-identity-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-team-identity-text strong {
+  font-size: var(--df-list-row-title, 13px);
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  height: 42px;
+}
+
+.df2-team-identity-text span,
+.df2-team-channel-target {
+  font-size: 12px;
+  color: var(--df-text-secondary, #64748b);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-team-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .df2-team-check {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 42px;
+  min-height: 42px;
   font-size: 13px;
   color: var(--df-text-secondary, #475569);
-  white-space: nowrap;
 }
 
 .df2-team-secret {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 16px;
   border-radius: 12px;
   border: 1px solid #fcd34d;
   background: #fffbeb;
   font-size: 13px;
   color: var(--df-text-secondary, #475569);
+}
+
+.df2-team-secret > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .df2-team-secret-value {
@@ -671,25 +831,47 @@
 
 .df2-team-role-select {
   min-width: 108px;
-  padding: 4px 8px;
+  padding: 6px 8px;
   font-size: 12px;
   font-weight: 600;
 }
 
-.df2-team-subsection {
-  margin-top: 28px;
-  padding-top: 20px;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+.df2-team-spaced {
+  margin-top: 16px;
 }
 
-.df2-team-subsection h3 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+.df2-team-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  width: 100%;
 }
 
-.df2-team-subsection > p {
-  margin: 0 0 14px;
-  font-size: 13px;
+.df2-team-toolbar .df2-settings-field {
+  flex: 1 1 220px;
+  min-width: 0;
+  width: auto !important;
+  max-width: none;
+}
+
+@media (max-width: 900px) {
+  .df2-team-list-head {
+    display: none;
+  }
+
+  .df2-team-list-head,
+  .df2-team-member-row,
+  .df2-team-list-head--logins,
+  .df2-team-member-row--logins,
+  .df2-team-list-head--channels,
+  .df2-team-member-row--channels {
+    grid-template-columns: 1fr;
+    justify-items: start;
+  }
+
+  .df2-team-row-actions,
+  .df2-team-member-row > .df2-btn {
+    justify-self: start;
+  }
 }

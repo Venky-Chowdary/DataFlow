@@ -3,7 +3,8 @@ import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "../../lib/workspace";
+import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import { Button } from "../../components/ui/Button";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -40,8 +41,6 @@ export function TenantSettings() {
   const [sessionTimeout, setSessionTimeout] = useState(8);
   const [ipAllowlist, setIpAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
-
-  const [switching, setSwitching] = useState(false);
 
   const [newKeyLabel, setNewKeyLabel] = useState("");
   const [newKeyProvider, setNewKeyProvider] = useState<ByokKey["provider"]>("local");
@@ -107,35 +106,9 @@ export function TenantSettings() {
       .finally(() => setLoading(false));
   }, [activeWorkspace]);
 
-  /** Read the named workspace's tenant instead of assuming it has none.
-   *
-   * Pointing the selector at another workspace used to change only which
-   * workspace a *new* tenant would be written to, so a workspace that already
-   * had one still read "No tenant configured" — and saving raised a conflict
-   * the operator could not see the cause of.
-   */
-  const selectWorkspace = async (id: string) => {
-    setWorkspaceId(id);
-    if (!id) return;
-    setSwitching(true);
-    try {
-      const t = await fetchTenant(id).catch(() => null);
-      setTenant(t);
-      // A read that answered is not a failed read: leaving the earlier message up
-      // rendered "No tenant configured" above the tenant it had just loaded.
-      setLoadError("");
-      if (t) {
-        setName(t.name);
-        setCustomDomain(t.custom_domain);
-        setDataRegion(t.data_region || "us-east-1");
-        setSecurityContact(t.security_contact_email);
-        setMfaRequired(t.mfa_required);
-        setSessionTimeout(t.session_timeout_hours);
-        setIpAllowlist((t.ip_allowlist || []).join("\n"));
-      }
-    } finally {
-      setSwitching(false);
-    }
+  /** Switch the live workspace so General, Team, and notifications re-read too. */
+  const selectWorkspace = (id: string) => {
+    setActiveWorkspaceId(id);
   };
 
   const canSave = useMemo(() => {
@@ -244,14 +217,19 @@ export function TenantSettings() {
 
         <div className="df2-settings-section-body">
           <div className="df2-settings-grid df2-settings-grid--row">
-            {!tenant && (
-              <div className="df2-settings-field">
-                <label htmlFor="tenant-workspace">Workspace</label>
-                <select id="tenant-workspace" className="df2-select" value={workspaceId} disabled={switching} onChange={(e) => void selectWorkspace(e.target.value)}>
-                  {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                </select>
-              </div>
-            )}
+            <div className="df2-settings-field">
+              <label htmlFor="tenant-workspace">Workspace</label>
+              <select
+                id="tenant-workspace"
+                className="df2-select"
+                data-testid="tenant-workspace-select"
+                value={activeWorkspace || workspaceId}
+                onChange={(e) => selectWorkspace(e.target.value)}
+              >
+                {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+              <p className="df2-settings-hint">Same live workspace as Team and the top bar. Tenant profile reloads immediately.</p>
+            </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-name">Tenant name</label>
               <input id="tenant-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Wells Fargo" />
@@ -277,7 +255,7 @@ export function TenantSettings() {
             </div>
           </div>
 
-          <div className="df2-settings-policy-row" style={{ marginTop: 16 }}>
+          <div className="df2-settings-policy-row df2-team-spaced">
             <div>
               <h3>Require MFA for admins</h3>
               <p>Recorded policy. Login MFA is not wired — this switch does not challenge TOTP or WebAuthn yet.</p>
@@ -287,7 +265,7 @@ export function TenantSettings() {
             </button>
           </div>
 
-          <div className="df2-settings-field" style={{ marginTop: 16 }}>
+          <div className="df2-settings-field df2-team-spaced">
             <label htmlFor="tenant-allowlist">IP allowlist (enforced only on a custom domain)</label>
             <textarea
               id="tenant-allowlist"
@@ -302,9 +280,16 @@ export function TenantSettings() {
         </div>
 
         <div className="df2-settings-section-footer">
-          <button type="button" className="df2-btn df2-btn-primary" disabled={!canSave || saving || !manage.allowed} title={manage.reason || undefined} onClick={() => void save()}>
-            {saving ? "Saving…" : tenant ? "Update tenant" : "Create tenant"}
-          </button>
+          <Button
+            variant="primary"
+            disabled={!canSave || saving || !manage.allowed}
+            title={manage.reason || undefined}
+            loading={saving}
+            loadingLabel="Saving…"
+            onClick={() => void save()}
+          >
+            {tenant ? "Update tenant" : "Create tenant"}
+          </Button>
         </div>
       </section>
 
@@ -363,12 +348,19 @@ export function TenantSettings() {
                 </div>
               )}
             </div>
-            <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" disabled={!manage.allowed} title={manage.reason || undefined} onClick={() => void addByokKey()} style={{ marginTop: 12 }}>
+            <Button
+              variant="secondary"
+              size="sm"
+              className="df2-team-spaced"
+              disabled={!manage.allowed}
+              title={manage.reason || undefined}
+              onClick={() => void addByokKey()}
+            >
               Add BYOK key
-            </button>
+            </Button>
 
             {keys.length > 0 && (
-              <div className="df2-byok-key-list" style={{ marginTop: 16 }}>
+              <div className="df2-byok-key-list df2-team-spaced">
                 {keys.map((k) => (
                   <div key={k.id} className={`df2-settings-policy-row ${k.status}`}>
                     <div>
@@ -378,15 +370,17 @@ export function TenantSettings() {
                     <div className="df2-settings-policy-actions">
                       {k.id === tenant.byok_key_id && <span className="df2-badge df2-badge-live">Active</span>}
                       {k.status === "active" && (
-                        <button
-                          type="button"
-                          className="df2-btn df2-btn-secondary df2-btn-sm"
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           disabled={!manage.allowed || rotatingKeyId === k.id}
                           title={manage.reason || "Mark this key rotated and mint a new active key. Existing secrets stay readable."}
+                          loading={rotatingKeyId === k.id}
+                          loadingLabel="Rotating…"
                           onClick={() => void rotateActiveKey(k.id)}
                         >
-                          {rotatingKeyId === k.id ? "Rotating…" : "Rotate"}
-                        </button>
+                          Rotate
+                        </Button>
                       )}
                     </div>
                   </div>

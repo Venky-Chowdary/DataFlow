@@ -129,6 +129,7 @@ test("docs help never invents 130 live drivers or 734 catalog tiles", () => {
   assert.match(help, /\*\*Certified\*\*/);
   assert.doesNotMatch(help, /\*\*Live\*\* — governed transfer/);
   assert.doesNotMatch(help, /Redshift.*ship with upsert/);
+  assert.doesNotMatch(help, /Viewer \/ Editor \/ Owner/);
 });
 
 test("offline form routing includes yaml and fixed-width; degraded live excludes email", () => {

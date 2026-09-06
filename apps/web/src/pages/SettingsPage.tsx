@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -14,6 +14,8 @@ import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
+import { useActiveWorkspaceId } from "../lib/workspace";
+import { useVisibleRefresh } from "../lib/visibleRefresh";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -84,6 +86,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
   /** Only edit what was actually read: an unread value must not be re-saved. */
   const generalEditable = workspaceManage.allowed && settingsLoaded;
+  const activeWorkspace = useActiveWorkspaceId();
+  const generalDirtyRef = useRef(false);
 
   const loadPosture = useCallback(() => {
     setPostureLoading(true);
@@ -93,11 +97,29 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       .finally(() => setPostureLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (tab === "security") loadPosture();
-  }, [tab, loadPosture]);
+  const loadGeneral = useCallback((force = false) => {
+    if (!force && generalDirtyRef.current) return;
+    setSettingsLoading(true);
+    fetchWorkspaceSettings()
+      .then((ws) => {
+        if (!force && generalDirtyRef.current) return;
+        setOrgName(ws.org_name);
+        setTimezone(ws.timezone);
+        setRetention(String(ws.retention_days));
+        setSettingsLoaded(true);
+        setSettingsError("");
+        generalDirtyRef.current = false;
+      })
+      .catch((err: unknown) => {
+        // A refusal or an outage is shown as itself. This used to swallow the
+        // error and display "Datawrap / UTC / 90", i.e. settings nobody saved.
+        setSettingsLoaded(false);
+        setSettingsError(err instanceof Error ? err.message : "Could not load workspace settings.");
+      })
+      .finally(() => setSettingsLoading(false));
+  }, []);
 
-  useEffect(() => {
+  const loadModelsAndSso = useCallback(() => {
     fetchModelCapabilities()
       .then((caps) => {
         setModelCapabilities(caps);
@@ -128,25 +150,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setSsoConfigs(null);
         setSsoError(err instanceof Error ? err.message : "Could not read identity provider settings.");
       });
-    fetchWorkspaceSettings()
-      .then((ws) => {
-        setOrgName(ws.org_name);
-        setTimezone(ws.timezone);
-        setRetention(String(ws.retention_days));
-        setSettingsLoaded(true);
-        setSettingsError("");
-      })
-      .catch((err: unknown) => {
-        // A refusal or an outage is shown as itself. This used to swallow the
-        // error and display "Datawrap / UTC / 90", i.e. settings nobody saved.
-        setSettingsLoaded(false);
-        setSettingsError(err instanceof Error ? err.message : "Could not load workspace settings.");
-      })
-      .finally(() => setSettingsLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (tab !== "api") return;
+  const loadApiKeys = useCallback(() => {
     setApiKeysLoading(true);
     fetchWorkspaceApiKeys()
       .then((keys) => {
@@ -159,7 +165,52 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setApiKeysError(err instanceof Error ? err.message : "Could not list API keys.");
       })
       .finally(() => setApiKeysLoading(false));
-  }, [tab]);
+  }, []);
+
+  const loadAudit = useCallback(() => {
+    setAuditLoading(true);
+    fetchAuditEvents(100, logFilter === "all" ? undefined : logFilter)
+      .then((events) =>
+        setAuditEvents(
+          events.map((ev) => ({
+            id: ev.id,
+            time: new Date(ev.time).toLocaleString(),
+            actor: ev.actor,
+            action: ev.action,
+            resource: ev.resource,
+            level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
+          })),
+        ),
+      )
+      .catch(() => setAuditEvents([]))
+      .finally(() => setAuditLoading(false));
+  }, [logFilter]);
+
+  useEffect(() => {
+    generalDirtyRef.current = false;
+    loadGeneral(true);
+    loadModelsAndSso();
+  }, [activeWorkspace, loadGeneral, loadModelsAndSso]);
+
+  useEffect(() => {
+    if (tab === "security") loadPosture();
+  }, [tab, activeWorkspace, loadPosture]);
+
+  useEffect(() => {
+    if (tab !== "api") return;
+    loadApiKeys();
+  }, [tab, activeWorkspace, loadApiKeys]);
+
+  useEffect(() => {
+    if (tab !== "logs") return;
+    loadAudit();
+  }, [tab, activeWorkspace, loadAudit]);
+
+  useVisibleRefresh(() => loadGeneral(false), 15_000, tab === "general");
+  useVisibleRefresh(loadPosture, 20_000, tab === "security");
+  useVisibleRefresh(loadApiKeys, 15_000, tab === "api");
+  useVisibleRefresh(loadAudit, 10_000, tab === "logs");
+  useVisibleRefresh(loadModelsAndSso, 20_000, tab === "models" || tab === "auth");
 
   const openSsoEditor = (type: SsoType) => {
     const cfg = ssoConfigs?.[type];
@@ -383,6 +434,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       setOrgName(ws.org_name);
       setTimezone(ws.timezone);
       setRetention(String(ws.retention_days));
+      generalDirtyRef.current = false;
       toast({ title: "Settings saved", message: "Organization preferences updated.", tone: "success" });
     } catch (err) {
       toast({
@@ -394,26 +446,6 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       setSettingsSaving(false);
     }
   };
-
-  useEffect(() => {
-    if (tab !== "logs") return;
-    setAuditLoading(true);
-    fetchAuditEvents(100, logFilter === "all" ? undefined : logFilter)
-      .then((events) =>
-        setAuditEvents(
-          events.map((ev) => ({
-            id: ev.id,
-            time: new Date(ev.time).toLocaleString(),
-            actor: ev.actor,
-            action: ev.action,
-            resource: ev.resource,
-            level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
-          })),
-        ),
-      )
-      .catch(() => setAuditEvents([]))
-      .finally(() => setAuditLoading(false));
-  }, [tab, logFilter]);
 
   const filteredLogs = useMemo(
     () => auditEvents,
@@ -504,7 +536,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-head">
                     <div>
                       <h2>Organization profile</h2>
-                      <p>Defaults applied across Transfer Studio, jobs, and connectors.</p>
+                      <p>Defaults applied across Transfer Studio, jobs, and connectors. Switching workspace in the top bar reloads this profile immediately.</p>
                     </div>
                   </div>
                   <PermissionNotice
@@ -531,7 +563,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           value={orgName}
                           disabled={!generalEditable}
                           title={workspaceManage.reason || undefined}
-                          onChange={(e) => setOrgName(e.target.value)}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setOrgName(e.target.value);
+                          }}
                         />
                       </div>
                       <div className="df2-settings-field">
@@ -542,7 +577,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           value={timezone}
                           disabled={!generalEditable}
                           title={workspaceManage.reason || undefined}
-                          onChange={(e) => setTimezone(e.target.value)}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setTimezone(e.target.value);
+                          }}
                         >
                           <option value="UTC">UTC</option>
                           <option value="America/New_York">Eastern Time</option>
@@ -559,7 +597,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           value={retention}
                           disabled={!generalEditable}
                           title={workspaceManage.reason || undefined}
-                          onChange={(e) => setRetention(e.target.value)}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setRetention(e.target.value);
+                          }}
                         />
                       </div>
                       <div className="df2-settings-field">

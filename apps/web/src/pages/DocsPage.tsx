@@ -274,7 +274,7 @@ function ArchitectureDiagram() {
         </div>
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--amber" />
-          <span>Streaming / CDC</span>
+          <span>Streaming / CDC (at-least-once)</span>
         </div>
         <div className="df2-docs-legend-item">
           <span className="df2-docs-legend-dot df2-docs-legend-dot--teal" />
@@ -520,6 +520,9 @@ export function DocsPage() {
               </li>
               <li>
                 <strong>Query / Pilot</strong> — inspect data or triage failures in plain language.
+              </li>
+              <li>
+                <strong>Settings → Team</strong> — Viewer / Editor / Admin (there is no Owner role). Workspace switch is live across Settings and the top bar.
               </li>
             </ol>
             <DocsShotReel

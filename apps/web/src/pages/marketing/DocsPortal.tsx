@@ -261,7 +261,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-installation")}>
             <span>01</span>
             <strong>Access your workspace</strong>
-            <em>Tenant URL, SSO sign-in, Viewer / Editor / Owner roles, Owner checklist.</em>
+            <em>Tenant URL, SSO sign-in, Viewer / Editor / Admin roles, admin checklist.</em>
           </button>
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-getting-started")}>
             <span>02</span>
