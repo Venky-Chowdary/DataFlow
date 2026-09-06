@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from connectors.writer_common import (
@@ -950,6 +951,30 @@ def _writer_supplied_engine_digests(
     return source, target, int(rows or 0)
 
 
+_COUNT_PROOF_TOKEN = re.compile(r"^dest_count:(\d+)$")
+
+
+def _engine_count_proof_only(dest_summary: dict[str, Any] | None) -> int | None:
+    """Rows an engine copy proved by COUNT(*) when a count is all the proof it has.
+
+    A server-side copy never brings a row into this process, so a route whose
+    proof scope is destination COUNT(*) against the source snapshot COUNT(*)
+    reports ``dest_count:<n>`` where a value digest would go. Reading the
+    destination back here produces a hex digest, and comparing that to the token
+    compares a hash to a row count: every correct run of those routes failed with
+    "checksum mismatch". The count is graded as the cardinality proof it is
+    instead, and the report says plainly that value fidelity was not compared.
+    """
+    summary = dest_summary or {}
+    if _writer_supplied_engine_digests(summary) is not None:
+        return None
+    scope = str(summary.get("proof_scope") or "")
+    if "dest_count_equals_source_snapshot" not in scope:
+        return None
+    matched = _COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip())
+    return int(matched.group(1)) if matched else None
+
+
 def _localize_checksum_mismatch(
     report: dict[str, Any],
     dest_summary: dict[str, Any] | None,
@@ -1773,6 +1798,7 @@ def run_reconciliation(
     # otherwise leave it empty and decline the comparison further down rather
     # than compare two different scopes.
     source_checksum_scope_note = ""
+    source_checksum_scope_label = "after resume"
     if resumed_from and not (
         resume_full_source_rows and (records or source_spool is not None)
     ):
@@ -1781,6 +1807,15 @@ def run_reconciliation(
             "read only the remaining slice, so no source digest covering the whole "
             "population is available to compare against the full-table destination "
             "digest."
+        ) + " Re-run without resume for full_checksum population proof."
+    elif _engine_count_proof_only(dest_summary) is not None:
+        source_checksum_scope_label = "by engine copy"
+        source_checksum_scope_note = (
+            "The copy ran inside the engines: no row entered this process, so the "
+            "only proof the route produced is destination COUNT(*) against the "
+            "source snapshot COUNT(*). There is no source value digest to compare "
+            "against a destination one. Set DATAFLOW_ENGINE_DIGEST=1 to digest both "
+            "populations in-engine for full_checksum proof."
         )
 
     source_checksum_provenance = ""
@@ -2060,16 +2095,17 @@ def run_reconciliation(
                 checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
                 message=(
                     (
-                        f"Row count verified after resume: {target_rows:,} row(s) on the "
-                        f"destination for {source_rows:,} source row(s). "
+                        f"Row count verified {source_checksum_scope_label}: "
+                        f"{target_rows:,} row(s) on the destination for "
+                        f"{source_rows:,} source row(s). "
                         if balanced
                         else (
-                            f"Row count mismatch after resume: expected {expected_rows:,} "
-                            f"row(s) on the destination, found {target_rows:,}. "
+                            f"Row count mismatch {source_checksum_scope_label}: expected "
+                            f"{expected_rows:,} row(s) on the destination, found "
+                            f"{target_rows:,}. "
                         )
                     )
                     + source_checksum_scope_note
-                    + " Re-run without resume for full_checksum population proof."
                 ),
             ).to_dict()
         )

@@ -120,6 +120,32 @@ class FastPathUnavailable(Exception):
         note_copy_decline(str(message), log=False)
 
 
+def declared_copy_carrier(
+    item: dict[str, Any],
+    schema: dict[str, str],
+    source_col: str,
+    target_col: str,
+) -> str:
+    """The carrier a fast-path CREATE declares for one mapped column.
+
+    A Map mapping states the destination carrier as ``target_type`` and the
+    source's as ``source_type``; only a schema-derived mapping carries ``type``.
+    Consulting ``type`` and the introspected schema alone meant a caller that
+    passes no schema — the multi-stream contract route passes an empty one and
+    re-introspects inside each stream — fell through to the ``TEXT`` default for
+    every column, so a declared BIGINT key landed as SQLite ``TEXT`` and its
+    values were stored as text.
+    """
+    return str(
+        item.get("type")
+        or item.get("target_type")
+        or item.get("source_type")
+        or schema.get(source_col)
+        or schema.get(target_col)
+        or ""
+    )
+
+
 def fifo_streaming_supported() -> bool:
     """Does this host have named pipes the COPY routes stream through?"""
     return hasattr(os, "mkfifo")
