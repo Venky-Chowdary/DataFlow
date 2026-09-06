@@ -155,6 +155,28 @@ the PR that carries it):
 - SFTP daily Excel sync modes started, not finished.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
 
+**Found by driving the app before handover (2026-09-06,
+[#168](https://github.com/Venky-Chowdary/DataFlow/pull/168)) — register §5:**
+
+Closed with a live Postgres→MySQL proof and an independent destination reread:
+a declared control total failed the whole job on MySQL because the G21 scan
+emitted PostgreSQL-only `CAST(... AS TEXT)` (**D21**); Map had no way to declare
+a crosswalk for a plain `VARCHAR` code column, so G20 could never be asked
+(**D22**); a *proven* control total rendered nowhere an operator looks, only in
+the exported pack (**D23**); and the MySQL COPY fast paths raised the absence of
+`os.mkfifo` out of the fast path instead of declining it, so the row-writer
+fallback never ran and the destination was created empty (**D24**).
+
+Still open, and a client has to be told: a freshly exported proof pack fails the
+product's own **verify** control (`content_sha256` / HMAC / chain-anchor,
+**D25**); a destination-type override is lost on a Map → Validate → Map round
+trip (**D26**); and the Gate-8 card on a *completed* Theater is unproven because
+the active job is cleared the moment the run finishes, so that surface is
+transient by construction. Schedules/retries/overlap/DST, cancellation,
+quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
+pages, workspace roles, G19 reachability, and the Mongo and MinIO routes were
+untouched by this wave and remain unmeasured.
+
 ---
 
 ## 5. Skips, with reasons (no invented green)

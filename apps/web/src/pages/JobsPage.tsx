@@ -25,7 +25,8 @@ import {
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
-import { Gate8ProofCard, classifyGate8Status } from "../components/transfer/Gate8ProofCard";
+import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
+import { classifyGate8Status } from "../components/transfer/gate8Status";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";

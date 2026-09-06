@@ -13,12 +13,15 @@
  *
  * A declared reduction is the exception: it is a decision about the source
  * field itself, so it survives regeneration by source name together with its
- * G16 evidence.
+ * G16 evidence. So is a hand-picked destination carrier: the operator chose it
+ * for that column, and re-deriving the inferred type over it discarded the
+ * choice on the way back from Validate.
  */
 
 import {
   CONTINUE_EXECUTION_POLICIES,
   acknowledgeMappingRisk,
+  applyDestTypeChange,
   applyTransformChange,
   isIntentionalOmit,
   mappingRequiresRiskAck,
@@ -59,8 +62,12 @@ export function carryOperatorDecisions(
   const decided = new Map<string, EditableMapping>();
   const omitted = new Map<string, EditableMapping>();
   const crosswalks = new Map<string, { table: Record<string, string>; system?: string }>();
+  const declaredTypes = new Map<string, string>();
   for (const p of prior) {
     if (isIntentionalOmit(p)) omitted.set(p.source, p);
+    if (p.destTypeDeclared && !isIntentionalOmit(p)) {
+      declaredTypes.set(p.source, p.destTypeDeclared);
+    }
     if (p.codeCrosswalk && Object.keys(p.codeCrosswalk).length && !isIntentionalOmit(p)) {
       crosswalks.set(p.source, { table: p.codeCrosswalk, system: p.codeCrosswalkSystem });
     }
@@ -71,6 +78,7 @@ export function carryOperatorDecisions(
     !decided.size
     && !omitted.size
     && !crosswalks.size
+    && !declaredTypes.size
     && !prior.some((p) => typeof p.controlTotal === "boolean")
   ) {
     return next;
@@ -82,14 +90,22 @@ export function carryOperatorDecisions(
   return next.map((m) => {
     const dropped = omitted.get(m.source);
     if (dropped) return carryReduction(m, dropped);
-    const hit = decided.get(mappingDecisionFingerprint(m));
+    // Replay the declaration before the fingerprint is read: an acknowledgement
+    // signed for the declared carrier belongs to the row that carries it, and
+    // fingerprinting the inferred type first would discard that signature too.
+    const declared = declaredTypes.get(m.source);
+    const restored = declared && declared !== m.destTypeDeclared
+      ? applyDestTypeChange(m, declared)
+      : m;
+    const hit = decided.get(mappingDecisionFingerprint(restored));
     const priorWalk = crosswalks.get(m.source);
-    let nextRow = m;
+    let nextRow = restored;
     if (priorWalk && !isIntentionalOmit(m)) {
       nextRow = { ...nextRow, codeCrosswalk: priorWalk.table, codeCrosswalkSystem: priorWalk.system };
     }
     const controlTotal = controlTotals.has(m.source) ? controlTotals.get(m.source) : nextRow.controlTotal;
     if (!hit && controlTotal === nextRow.controlTotal) return nextRow;
+
     return {
       ...nextRow,
       ...(hit

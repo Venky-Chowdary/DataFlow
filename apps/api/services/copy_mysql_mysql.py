@@ -21,13 +21,14 @@ copy onto the same table.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
-import threading
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    stream_between_cursors,
+)
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _PIPE_CHUNK,
@@ -135,59 +136,38 @@ def _fifo_mysql_into_mysql(
         quote_load_data_path,
     )
 
-    tmp = tempfile.mkdtemp(prefix="df_mysql_mysql_")
-    path = os.path.join(tmp, "stream.tsv")
-    os.mkfifo(path, 0o600)
-    load_sql = build_load_data_sql(
-        table_q=table_q,
-        columns=columns,
-        infile_sql=quote_load_data_path(path),
-    )
-    failure: list[BaseException] = []
+    def _produce(path: str) -> None:
+        from pymysql.cursors import SSCursor
 
-    def _pump() -> None:
-        try:
-            from pymysql.cursors import SSCursor
+        encode = fast_load_data_text_value
+        join = "\t".join
+        with source_conn.cursor(SSCursor) as stream:
+            stream.execute(select_sql)
+            with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
+                while True:
+                    batch = stream.fetchmany(_FETCH_BATCH)
+                    if not batch:
+                        break
+                    payload = "\n".join(
+                        join(encode(v) for v in row) for row in batch
+                    )
+                    writer.write((payload + "\n").encode("utf-8"))
 
-            encode = fast_load_data_text_value
-            join = "\t".join
-            with source_conn.cursor(SSCursor) as stream:
-                stream.execute(select_sql)
-                with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-                    while True:
-                        batch = stream.fetchmany(_FETCH_BATCH)
-                        if not batch:
-                            break
-                        payload = "\n".join(
-                            join(encode(v) for v in row) for row in batch
-                        )
-                        writer.write((payload + "\n").encode("utf-8"))
-        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
-            failure.append(exc)
-
-    pump = threading.Thread(target=_pump, name="mysql-mysql-copy-fifo", daemon=True)
-    pump.start()
-    try:
+    def _consume(path: str) -> None:
+        load_sql = build_load_data_sql(
+            table_q=table_q,
+            columns=columns,
+            infile_sql=quote_load_data_path(path),
+        )
         dst_cur.execute(load_sql)
         dst_cur.execute("SHOW WARNINGS")
         blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
         if blocked:
             raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
-    except BaseException:
-        pump.join(timeout=30)
-        raise
-    finally:
-        pump.join(timeout=120)
-        try:
-            os.unlink(path)
-        except OSError:
-            logger.debug("fifo unlink skipped", exc_info=True)
-        try:
-            os.rmdir(tmp)
-        except OSError:
-            logger.debug("fifo dir rmdir skipped", exc_info=True)
-    if failure:
-        raise failure[0]
+
+    stream_between_cursors(
+        prefix="df_mysql_mysql_", producer=_produce, consumer=_consume
+    )
 
 
 def copy_mysql_to_mysql(

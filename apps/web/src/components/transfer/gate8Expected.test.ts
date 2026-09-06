@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./gate8Status";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
