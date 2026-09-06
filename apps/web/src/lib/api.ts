@@ -4058,6 +4058,8 @@ export type ProofLedger = {
     production_sku_driver_missing?: number;
     production_sku_refused?: number;
     production_sku_note?: string;
+    customer_handover_sold?: number;
+    customer_handover_eligible?: number;
     fidelity_proofs_on_disk: number;
     fidelity_proofs_passed: number;
     planned_catalog_entries?: number;
@@ -4070,6 +4072,8 @@ export type ProofLedger = {
     route: string;
     status: string;
     sold?: boolean;
+    customer_handover?: boolean;
+    customer_handover_eligible?: boolean;
     validate_ok?: boolean;
     driver_gap?: string | null;
   }[];

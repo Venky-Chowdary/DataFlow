@@ -5,12 +5,22 @@ an estimate. ``:memory:`` declines (cannot prove ATTACH identity across
 processes). Same resolved filesystem path **and** same table declines.
 Same file + different tables uses ``INSERT SELECT`` on one connection
 (no ATTACH). BLOB declines.
+
+DATE cells must be an ISO calendar day (Python ``date``, or TEXT
+``YYYY-MM-DD`` / midnight). DATETIME cells must be a naive wall-clock
+(Python ``datetime`` without ``tzinfo``, or TEXT ISO with a time
+component and no ``Z`` / offset). INTEGER unix and REAL julian decline
+— those would invent a destination clock. BOOLEAN cells must be
+SQL-boolean 0/1 (Python ``bool``, INTEGER 0/1, or TEXT ``'0'``/``'1'``).
+``true``/``yes``/``t`` synonyms decline (would invent a boolean). JSON /
+BYTEA / TIMESTAMPTZ dest DDL stay COPY-unsafe.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,14 +36,16 @@ _UNSAFE_SQLITE_BASES = frozenset({
 })
 
 _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
-    "DATE",
-    "DATETIME",
-    "TIMESTAMP",
     "TIMESTAMPTZ",
+    "TIMETZ",
     "JSON",
     "JSONB",
-    "BOOLEAN",
-    "BOOL",
+})
+
+_DATE_MIDNIGHT_CLOCKS = frozenset({
+    "00:00:00",
+    "00:00:00.000",
+    "00:00:00.000000",
 })
 
 
@@ -101,14 +113,133 @@ def sqlite_type_is_copy_safe(declared: str) -> bool:
     return True
 
 
+def sqlite_ddl_base(declared: str) -> str:
+    return (declared or "").split("(")[0].strip().upper().replace(" ", "")
+
+
 def sqlite_pg_type_is_copy_safe(declared: str) -> bool:
     raw = (declared or "").strip().upper().replace(" ", "")
     if not raw:
         return True
+    if "WITHTIMEZONE" in raw and "WITHOUT" not in raw:
+        return False
+    if raw.startswith("TIMESTAMPTZ") or raw.startswith("TIMETZ"):
+        return False
     base = raw.split("(", 1)[0]
     if base in _UNSAFE_SQLITE_PG_BASES:
         return False
     return True
+
+
+def sqlite_copy_date_value(value: Any) -> date | None:
+    """Prove a SQLite cell is an ISO calendar day. Unix/julian/clock decline."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable("tz-aware SQLite DATE is not COPY-safe")
+        if value.hour or value.minute or value.second or value.microsecond:
+            raise FastPathUnavailable(
+                "DATETIME SQLite value is not DATE COPY-safe"
+            )
+        return date(value.year, value.month, value.day)
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float, bytes, bytearray, memoryview, bool)):
+        raise FastPathUnavailable(
+            f"DATE cell {value!r} is not ISO calendar-day COPY-safe"
+        )
+    if isinstance(value, str):
+        text = value.strip().replace("T", " ", 1)
+        if " " in text:
+            day, clock = text.split(" ", 1)
+            if clock and clock not in _DATE_MIDNIGHT_CLOCKS:
+                raise FastPathUnavailable(
+                    "DATETIME SQLite value is not DATE COPY-safe"
+                )
+            text = day
+        try:
+            return date.fromisoformat(text)
+        except ValueError as exc:
+            raise FastPathUnavailable(
+                f"DATE cell {value!r} is not ISO calendar-day COPY-safe"
+            ) from exc
+    raise FastPathUnavailable(
+        f"DATE cell {value!r} is not ISO calendar-day COPY-safe"
+    )
+
+
+def sqlite_copy_naive_datetime_value(value: Any) -> datetime | None:
+    """Prove a SQLite cell is a naive wall-clock. Unix/tz/date-only decline."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable(
+                "tz-aware SQLite DATETIME is not COPY-safe"
+            )
+        return value
+    if isinstance(value, date):
+        raise FastPathUnavailable(
+            "DATE cell is not DATETIME COPY-safe (would invent 00:00:00)"
+        )
+    if isinstance(value, (int, float, bytes, bytearray, memoryview, bool)):
+        raise FastPathUnavailable(
+            "unix/julian SQLite DATETIME is not COPY-safe"
+        )
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            raise FastPathUnavailable("empty DATETIME cell is not COPY-safe")
+        if text.endswith("Z") or text.endswith("z"):
+            raise FastPathUnavailable(
+                "tz-aware SQLite DATETIME is not COPY-safe"
+            )
+        normalized = text.replace("T", " ", 1)
+        if " " not in normalized:
+            raise FastPathUnavailable(
+                "date-only cell is not DATETIME COPY-safe (would invent 00:00:00)"
+            )
+        try:
+            parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+        except ValueError as exc:
+            raise FastPathUnavailable(
+                f"DATETIME cell {value!r} is not naive ISO COPY-safe"
+            ) from exc
+        if parsed.tzinfo is not None:
+            raise FastPathUnavailable(
+                "tz-aware SQLite DATETIME is not COPY-safe"
+            )
+        return parsed
+    raise FastPathUnavailable(
+        f"DATETIME cell {value!r} is not naive ISO COPY-safe"
+    )
+
+
+def sqlite_copy_bool_value(value: Any) -> bool | None:
+    """Prove a SQLite cell is SQL-boolean 0/1. Synonyms and other ints decline."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise FastPathUnavailable(
+            f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
+        )
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "0":
+            return False
+        if text == "1":
+            return True
+        raise FastPathUnavailable(
+            f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
+        )
+    raise FastPathUnavailable(
+        f"BOOLEAN cell {value!r} is not 0/1 COPY-safe"
+    )
 
 
 def sqlite_dest_count(cfg: dict[str, Any], table: str) -> int:
@@ -147,16 +278,30 @@ def sqlite_pragma_types(conn: sqlite3.Connection, table: str) -> dict[str, str]:
     return {str(r[1]): str(r[2] or "TEXT") for r in rows}
 
 
+def sqlite_table_pk_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    rows = conn.execute(f"PRAGMA table_info({sqlite_ident(table)})").fetchall()
+    ranked = sorted(
+        (int(r[5] or 0), str(r[1])) for r in rows if int(r[5] or 0) > 0
+    )
+    return [name for _ord, name in ranked]
+
+
 def sqlite_create_sql(
     table: str,
     pairs: list[tuple[str, str]],
     sqlite_ddls: list[str],
+    primary_key: list[str] | None = None,
 ) -> str:
     from connectors.sqlite_writer import sqlite_type
 
     cols = []
+    targets = [t for _s, t in pairs]
     for (_src, target), ddl in zip(pairs, sqlite_ddls, strict=True):
         cols.append(f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}")
+    pk = [c for c in (primary_key or []) if c in targets]
+    if pk:
+        pk_sql = ", ".join(sqlite_ident(c) for c in pk)
+        cols.append(f"PRIMARY KEY ({pk_sql})")
     return f"CREATE TABLE {sqlite_ident(table)} ({', '.join(cols)})"
 
 

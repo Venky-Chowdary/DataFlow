@@ -1063,6 +1063,19 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {typeof destinationSummary.copy_decline_reason === "string"
+          && destinationSummary.copy_decline_reason && (
+          <article
+            className="df2-theater-v3-metric"
+            title={destinationSummary.copy_decline_reason}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Row path</strong>
+              <span>COPY declined</span>
+            </div>
+          </article>
+        )}
         {batchSize > 0 && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="database" size={16} />

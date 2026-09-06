@@ -48,8 +48,14 @@ def copy_sqlite_to_sqlite(
     sqlite_ddls: list[str],
     replace_destination: bool,
     source_schema: str | None = None,
+    source_where: str = "",
 ) -> FastPathResult:
-    """ATTACH source and INSERT SELECT into dest. Dest COUNT(*) is the proof."""
+    """ATTACH source and INSERT SELECT into dest. Dest COUNT(*) is the proof.
+
+    ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
+    When set, COUNT and INSERT SELECT use that filter, dest-occupied skip is
+    disabled, and the load is a single shard.
+    """
     del source_schema
     if not pairs or len(pairs) != len(sqlite_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
@@ -95,8 +101,10 @@ def copy_sqlite_to_sqlite(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not SQLite COPY-safe"
                 )
+        cursor_where = (source_where or "").strip()
+        where_sql = f" WHERE {cursor_where}" if cursor_where else ""
         source_count = int(
-            conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
+            conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )
         exists = sqlite_table_exists(conn, dest_table)
         dest_count_before = 0
@@ -106,6 +114,10 @@ def copy_sqlite_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            if cursor_where:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
             if dest_count_before == source_count:
                 conn.rollback()
                 return skip_complete_sqlite(
@@ -126,7 +138,7 @@ def copy_sqlite_to_sqlite(
         sqlite_write = "overwrite" if replace_destination and dest_occupied else "insert"
         conn.execute(
             f"INSERT INTO {dest_ref} ({dest_col_sql}) "  # nosec B608
-            f"SELECT {src_col_sql} FROM {src_ref}"
+            f"SELECT {src_col_sql} FROM {src_ref}{where_sql}"
         )
         dest_count = int(
             conn.execute(f"SELECT COUNT(*) FROM {dest_ref}").fetchone()[0]  # nosec B608
@@ -146,11 +158,12 @@ def copy_sqlite_to_sqlite(
             target_checksum=proof,
             source_snapshot={
                 "copy_workers": 1,
-                "copy_split": "serial",
+                "copy_split": "cursor" if cursor_where else "serial",
                 "copy_partitions": 1,
                 "partitions_skipped": 0,
                 "partitions_loaded": 1,
-                "shard_mode": "table",
+                "shard_mode": "cursor" if cursor_where else "table",
+                "source_where": bool(cursor_where),
                 "sqlite_read": "attach_select" if not same_file else "same_file_select",
                 "sqlite_write": sqlite_write,
             },

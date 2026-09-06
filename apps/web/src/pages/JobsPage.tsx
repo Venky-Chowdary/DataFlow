@@ -1660,6 +1660,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 </dd>
               </div>
             )}
+            {typeof destSummary.copy_decline_reason === "string" && destSummary.copy_decline_reason && (
+              <div>
+                <dt>COPY declined</dt>
+                <dd title={destSummary.copy_decline_reason}>
+                  {destSummary.copy_decline_reason}
+                </dd>
+              </div>
+            )}
             {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
               <div>
                 <dt>Chunk policy</dt>

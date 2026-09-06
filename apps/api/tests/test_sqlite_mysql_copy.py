@@ -6,7 +6,7 @@ import socket
 import sqlite3
 import sys
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -104,7 +104,7 @@ def test_sqlite_mysql_copy_safe_types():
     assert sqlite_mysql_type_is_copy_safe("DATE") is True
     assert sqlite_mysql_type_is_copy_safe("REAL") is True
     assert sqlite_mysql_type_is_copy_safe("BOOLEAN") is True
-    assert sqlite_mysql_type_is_copy_safe("DATETIME") is False
+    assert sqlite_mysql_type_is_copy_safe("DATETIME") is True
     assert sqlite_mysql_type_is_copy_safe("TIMESTAMP") is False
     assert sqlite_mysql_type_is_copy_safe("JSON") is False
     assert sqlite_mysql_type_is_copy_safe("BLOB") is False
@@ -119,9 +119,28 @@ def test_sqlite_mysql_date_iso_to_load_data():
     with pytest.raises(FastPathUnavailable, match="not ISO"):
         sqlite_value_to_load_data("not-a-date", "DATE")
     with pytest.raises(FastPathUnavailable, match="DATETIME"):
-        sqlite_value_to_load_data("2020-01-02 12:00:00", "DATETIME")
+        sqlite_value_to_load_data("2020-01-02 12:00:00", "DATE")
     with pytest.raises(FastPathUnavailable, match="BLOB"):
         sqlite_value_to_load_data(b"x", "TEXT")
+    assert sqlite_value_to_load_data("2020-01-02 12:00:00", "DATETIME") == (
+        "2020-01-02 12:00:00"
+    )
+    assert sqlite_value_to_load_data(None, "DATETIME") == "\\N"
+    with pytest.raises(FastPathUnavailable, match="unix"):
+        sqlite_value_to_load_data(1711929600, "DATETIME")
+    with pytest.raises(FastPathUnavailable, match="tz-aware"):
+        sqlite_value_to_load_data("2020-01-02T12:00:00Z", "DATETIME")
+    with pytest.raises(FastPathUnavailable, match="date-only"):
+        sqlite_value_to_load_data("2020-01-02", "DATETIME")
+    with pytest.raises(FastPathUnavailable, match="TIMESTAMP"):
+        sqlite_value_to_load_data("2020-01-02 12:00:00", "TIMESTAMP")
+    assert sqlite_value_to_load_data(1, "BOOLEAN") == "1"
+    assert sqlite_value_to_load_data(0, "BOOLEAN") == "0"
+    assert sqlite_value_to_load_data(None, "BOOLEAN") == "\\N"
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_value_to_load_data("true", "BOOLEAN")
+    with pytest.raises(FastPathUnavailable, match="0/1"):
+        sqlite_value_to_load_data(2, "BOOLEAN")
 
 
 def test_sqlite_mysql_copy_kill_switch(monkeypatch, tmp_path):
@@ -174,6 +193,83 @@ def test_live_sqlite_mysql_dest_count(monkeypatch, tmp_path):
         assert result.source_snapshot.get("sqlite_read") == "select"
         assert _dest_count(dest) == 800
     finally:
+        _drop_mysql(dest)
+
+
+def test_live_sqlite_mysql_datetime_iso_dest_count(tmp_path):
+    tag = uuid.uuid4().hex[:8]
+    src = tmp_path / "src.db"
+    dest = f"sqlite_mysql_dt_{tag}"
+    conn = sqlite3.connect(src)
+    conn.execute(
+        'CREATE TABLE "src_t" (id INTEGER NOT NULL PRIMARY KEY, updated_at DATETIME)'
+    )
+    conn.execute(
+        'INSERT INTO "src_t" (id, updated_at) VALUES (1, ?), (2, NULL)',
+        ("2024-11-01 08:00:00",),
+    )
+    conn.commit()
+    conn.close()
+    mysql = _mysql_connect()
+    try:
+        result = copy_sqlite_to_mysql(
+            source_cfg=_cfg(src, "src_t"),
+            source_table="src_t",
+            dest_cfg=_mysql_cfg(),
+            dest_table=dest,
+            pairs=[("id", "id"), ("updated_at", "updated_at")],
+            mysql_ddls=["BIGINT", "DATETIME(6)"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 2
+        assert result.source_checksum == "dest_count:2"
+        assert _dest_count(dest) == 2
+        with mysql.cursor() as cur:
+            cur.execute(f"SELECT id, updated_at FROM `{dest}` ORDER BY id")
+            rows = cur.fetchall()
+        assert rows[0][0] == 1
+        assert rows[0][1] == datetime(2024, 11, 1, 8, 0, 0)
+        assert rows[1] == (2, None)
+    finally:
+        mysql.close()
+        _drop_mysql(dest)
+
+
+def test_live_sqlite_mysql_boolean_0_1_dest_count(tmp_path):
+    tag = uuid.uuid4().hex[:8]
+    src = tmp_path / "src.db"
+    dest = f"sqlite_mysql_bool_{tag}"
+    conn = sqlite3.connect(src)
+    conn.execute(
+        'CREATE TABLE "src_t" (id INTEGER NOT NULL PRIMARY KEY, flag BOOLEAN)'
+    )
+    conn.execute(
+        'INSERT INTO "src_t" (id, flag) VALUES (1, 1), (2, 0), (3, NULL)'
+    )
+    conn.commit()
+    conn.close()
+    mysql = _mysql_connect()
+    try:
+        result = copy_sqlite_to_mysql(
+            source_cfg=_cfg(src, "src_t"),
+            source_table="src_t",
+            dest_cfg=_mysql_cfg(),
+            dest_table=dest,
+            pairs=[("id", "id"), ("flag", "flag")],
+            mysql_ddls=["BIGINT", "BOOLEAN"],
+            replace_destination=True,
+        )
+        assert result.source_rows == 3
+        assert result.source_checksum == "dest_count:3"
+        assert _dest_count(dest) == 3
+        with mysql.cursor() as cur:
+            cur.execute(f"SELECT id, flag FROM `{dest}` ORDER BY id")
+            rows = cur.fetchall()
+        assert rows[0] == (1, 1)
+        assert rows[1] == (2, 0)
+        assert rows[2] == (3, None)
+    finally:
+        mysql.close()
         _drop_mysql(dest)
 
 

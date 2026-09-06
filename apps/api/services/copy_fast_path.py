@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,8 @@ logger = logging.getLogger(__name__)
 #: Pipe buffer between the two COPY cursors. Large enough that the reader is not
 #: woken per row, small enough that a stalled destination applies backpressure to
 #: the source instead of buffering a whole table in memory.
-_PIPE_CHUNK = 1 << 20
+_PIPE_CHUNK = 1 << 22
+_COPY_DECLINE: ContextVar[list[str] | None] = ContextVar("df_copy_decline", default=None)
 
 
 class FastPathResult(NamedTuple):
@@ -86,8 +88,35 @@ class FastPathResult(NamedTuple):
         )
 
 
+def begin_copy_decline_capture(sink: list[str] | None = None) -> tuple[Token, list[str]]:
+    """Record FastPathUnavailable reasons for the operator dest_summary."""
+    bucket = sink if sink is not None else []
+    token = _COPY_DECLINE.set(bucket)
+    return token, bucket
+
+
+def reset_copy_decline_capture(token: Token) -> None:
+    _COPY_DECLINE.reset(token)
+
+
+def note_copy_decline(reason: str, *, log: bool = True) -> None:
+    """Append a COPY decline reason. Duplicate text in one capture is skipped."""
+    text = str(reason or "").strip()
+    if not text:
+        return
+    if log:
+        logger.info("COPY fast path declined: %s", text)
+    sink = _COPY_DECLINE.get()
+    if sink is not None and text not in sink:
+        sink.append(text)
+
+
 class FastPathUnavailable(Exception):
     """Raised when the route cannot be proven identical — caller falls back."""
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message)
+        note_copy_decline(str(message), log=False)
 
 
 def skip_complete_identity_copy(
@@ -673,6 +702,7 @@ def copy_between_postgres(
     dest_table: str,
     pairs: list[tuple[str, str]],
     replace_destination: bool = True,
+    source_where: str = "",
 ) -> FastPathResult:
     """Copy a population between two PostgreSQL tables and prove it arrived.
 
@@ -707,6 +737,12 @@ def copy_between_postgres(
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
             )
+            # Dest WAL flush per COPY row is the 10M-row tax. LOCAL lasts this
+            # transaction; commit still writes the catalog + heap, just not
+            # fsync-per-record. Crash between commit and OS flush can lose the
+            # dest table — the source snapshot is still the proof, and the
+            # operator re-runs overwrite.
+            dst_cur.execute("SET LOCAL synchronous_commit = off")
             snapshot = _snapshot_evidence(src_cur)
             blocked = unsupported_structure(src_cur, source_schema, source_table)
             if blocked:
@@ -781,22 +817,40 @@ def copy_between_postgres(
             )
 
             pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
-            if dest_occupied and pk_map is None:
+            cursor_where = (source_where or "").strip()
+            if dest_occupied and pk_map is None and not cursor_where:
                 raise FastPathUnavailable(
                     "append into non-empty PostgreSQL dest stays on the row path"
                 )
+            if cursor_where and dest_occupied:
+                raise FastPathUnavailable(
+                    "filtered COPY into occupied dest stays on the incremental staging path"
+                )
 
-            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
-            workers = pg_mysql_copy_workers(source_count)
-            n_parts = pg_mysql_copy_partitions(source_count, workers)
+            workers = 1 if cursor_where else pg_mysql_copy_workers(source_count)
+            n_parts = 1 if cursor_where else pg_mysql_copy_partitions(source_count, workers)
             partitions: list[dict[str, Any]] = []
             shard_mode = "serial"
             copy_split = "binary"
             predicates: list[str] = [""]
             skip_all = False
 
-            if pk_map is not None:
+            if cursor_where:
+                shard_mode = "cursor"
+                copy_split = "cursor"
+                predicates = [cursor_where]
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
                 src_pk, dest_pk = pk_map
                 src_ident = _quote(src_pk)
                 dest_ident = _quote(dest_pk)
@@ -854,7 +908,7 @@ def copy_between_postgres(
             source_digest = None
             if need_checksum:
                 source_digest = postgresql_engine_checksum(
-                    src_cur, source_ref, source_cols
+                    src_cur, source_ref, source_cols, where=cursor_where
                 )
                 if source_digest is None:
                     raise FastPathUnavailable("source digest unavailable")

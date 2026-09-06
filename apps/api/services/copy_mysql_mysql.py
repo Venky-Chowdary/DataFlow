@@ -199,6 +199,7 @@ def copy_mysql_to_mysql(
     pairs: list[tuple[str, str]],
     mysql_ddls: list[str],
     replace_destination: bool,
+    source_where: str = "",
 ) -> FastPathResult:
     """Identity MySQL→MySQL. Dest COUNT(*) is the proof."""
     if not pairs or len(pairs) != len(mysql_ddls):
@@ -292,15 +293,31 @@ def copy_mysql_to_mysql(
 
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
+            cursor_where = (source_where or "").strip()
+            where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+            src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
             workers = pg_mysql_copy_workers(source_count)
             n_parts = pg_mysql_copy_partitions(source_count, workers)
             partitions: list[dict[str, Any]] = []
             shard_mode = "serial"
-            predicates: list[str] = [""]
+            predicates: list[str] = [cursor_where] if cursor_where else [""]
 
-            if pk_map is not None:
+            if cursor_where:
+                if dest_occupied:
+                    raise FastPathUnavailable(
+                        "filtered COPY into occupied dest stays on the incremental staging path"
+                    )
+                shard_mode = "cursor"
+                partitions = [{
+                    "lo": None,
+                    "hi": None,
+                    "null_shard": False,
+                    "source_count": source_count,
+                    "predicate": cursor_where,
+                    "action": "load",
+                }]
+            elif pk_map is not None:
                 src_pk, dest_pk = pk_map
                 src_ident = _mysql_ident(src_pk)
                 shard_mode = "pk"
@@ -425,6 +442,7 @@ def copy_mysql_to_mysql(
                     ),
                     "shard_mode": shard_mode if partitions else "serial",
                     "partition_proof": partition_proof,
+                    "source_where": bool(cursor_where),
                 },
                 proof_scope=(
                     "partition_dest_count_equals_source_snapshot"
