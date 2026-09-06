@@ -23,7 +23,12 @@ import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBa
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
-import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
+import {
+  formatProofScope,
+  readControlTotals,
+  readGate8Population,
+  readJobLineage,
+} from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
@@ -461,6 +466,7 @@ export function JobTheaterView({
     reconciliation: job.reconciliation,
     preflight,
   });
+  const controlTotals = readControlTotals(job.reconciliation);
   const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
@@ -894,6 +900,51 @@ export function JobTheaterView({
                 ) : null}
               </div>
             )}
+          {controlTotals.declared && (
+            <div
+              className={`df2-theater-control-totals${controlTotals.proven ? " is-proven" : " is-unproven"}`}
+              aria-label="G21 control totals"
+            >
+              <div className="df2-theater-control-totals-head">
+                <strong>Control totals</strong>
+                <span className={`df2-badge df2-badge-xs ${controlTotals.proven ? "df2-badge-ok" : controlTotals.mismatch ? "df2-badge-block" : "df2-badge-warn"}`}>
+                  {controlTotals.proven
+                    ? "proven"
+                    : controlTotals.mismatch
+                      ? "mismatch"
+                      : "unproven"}
+                </span>
+                <span className="df2-theater-control-totals-evidence">
+                  evidence: {controlTotals.evidence}
+                </span>
+              </div>
+              <table className="df2-theater-control-totals-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Column</th>
+                    <th scope="col">Source SUM</th>
+                    <th scope="col">Dest SUM</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {controlTotals.rows.map((row) => (
+                    <tr key={row.column} title={row.reason}>
+                      <th scope="row">{row.column}</th>
+                      <td>
+                        <code>{row.sourceSum || "—"}</code>
+                      </td>
+                      <td>
+                        <code>{row.destSum || "—"}</code>
+                        {row.proven ? null : (
+                          <span className="df2-theater-control-totals-why">{row.reason}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <ConservationLedgerCard
             job={job}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}

@@ -1422,6 +1422,17 @@
   margin: 0;
 }
 
+.df2-column-crosswalk-declare {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--df-text-secondary, #475569);
+  white-space: nowrap;
+}
+
 .df2-column-row.is-omitted td .df2-column-omit-block {
   opacity: 1;
 }

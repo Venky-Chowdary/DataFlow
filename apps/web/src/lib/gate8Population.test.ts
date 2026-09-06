@@ -4,7 +4,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatProofScope, readGate8Population, readJobLineage } from "./gate8Population";
+import {
+  formatProofScope,
+  readControlTotals,
+  readGate8Population,
+  readJobLineage,
+} from "./gate8Population";
 
 describe("readGate8Population", () => {
   it("prefers dest-engine ledger COUNT over dest_readback", () => {
@@ -42,6 +47,82 @@ describe("readGate8Population", () => {
     });
     assert.equal(view.destCount, null);
     assert.equal(view.coverage, "writer_ack");
+  });
+});
+
+describe("readControlTotals", () => {
+  it("shows both independent SUMs as exact strings when proven", () => {
+    const view = readControlTotals({
+      control_totals: {
+        declared: true,
+        evidence: "exact",
+        columns: [
+          {
+            source: "amount",
+            target: "amount",
+            source_sum: "618.75",
+            dest_sum: "618.75",
+            matched: true,
+            proven: true,
+            reason: "independent source SUM equals destination SUM",
+          },
+        ],
+      },
+    });
+    assert.equal(view.declared, true);
+    assert.equal(view.proven, true);
+    assert.equal(view.mismatch, false);
+    // Strings, not numbers — a float SUM is the evidence G21 refuses.
+    assert.equal(view.rows[0].sourceSum, "618.75");
+    assert.equal(view.rows[0].destSum, "618.75");
+  });
+
+  it("never renders a sampled or unread SUM as proof", () => {
+    const sampled = readControlTotals({
+      control_totals: {
+        declared: true,
+        evidence: "sampled",
+        columns: [
+          { source: "amount", source_sum: "10.00", dest_sum: "10.00", matched: true, proven: false, reason: "a sample SUM is not a population control total" },
+        ],
+      },
+    });
+    assert.equal(sampled.declared, true);
+    assert.equal(sampled.proven, false);
+    assert.equal(sampled.evidence, "sampled");
+
+    const unread = readControlTotals({
+      control_totals: {
+        declared: true,
+        evidence: "unmeasured",
+        any_unproven: true,
+        columns: [
+          { source: "amount", source_sum: null, dest_sum: null, proven: false, reason: "sum failed: cannot connect" },
+        ],
+      },
+    });
+    assert.equal(unread.proven, false);
+    // No sum is an em-dash at render time, never a zero balance.
+    assert.equal(unread.rows[0].destSum, "");
+    assert.match(unread.rows[0].reason, /sum failed/);
+  });
+
+  it("reports a mismatch and stays hidden when nothing was declared", () => {
+    const mismatch = readControlTotals({
+      control_totals: {
+        declared: true,
+        evidence: "exact",
+        any_mismatch: true,
+        columns: [
+          { source: "amount", source_sum: "618.75", dest_sum: "618.74", matched: false, proven: false, reason: "control total mismatch" },
+        ],
+      },
+    });
+    assert.equal(mismatch.mismatch, true);
+    assert.equal(mismatch.proven, false);
+
+    assert.equal(readControlTotals({ control_totals: { declared: false, columns: [] } }).declared, false);
+    assert.equal(readControlTotals(null).declared, false);
   });
 });
 

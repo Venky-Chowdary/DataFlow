@@ -73,6 +73,56 @@ export function formatProofScope(view: Gate8PopulationView): string {
   return `${coverage} · ${provenance}`;
 }
 
+export type ControlTotalRowView = {
+  column: string;
+  sourceSum: string;
+  destSum: string;
+  proven: boolean;
+  matched: boolean;
+  reason: string;
+};
+
+export type ControlTotalsView = {
+  declared: boolean;
+  /** exact | sampled | unmeasured — anything but `exact` is not proof. */
+  evidence: string;
+  proven: boolean;
+  mismatch: boolean;
+  rows: ControlTotalRowView[];
+};
+
+/**
+ * The G21 ledger as Theater shows it: declared money columns with both
+ * independent SUMs and whether they matched.
+ *
+ * Sums stay strings all the way to the DOM — `Number("618.75")` is a float,
+ * and a float is exactly the evidence G21 refuses. A column with no sums is
+ * rendered as unproven with its reason, never as a zero balance.
+ */
+export function readControlTotals(
+  reconciliation: Gate8ReconciliationPayload | null | undefined,
+): ControlTotalsView {
+  const ct = reconciliation?.control_totals;
+  const columns = Array.isArray(ct?.columns) ? ct.columns : [];
+  const rows: ControlTotalRowView[] = columns.map((c) => ({
+    column: text(c?.source) || text(c?.target),
+    sourceSum: text(c?.source_sum),
+    destSum: text(c?.dest_sum),
+    proven: c?.proven === true,
+    matched: c?.matched === true,
+    reason: text(c?.reason),
+  }));
+  const declared = ct?.declared === true && rows.length > 0;
+  return {
+    declared,
+    evidence: text(ct?.evidence) || "unmeasured",
+    // Proven only when the engine said `exact` and every column proved.
+    proven: declared && text(ct?.evidence) === "exact" && rows.every((r) => r.proven),
+    mismatch: ct?.any_mismatch === true,
+    rows,
+  };
+}
+
 export type LineageEventView = {
   eventType: string;
   timestamp: string;

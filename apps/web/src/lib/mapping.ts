@@ -1946,6 +1946,31 @@ export function isControlTotalCandidate(m: EditableMapping): boolean {
   return false;
 }
 
+const CHARACTER_CARRIER = /\b(CHAR|VARCHAR|NVARCHAR|NCHAR|TEXT|STRING|CLOB|KEYWORD)\b/i;
+
+/**
+ * Can an operator declare a G20 crosswalk on this row?
+ *
+ * Any character carrier can hold codes — a `varchar(4)` status column is the
+ * ordinary case, and it carries no enum marker to detect. So candidacy is the
+ * carrier's type, and declaring is still the operator's act: no crosswalk is
+ * inferred, and a row nobody declares is reported as *not asked*, never as
+ * covered.
+ */
+export function isCodeCrosswalkCandidate(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (m.codeCrosswalk) return true;
+  if ((m.semanticRole || "").toLowerCase() === "string_enum") return true;
+  const types = `${m.inferredType || ""} ${m.destType || ""}`;
+  if (/enum/i.test(types)) return true;
+  return CHARACTER_CARRIER.test(types);
+}
+
+/** Already declared, or a carrier whose enum-ness the profiler asserted. */
+export function isCodeCrosswalkDeclared(m: EditableMapping): boolean {
+  return Boolean(m.codeCrosswalk && Object.keys(m.codeCrosswalk).length > 0);
+}
+
 export function applyTransformChange(m: EditableMapping, next: MappingTransform): EditableMapping {
   if (next === "omit") {
     return {

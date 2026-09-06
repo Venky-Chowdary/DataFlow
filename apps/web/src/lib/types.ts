@@ -507,6 +507,31 @@ export interface Gate8ReconciliationPayload {
   };
   /** Ordered next moves for a failed reconcile; each maps to a real control. */
   remediation?: { action?: string; label?: string; why?: string }[];
+  /**
+   * G21 control totals (`services/control_totals.py`). Sums are decimal
+   * *strings*: parsing them as numbers is how a cent goes missing.
+   */
+  control_totals?: {
+    schema?: string;
+    declared?: boolean;
+    /** exact | sampled | unmeasured — only `exact` is proof. */
+    evidence?: string;
+    any_unproven?: boolean;
+    any_mismatch?: boolean;
+    rejected_rows?: number;
+    honesty?: string;
+    columns?: {
+      source?: string;
+      target?: string;
+      transform?: string;
+      identity?: boolean;
+      matched?: boolean;
+      proven?: boolean;
+      source_sum?: string | null;
+      dest_sum?: string | null;
+      reason?: string;
+    }[];
+  } | null;
 }
 
 export interface JobProgress extends TransferJob {
