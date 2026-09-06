@@ -27,7 +27,11 @@ import threading
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    require_fifo_streaming,
+)
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _PIPE_CHUNK,
@@ -229,6 +233,9 @@ def copy_mysql_to_mysql(
 
     same_instance = mysql_same_instance(source_cfg, dest_cfg)
     use_insert_select = same_instance and mysql_mysql_insert_select_enabled()
+    if not use_insert_select:
+        # Cross-instance rows travel through a named pipe; INSERT…SELECT does not.
+        require_fifo_streaming("MySQL→MySQL")
 
     source_conn = _mysql_connect(source_cfg)
     dest_conn = _mysql_connect(dest_cfg)

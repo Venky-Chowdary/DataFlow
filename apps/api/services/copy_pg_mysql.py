@@ -36,7 +36,13 @@ import threading
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote, _table_ref
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    _table_ref,
+    require_fifo_streaming,
+)
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
 logger = logging.getLogger(__name__)
@@ -631,6 +637,7 @@ def copy_postgres_to_mysql(
     """
     if not pairs or len(pairs) != len(mysql_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
+    require_fifo_streaming("PG→MySQL")
 
     from connectors.mysql_load_data import mysql_load_data_session_ready
     from connectors.write_resilience import is_public_proxy_host

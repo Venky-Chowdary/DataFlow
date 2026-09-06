@@ -27,7 +27,13 @@ import tempfile
 import threading
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote, _table_ref
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    _table_ref,
+    require_fifo_streaming,
+)
 from services.copy_pg_mysql import (
     _INTEGER_PK_BASES,
     _jsonable_bound,
@@ -392,6 +398,7 @@ def copy_mysql_to_postgres(
     """
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
+    require_fifo_streaming("MySQL→PG")
 
     from connectors.write_resilience import is_public_proxy_host
 

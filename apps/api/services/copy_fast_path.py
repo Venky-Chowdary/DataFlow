@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
@@ -117,6 +118,27 @@ class FastPathUnavailable(Exception):
     def __init__(self, message: str = "") -> None:
         super().__init__(message)
         note_copy_decline(str(message), log=False)
+
+
+def fifo_streaming_supported() -> bool:
+    """Does this host have named pipes the COPY routes stream through?"""
+    return hasattr(os, "mkfifo")
+
+
+def require_fifo_streaming(route: str) -> None:
+    """Decline a FIFO-streamed route on a host without named pipes.
+
+    ``os.mkfifo`` is POSIX-only. Discovering that inside the copy is a *job*
+    failure, not a decline: by then the destination may already have been
+    recreated, so the row writer never gets its turn and the route is simply
+    unusable on Windows. Refusing here is the same contract as every other
+    unmet precondition — the caller falls back and the rows still land.
+    """
+    if not fifo_streaming_supported():
+        raise FastPathUnavailable(
+            f"{route} COPY streams through a named pipe (os.mkfifo), "
+            f"which {sys.platform} does not provide"
+        )
 
 
 def skip_complete_identity_copy(
