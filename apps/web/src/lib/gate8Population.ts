@@ -123,6 +123,21 @@ export function readControlTotals(
   };
 }
 
+/**
+ * What the engine's `evidence` token means to an operator.
+ *
+ * `unmeasured` is the engine's word for "no exact population proof", and it
+ * is also what a *mismatch* carries — two cent-exact sums that disagree were
+ * certainly measured, so echoing the raw token next to them reads as a
+ * contradiction. The raw token stays available for the auditor.
+ */
+export function controlTotalEvidenceLabel(view: ControlTotalsView): string {
+  if (view.evidence === "exact") return "population SUM, exact";
+  if (view.evidence === "sampled") return "sample SUM — not proof";
+  if (view.mismatch) return "measured, sums disagree";
+  return "no exact population SUM";
+}
+
 export type LineageEventView = {
   eventType: string;
   timestamp: string;

@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   formatProofScope,
+  controlTotalEvidenceLabel,
   readControlTotals,
   readGate8Population,
   readJobLineage,
@@ -123,6 +124,51 @@ describe("readControlTotals", () => {
 
     assert.equal(readControlTotals({ control_totals: { declared: false, columns: [] } }).declared, false);
     assert.equal(readControlTotals(null).declared, false);
+  });
+});
+
+describe("controlTotalEvidenceLabel", () => {
+  const view = (control_totals: Record<string, unknown>) =>
+    readControlTotals({ control_totals } as never);
+
+  it("names the population scan when the totals are exact", () => {
+    assert.equal(
+      controlTotalEvidenceLabel(
+        view({
+          declared: true,
+          evidence: "exact",
+          columns: [{ source: "amount", source_sum: "618.75", dest_sum: "618.75", proven: true, matched: true }],
+        }),
+      ),
+      "population SUM, exact",
+    );
+  });
+
+  it("never calls two disagreeing exact sums unmeasured", () => {
+    // The engine writes `unmeasured` for any unproven run, mismatches
+    // included — two cent-exact sums on screen were plainly measured.
+    const label = controlTotalEvidenceLabel(
+      view({
+        declared: true,
+        evidence: "unmeasured",
+        any_mismatch: true,
+        columns: [{ source: "amount", source_sum: "618.75", dest_sum: "618.76", proven: false, matched: false }],
+      }),
+    );
+    assert.equal(label, "measured, sums disagree");
+    assert.doesNotMatch(label, /unmeasured/);
+  });
+
+  it("says a sample is not proof, and says when no population sum ran", () => {
+    const columns = [{ source: "amount", source_sum: "618.75", dest_sum: "618.75", proven: false }];
+    assert.equal(
+      controlTotalEvidenceLabel(view({ declared: true, evidence: "sampled", columns })),
+      "sample SUM — not proof",
+    );
+    assert.equal(
+      controlTotalEvidenceLabel(view({ declared: true, evidence: "unmeasured", columns })),
+      "no exact population SUM",
+    );
   });
 });
 

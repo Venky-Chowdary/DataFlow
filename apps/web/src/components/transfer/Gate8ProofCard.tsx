@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
+import { controlTotalEvidenceLabel, readControlTotals } from "../../lib/gate8Population";
 import type { Gate8ReconciliationPayload } from "../../lib/types";
 
 /**
@@ -380,6 +381,7 @@ export function Gate8ProofCard({
     mapping_hash?: string | null;
     rollback?: string;
   } | null>(null);
+  const controlTotals = readControlTotals(report);
   useEffect(() => {
     setVerifyState({ status: "idle" });
   }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
@@ -764,6 +766,52 @@ export function Gate8ProofCard({
           {mismatches.length > 8 && (
             <p className="df2-gate8-proof-more">+{mismatches.length - 8} more in exported proof</p>
           )}
+        </div>
+      )}
+
+      {controlTotals.declared && (
+        <div
+          className={`df2-gate8-control-totals${controlTotals.proven ? " is-proven" : " is-unproven"}`}
+          aria-label="Control totals"
+        >
+          <div className="df2-gate8-control-totals-head">
+            <strong>Control totals</strong>
+            <span
+              className={`df2-gate8-proof-badge ${
+                controlTotals.proven ? "is-ok" : controlTotals.mismatch ? "is-fail" : "is-warn"
+              }`}
+            >
+              {controlTotals.proven ? "Proven" : controlTotals.mismatch ? "Mismatch" : "Unproven"}
+            </span>
+            <span className="df2-gate8-control-totals-evidence" title={`evidence: ${controlTotals.evidence}`}>
+              {controlTotalEvidenceLabel(controlTotals)}
+            </span>
+          </div>
+          <table className="df2-gate8-control-totals-table">
+            <thead>
+              <tr>
+                <th scope="col">Column</th>
+                <th scope="col">Source SUM</th>
+                <th scope="col">Dest SUM</th>
+              </tr>
+            </thead>
+            <tbody>
+              {controlTotals.rows.map((row) => (
+                <tr key={row.column}>
+                  <th scope="row">{row.column}</th>
+                  <td>
+                    <code>{row.sourceSum || "—"}</code>
+                  </td>
+                  <td>
+                    <code>{row.destSum || "—"}</code>
+                    {row.proven ? null : (
+                      <span className="df2-gate8-control-totals-why">{row.reason}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
