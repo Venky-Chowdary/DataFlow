@@ -3098,6 +3098,9 @@ class UniversalTransferEngine:
                                 conflict_columns,
                                 validation_mode=request.validation_mode,
                                 source_spool=scd2_spill.spool,
+                                # SCD2 never narrows its read (bind_batch_incremental),
+                                # so an unlimited read is the whole source population.
+                                complete_snapshot=not int(request.limit or 0),
                             ),
                             budget=RetryBudget(
                                 max_attempts=3,
@@ -3471,7 +3474,7 @@ class UniversalTransferEngine:
 
             # Reconciliation passed: the delta is at rest, so the watermark may
             # move. Persisting it earlier would skip these rows after a failed run.
-            incremental_bound.commit()
+            incremental_bound.commit(job_id=job_id)
 
             explanation = _build_explanation(
                 request,

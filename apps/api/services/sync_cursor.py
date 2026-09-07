@@ -482,8 +482,32 @@ def get_watermark(cursor_key: str) -> str | None:
     return None
 
 
+def _stamp_job_watermark(job_id: str, cursor_key: str, watermark: str, cursor_column: str) -> None:
+    """Record the advanced watermark on the job that advanced it.
+
+    The schedule finalizer and the operator's run history read the watermark
+    from the job document; the cursor store alone is keyed by route, not run.
+    """
+    from services.mongodb_service import get_mongodb_service
+
+    try:
+        get_mongodb_service().update_job_fields(
+            job_id,
+            {"cursor_value": watermark, "cursor_key": cursor_key, "cursor_column": cursor_column},
+        )
+    except Exception:
+        _logger.exception("Could not stamp watermark on job %s", job_id)
+
+
 def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] | None = None) -> None:
-    """Persist watermark with CAS semantics when Mongo is available."""
+    """Persist watermark with CAS semantics when Mongo is available.
+
+    ``metadata["job_id"]`` names the run that proved the delta at rest; the
+    watermark is then also stamped on that job document as ``cursor_value``.
+    """
+    job_id = str((metadata or {}).get("job_id") or "").strip()
+    if job_id:
+        _stamp_job_watermark(job_id, cursor_key, watermark, str((metadata or {}).get("cursor_column") or ""))
     coll = _mongo_cursors()
     if coll is not None:
         try:

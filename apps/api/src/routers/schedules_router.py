@@ -87,6 +87,7 @@ class ScheduleCreate(BaseModel):
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
     source_read_mode: str = ""
     procedure_call: str = ""
@@ -135,6 +136,7 @@ class ScheduleUpdate(BaseModel):
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
+    cursor_semantics: Optional[str] = None
     primary_key: Optional[str] = None
     source_read_mode: Optional[str] = None
     procedure_call: Optional[str] = None
@@ -180,6 +182,7 @@ class ScheduleResponse(BaseModel):
     cdc_row_filter: str = ""
     multi_subnet_failover: bool = False
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
     cursor_value: str = ""
     source_read_mode: str = ""
@@ -267,6 +270,7 @@ class ScheduleSummaryResponse(BaseModel):
     cdc_row_filter: str = ""
     multi_subnet_failover: bool = False
     cursor_column: str = ""
+    cursor_semantics: str = ""
     primary_key: str = ""
     cursor_value: str = ""
     source_read_mode: str = ""

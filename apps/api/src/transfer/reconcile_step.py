@@ -947,6 +947,11 @@ def _writer_supplied_engine_digests(
     target = str(summary.get("engine_target_checksum") or "").strip()
     if not source or not target:
         return None
+    # A count token on both sides is a row count, not a digest pair: taking it
+    # here would grade ``pk_join_count:37 == pk_join_count:37`` as value proof
+    # and stamp the batch size as the destination population.
+    if is_count_proof_token(source) or is_count_proof_token(target):
+        return None
     rows = summary.get("rows_written")
     return source, target, int(rows or 0)
 
@@ -960,6 +965,36 @@ _COUNT_PROOF_SCOPES = (
     "dest_count_equals_source_snapshot",
     "dest_pk_join_equals_staging",
 )
+
+
+def is_count_proof_token(checksum: Any) -> bool:
+    """True for an engine copy's ``dest_count:<n>`` / ``pk_join_count:<n>`` token."""
+    return bool(_COUNT_PROOF_TOKEN.match(str(checksum or "").strip()))
+
+
+_SOURCE_DIGEST_MODES = ("inline_write_pass", "source_reread")
+
+
+def source_digest_from_summaries(
+    *summaries: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """``(checksum, checksum_mode)`` of the first summary holding a real source digest.
+
+    A staged merge (SCD2, mirror) runs two inner passes: the source→staging
+    write, whose write-pass fingerprint *is* the remapped source population,
+    and a staging→target apply whose digest — when it is a digest at all and
+    not an engine copy's count token — covers the same rows. Only a value
+    digest may stand as the source side of Gate-8; a count token or a writer's
+    own ack would make the comparison a hash-to-count or a tautology.
+    """
+    for summary in summaries:
+        if not summary:
+            continue
+        checksum = str(summary.get("checksum") or "").strip()
+        mode = str(summary.get("checksum_mode") or "").strip()
+        if checksum and mode in _SOURCE_DIGEST_MODES and not is_count_proof_token(checksum):
+            return checksum, mode
+    return "", ""
 
 
 def _engine_count_proof_only(dest_summary: dict[str, Any] | None) -> int | None:
@@ -983,6 +1018,52 @@ def _engine_count_proof_only(dest_summary: dict[str, Any] | None) -> int | None:
         return None
     matched = _COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip())
     return int(matched.group(1)) if matched else None
+
+
+def _merge_cardinality_only_report(
+    *,
+    source_rows: int,
+    active_rows: int,
+    active_checksum: str,
+    rejected_rows: int,
+    coerced_null_rows: int,
+    rows_skipped: int,
+    note: str,
+) -> dict[str, Any]:
+    """SCD2/mirror verdict when the run holds no source value digest.
+
+    The active-row population is compared to the source population and the
+    report says plainly that value fidelity was not compared — never a hash
+    against a count, never the destination digest on both sides.
+    """
+    from services.reconciliation import ReconciliationReport
+
+    expected_rows = max(source_rows - rejected_rows - rows_skipped, 0)
+    balanced = active_rows == expected_rows
+    return ReconciliationReport(
+        passed=balanced,
+        source_rows=source_rows,
+        target_rows=active_rows,
+        source_checksum="",
+        target_checksum=active_checksum,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+        message=(
+            (
+                f"Active row count verified by engine copy: {active_rows:,} live "
+                f"row(s) on the destination for {source_rows:,} source row(s). "
+                if balanced
+                else (
+                    f"Active row count mismatch by engine copy: expected "
+                    f"{expected_rows:,} live row(s) on the destination, found "
+                    f"{active_rows:,}. "
+                )
+            )
+            + note
+        ),
+    ).to_dict()
 
 
 def _keyed_join_proof(dest_summary: dict[str, Any] | None) -> bool:
@@ -1914,6 +1995,18 @@ def run_reconciliation(
                 active_rows = sub_summary.get("active_rows")
                 active_checksum = sub_summary["active_checksum"]
                 break
+    if active_checksum and source_checksum_scope_note:
+        return _finalize(
+            _merge_cardinality_only_report(
+                source_rows=source_rows,
+                active_rows=int(active_rows or 0),
+                active_checksum=str(active_checksum),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                note=source_checksum_scope_note,
+            )
+        )
     if active_checksum:
         report = reconcile(
             source_rows=source_rows,
@@ -2101,11 +2194,27 @@ def run_reconciliation(
         # never compare two different populations and call the difference
         # corruption.
         from services.reconciliation import ReconciliationReport
+        from services.row_conservation import KeyCensus
 
         expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
-        balanced = target_rows == expected_rows or (
-            allow_extra_early and target_rows >= expected_rows
+        keyed_census = (
+            KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
+            if _keyed_join_proof(dest_summary)
+            else None
         )
+        if keyed_census is not None and rows_before is not None:
+            # Keyed engine copy into an occupied table: the identity is
+            # ``dest == dest_before + inserts - deletes``, exactly.
+            expected_rows = int(rows_before) + int(keyed_census.expected_delta)
+            balanced = target_rows == expected_rows
+            source_checksum_scope_label = (
+                f"by engine copy (dest_before {int(rows_before):,} + inserts "
+                f"{keyed_census.inserts:,} - deletes {keyed_census.deletes:,})"
+            )
+        else:
+            balanced = target_rows == expected_rows or (
+                allow_extra_early and target_rows >= expected_rows
+            )
         return _finalize(
             ReconciliationReport(
                 passed=balanced,

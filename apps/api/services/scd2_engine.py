@@ -344,6 +344,124 @@ def _expire_rows(
     return result.rowcount or 0
 
 
+def _iter_current_keys(
+    conn: Any,
+    qualified: str,
+    pk_columns: list[str],
+    dialect_name: str,
+    batch_size: int,
+):
+    """Stream the composite keys of every current version. Never OFFSET."""
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+    from services.reconciliation_api import iter_select_row_dicts
+
+    q = _qchar(dialect_name)
+    current_pred = scd2_is_current_predicate(
+        dialect_name, quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    )
+    cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
+    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
+    for batch in iter_select_row_dicts(
+        conn, sa.text(sql), pk_columns, itersize=max(1, int(batch_size))
+    ):
+        for row in batch:
+            yield _compose_key(row, pk_columns)
+
+
+def close_versions_missing_from_keys(
+    conn: Any,
+    qualified: str,
+    pk_columns: list[str],
+    source_keys: set[str],
+    timestamp: datetime,
+    dialect_name: str,
+    batch_size: int = 1_000,
+) -> int:
+    """Expire current versions whose key is not in a complete source key set.
+
+    Buffered-path twin of :func:`close_versions_missing_from_snapshot`: the
+    source population lives in a spool, not a staging table, so the
+    difference ``dest_current \\ source`` is taken key-by-key against a
+    streamed read of the destination's current versions and expired in
+    bundles. Only valid for a complete source snapshot.
+    """
+    if not pk_columns:
+        return 0
+    missing = [
+        k
+        for k in _iter_current_keys(conn, qualified, pk_columns, dialect_name, batch_size)
+        if k and k not in source_keys
+    ]
+    expired = 0
+    for start in range(0, len(missing), max(1, int(batch_size))):
+        expired += _expire_rows(
+            conn,
+            qualified,
+            pk_columns,
+            set(missing[start : start + batch_size]),
+            timestamp,
+            dialect_name,
+        )
+    return expired
+
+
+def close_versions_missing_from_snapshot(
+    conn: Any,
+    target_qualified: str,
+    snapshot_qualified: str,
+    pk_columns: list[str],
+    *,
+    timestamp: datetime | None = None,
+    dialect: str = "",
+) -> dict[str, Any]:
+    """Expire current versions whose key is absent from a complete source snapshot.
+
+    Kimball hard-delete close-out (dbt snapshot ``invalidate_hard_deletes``):
+    a key that no longer exists at the source keeps its history but stops
+    being current. Only valid when ``snapshot_qualified`` holds the *whole*
+    source population — a limited or watermark-narrowed read must never call
+    this, or every unread key would be closed. The closed count is a
+    dest-engine COUNT of the transition taken before the UPDATE, never
+    driver ``rowcount``.
+    """
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+
+    if not pk_columns:
+        return {"closed_missing_rows": 0}
+    q = _qchar(dialect)
+    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN, q)
+    current_pred = scd2_is_current_predicate(dialect, current_quoted)
+    false_lit = scd2_is_current_false_sql(dialect)
+    join_pred = " AND ".join(
+        f"{snapshot_qualified}.{quote_sql_identifier(c, q)} = "
+        f"{target_qualified}.{quote_sql_identifier(c, q)}"
+        for c in pk_columns
+    )
+    missing_pred = (
+        f"{current_pred} AND NOT EXISTS "
+        f"(SELECT 1 FROM {snapshot_qualified} WHERE {join_pred})"
+    )
+    closed = conn.execute(
+        sa.text(
+            f"SELECT COUNT(*) FROM {target_qualified} WHERE {missing_pred}"  # nosec B608
+        )
+    ).scalar()
+    closed_n = int(closed or 0)
+    if closed_n:
+        conn.execute(
+            sa.text(
+                f"UPDATE {target_qualified} "  # nosec B608
+                f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+                f"WHERE {missing_pred}"
+            ),
+            {"ts": timestamp or _now_utc()},
+        )
+    return {"closed_missing_rows": closed_n}
+
+
 def _active_checksum(
     conn: Any,
     qualified: str,
@@ -708,12 +826,18 @@ def apply_scd2(
     validation_mode: str = "strict",
     source_spool: Any = None,
     clear_records: bool = False,
+    complete_snapshot: bool = False,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
 
     ``conflict_columns`` is the destination primary key (one or more columns).
     Returns a summary dict with ``rows_written`` (new current versions),
     ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
+
+    ``complete_snapshot=True`` declares ``records`` / ``source_spool`` to be the
+    whole source population: current versions whose key is absent are closed
+    (Kimball hard-delete close-out) and reported as ``closed_missing_rows``.
+    A per-batch or limited caller must leave it False.
 
     Fail / FAIL_JOB: scan every spool bundle, collect every reject, then
     refuse the history write — never expire/insert a prefix. Merge pass
@@ -802,6 +926,8 @@ def apply_scd2(
             timestamp = _now_utc()
             inserted_total = 0
             expired_total = 0
+            closed_missing = 0
+            source_keys: set[str] = set()
             qualified = _qualified_name(table, schema_name, dialect_name)
 
             with engine.begin() as conn:
@@ -812,6 +938,10 @@ def apply_scd2(
                     batch_size=batch_size,
                 ):
                     if pk_ok:
+                        if complete_snapshot:
+                            source_keys.update(
+                                _compose_key(row, pk_columns) for row in pk_ok
+                            )
                         inserted, expired = _merge_scd2_bundle(
                             conn,
                             table_obj,
@@ -826,6 +956,18 @@ def apply_scd2(
                         expired_total += expired
                     del pk_ok
 
+                if complete_snapshot:
+                    closed_missing = close_versions_missing_from_keys(
+                        conn,
+                        qualified,
+                        pk_columns,
+                        source_keys,
+                        timestamp,
+                        dialect_name,
+                        batch_size=batch_size,
+                    )
+                    expired_total += closed_missing
+
                 active_rows, active_checksum = _active_checksum(
                     conn, qualified, target_cols, batch_size, dialect_name
                 )
@@ -839,6 +981,7 @@ def apply_scd2(
         "ok": True,
         "rows_written": inserted_total,
         "updated_rows": expired_total,
+        "closed_missing_rows": closed_missing,
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "mode": "scd2",
