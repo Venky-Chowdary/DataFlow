@@ -494,19 +494,33 @@ def read_table_cursor_batch(
                 # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
                 pk = (cursor_primary_key or "").strip()
                 if pk and pk != cursor_column:
-                    query = sql.SQL(
-                        "{} WHERE ({}, {}) > (%s, %s) ORDER BY {}, {} LIMIT %s"
-                    ).format(
-                        base,
-                        sql.Identifier(cursor_column),
-                        sql.Identifier(pk),
-                        sql.Identifier(cursor_column),
-                        sql.Identifier(pk),
-                    )
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )
-                    cur.execute(query, (cur_val, pk_val, limit))
+                    if pk_val == "":
+                        # Cursor-only watermark with a tie-break column: seek on
+                        # the cursor alone but order on both so the page edge
+                        # is deterministic for the composite seek that follows.
+                        query = sql.SQL(
+                            "{} WHERE {} > %s ORDER BY {}, {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(pk),
+                        )
+                        cur.execute(query, (cur_val, limit))
+                    else:
+                        query = sql.SQL(
+                            "{} WHERE ({}, {}) > (%s, %s) ORDER BY {}, {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(pk),
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(pk),
+                        )
+                        cur.execute(query, (cur_val, pk_val, limit))
                 else:
                     query = sql.SQL("{} WHERE {} > %s ORDER BY {} LIMIT %s").format(
                         base,

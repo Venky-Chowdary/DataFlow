@@ -78,6 +78,12 @@ def present_cursor_bookmark(value: Any) -> str | None:
     return present_cell_text(value)
 
 
+def is_cursor_only_bookmark(bookmark: str | None) -> bool:
+    """True when ``bookmark`` carries a single cursor value and no tie-break part."""
+    raw = "" if bookmark is None else str(bookmark)
+    return KEYSET_SEP not in raw and _LEGACY_PIPE_SEP not in raw
+
+
 def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
     """Decode a bookmark into ``expected_parts`` string parts.
 

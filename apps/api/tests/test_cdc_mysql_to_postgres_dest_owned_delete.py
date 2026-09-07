@@ -273,7 +273,9 @@ def test_mysql_binlog_postgres_dest_owned_delete_replay() -> None:
             or summary2.get("watermark"),
             "note": "Dest-engine PostgreSQL DELETE. Not leftover MERGE. Not dest-owned exactly-once.",
         }
-        out = Path("/opt/cursor/artifacts/cdc-dest-owned-merge/mysql-pg-dest-owned-delete.json")
+        from services.platform_config import data_dir
+
+        out = data_dir() / "proofs" / "cdc-dest-owned-merge" / "mysql-pg-dest-owned-delete.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(__import__("json").dumps(artifact, indent=2) + "\n", encoding="utf-8")
     finally:

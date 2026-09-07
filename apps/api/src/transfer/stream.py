@@ -1044,6 +1044,9 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        # Bulk COPY never pages the source; say so instead of leaving the
+        # pagination fields absent (which reads as "unknown" to the operator).
+        dest_summary.setdefault("pagination_mode", "bulk_copy")
         if pre_write_rows_before is not None:
             dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if incremental:

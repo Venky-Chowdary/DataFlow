@@ -3816,7 +3816,11 @@ def read_table_cursor_batch(
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
-    from services.keyset_pagination import present_cursor_bookmark, sqlalchemy_keyset_clause
+    from services.keyset_pagination import (
+        is_cursor_only_bookmark,
+        present_cursor_bookmark,
+        sqlalchemy_keyset_clause,
+    )
 
     cfg = _cfg_from_params(
         host,
@@ -3883,8 +3887,17 @@ def read_table_cursor_batch(
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
             bookmark = present_cursor_bookmark(cursor_after)
             if bookmark is not None:
+                seek_cols = key_cols
+                if (
+                    not cursor_key_columns
+                    and len(key_cols) == 2
+                    and is_cursor_only_bookmark(bookmark)
+                ):
+                    # Cursor-only watermark with a tie-break column: seek on
+                    # the cursor alone, order on both (deterministic page edge).
+                    seek_cols = key_cols[:1]
                 stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, key_cols, bookmark)
+                    sqlalchemy_keyset_clause(sa, seek_cols, bookmark)
                 )
             stmt = stmt.order_by(*key_cols).limit(limit)
 

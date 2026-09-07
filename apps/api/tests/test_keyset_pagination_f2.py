@@ -132,7 +132,18 @@ def test_generic_sql_cursor_composite_sqlite():
         assert ("A", "2") not in got
 
 
-def test_stream_sqlite_composite_pk_keyset_mode():
+@pytest.mark.parametrize(
+    ("limit", "expected_mode"),
+    [
+        # Identity SQLite→SQLite is served by bulk COPY: no source paging happens
+        # and the summary must say so rather than leave the mode absent.
+        (0, "bulk_copy"),
+        # A row limit declines COPY; the row path must seek on the composite
+        # primary key, not OFFSET.
+        (1000, "keyset"),
+    ],
+)
+def test_stream_sqlite_composite_pk_keyset_mode(limit, expected_mode):
     from services.checkpoint_service import CheckpointService
     from src.transfer.models import EndpointConfig
     from src.transfer.stream import stream_database_transfer
@@ -182,6 +193,7 @@ def test_stream_sqlite_composite_pk_keyset_mode():
             {"order_id": "string", "line_id": "integer", "qty": "integer"},
             job_id="000000000000000000000001",
             checkpoint_service=CheckpointService(_FakeMongo()),
+            limit=limit,
             stream_contracts=[
                 {
                     "selected": True,
@@ -191,8 +203,11 @@ def test_stream_sqlite_composite_pk_keyset_mode():
             ],
         )
         assert rows_written == 40
-        assert summary.get("pagination_mode") == "keyset"
-        assert summary.get("pagination_key_columns") == ["order_id", "line_id"]
+        assert summary.get("pagination_mode") == expected_mode
+        if expected_mode == "keyset":
+            assert summary.get("pagination_key_columns") == ["order_id", "line_id"]
+        else:
+            assert summary.get("copy_fast_path") == "used"
         out = sqlite3.connect(dst)
         assert out.execute("SELECT count(*) FROM lines_out").fetchone()[0] == 40
         out.close()
