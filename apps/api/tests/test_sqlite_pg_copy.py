@@ -376,7 +376,7 @@ def test_live_sqlite_pg_boolean_synonym_declines(tmp_path):
     conn.commit()
     conn.close()
     try:
-        with pytest.raises(FastPathUnavailable, match="0/1"):
+        with pytest.raises(FastPathUnavailable, match=r"'flag' holds 1 cell\(s\) that are not BOOLEAN"):
             copy_sqlite_to_postgres(
                 source_cfg=_sqlite_cfg(src_path, "src_t"),
                 source_table="src_t",
@@ -436,7 +436,7 @@ def test_live_sqlite_pg_empty_string_and_null_preserved(tmp_path):
         pg.close()
 
 
-def test_live_sqlite_pg_skip_when_dest_count_matches(tmp_path):
+def test_live_sqlite_pg_equal_count_append_declines(tmp_path):
     pg = _pg_connect()
     tag = uuid.uuid4().hex[:8]
     src_path = tmp_path / "src.db"
@@ -457,18 +457,17 @@ def test_live_sqlite_pg_skip_when_dest_count_matches(tmp_path):
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_sqlite_to_postgres(
-            source_cfg=_sqlite_cfg(src_path, "src_t"),
-            source_table="src_t",
-            dest_cfg=_pg_cfg(),
-            dest_schema="public",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            pg_ddls=["BIGINT", "TEXT"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_sqlite_to_postgres(
+                source_cfg=_sqlite_cfg(src_path, "src_t"),
+                source_table="src_t",
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "TEXT"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         with pg.cursor() as cur:

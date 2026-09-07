@@ -21,7 +21,6 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -121,13 +120,6 @@ def copy_sqlite_to_sqlite(
             if cursor_where:
                 raise FastPathUnavailable(
                     "filtered COPY into occupied dest stays on the incremental staging path"
-                )
-            if dest_count_before == source_count:
-                conn.rollback()
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"sqlite_write": "skip", "sqlite_read": "skip"},
                 )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "

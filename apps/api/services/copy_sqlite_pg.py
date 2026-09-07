@@ -30,7 +30,6 @@ from services.copy_fast_path import _table_ref as _pg_table_ref
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_copy_bool_value,
     sqlite_copy_date_value,
@@ -214,12 +213,6 @@ def copy_sqlite_to_postgres(
                 if cursor_where:
                     raise FastPathUnavailable(
                         "filtered COPY into occupied dest stays on the incremental staging path"
-                    )
-                if dest_count_before == source_count:
-                    return skip_complete_sqlite(
-                        source_count=source_count,
-                        dest_count=dest_count_before,
-                        extra_snapshot={"sqlite_read": "skip"},
                     )
                 raise FastPathUnavailable(
                     "append into occupied PostgreSQL dest stays on the row path "

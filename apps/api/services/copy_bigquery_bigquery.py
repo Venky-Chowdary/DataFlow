@@ -36,7 +36,6 @@ from services.copy_bigquery_common import (
     bigquery_table_exists,
     bigquery_table_ref,
     bigquery_type_is_copy_safe,
-    skip_complete_bigquery,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,15 +89,6 @@ def copy_bigquery_to_bigquery(
     dest_count_before = bigquery_dest_count(dest_cfg, dest_table)
     dest_occupied = dest_count_before > 0
     if dest_occupied and not replace_destination:
-        if dest_count_before == source_count:
-            return skip_complete_bigquery(
-                source_count=source_count,
-                dest_count=dest_count_before,
-                extra_snapshot={
-                    "bigquery_write": "skip",
-                    "bigquery_read": "skip",
-                },
-            )
         raise FastPathUnavailable(
             "append into occupied BigQuery dest stays on the row path "
             "(identity COPY would duplicate)"

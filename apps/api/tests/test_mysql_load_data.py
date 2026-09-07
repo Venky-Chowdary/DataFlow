@@ -231,7 +231,9 @@ def test_integer_pk_cuts_and_partition_count():
     assert pg_mysql_copy_partitions(10, 1) == 1
     assert pg_mysql_copy_partitions(8_000, 4) == 4
     assert pg_mysql_copy_partitions(200_000_000, 4) == 32
-    assert pg_mysql_copy_partitions(10_000_000, 4) == 4
+    # ≥1M rows plan ~1M-row partitions (resume granularity), not one per worker.
+    assert pg_mysql_copy_partitions(10_000_000, 4) == 10
+    assert pg_mysql_copy_partitions(1_000_000, 4) == 4
 
 
 def test_warning_rows_block_commit_notes_do_not():

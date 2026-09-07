@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import socket
 import sys
 import uuid
@@ -228,7 +227,7 @@ def test_live_pg_mongo_empty_string_and_null_preserved():
         pg.close()
 
 
-def test_live_pg_mongo_skip_when_dest_count_matches():
+def test_live_pg_mongo_equal_count_append_declines():
     pytest.importorskip("pymongo")
     pg = _pg_connect()
     tag = uuid.uuid4().hex[:8]
@@ -250,18 +249,17 @@ def test_live_pg_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_postgres_to_mongo(
-            source_cfg=_pg_cfg(),
-            source_schema="public",
-            source_table=src,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_postgres_to_mongo(
+                source_cfg=_pg_cfg(),
+                source_schema="public",
+                source_table=src,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         with pg.cursor() as cur:

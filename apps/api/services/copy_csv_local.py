@@ -826,7 +826,6 @@ def copy_csv_to_sqlite(
         sqlite_resolved_path,
         sqlite_table_exists,
         sqlite_type_is_copy_safe,
-        skip_complete_sqlite,
     )
 
     if not pairs or len(pairs) != len(sqlite_ddls):
@@ -865,13 +864,6 @@ def copy_csv_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                dest_conn.rollback()
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip", "sqlite_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"
@@ -961,7 +953,6 @@ def copy_csv_to_postgres(
     """Mapped local CSV into PostgreSQL COPY FROM STDIN. Dest COUNT(*) is the proof."""
     from services.copy_fast_path import _quote, _table_ref
     from services.copy_mysql_pg import _pg_connect, _pg_create_sql
-    from services.copy_s3_common import skip_complete_s3
 
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
@@ -1001,12 +992,6 @@ def copy_csv_to_postgres(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip"},
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied PostgreSQL dest stays on the row path "
@@ -1065,7 +1050,6 @@ def copy_csv_to_mysql(
     from connectors.write_resilience import is_public_proxy_host
     from services.copy_mysql_pg import _mysql_connect, _mysql_ident
     from services.copy_pg_mysql import _mysql_create_sql
-    from services.copy_s3_common import skip_complete_s3
     from services.copy_s3_mysql import _load_delimited_into_mysql, _mysql_table_exists
 
     if not pairs or len(pairs) != len(mysql_ddls):
@@ -1091,12 +1075,6 @@ def copy_csv_to_mysql(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip", "load_data": "skip"},
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied MySQL dest stays on the row path "

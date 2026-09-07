@@ -228,7 +228,7 @@ def test_live_mysql_mongo_empty_string_and_null_preserved():
         mysql.close()
 
 
-def test_live_mysql_mongo_skip_when_dest_count_matches():
+def test_live_mysql_mongo_equal_count_append_declines():
     pytest.importorskip("pymongo")
     mysql = _mysql_connect()
     tag = uuid.uuid4().hex[:8]
@@ -248,17 +248,16 @@ def test_live_mysql_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mysql_to_mongo(
-            source_cfg=_mysql_cfg(),
-            source_table=src,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_mysql_to_mongo(
+                source_cfg=_mysql_cfg(),
+                source_table=src,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         with mysql.cursor() as cur:

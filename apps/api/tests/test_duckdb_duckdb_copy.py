@@ -412,7 +412,7 @@ def test_live_duckdb_copy_is_not_pandas_or_parquet(monkeypatch):
         _cleanup(src_p, dst_p)
 
 
-def test_live_duckdb_skip_when_dest_count_matches(monkeypatch):
+def test_live_duckdb_equal_count_append_declines(monkeypatch):
     monkeypatch.delenv("DATAFLOW_DUCKDB_DUCKDB_COPY", raising=False)
     tag = uuid.uuid4().hex[:8]
     src_p, dst_p = _path(tag, "src"), _path(tag, "dst")
@@ -428,17 +428,16 @@ def test_live_duckdb_skip_when_dest_count_matches(monkeypatch):
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_duckdb_to_duckdb(
-            source_cfg=_cfg(src_p, "src_t"),
-            source_table="src_t",
-            dest_cfg=_cfg(dst_p, "dst_t"),
-            dest_table="dst_t",
-            pairs=_pairs(),
-            duckdb_ddls=_ddls(),
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_duckdb_to_duckdb(
+                source_cfg=_cfg(src_p, "src_t"),
+                source_table="src_t",
+                dest_cfg=_cfg(dst_p, "dst_t"),
+                dest_table="dst_t",
+                pairs=_pairs(),
+                duckdb_ddls=_ddls(),
+                replace_destination=False,
+            )
         assert _dest_count(dst_p, "dst_t") == 800
     finally:
         _cleanup(src_p, dst_p)

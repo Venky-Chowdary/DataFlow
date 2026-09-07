@@ -333,6 +333,17 @@ What this sweep did **not** prove, and what a client must therefore be told:
    the 19 failures in this neighbourhood fail identically on `b68e7c89`, and
    54 of the 152 are one harness class (`_seed_source` through a
    source-only rest_api/stripe connector). Class breakdown in register §8b.
+   **Append-contract wave (register §8c, same branch):** the equal-count
+   "skip complete" was removed from ~45 row-addressed COPY fast paths (one owner,
+   `copy_fast_path.skip_complete_identity_copy`, key-addressed dests only);
+   `target_rows_before` is now measured on the stream/file path; MongoDB is
+   key-addressed only with a mapped `_id`; Redis empty-prefix phantom schema
+   fixed; SQLite text-boolean identity COPY declines to the row path. 580
+   passed / 0 failed / 8 skipped on the 69-file changed-test selection with
+   PG/MySQL/Mongo/Redis live. Still open: source-only SaaS seeding (54), MariaDB
+   upsert, RI properties, `_Table.c` stubs, vector Gate-8, and a CDC poll that
+   may not terminate when the bookmark cannot advance (untracked repro tests,
+   OOM at 5 GB — not yet fixed).
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A

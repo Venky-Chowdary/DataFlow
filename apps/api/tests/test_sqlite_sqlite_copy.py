@@ -206,7 +206,7 @@ def test_live_sqlite_sqlite_blob_declines(tmp_path):
     assert not dest.exists() or _dest_count(dest, "dst_t") == 0
 
 
-def test_live_sqlite_sqlite_skip_when_dest_count_matches(tmp_path):
+def test_live_sqlite_sqlite_equal_count_append_declines(tmp_path):
     src = tmp_path / "src.db"
     dest = tmp_path / "dst.db"
     _seed(src, "src_t", 800)
@@ -220,18 +220,16 @@ def test_live_sqlite_sqlite_skip_when_dest_count_matches(tmp_path):
         replace_destination=False,
     )
     assert first.target_rows == 800
-    second = copy_sqlite_to_sqlite(
-        source_cfg=_cfg(src, "src_t"),
-        source_table="src_t",
-        dest_cfg=_cfg(dest, "dst_t"),
-        dest_table="dst_t",
-        pairs=[("id", "id"), ("label", "label")],
-        sqlite_ddls=["INTEGER", "TEXT"],
-        replace_destination=False,
-    )
-    assert second.source_snapshot.get("copy_split") == "skip"
-    assert second.source_snapshot.get("partitions_skipped") == 1
-    assert second.source_snapshot.get("sqlite_write") == "skip"
+    with pytest.raises(FastPathUnavailable, match="occupied"):
+        copy_sqlite_to_sqlite(
+            source_cfg=_cfg(src, "src_t"),
+            source_table="src_t",
+            dest_cfg=_cfg(dest, "dst_t"),
+            dest_table="dst_t",
+            pairs=[("id", "id"), ("label", "label")],
+            sqlite_ddls=["INTEGER", "TEXT"],
+            replace_destination=False,
+        )
     assert _dest_count(dest, "dst_t") == 800
 
 

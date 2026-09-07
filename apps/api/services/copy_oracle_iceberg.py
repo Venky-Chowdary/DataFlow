@@ -175,27 +175,6 @@ def copy_oracle_to_iceberg(
                 )
 
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                proof = f"dest_count:{dest_count_before}"
-                return FastPathResult(
-                    rows_copied=source_count,
-                    source_rows=source_count,
-                    source_checksum=proof,
-                    target_rows=dest_count_before,
-                    target_checksum=proof,
-                    source_snapshot={
-                        "oracle_lock": "share",
-                        "copy_workers": 1,
-                        "copy_split": "skip",
-                        "copy_partitions": 1,
-                        "partitions_skipped": 1,
-                        "partitions_loaded": 0,
-                        "shard_mode": "table",
-                        "iceberg_write": "skip",
-                        "source_pk": list(pk_cols or []),
-                    },
-                    proof_scope="dest_count_equals_source_snapshot_count",
-                )
             raise FastPathUnavailable(
                 "append into occupied Iceberg dest stays on the row path "
                 "(leftover MERGE / upsert); identity COPY would duplicate"

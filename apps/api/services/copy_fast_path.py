@@ -321,10 +321,17 @@ def skip_complete_identity_copy(
     shard_mode: str,
     extra_snapshot: dict[str, Any] | None = None,
 ) -> FastPathResult:
-    """Occupied dest whose COUNT already equals source COUNT — skip write, keep proof.
+    """Occupied key-addressed dest whose COUNT equals source COUNT — skip write.
 
-    Identity COPY engines share this result shape so skip-complete cannot drift
-    per connector. Proof remains dest COUNT, never upsert ack.
+    Only for destinations where a re-run rewrites the same keys or objects
+    (Redis keys, vector ids, object-store objects, Kafka compacted keys), so an
+    equal COUNT *is* the complete state. Row-addressed stores — SQL tables,
+    MongoDB collections, warehouse tables, Iceberg — must never call this:
+    ``full_refresh_append`` accumulates (two runs of N rows hold 2N), and an
+    equal COUNT is not proof the load already happened — the source may have
+    changed under the same cardinality. Those routes decline into an occupied
+    dest and the row path appends with a measured ``target_rows_before``.
+    Proof remains dest COUNT, never upsert ack.
     """
     proof = f"dest_count:{dest_count}"
     snapshot = {

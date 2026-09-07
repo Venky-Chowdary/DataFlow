@@ -301,7 +301,7 @@ def test_live_snowflake_snowflake_empty_string_and_null_preserved():
         _drop(dest)
 
 
-def test_live_snowflake_snowflake_skip_when_dest_count_matches():
+def test_live_snowflake_snowflake_equal_count_append_declines():
     tag = uuid.uuid4().hex[:8]
     src = f"sf_copy_skip_{tag}"
     dest = f"sf_copy_skip_dst_{tag}"
@@ -318,17 +318,16 @@ def test_live_snowflake_snowflake_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_snowflake_to_snowflake(
-            source_cfg=_sf_cfg(src),
-            source_table=src,
-            dest_cfg=_sf_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            snowflake_ddls=["INTEGER", "VARCHAR"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_snowflake_to_snowflake(
+                source_cfg=_sf_cfg(src),
+                source_table=src,
+                dest_cfg=_sf_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                snowflake_ddls=["INTEGER", "VARCHAR"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         _drop(src)

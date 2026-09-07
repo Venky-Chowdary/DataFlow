@@ -8,7 +8,6 @@ from services.brand_env import getenv_brand
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -50,7 +49,6 @@ from services.row_conservation import (
     KeyCensusAccumulator,
     live_rows_for_digest,
     observe_keyed_batch,
-    record_stream_health,
     record_tombstone_digest_scope,
 )
 from services.resilience import (  # noqa: E402, F401
@@ -75,12 +73,10 @@ from .stream_row_accounting import (
     _raw_page_keyset,
     _raw_page_marked,
     _raw_page_rows,
-    begin_table_population,
     stamp_incremental_no_op,
     stamp_source_row_count,
 )
 from .stream_foreign_keys import (
-    ForeignKeyContext as _ForeignKeyContext,
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
     foreign_key_context as _foreign_key_context,
 )
@@ -1007,6 +1003,23 @@ def _stream_database_transfer_impl(
             refuse_unusable_cursor_state(
                 _scope, dest_type, dest_cfg, _dest_obj
             )
+    # Gate-8 append proof needs the destination cardinality from before the
+    # first write, whichever path performs it. Measured once here, ahead of the
+    # COPY fast path, and reused by the row path below. A resumed run already
+    # holds rows this job wrote, so its live COUNT is not a "before".
+    pre_write_rows_before: int | None = None
+    if not (
+        checkpoint
+        and (
+            getattr(checkpoint, "rows_processed", 0)
+            or getattr(checkpoint, "offset", 0)
+        )
+    ):
+        pre_write_rows_before = precount_table(
+            dest_type,
+            dest_cfg,
+            resolve_dest_table(dest_type, destination, _source_name(source)),
+        )
     try:
         fast = None if shape_runner is not None else _try_copy_fast_path(
             source=source,
@@ -1031,6 +1044,8 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        if pre_write_rows_before is not None:
+            dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if incremental:
             dest_summary["sync_mode"] = effective_sync
             wm = str(dest_summary.get("incremental_watermark") or "").strip()
@@ -1697,7 +1712,7 @@ def _stream_database_transfer_impl(
     # resumed run already appended rows, so its count is not a "before" and the
     # delta stays unproven rather than being reported wrong.
     if not (written or offset):
-        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        rows_before = pre_write_rows_before
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
@@ -1709,7 +1724,7 @@ def _stream_database_transfer_impl(
     # write, so even an append needs the dest-engine census (new keys vs
     # replaced keys) to close conservation — COUNT(*) growth alone reads a
     # correct re-write of the same keys as silent loss.
-    dest_key_addressed = dest_is_key_addressed(dest_type)
+    dest_key_addressed = dest_is_key_addressed(dest_type, pk_target_cols)
     if dest_key_addressed:
         dest_summary[KEY_ADDRESSED_KEY] = True
     keyed_upsert_scope = write_mode == "upsert" and bool(pk_target_cols)

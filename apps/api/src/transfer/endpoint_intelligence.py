@@ -807,13 +807,23 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             )
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
-            out["columns"] = batch.headers
-            _stamp_batch_schema(out, batch, "redis")
-            out["row_estimate"] = (batch.total_rows or 0)
+            keys_matched = int(batch.total_rows or 0) or len(batch.rows or [])
+            if keys_matched > 0:
+                out["columns"] = batch.headers
+                _stamp_batch_schema(out, batch, "redis")
+            else:
+                # The reader's ``redis_key``/``redis_value``/``redis_type``
+                # envelope is not a live schema. Stamping it on an empty prefix
+                # made writers bind against three phantom fields and refuse
+                # every mapped column as "missing" instead of create-new.
+                out["columns"] = []
+                out["schema"] = {}
+                out["schema_authority"] = {}
+            out["row_estimate"] = keys_matched
             # Redis namespaces are logical key prefixes — an empty SCAN is not
             # proof the destination is missing (would falsely flip Map create-new).
             out["table_exists"] = True
-            if not (batch.total_rows or 0):
+            if not keys_matched:
                 out["message"] = (
                     f"{out.get('message', '')} · no keys match `{pattern}`; "
                     "Redis namespaces are logical prefixes, not tables."

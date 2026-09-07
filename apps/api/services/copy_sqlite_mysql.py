@@ -30,7 +30,6 @@ from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _mysql_connect, _mysql_ident
 from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_copy_bool_value,
     sqlite_copy_date_value,
@@ -203,12 +202,6 @@ def copy_sqlite_to_mysql(
             if cursor_where:
                 raise FastPathUnavailable(
                     "filtered COPY into occupied dest stays on the incremental staging path"
-                )
-            if dest_count_before == source_count:
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"sqlite_read": "skip", "load_data": "skip"},
                 )
             raise FastPathUnavailable(
                 "append into occupied MySQL dest stays on the row path "

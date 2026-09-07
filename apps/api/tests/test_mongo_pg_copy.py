@@ -267,7 +267,7 @@ def test_live_mongo_pg_empty_string_and_null_preserved():
         pg.close()
 
 
-def test_live_mongo_pg_skip_when_dest_count_matches():
+def test_live_mongo_pg_equal_count_append_declines():
     pytest.importorskip("pymongo")
     pg = _pg_connect()
     tag = uuid.uuid4().hex[:8]
@@ -290,18 +290,17 @@ def test_live_mongo_pg_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mongo_to_postgres(
-            source_cfg=_mongo_cfg(mid),
-            source_table=mid,
-            dest_cfg=_pg_cfg(),
-            dest_schema="public",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            pg_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_mongo_to_postgres(
+                source_cfg=_mongo_cfg(mid),
+                source_table=mid,
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 800
