@@ -266,16 +266,30 @@ where the browser returned `100`.
 
 What this sweep did **not** prove, and what a client must therefore be told:
 
-1. **UI evidence is partial.** The browser pass covered Map / Validate / Execute,
-   the Gate-8 card, proof-pack export and Verify, the approval inbox, quarantine
-   and the audit chain. Still **untested, not passing**: the browser re-proof of
-   D25's download → Verify round trip and of D26 / D31 after their fixes, job
-   cancellation, schedules driven by an operator end to end, the Operations /
-   Contracts / Proofs pages, workspace roles and member removal. **D40** is an
-   open defect from that pass: a reachable G19 hard block (`TEXT →
-   DECIMAL(38,15)`) offers no risk-policy or signing control and no statement
-   that remapping is the only way forward.
-2. **The connector matrix is still incomplete.** Local engines are up (Postgres,
+1. **UI evidence is partial, and now says which half.** A second browser pass
+   re-proved D25 (export → download → re-upload verifies; a one-byte mutation
+   still fails all three checks), D38 (a destination edit drops the stale stamp,
+   `Run now` completes, the cadence tick judges the current route, and
+   rename-only and cadence-only edits preserve both hashes byte-identically),
+   D39 (22/22 post-fix records carry a monotonic `chain_seq` and no finding
+   lands on any of them) and D26 (the declared `VARCHAR(255)` survives the round
+   trip and drives the DDL). Three things it could **not** prove: D37's *enabled*
+   Replay path, because no route through the UI reaches a payload-bearing
+   write-time rejection; D39's tie-break, because no two post-fix audit writes
+   shared a timestamp; and D31 at this tip. Still untested: job cancellation, an
+   operator-driven schedule, Operations / Contracts / Proofs, workspace roles and
+   member removal.
+2. **D40 is open and wider than first recorded.** A blocked route offers no
+   risk-policy selector and no signing control, on `TEXT → DECIMAL(38,15)` and
+   again on `DECIMAL(12,2) → DATE`, where Validate *names* the way out ("sign a
+   continue-policy Migration Risk Contract") and Map then offers neither
+   control. It also blocks D37's positive path, so fixing it closes two items.
+3. **The Verify chain screen still reads `Chain verification failed — 36
+   record(s)`** even though every finding is on a pre-fix record. The fix stops
+   new ones; it cannot un-cross history without rewriting audit history. A
+   client sees a red verdict until those records are checkpointed or the screen
+   distinguishes legacy findings — that is a product decision, not a defect.
+4. **The connector matrix is still incomplete.** Local engines are up (Postgres,
    MySQL, SQL Server, Mongo replica set, Redis, Elasticsearch, MinIO, Azurite,
    fake-GCS, BigQuery emulator, DynamoDB Local, Iceberg REST, Qdrant, Weaviate,
    Redpanda, ClickHouse, DuckDB, SQLite), and starting them converted silent
@@ -284,11 +298,11 @@ What this sweep did **not** prove, and what a client must therefore be told:
    the fixtures resolve differently (D35). Hosted Snowflake / BigQuery /
    Databricks, real S3 / GCS / ADLS, the SaaS connectors, SFTP and a real IdP
    remain unproven for want of credentials.
-3. **Schedules have automated proof only** — 173 passed across the schedule
+5. **Schedules have automated proof only** — 173 passed across the schedule
    suites (cadence, due tick, retry/backoff, overlap, missed windows, DST,
    workspace ownership, cancellation). No operator drove one through the UI in
    this sweep.
-4. **The full suite is not green** and the failures are classified rather than
+6. **The full suite is not green** and the failures are classified rather than
    hidden: see the register's "Full-suite state" note. The dominant category is
    SaaS connectors refusing a write by design or having no sandbox credentials.
 

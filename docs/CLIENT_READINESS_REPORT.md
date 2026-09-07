@@ -368,20 +368,41 @@ ledger; the hash-chained evidence store and proof-pack export/verify.
 window / DST / ownership / cancellation semantics — 173 automated tests pass, no
 operator has driven one through the UI here.
 
-**Implemented but not measured:** the D26 carrier round trip and D31 locale
-money behaviour after their fixes; job cancellation; a schedule driven end to
-end by an operator; the Operations, Contracts and Proofs pages; workspace roles
-and member removal; and the browser re-proof of D25's download → Verify path.
-These are **untested**, not passing.
+**Now browser-proved (second QA pass, 2026-09-07):** the proof-pack export →
+download → re-upload round trip verifies and a one-byte mutation still fails all
+three checks (D25); a schedule survives a destination edit and runs, while a
+rename or cadence change preserves its approval byte-identically (D38); records
+written after the chain fix carry a monotonic `chain_seq` and none of them draws
+a finding (D39); and a hand-declared `VARCHAR(255)` survives Map → Validate →
+Map and drives the DDL (D26).
+
+**Implemented but not measured:** D37's *enabled* Replay path (no route through
+the UI reaches a payload-bearing write-time rejection — blocked by D40); D39's
+tie-break under two writes in one clock tick (no natural tie could be forced);
+D31's locale money behaviour at this tip; job cancellation; a schedule driven end
+to end by an operator; the Operations, Contracts and Proofs pages; workspace
+roles and member removal. These are **untested**, not passing.
+
+**One thing a client will see immediately:** the Verify chain screen reads
+`Chain verification failed — 36 record(s)`. Every one of those findings is on a
+record written before the ordering fix went live; the fix stops new ones and
+cannot un-cross history without rewriting an append-only audit log. Either those
+records get checkpointed or the screen distinguishes legacy findings — shipping
+a red chain verdict to a regulated client is not an option.
 
 A later browser pass in the same sweep did reach the application and closed four
 more defects the automated suites could not have found — the approval inbox
 showing another tenant's parked schedule (D36), a Replay control offered on
 findings with no row to replay (D37), a schedule permanently bricked by editing
 its destination (D38), and Verify chain accusing an untampered store of 28
-broken links (D39). It also left one open: **D40**, a reachable G19 hard block
-(`TEXT → DECIMAL(38,15)`) with no risk-policy selector, no signing path, and no
-statement that remapping is the only way forward.
+broken links (D39). It also left one open: **D40**, a blocked route with no
+release path — no risk-policy selector, no signing control — reproduced on two
+unrelated type pairs (`TEXT → DECIMAL(38,15)` and `DECIMAL(12,2) → DATE`), the
+second of which has Validate *name* the contract an operator is supposed to sign
+and Map then offer no way to sign it. It is the single highest-value open item:
+it is the difference between "the gate refused me and told me what to do" and
+"the product is a dead end", and it also blocks the one quarantine path QA could
+not exercise.
 
 The pattern is worth naming for the handover conversation: the assurance
 machinery is sound under test, and almost every defect found by *using* the
