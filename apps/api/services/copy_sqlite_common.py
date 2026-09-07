@@ -13,11 +13,14 @@ component and no ``Z`` / offset). INTEGER unix and REAL julian decline
 — those would invent a destination clock. BOOLEAN cells must be
 SQL-boolean 0/1 (Python ``bool``, INTEGER 0/1, or TEXT ``'0'``/``'1'``).
 ``true``/``yes``/``t`` synonyms decline (would invent a boolean). JSON /
-BYTEA / TIMESTAMPTZ dest DDL stay COPY-unsafe.
+BYTEA / TIMESTAMPTZ dest DDL stay COPY-unsafe. A text cell that is not the
+declared numeric carrier (``'false'``, ``'1,234'``) declines too: the row
+path owns locale parsing and the validation policy that quarantines it.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime
@@ -41,6 +44,11 @@ _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
     "JSON",
     "JSONB",
 })
+
+#: A decimal the row path would not rewrite: no grouping, currency mark, or
+#: locale separator ambiguity. ``1,234`` is US 1234 or EU 1.234 — the parser
+#: owns that judgement, so COPY declines instead of storing the raw text.
+_CANONICAL_DECIMAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 _DATE_MIDNIGHT_CLOCKS = frozenset({
     "00:00:00",
@@ -72,8 +80,14 @@ def sqlite_same_file(src_cfg: dict[str, Any], dest_cfg: dict[str, Any]) -> bool:
     return src == dest
 
 
-def sqlite_bind_from_text(ddl: str) -> Callable[[str | None], Any]:
-    """Bind a CSV/COPY-text cell to a SQLite value. NULL stays None."""
+def sqlite_bind_from_text(ddl: str, declared: str = "") -> Callable[[str | None], Any]:
+    """Bind a CSV/COPY-text cell to a SQLite value. NULL stays None.
+
+    ``declared`` is the logical type the mapping asked for, which SQLite
+    rematerializes as TEXT for the DECIMAL family — so the physical carrier
+    alone cannot tell a money column from free text, and a grouped or
+    currency-marked cell would land verbatim.
+    """
     base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
     if base in {
         "BIGINT",
@@ -88,15 +102,43 @@ def sqlite_bind_from_text(ddl: str) -> Callable[[str | None], Any]:
         return _bind_int
     if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
         return _bind_float
+    if declared:
+        from services.decision_kernel import normalize_logical_type
+
+        if normalize_logical_type(declared) == "decimal":
+            return _bind_decimal_text
     return _bind_text
 
 
 def _bind_int(value: str | None) -> int | None:
-    return None if value is None else int(value)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise FastPathUnavailable(
+            f"INTEGER cell {value!r} is not COPY-safe"
+        ) from exc
 
 
 def _bind_float(value: str | None) -> float | None:
-    return None if value is None else float(value)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise FastPathUnavailable(
+            f"REAL cell {value!r} is not COPY-safe"
+        ) from exc
+
+
+def _bind_decimal_text(value: str | None) -> str | None:
+    """Keep the exact digits of a canonical decimal; anything else declines."""
+    if value is None:
+        return None
+    if _CANONICAL_DECIMAL.match(value.strip()):
+        return value
+    raise FastPathUnavailable(f"DECIMAL cell {value!r} is not COPY-safe")
 
 
 def _bind_text(value: str | None) -> str | None:
