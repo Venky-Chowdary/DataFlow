@@ -15,7 +15,7 @@ export function parseStringCarrierWidth(inferred: string | null | undefined): nu
   if (!text) return null;
   if (isUnlimitedStringCarrier(text)) return null;
   const m = text.match(
-    /(?:var)?(?:national\s+)?(?:character\s+varying|char(?:acter)?\s+varying|nvarchar|varchar|nchar|char|character|string)\s*\(\s*(\d+)\s*\)/i,
+    /(?:var)?(?:national\s+)?(?:character\s+varying|char(?:acter)?\s+varying|nvarchar2|varchar2|nvarchar|varchar|nchar|bpchar|char|character|string)\s*\(\s*(\d+)\s*(?:byte|char)?\s*\)/i,
   );
   if (!m) return null;
   const width = Number.parseInt(m[1], 10);
@@ -60,7 +60,9 @@ export function isStringFamily(inferred: string | null | undefined): boolean {
   const t = (inferred || "").trim().toLowerCase();
   if (!t) return false;
   if (isUnlimitedStringCarrier(t) || mysqlTextTierRank(t) != null) return true;
-  return /\b(?:varchar|nvarchar|char|character|string|text|clob)\b/.test(t);
+  // Oracle VARCHAR2/NVARCHAR2 and NCHAR/BPCHAR are string carriers too — an
+  // unclassified carrier is a carrier every fidelity rule below skips.
+  return /\b(?:n?varchar2|n?varchar|nchar|bpchar|char|character|string|text|clob)\b/.test(t);
 }
 
 /** True when source string capacity exceeds destination VARCHAR(n). */
@@ -168,6 +170,200 @@ function integerWidthWouldNarrow(sourceType: string, targetType: string): boolea
 }
 
 /**
+ * The logical domain a declared carrier belongs to, for the domain-crossing
+ * rule below. Mirrors the domains ``type_system.normalize_logical_type``
+ * distinguishes; anything it cannot place (specialty, interval, spatial,
+ * vector, ObjectId) returns null and is left to the specific rules above.
+ */
+export type CarrierDomain =
+  | "string"
+  | "text"
+  | "json"
+  | "array"
+  | "struct"
+  | "map"
+  | "integer"
+  | "decimal"
+  | "float"
+  | "boolean"
+  | "date"
+  | "datetime"
+  | "time"
+  | "binary";
+
+export function carrierLogicalDomain(inferred: string | null | undefined): CarrierDomain | null {
+  const raw = (inferred || "").trim();
+  if (!raw) return null;
+  const t = raw.toLowerCase();
+  // Document/container carriers first: JSON also matches the unlimited-string test.
+  if (/^(?:struct|record|row)\b/.test(t) || /^(?:struct|record|row)\s*[<(]/.test(t)) return "struct";
+  if (/^map\b/.test(t)) return "map";
+  if (/^(?:array|list|set)\b/.test(t) || /\[\s*\]\s*$/.test(t)) return "array";
+  if (/\b(?:jsonb?|variant|super)\b/.test(t)) return "json";
+  if (/\b(?:interval|vector|geography|geometry|geojson|sdo_geometry|objectid|uuid|guid|uniqueidentifier|inet|cidr|macaddr|xml|xmltype|hstore|ltree|tsvector|tsquery|jsonpath|hierarchyid|sql_variant|rowversion|enum|user-defined|user_defined)\b/.test(t)) {
+    return null;
+  }
+  if (/\b(?:binary|varbinary|blob|bytea|bytes|raw|bindata|image)\b/.test(t)) return "binary";
+  if (/\b(?:boolean|bool)\b/.test(t)) return "boolean";
+  if (/\b(?:timestamptz|timestamp|datetime|datetime2|smalldatetime|datetimeoffset)\b/.test(t)) {
+    return "datetime";
+  }
+  if (/\b(?:timetz|time)\b/.test(t)) return "time";
+  if (/\bdate\b/.test(t)) return "date";
+  if (isDecimalFamily(t)) return "decimal";
+  if (/\b(?:float|double|real|float4|float8|float16|float32|float64|half|halffloat|binary_float|binary_double)\b/.test(t)) {
+    return "float";
+  }
+  if (integerBitWidth(raw) != null) return "integer";
+  if (isUnlimitedStringCarrier(t)) return "text";
+  if (isStringFamily(t)) return "string";
+  return null;
+}
+
+/**
+ * Domain crossings the engine treats as preserving — the allow-list in
+ * ``type_system.is_lossy_coercion``. Every other crossing is a coercion the
+ * engine declares lossy, so Map must ask for a Risk Contract rather than
+ * offering a plain Approve that Validate then refuses.
+ */
+const SAFE_DOMAIN_COERCIONS: ReadonlySet<string> = new Set([
+  "string>text",
+  "text>string",
+  "integer>decimal",
+  "integer>string",
+  "integer>text",
+  "integer>json",
+  "decimal>string",
+  "decimal>text",
+  "decimal>json",
+  "float>string",
+  "float>text",
+  "float>json",
+  "boolean>string",
+  "boolean>text",
+  "boolean>json",
+  "boolean>integer",
+  "boolean>decimal",
+  "boolean>float",
+  "date>datetime",
+  "date>string",
+  "date>text",
+  "date>json",
+  "datetime>string",
+  "datetime>text",
+  "datetime>json",
+  "time>string",
+  "time>text",
+  "time>json",
+]);
+
+/** N-prefixed / NATIONAL CHARACTER carrier — its own charset, not the table default. */
+function isNationalCharsetCarrier(inferred: string | null | undefined): boolean {
+  return /\b(?:nchar|nvarchar|nvarchar2|nclob|ntext|national\s+char(?:acter)?)\b/i.test(
+    (inferred || "").trim(),
+  );
+}
+
+/** Fixed-width CHAR(n)/NCHAR(n) — blank-padded storage, not an open string. */
+function isBlankPaddedCharCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  if (!t) return false;
+  return /^(?:n?char|character|nchar\s+varying|bpchar)\s*\(\s*\d+\s*\)$/.test(t)
+    || /^(?:n?char|character|bpchar)$/.test(t);
+}
+
+/** Declared-width string carrier: VARCHAR(255), STRING(50), VARCHAR2(30), CHAR(10). */
+function isBoundedStringCarrier(inferred: string | null | undefined): boolean {
+  return isStringFamily(inferred) && parseStringCarrierWidth(inferred) != null;
+}
+
+/**
+ * The engine's document specialty carriers: a scalar written into JSONB /
+ * VARIANT / SUPER acquires document-validation polarity the source never had
+ * (``type_system.specialty_domain_would_invent``).
+ */
+function isDocumentSpecialtyCarrier(inferred: string | null | undefined): boolean {
+  const t = (inferred || "").trim().toLowerCase();
+  return /\b(?:jsonb|variant|super|bson)\b/.test(t);
+}
+
+/**
+ * Crossings the engine refuses that a same/adjacent-domain read would call
+ * preserving. Each mirrors a named ``is_lossy_coercion`` rule, so an Approve
+ * offered here is an Approve Validate then refuses.
+ */
+function carrierShapeCoercionRisk(
+  sourceType: string | null | undefined,
+  targetType: string | null | undefined,
+): boolean {
+  const src = carrierLogicalDomain(sourceType);
+  const tgt = carrierLogicalDomain(targetType);
+
+  // Blank padding is storage semantics: entering or leaving CHAR(n) rewrites it.
+  const srcChar = isBlankPaddedCharCarrier(sourceType);
+  const tgtChar = isBlankPaddedCharCarrier(targetType);
+  if (srcChar !== tgtChar) return true;
+
+  // Non-string value into a declared-width string sink truncates at the width
+  // its rendered form exceeds — the width is not a property of the source.
+  if (
+    src != null
+    && src !== "string"
+    && src !== "text"
+    && isBoundedStringCarrier(targetType)
+  ) {
+    return true;
+  }
+
+  // A scaled decimal rendered as text drops the numeric domain and its scale.
+  if (src === "decimal" && (tgt === "string" || tgt === "text")) {
+    const ps = parseDecimalPrecisionScale(sourceType);
+    if (ps == null || ps.scale > 0) return true;
+  }
+
+  // A rendered TIMESTAMPTZ drops the offset it carried; its JSON wire keeps it.
+  if (isTzAwareTemporal(sourceType) && (tgt === "string" || tgt === "text")) return true;
+
+  // Bytes have no text encoding — rendering them invents one.
+  if (src === "binary" && (tgt === "string" || tgt === "text" || tgt === "json")) {
+    return true;
+  }
+
+  // Scalar → native document carrier invents document validation polarity. A
+  // temporal instant keeps its own JSON wire (``document_instant``), so the
+  // engine preserves it and Map must not demand a contract for it.
+  if (
+    src != null
+    && src !== "json"
+    && src !== "date"
+    && src !== "datetime"
+    && src !== "time"
+    && isDocumentSpecialtyCarrier(targetType)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * True when the declared carriers sit in different logical domains and the
+ * crossing is not one the engine preserves — TEXT → DECIMAL(38,15) parses,
+ * DECIMAL(12,2) → DATE reinterprets, and both can reject cells at write time.
+ */
+export function crossDomainCoercionRisk(
+  sourceType: string | null | undefined,
+  targetType: string | null | undefined,
+): boolean {
+  const src = carrierLogicalDomain(sourceType);
+  const tgt = carrierLogicalDomain(targetType);
+  if (src == null || tgt == null) return false;
+  if (carrierShapeCoercionRisk(sourceType, targetType)) return true;
+  if (src === tgt) return false;
+  return !SAFE_DOMAIN_COERCIONS.has(`${src}>${tgt}`);
+}
+
+/**
  * Client-side Map fidelity risk when engine stamp is cleared (dest-type change).
  * Aligns with API is_lossy / timezone / document-domain honesty — never invent Approve.
  */
@@ -241,19 +437,13 @@ export function declaredCarrierFidelityRisk(
   ) {
     return true;
   }
-  // National charset collapse / invent (NCHAR↔CHAR, NATIONAL CHARACTER).
-  if (
-    /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
-    && /\b(char|varchar|varchar2|text|string|clob)\b/i.test(tgt)
-    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
-  ) {
+  // National charset collapse / invent (NCHAR↔CHAR, NATIONAL CHARACTER). The
+  // target side reads through isStringFamily so a MySQL text tier
+  // (LONGTEXT/MEDIUMTEXT) counts — the engine calls that crossing lossy.
+  if (isNationalCharsetCarrier(src) && isStringFamily(tgt) && !isNationalCharsetCarrier(tgt)) {
     return true;
   }
-  if (
-    /\b(char|varchar|varchar2|text|string)\b/i.test(src)
-    && !/\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(src)
-    && /\b(nchar|nvarchar|nvarchar2|nclob|national\s+character|national\s+char)\b/i.test(tgt)
-  ) {
+  if (isStringFamily(src) && !isNationalCharsetCarrier(src) && isNationalCharsetCarrier(tgt)) {
     return true;
   }
   if (isDocumentCarrier(src) && isOpenStringCarrier(tgt)) return true;
@@ -324,6 +514,7 @@ export function declaredCarrierFidelityRisk(
   const sm = mapTyped(src);
   const tm = mapTyped(tgt);
   if (sm != null && tm != null && sm !== tm) return true;
+  if (crossDomainCoercionRisk(src, tgt)) return true;
   return false;
 }
 
