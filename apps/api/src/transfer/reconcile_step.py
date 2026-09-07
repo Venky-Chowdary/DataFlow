@@ -951,28 +951,47 @@ def _writer_supplied_engine_digests(
     return source, target, int(rows or 0)
 
 
-_COUNT_PROOF_TOKEN = re.compile(r"^dest_count:(\d+)$")
+_COUNT_PROOF_TOKEN = re.compile(r"^(?:dest_count|pk_join_count):(\d+)$")
+
+#: Proof scopes whose token counts rows rather than digesting them: a full COPY
+#: comparing destination COUNT(*) to the source snapshot, and a keyed upsert
+#: comparing the destination key join to the staged population.
+_COUNT_PROOF_SCOPES = (
+    "dest_count_equals_source_snapshot",
+    "dest_pk_join_equals_staging",
+)
 
 
 def _engine_count_proof_only(dest_summary: dict[str, Any] | None) -> int | None:
-    """Rows an engine copy proved by COUNT(*) when a count is all the proof it has.
+    """Rows an engine copy proved by counting when a count is all the proof it has.
 
     A server-side copy never brings a row into this process, so a route whose
     proof scope is destination COUNT(*) against the source snapshot COUNT(*)
-    reports ``dest_count:<n>`` where a value digest would go. Reading the
-    destination back here produces a hex digest, and comparing that to the token
-    compares a hash to a row count: every correct run of those routes failed with
-    "checksum mismatch". The count is graded as the cardinality proof it is
-    instead, and the report says plainly that value fidelity was not compared.
+    reports ``dest_count:<n>`` where a value digest would go — and a keyed
+    upsert, whose destination holds rows earlier runs wrote, reports
+    ``pk_join_count:<n>`` for the same reason. Reading the destination back here
+    produces a hex digest, and comparing that to either token compares a hash to
+    a row count: every correct run of those routes failed with "checksum
+    mismatch". The count is graded as the cardinality proof it is instead, and
+    the report says plainly that value fidelity was not compared.
     """
     summary = dest_summary or {}
     if _writer_supplied_engine_digests(summary) is not None:
         return None
     scope = str(summary.get("proof_scope") or "")
-    if "dest_count_equals_source_snapshot" not in scope:
+    if not any(known in scope for known in _COUNT_PROOF_SCOPES):
         return None
     matched = _COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip())
     return int(matched.group(1)) if matched else None
+
+
+def _keyed_join_proof(dest_summary: dict[str, Any] | None) -> bool:
+    """True when the count proof came from a destination key join, not COUNT(*)."""
+    summary = dest_summary or {}
+    scope = str(summary.get("proof_scope") or "")
+    if "dest_pk_join_equals_staging" not in scope:
+        return False
+    return bool(_COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip()))
 
 
 def _localize_checksum_mismatch(
@@ -1810,12 +1829,17 @@ def run_reconciliation(
         ) + " Re-run without resume for full_checksum population proof."
     elif _engine_count_proof_only(dest_summary) is not None:
         source_checksum_scope_label = "by engine copy"
+        counted = (
+            "the destination key join against the staged population"
+            if _keyed_join_proof(dest_summary)
+            else "destination COUNT(*) against the source snapshot COUNT(*)"
+        )
         source_checksum_scope_note = (
             "The copy ran inside the engines: no row entered this process, so the "
-            "only proof the route produced is destination COUNT(*) against the "
-            "source snapshot COUNT(*). There is no source value digest to compare "
-            "against a destination one. Set DATAFLOW_ENGINE_DIGEST=1 to digest both "
-            "populations in-engine for full_checksum proof."
+            f"only proof the route produced is {counted}. There is no source value "
+            "digest to compare against a destination one. Set "
+            "DATAFLOW_ENGINE_DIGEST=1 to digest both populations in-engine for "
+            "full_checksum proof."
         )
 
     source_checksum_provenance = ""
