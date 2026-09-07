@@ -1483,7 +1483,13 @@ def map_rows_for_fingerprint(
     rejected_details = list(rejected or [])
     type_map = dict(dest_types or {}) or dict(column_types or {})
     if mapped and target_cols and type_map:
-        target_types = [str(type_map.get(c) or type_map.get(str(c).lower()) or "") for c in target_cols]
+        target_types = [
+            physical_integer_carrier(
+                str(type_map.get(c) or type_map.get(str(c).lower()) or ""),
+                dest_kind,
+            )
+            for c in target_cols
+        ]
         if any(t.strip() for t in target_types):
             policy = transform_error_policy(error_policy)
             mapped = apply_write_quarantine_matrix(
@@ -3606,6 +3612,44 @@ def proven_varchar_widen(
 def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
     """True if value fits the signed/unsigned integer destination carrier."""
     return integer_fit_failure(value, type_str, dest_db=dest_db) is None
+
+
+@lru_cache(maxsize=4096)
+def physical_integer_carrier(type_str: str, dest_db: str) -> str:
+    """The integer column a bare logical ``integer`` stamp lands in on ``dest_db``.
+
+    A create-new destination has no catalog to read, so the Gate-8 remap only
+    sees Map's logical stamp — and ``integer_storage_bounds`` deliberately
+    reports a bare logical stamp as unbounded. The writer, however, materializes
+    that same stamp through ``ddl_type`` (BIGINT on PostgreSQL/MySQL, INTEGER on
+    SQLite) and quarantines what overflows it. Grading the fingerprint against
+    the logical stamp therefore kept a held-out row in the source digest and
+    failed a correct load on two opaque hashes. Physical carriers and non-integer
+    stamps pass through unchanged; engines whose keyword is a big-decimal carrier
+    stay unbounded, exactly as the write does.
+    """
+    from services.type_system import (
+        LOGICAL_INTEGER,
+        ddl_type,
+        integer_storage_bounds,
+        normalize_logical_type,
+    )
+
+    raw = (type_str or "").strip()
+    db = (dest_db or "").strip().lower()
+    if not raw or not db or normalize_logical_type(raw) != LOGICAL_INTEGER:
+        return raw
+    if integer_storage_bounds(raw, dest_db=db) is not None:
+        return raw
+    if raw not in {LOGICAL_INTEGER, "int", "integer"}:
+        return raw
+    if integer_storage_bounds("INTEGER", dest_db=db) is None:
+        # Schemaless / big-decimal engines: no fixed integer column to overflow.
+        return raw
+    physical = str(ddl_type(db, raw) or "").strip()
+    if not physical or integer_storage_bounds(physical, dest_db=db) is None:
+        return raw
+    return physical
 
 
 def quarantine_unfit_integers(

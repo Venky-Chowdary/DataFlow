@@ -621,6 +621,8 @@ def _write_mapped_csv(
     pk_column: str = "",
     file_type: str = "",
     declared_types: list[str] | None = None,
+    physical_types: list[str] | None = None,
+    dest_db: str = "",
 ) -> int:
     """Write dest-ordered CSV with HEADER. Returns data-row COUNT.
 
@@ -637,7 +639,14 @@ def _write_mapped_csv(
     carriers = list(declared_types or [""] * len(pairs))
     if len(carriers) != len(pairs):
         raise FastPathUnavailable("declared type list / column list mismatch")
-    census = [(col, logical) for col, logical in zip(source_cols, carriers, strict=True) if logical]
+    physicals = list(physical_types or [""] * len(pairs))
+    if len(physicals) != len(pairs):
+        raise FastPathUnavailable("physical type list / column list mismatch")
+    census = [
+        (col, logical, physical)
+        for col, logical, physical in zip(source_cols, carriers, physicals, strict=True)
+        if logical
+    ]
     count = 0
     unbounded = 0
     pending: list[dict[str, str | None]] = []
@@ -645,13 +654,15 @@ def _write_mapped_csv(
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
-            for col, logical in census:
+            for col, logical, physical in census:
                 cell = rec.get(col)
-                if not text_cell_copy_safe(cell, logical):
+                if not text_cell_copy_safe(
+                    cell, logical, physical=physical, dest_db=dest_db
+                ):
                     raise FastPathUnavailable(
                         f"{col!r} cell {cell!r} (data row {count + written + 1}) is not "
-                        f"{logical} COPY-safe; the row path owns its validation "
-                        "and quarantine"
+                        f"{physical or logical} COPY-safe; the row path owns its "
+                        "validation and quarantine"
                     )
             writer.writerow([_csv_cell(rec.get(col)) for col in source_cols])
             written += 1
@@ -710,6 +721,8 @@ def _mapped_csv_file(
     pk_column: str = "",
     file_type: str = "",
     declared_types: list[str] | None = None,
+    physical_types: list[str] | None = None,
+    dest_db: str = "",
 ) -> Iterator[tuple[str, int, str]]:
     kind = (file_type or "").strip().lower()
     ext = "tsv" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else "csv"
@@ -728,6 +741,8 @@ def _mapped_csv_file(
             pk_column=pk_column,
             file_type=file_type,
             declared_types=declared_types,
+            physical_types=physical_types,
+            dest_db=dest_db,
         )
         yield path, count, ext
     finally:
@@ -1182,6 +1197,8 @@ def copy_csv_to_sqlite_incremental(
         pk_column=pk_column,
         file_type=file_type,
         declared_types=declared_types,
+        physical_types=sqlite_ddls,
+        dest_db="sqlite",
     ) as (path, source_count, ext):
         if source_count == 0:
             return _empty_incremental(_sqlite_existing_count(dest_cfg, dest_table), mode)
@@ -1262,6 +1279,8 @@ def copy_csv_to_postgres_incremental(
         pk_column=pk_column,
         file_type=file_type,
         declared_types=declared_types,
+        physical_types=pg_ddls,
+        dest_db="postgresql",
     ) as (path, source_count, ext):
         dest_conn = _pg_connect(dest_cfg)
         try:
@@ -1388,6 +1407,8 @@ def copy_csv_to_mysql_incremental(
         pk_column=pk_column,
         file_type=file_type,
         declared_types=declared_types,
+        physical_types=mysql_ddls,
+        dest_db="mysql",
     ) as (path, source_count, ext):
         dest_conn = _mysql_connect(dest_cfg)
         try:
@@ -1725,6 +1746,8 @@ def try_copy_local_csv(
                 read_options=read_options,
                 file_type=file_type,
                 declared_types=declared_types,
+                physical_types=ddls,
+                dest_db=dest_n,
             ) as (path, source_count, ext):
                 if dest_n in {"postgresql", "postgres"}:
                     result = copy_csv_to_postgres(

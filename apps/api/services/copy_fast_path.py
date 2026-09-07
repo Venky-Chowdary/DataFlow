@@ -162,7 +162,13 @@ _ISO_DATETIME_TEXT = re.compile(
 _COPY_BOOLEAN_TEXT = frozenset({"0", "1"})
 
 
-def text_cell_copy_safe(value: str | None, logical: str) -> bool:
+def text_cell_copy_safe(
+    value: str | None,
+    logical: str,
+    *,
+    physical: str = "",
+    dest_db: str = "",
+) -> bool:
     """Would the destination engine's bulk loader accept this text cell as-is?
 
     An identity file COPY hands raw text to ``COPY FROM STDIN`` / ``LOAD DATA``
@@ -172,6 +178,13 @@ def text_cell_copy_safe(value: str | None, logical: str) -> bool:
     destination is touched, and a cell the carrier cannot hold declines the
     fast path so the row path validates and quarantines it. Text carriers hold
     anything; unknown logical types are left to the row path's own contract.
+
+    Syntax alone is not the carrier: ``99999999999999999999`` is an integer the
+    engine's BIGINT parser rejects at load, and ``0.016666668`` is a decimal
+    NUMBER(11,8) would round. When the ``physical`` destination type is known
+    the cell is also graded against the same range / precision-scale owners the
+    row path binds through (``fits_integer`` / ``fits_decimal``), so the census
+    and the writer agree on what fits.
     """
     if value is None:
         return True
@@ -179,9 +192,27 @@ def text_cell_copy_safe(value: str | None, logical: str) -> bool:
 
     kind = normalize_logical_type(logical) if logical else ""
     if kind == "integer":
-        return bool(_CANONICAL_INTEGER_TEXT.match(value))
+        if not _CANONICAL_INTEGER_TEXT.match(value):
+            return False
+        if not physical:
+            return True
+        from connectors.writer_common import fits_integer
+
+        return fits_integer(value, physical, dest_db=dest_db)
     if kind in {"decimal", "float"}:
-        return bool(CANONICAL_DECIMAL_TEXT.match(value))
+        if not CANONICAL_DECIMAL_TEXT.match(value):
+            return False
+        if not physical or kind != "decimal":
+            return True
+        from connectors.writer_common import (
+            fits_decimal,
+            parse_decimal_precision_scale,
+        )
+
+        params = parse_decimal_precision_scale(physical, dest_db=dest_db)
+        if params is None:
+            return True
+        return fits_decimal(value, params[0], params[1], dest_db=dest_db)
     if kind == "boolean":
         return value in _COPY_BOOLEAN_TEXT
     if kind == "date":

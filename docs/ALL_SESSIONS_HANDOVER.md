@@ -314,9 +314,23 @@ What this sweep did **not** prove, and what a client must therefore be told:
    strict fails closed with 0 rows, clean population still COPYs); focused
    suites 32 passed, blast radius 189 passed / 2 pre-existing failures
    (`test_file_stream_path`, `test_file_stream_skip_matrix`, identical on
-   `b3fec86b`). Unmeasured: MySQL `LOAD DATA` live cell, integer range
-   overflow inside a valid integer, full backend suite on `59c37f01`
-   (running; the previous run died at 36% with its shell).
+   `b3fec86b`). Both formerly unmeasured cells were then run live
+   (register §8b): MySQL `LOAD DATA` behaves like PostgreSQL for
+   `not-a-number`, and **integer range overflow inside a valid integer was a
+   real defect** — `99999999999999999999` passed the lexical census and
+   PostgreSQL `COPY` aborted on `out of range for type bigint`, while MySQL
+   quarantined it but then failed Gate-8 because the fingerprint remap graded
+   the held-out row against the unbounded logical `integer` stamp. Closed by
+   passing the physical DDL + dialect into the census
+   (`text_cell_copy_safe` → `fits_integer` / `fits_decimal`, the row path's
+   own owners) and by `writer_common.physical_integer_carrier` so Gate-8
+   holds out exactly what the writer quarantined. Live PG + MySQL, balanced
+   and strict, both green with a DLQ row; bounded decimals
+   (`0.016666668` into `NUMERIC(11,8)`) decline the same way. Focused suite
+   65 passed; blast radius 503 passed / 4 failed / 1 skipped, all 4
+   pre-existing (identical with the change stashed). Unmeasured: full
+   backend suite on this head (queued; two earlier detached runs raced each
+   other on the shared PostgreSQL and were stopped).
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A
