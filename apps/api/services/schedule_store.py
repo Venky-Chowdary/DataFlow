@@ -824,6 +824,25 @@ def drop_blank_validate_identity(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+#: Fields the Studio Validate stamp was taken against. Editing any of them
+#: describes a different route than the one that was approved.
+_STAMPED_ROUTE_KEYS = (
+    "source_connector_id",
+    "source_table",
+    "dest_connector_id",
+    "dest_table",
+    "mappings",
+    "stream_contracts",
+    "sync_mode",
+)
+
+
+def _route_stamp_is_stale(current: PipelineSchedule, merged: dict[str, Any]) -> bool:
+    """True when this edit moved the route the Decision Artifact was hashed for."""
+    before = current.to_dict()
+    return any(merged.get(key) != before.get(key) for key in _STAMPED_ROUTE_KEYS)
+
+
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
     data = drop_blank_validate_identity(data)
     schedules = _load_all()
@@ -857,6 +876,16 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
             raise ValueError(EMPTY_MAPPING_REFUSAL)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
+        # A stamp names one route. Carrying it onto an edited destination made
+        # every later run — cadence tick and Run now alike — refuse with
+        # "content_hash mismatch", with no control anywhere that could clear it.
+        # Dropping it puts the schedule back where an unstamped one already is:
+        # the run stamps inline and the gates decide on what is there now.
+        if not any(
+            str(data.get(key) or "").strip() for key in _VALIDATE_IDENTITY_HASH_KEYS
+        ) and _route_stamp_is_stale(s, merged):
+            merged["approved_decision_artifact_hash"] = ""
+            merged["approved_ddl_identity_hash"] = ""
         updated = PipelineSchedule.from_dict(merged)
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):
