@@ -116,7 +116,8 @@ def _platform_hmac_secret() -> bytes:
         return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
 
 
-def _latest_hash_from_file() -> str | None:
+def _latest_record_from_file() -> dict[str, Any] | None:
+    """The last record actually written to the JSONL store, in write order."""
     if not STORE_PATH.exists():
         return None
     lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
@@ -127,10 +128,46 @@ def _latest_hash_from_file() -> str | None:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        h = ev.get("event_hash")
-        if h:
-            return str(h)
+        if isinstance(ev, dict) and ev.get("event_hash"):
+            return ev
     return None
+
+
+def _latest_hash_from_file() -> str | None:
+    tip = _latest_record_from_file()
+    return str(tip.get("event_hash")) if tip else None
+
+
+def chain_seq_of(event: dict[str, Any] | None) -> int:
+    """Position of a record in the chain; 0 for records written before ordering existed."""
+    try:
+        return int((event or {}).get("chain_seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+#: Ordering key for the chain. ``time`` alone is not one: two records written in
+#: the same clock tick sort arbitrarily, so the tip query could return the wrong
+#: record to link to (a fork) and a later re-walk could read the pair back in the
+#: opposite order from the one they were written in (a broken link) — on a chain
+#: nobody had tampered with. ``chain_seq`` is strictly increasing per append and
+#: breaks every tie.
+CHAIN_ORDER: tuple[tuple[str, int], ...] = (("time", 1), ("chain_seq", 1))
+
+
+def _chain_tip() -> dict[str, Any] | None:
+    """The newest record in the chain, by write position rather than by clock."""
+    coll = _mongo_collection()
+    if coll is not None:
+        try:
+            for doc in coll.find({}).sort([(k, -d) for k, d in CHAIN_ORDER]).limit(1):
+                return {k: v for k, v in doc.items() if k != "_id"}
+            return None
+        except Exception as exc:  # noqa: BLE001 - any driver error falls back to file
+            logging.getLogger(__name__).warning(
+                "Mongo chain tip read failed; falling back to file: %s", exc
+            )
+    return _latest_record_from_file()
 
 
 def append_audit_event(
@@ -155,7 +192,8 @@ def append_audit_event(
     """
     with _APPEND_LOCK:
         secret = _platform_hmac_secret()
-        prev = latest_event_hash()
+        tip = _chain_tip()
+        prev = str(tip.get("event_hash")) if tip and tip.get("event_hash") else None
         redacted = _redact(details or {})
         ws = (workspace_id or "").strip()
         tid = (tenant_id or "").strip()
@@ -175,6 +213,7 @@ def append_audit_event(
             "tenant_id": tid,
             "details": redacted,
             "prev_hash": prev,
+            "chain_seq": chain_seq_of(tip) + 1,
             "hash_alg": "HMAC-SHA256",
         }
         event["event_hash"] = _hmac_event_hash(event, secret)
@@ -193,8 +232,11 @@ def append_audit_event(
                 )
                 # Rebuild chain tip from the file store so we do not link to a Mongo
                 # tip that never landed in JSONL.
-                file_prev = _latest_hash_from_file()
-                event["prev_hash"] = file_prev
+                file_tip = _latest_record_from_file()
+                event["prev_hash"] = (
+                    str(file_tip.get("event_hash")) if file_tip else None
+                )
+                event["chain_seq"] = chain_seq_of(file_tip) + 1
                 event["event_hash"] = _hmac_event_hash(event, secret)
 
         STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -293,7 +335,11 @@ def list_audit_events(
                     query["time"]["$gte"] = since
                 if until:
                     query["time"]["$lte"] = until
-            cursor = coll.find(query).sort("time", -1).limit(limit)
+            cursor = (
+                coll.find(query)
+                .sort([(key, -direction) for key, direction in CHAIN_ORDER])
+                .limit(limit)
+            )
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

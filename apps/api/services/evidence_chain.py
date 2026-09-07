@@ -185,7 +185,10 @@ def read_chain(*, limit: int = MAX_VERIFY_EVENTS) -> list[dict[str, Any]]:
     coll = audit_log._mongo_collection()
     if coll is not None:
         try:
-            cursor = coll.find({}).sort("time", 1).limit(limit)
+            # Write order, not clock order: records sharing a timestamp would
+            # otherwise come back in an arbitrary order and be reported as
+            # broken links on a chain nobody had touched.
+            cursor = coll.find({}).sort(list(audit_log.CHAIN_ORDER)).limit(limit)
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
         except Exception as exc:
             logger.warning("Mongo chain read failed; falling back to file: %s", exc)
