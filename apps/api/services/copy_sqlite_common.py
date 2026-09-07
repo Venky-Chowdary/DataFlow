@@ -20,7 +20,6 @@ path owns locale parsing and the validation policy that quarantines it.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime
@@ -29,7 +28,11 @@ from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
 from connectors.sqlite_common import sqlite_file_path
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    CANONICAL_DECIMAL_TEXT,
+    FastPathResult,
+    FastPathUnavailable,
+)
 
 _UNSAFE_SQLITE_BASES = frozenset({
     "BLOB",
@@ -44,11 +47,6 @@ _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
     "JSON",
     "JSONB",
 })
-
-#: A decimal the row path would not rewrite: no grouping, currency mark, or
-#: locale separator ambiguity. ``1,234`` is US 1234 or EU 1.234 — the parser
-#: owns that judgement, so COPY declines instead of storing the raw text.
-_CANONICAL_DECIMAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 _INTEGER_BASES = frozenset({
     "BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "INT2", "INT4", "INT8",
@@ -133,7 +131,7 @@ def _bind_decimal_text(value: str | None) -> str | None:
     """Keep the exact digits of a canonical decimal; anything else declines."""
     if value is None:
         return None
-    if _CANONICAL_DECIMAL.match(value.strip()):
+    if CANONICAL_DECIMAL_TEXT.match(value.strip()):
         return value
     raise FastPathUnavailable(f"DECIMAL cell {value!r} is not COPY-safe")
 
@@ -336,7 +334,7 @@ def _sqlite_census_predicate(column_sql: str, ddl: str) -> str | None:
 
 
 def _canonical_decimal_sql(value: Any) -> int:
-    return 1 if isinstance(value, str) and _CANONICAL_DECIMAL.match(value.strip()) else 0
+    return 1 if isinstance(value, str) and CANONICAL_DECIMAL_TEXT.match(value.strip()) else 0
 
 
 def sqlite_source_carrier_census(

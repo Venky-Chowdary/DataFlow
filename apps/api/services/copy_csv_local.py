@@ -41,7 +41,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    text_cell_copy_safe,
+)
 from services.copy_incremental import (
     COPY_INCREMENTAL_MODES,
     _apply_staging_to_mysql,
@@ -616,12 +620,24 @@ def _write_mapped_csv(
     watermark: str | None = None,
     pk_column: str = "",
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> int:
-    """Write dest-ordered CSV with HEADER. Returns data-row COUNT."""
+    """Write dest-ordered CSV with HEADER. Returns data-row COUNT.
+
+    Every cell is censused against its declared carrier on the way through
+    (``text_cell_copy_safe``): the destination's bulk loader parses text
+    all-or-nothing, so a cell it would reject declines the whole fast path
+    here — before any destination object exists — and the row path
+    quarantines it.
+    """
     kind = (file_type or "").strip().lower()
     delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
     source_cols = [p[0] for p in pairs]
     dest_cols = [p[1] for p in pairs]
+    carriers = list(declared_types or [""] * len(pairs))
+    if len(carriers) != len(pairs):
+        raise FastPathUnavailable("declared type list / column list mismatch")
+    census = [(col, logical) for col, logical in zip(source_cols, carriers, strict=True) if logical]
     count = 0
     unbounded = 0
     pending: list[dict[str, str | None]] = []
@@ -629,6 +645,14 @@ def _write_mapped_csv(
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
+            for col, logical in census:
+                cell = rec.get(col)
+                if not text_cell_copy_safe(cell, logical):
+                    raise FastPathUnavailable(
+                        f"{col!r} cell {cell!r} (data row {count + written + 1}) is not "
+                        f"{logical} COPY-safe; the row path owns its validation "
+                        "and quarantine"
+                    )
             writer.writerow([_csv_cell(rec.get(col)) for col in source_cols])
             written += 1
         return written
@@ -685,6 +709,7 @@ def _mapped_csv_file(
     watermark: str | None = None,
     pk_column: str = "",
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> Iterator[tuple[str, int, str]]:
     kind = (file_type or "").strip().lower()
     ext = "tsv" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else "csv"
@@ -702,6 +727,7 @@ def _mapped_csv_file(
             watermark=watermark,
             pk_column=pk_column,
             file_type=file_type,
+            declared_types=declared_types,
         )
         yield path, count, ext
     finally:
@@ -1155,6 +1181,7 @@ def copy_csv_to_sqlite_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
     ) as (path, source_count, ext):
         if source_count == 0:
             return _empty_incremental(_sqlite_existing_count(dest_cfg, dest_table), mode)
@@ -1204,6 +1231,7 @@ def copy_csv_to_postgres_incremental(
     pk_column: str = "",
     read_options: Any = None,
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     from services.copy_fast_path import _table_ref
     from services.copy_mysql_pg import _pg_connect, _pg_create_sql
@@ -1233,6 +1261,7 @@ def copy_csv_to_postgres_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
     ) as (path, source_count, ext):
         dest_conn = _pg_connect(dest_cfg)
         try:
@@ -1329,6 +1358,7 @@ def copy_csv_to_mysql_incremental(
     pk_column: str = "",
     read_options: Any = None,
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     from services.copy_mysql_pg import _mysql_connect, _mysql_ident
     from services.copy_pg_mysql import _mysql_create_sql
@@ -1357,6 +1387,7 @@ def copy_csv_to_mysql_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
     ) as (path, source_count, ext):
         dest_conn = _mysql_connect(dest_cfg)
         try:
@@ -1652,6 +1683,7 @@ def try_copy_local_csv(
                     pk_column=pk_column,
                     read_options=read_options,
                     file_type=file_type,
+                    declared_types=declared_types,
                 )
             elif dest_n in {"mysql", "mariadb"}:
                 result = copy_csv_to_mysql_incremental(
@@ -1667,6 +1699,7 @@ def try_copy_local_csv(
                     pk_column=pk_column,
                     read_options=read_options,
                     file_type=file_type,
+                    declared_types=declared_types,
                 )
             else:
                 result = copy_csv_to_sqlite_incremental(
@@ -1691,6 +1724,7 @@ def try_copy_local_csv(
                 pairs,
                 read_options=read_options,
                 file_type=file_type,
+                declared_types=declared_types,
             ) as (path, source_count, ext):
                 if dest_n in {"postgresql", "postgres"}:
                     result = copy_csv_to_postgres(

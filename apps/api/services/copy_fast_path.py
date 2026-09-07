@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Callable
@@ -145,6 +146,51 @@ def declared_copy_carrier(
         or schema.get(target_col)
         or ""
     )
+
+
+#: Digits the destination engine's own text→number parser accepts verbatim.
+CANONICAL_DECIMAL_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_CANONICAL_INTEGER_TEXT = re.compile(r"^[+-]?\d+$")
+_ISO_DATE_TEXT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_TIME_TEXT = re.compile(r"^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$")
+_ISO_DATETIME_TEXT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
+#: Boolean spellings every COPY-family loader (PostgreSQL COPY, MySQL strict
+#: LOAD DATA into TINYINT(1), SQLite) accepts without a cast the row path owns.
+_COPY_BOOLEAN_TEXT = frozenset({"0", "1"})
+
+
+def text_cell_copy_safe(value: str | None, logical: str) -> bool:
+    """Would the destination engine's bulk loader accept this text cell as-is?
+
+    An identity file COPY hands raw text to ``COPY FROM STDIN`` / ``LOAD DATA``
+    / ``executemany``, so the *engine* parses the cell. That parse is
+    all-or-nothing: one ``not-a-number`` fails the whole load and no cell is
+    quarantined. The census therefore runs over every cell before the
+    destination is touched, and a cell the carrier cannot hold declines the
+    fast path so the row path validates and quarantines it. Text carriers hold
+    anything; unknown logical types are left to the row path's own contract.
+    """
+    if value is None:
+        return True
+    from services.decision_kernel import normalize_logical_type
+
+    kind = normalize_logical_type(logical) if logical else ""
+    if kind == "integer":
+        return bool(_CANONICAL_INTEGER_TEXT.match(value))
+    if kind in {"decimal", "float"}:
+        return bool(CANONICAL_DECIMAL_TEXT.match(value))
+    if kind == "boolean":
+        return value in _COPY_BOOLEAN_TEXT
+    if kind == "date":
+        return bool(_ISO_DATE_TEXT.match(value))
+    if kind == "datetime":
+        return bool(_ISO_DATETIME_TEXT.match(value))
+    if kind == "time":
+        return bool(_ISO_TIME_TEXT.match(value))
+    return True
 
 
 def fifo_streaming_supported() -> bool:

@@ -22,6 +22,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
+from services.procedure_destination import DEST_PROCEDURE_EXTRA_KEYS
 from services.type_system import materialize_dest_ddl
 
 logger = logging.getLogger(__name__)
@@ -81,9 +82,20 @@ def dlq_table_name(dest_table: str | None) -> str:
 
 
 def dlq_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:
-    """Clone destination endpoint pointing at the DLQ table/collection."""
+    """Clone destination endpoint pointing at the DLQ table/collection.
+
+    The DLQ is always a plain table owned by DataFlow. A destination driven by
+    a stored procedure / dest DML / before-after hooks must not carry that
+    contract onto the clone: the ``_df_*`` rows would be bound into the
+    client's INSERT or CALL (which has none of those columns), the hooks would
+    fire a second time, and no ``*_df_quarantine`` table would ever exist.
+    """
     table = dest_table or getattr(destination, "table", None) or getattr(destination, "collection", None) or "import"
     dlq = dlq_table_name(str(table))
+    extra = getattr(destination, "extra", None)
+    if isinstance(extra, dict) and any(k in extra for k in DEST_PROCEDURE_EXTRA_KEYS):
+        extra = {k: v for k, v in extra.items() if k not in DEST_PROCEDURE_EXTRA_KEYS}
+        return replace(destination, table=dlq, collection=dlq, extra=extra)
     return replace(destination, table=dlq, collection=dlq)
 
 
