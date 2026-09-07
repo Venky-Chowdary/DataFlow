@@ -341,9 +341,15 @@ What this sweep did **not** prove, and what a client must therefore be told:
    fixed; SQLite text-boolean identity COPY declines to the row path. 580
    passed / 0 failed / 8 skipped on the 69-file changed-test selection with
    PG/MySQL/Mongo/Redis live. Still open: source-only SaaS seeding (54), MariaDB
-   upsert, RI properties, `_Table.c` stubs, vector Gate-8, and a CDC poll that
-   may not terminate when the bookmark cannot advance (untracked repro tests,
-   OOM at 5 GB — not yet fixed).
+   upsert, RI properties, `_Table.c` stubs, vector Gate-8.
+   **CDC cursor wave (register §8d, `bfc565dd`):** the CDC cursor poll never
+   advanced past page one (watermark reused as `cursor_after`, offset ignored
+   by keyset readers) — every multi-page poll re-read the same rows (OOM at
+   5 GB in the repro). Fixed at the owner: `_read_keyset_pages` seeks from the
+   page maximum `(cursor, pk)`, readers accept a cursor-only first bookmark,
+   non-advancing pages fail closed. Writer per-batch counts no longer pose as
+   the run's source population; the run stamps its reader count once.
+   513 passed / 26 skipped on the 56-file CDC/keyset neighbourhood.
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A
