@@ -343,3 +343,70 @@ is items 1, 2, 3 and 9 — the rest widens the certified surface.
   tiles are larger and the difference is not capability.
 - No claim that any Snowflake, BigQuery, S3 or Salesforce route works in a
   client environment. They have not been run against a real account here.
+
+---
+
+## 9. Handover verdict — 2026-09-07 pre-handover sweep
+
+Asked directly whether the product can be handed to a client as "46+ connectors
+and every feature working, schedules and pilot, 100% robust": **no.** The
+migration-assurance core has got materially stronger in this sweep — twelve
+defects that were green-and-wrong are closed with measurements (register §5–§6),
+including two that refused *correct* migrations at Gate-8 and one that made the
+product's own proof-pack verify control report tampering on a pack it had just
+signed. But readiness is an evidence claim, and four categories of evidence do
+not exist yet.
+
+**Proven (live engine, independent destination reread, named artifact):**
+relational source → relational destination on Postgres / MySQL / SQL Server /
+Oracle / SQLite / DuckDB for create-new, append, incremental, upsert and
+overwrite; Gate-8 count and checksum proof; G21 control totals per dialect; G20
+population crosswalk coverage; G22 referential integrity; the field-reduction
+ledger; the hash-chained evidence store and proof-pack export/verify.
+
+**Tested but not live-proven:** schedules and their retry / overlap / missed
+window / DST / ownership / cancellation semantics — 173 automated tests pass, no
+operator has driven one through the UI here.
+
+**Implemented but not measured:** the D26 carrier round trip and D31 locale
+money behaviour after their fixes; job cancellation; a schedule driven end to
+end by an operator; the Operations, Contracts and Proofs pages; workspace roles
+and member removal; and the browser re-proof of D25's download → Verify path.
+These are **untested**, not passing.
+
+A later browser pass in the same sweep did reach the application and closed four
+more defects the automated suites could not have found — the approval inbox
+showing another tenant's parked schedule (D36), a Replay control offered on
+findings with no row to replay (D37), a schedule permanently bricked by editing
+its destination (D38), and Verify chain accusing an untampered store of 28
+broken links (D39). It also left one open: **D40**, a reachable G19 hard block
+(`TEXT → DECIMAL(38,15)`) with no risk-policy selector, no signing path, and no
+statement that remapping is the only way forward.
+
+The pattern is worth naming for the handover conversation: the assurance
+machinery is sound under test, and almost every defect found by *using* the
+product is in the surface that presents that machinery to an operator. A client
+pilot exercises exactly those surfaces.
+
+**Environment-blocked (needs credentials the client or you must provide):**
+hosted Snowflake, hosted BigQuery, Databricks, real S3 / GCS / ADLS, every SaaS
+connector, SFTP, and a real IdP for SSO/SAML. Locally emulated stand-ins
+(MinIO, Azurite, fake-GCS, the BigQuery emulator, DynamoDB Local, Iceberg REST,
+Redpanda, Qdrant, Weaviate) prove the route's code path, not the vendor's.
+
+**Open defects:** D40 (the G19 block with no release path, above), D33 (an
+engine-side keyed upsert reports no insert/update/delete census), D34 (`kafka-python` absent, 47 matrix cells unmeasured), D35
+(Qdrant host resolution in the matrix fixtures, 24 cells unmeasured), plus the
+never-measured rows carried forward in §5.
+
+The honest per-connector position: **46 unique TRANSFER_READY drivers exist in
+code; the ones with live proof on this box are the ~18 local engines listed in
+the register §4 and §6b.** The remainder are unmeasured — not broken, not
+proven. Any handover pack must carry that distinction, connector by connector,
+rather than a tile count.
+
+What would close it, in order: get the browser harness working and drive the UI
+sweep above; install `kafka-python` and fix the Qdrant fixture host so those 71
+cells report a real verdict; close D33; then provision one hosted warehouse
+account and one IdP so the two remaining evidence categories stop being
+theoretical.

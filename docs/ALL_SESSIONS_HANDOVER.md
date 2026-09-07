@@ -231,6 +231,67 @@ measured.
 
 ---
 
+## 6b. Pre-handover sweep (2026-09-07, branch `devin/1788705057.72211-handover-gate-fixes`)
+
+Driven by the question "are we good to hand over for 46+ connectors and every
+feature". The answer recorded here is **no, not yet**, and this section is the
+reason, not a summary.
+
+Closed in this sweep, each with the measurement next to it in
+`docs/OPEN_DEFECT_REGISTER.md` §5–§6: D21–D24 (MySQL control totals, the missing
+G20 declaration path, an invisible proven control total, the Windows FIFO
+decline), D25 (a signed proof pack failing the product's own verify control),
+D26 (a hand-picked destination carrier lost on Map → Validate → Map), D27–D30
+(declared carrier ignored by the multi-table fast path; `dest_count` read as a
+digest; FIFO-or-spill; ODBC options passed to `pymssql`), D31 (dirty and
+EU-locale numeric cells forced through the SQLite fast path instead of declining
+to the row path) and D32 (`pk_join_count` refused every correct engine-side
+keyed upsert at Gate-8).
+
+A later browser pass in the same sweep reached the running application over CDP
+and closed four more, each found by using the product rather than reading it:
+**D36** (the approval inbox rendered another tenant's parked schedule and both
+its connector ids, because the route read `workspace_id` as a query parameter
+and ignored the header every client sends), **D37** (Promote / Replay offered on
+findings with no row payload to rewrite, refusing every click into a toast that
+faded), **D38** (editing a schedule's destination kept the Decision Artifact
+stamp taken for the old one, so the cadence tick and the "Run now" offered as
+recovery both refused forever, with no control anywhere that could clear it) and
+**D39** (Verify chain reported 28 broken links and forks on an untampered store,
+because the chain was linked and re-walked by timestamp alone and records
+written in one tick sort arbitrarily). The same pass also completed the D25
+closure: the pack failed verification again on the exact export → download →
+re-upload path, because JSON has one number type and the signer hashed `100.0`
+where the browser returned `100`.
+
+What this sweep did **not** prove, and what a client must therefore be told:
+
+1. **UI evidence is partial.** The browser pass covered Map / Validate / Execute,
+   the Gate-8 card, proof-pack export and Verify, the approval inbox, quarantine
+   and the audit chain. Still **untested, not passing**: the browser re-proof of
+   D25's download → Verify round trip and of D26 / D31 after their fixes, job
+   cancellation, schedules driven by an operator end to end, the Operations /
+   Contracts / Proofs pages, workspace roles and member removal. **D40** is an
+   open defect from that pass: a reachable G19 hard block (`TEXT →
+   DECIMAL(38,15)`) offers no risk-policy or signing control and no statement
+   that remapping is the only way forward.
+2. **The connector matrix is still incomplete.** Local engines are up (Postgres,
+   MySQL, SQL Server, Mongo replica set, Redis, Elasticsearch, MinIO, Azurite,
+   fake-GCS, BigQuery emulator, DynamoDB Local, Iceberg REST, Qdrant, Weaviate,
+   Redpanda, ClickHouse, DuckDB, SQLite), and starting them converted silent
+   skips into real attempts — which is why the failure count went up. Kafka
+   cells now error on a missing `kafka-python` (D34) and Qdrant cells on a host
+   the fixtures resolve differently (D35). Hosted Snowflake / BigQuery /
+   Databricks, real S3 / GCS / ADLS, the SaaS connectors, SFTP and a real IdP
+   remain unproven for want of credentials.
+3. **Schedules have automated proof only** — 173 passed across the schedule
+   suites (cadence, due tick, retry/backoff, overlap, missed windows, DST,
+   workspace ownership, cancellation). No operator drove one through the UI in
+   this sweep.
+4. **The full suite is not green** and the failures are classified rather than
+   hidden: see the register's "Full-suite state" note. The dominant category is
+   SaaS connectors refusing a write by design or having no sandbox credentials.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

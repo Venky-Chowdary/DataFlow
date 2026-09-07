@@ -236,6 +236,26 @@ proof. Full detail and live evidence in `docs/OPEN_DEFECT_REGISTER.md`.
 
 This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 
+### 4b. What driving the product then found (pre-handover sweep, 2026-09-07)
+
+Implemented is not the same as proven, and the sweep exists to keep the two
+apart. Every item below was found by using the application, and each is closed
+with a test that fails on the previous code — except D40, which is open.
+
+| Defect | What was actually wrong | Where it lives now |
+|--------|-------------------------|--------------------|
+| D25 | The signed proof pack failed the product's own Verify control twice: first because it was signed over in-memory objects rather than the shipped bytes, then — on the export → download → re-upload path an operator actually walks — because JSON has one number type, so the signer hashed `100.0` and the browser handed back `100`. A verifier that rejects its own evidence is worse than no verifier: a reviewer reads it as tamper detection firing | `services/signed_proof_pack.py` |
+| D36 | The approval inbox rendered another tenant's parked schedule and both connector ids, because the route read `workspace_id` as a query parameter and ignored the `X-Workspace-Id` header. Execution had failed closed independently, so it was disclosure, not cross-tenant execution | `src/routers/schedules_router.py` |
+| D37 | Promote / Replay was offered on quarantine findings with no row payload to rewrite, so every click refused into a toast that faded | `components/transfer/QuarantinePanel.tsx` |
+| D38 | Editing a schedule's destination kept the Decision Artifact stamp taken for the old one, so the tick and the "Run now" offered as recovery refused forever with nothing able to clear it | `services/schedule_store.py` |
+| D39 | Verify chain reported 28 broken links and forks on an untampered store: the chain was linked and re-walked by timestamp, and records written in one clock tick sort arbitrarily | `services/audit_log.py`, `services/evidence_chain.py` |
+| **D40 (open)** | A reachable G19 hard block (`TEXT → DECIMAL(38,15)`) offers no risk-policy selector, no signing path, and no statement that remapping is the only way forward — a dead end. A narrower `DECIMAL(6,2) → DECIMAL` route does expose both | Map release surface |
+
+The honest reading of this section: the 2026 capabilities are implemented and
+unit-proven, and the surfaces that *present* them to an operator are where the
+defects keep being found. That is the argument against handover today, and the
+work that would change it is UI-driven measurement, not more features.
+
 ---
 
 ## 5. Deliberately not built (yet), with the reason
