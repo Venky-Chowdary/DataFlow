@@ -16,6 +16,19 @@ describe("sqlEditorModel", () => {
     assert.deepEqual(extractBindParams("CALL get_orders(:since) -- night"), ["since"]);
   });
 
+  it("names the next action when a CREATE PROCEDURE script is pasted", () => {
+    const ddl = "CREATE PROCEDURE dbo.T @A INT = 1 AS BEGIN SET NOCOUNT ON; SELECT 1; END;\nGO";
+    const q = diagnoseSql(ddl, { mode: "query", dialect: "snowflake" });
+    assert.equal(q.ok, false);
+    assert.match(q.error, /CREATE PROCEDURE definition, not an extract/);
+    assert.match(q.error, /switch to Stored procedure/);
+    assert.doesNotMatch(q.error, /semicolons/);
+    const p = diagnoseSql(ddl, { mode: "procedure", dialect: "mssql" });
+    assert.match(p.error, /EXEC schema\.name\(:param\)/);
+    const t = diagnoseSql("CREATE TABLE x (a INT)", { mode: "query" });
+    assert.match(t.error, /CREATE TABLE statement/);
+  });
+
   it("refuses stacked statements and DML in query mode", () => {
     const stacked = diagnoseSql("SELECT 1; DROP TABLE t", { mode: "query" });
     assert.equal(stacked.ok, false);
