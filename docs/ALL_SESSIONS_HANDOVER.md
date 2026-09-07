@@ -328,9 +328,11 @@ What this sweep did **not** prove, and what a client must therefore be told:
    and strict, both green with a DLQ row; bounded decimals
    (`0.016666668` into `NUMERIC(11,8)`) decline the same way. Focused suite
    65 passed; blast radius 503 passed / 4 failed / 1 skipped, all 4
-   pre-existing (identical with the change stashed). Unmeasured: full
-   backend suite on this head (queued; two earlier detached runs raced each
-   other on the shared PostgreSQL and were stopped).
+   pre-existing (identical with the change stashed). Full backend
+   suite on `d693555f`: 19977 passed / 152 failed / 1105 skipped / 1 error;
+   the 19 failures in this neighbourhood fail identically on `b68e7c89`, and
+   54 of the 152 are one harness class (`_seed_source` through a
+   source-only rest_api/stripe connector). Class breakdown in register §8b.
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A
