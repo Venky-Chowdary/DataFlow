@@ -29,6 +29,30 @@ def over_the_wire(payload: dict) -> dict:
     return json.loads(json.dumps(jsonable_encoder(payload)))
 
 
+def _one_json_number(value):
+    """JSON has one number type, so ``100.0`` comes back as ``100``."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _one_json_number(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_one_json_number(v) for v in value]
+    return value
+
+
+def through_a_json_reader(payload: dict) -> dict:
+    """The file an operator actually re-uploads to Verify.
+
+    The pack is downloaded by a browser, which parses it with a reader that has
+    one number type and re-serializes ``100.0`` as ``100``. Verifying only the
+    Python-to-Python round trip misses that entirely: it is the step where a
+    pack the product had just signed started failing its own verify control.
+    """
+    return _one_json_number(over_the_wire(payload))
+
+
 def proven_reconciliation() -> dict:
     return {
         "phase": "post_write",
@@ -72,6 +96,38 @@ def test_pack_with_decimal_and_datetime_verifies_after_the_wire():
     result = verify_signed_proof_pack(shipped)
     assert result["ok"] is True, result["errors"]
     assert result["content_sha256"] == pack["content_sha256"]
+
+
+def test_pack_verifies_after_a_browser_reparses_its_numbers():
+    """An integral float and the integer it denotes are the same JSON number."""
+    recon = proven_reconciliation()
+    recon["rows_per_second"] = 100.0
+    recon["duration_seconds"] = 2.5
+    pack = build_signed_proof_pack(
+        job_id="job-wire-8",
+        reconciliation=recon,
+        connector_versions={"source": "postgresql 16.2", "destination": "mysql 8.4.2"},
+        ddl_hash="ddl-8",
+        mapping_hash="map-8",
+        job_success=True,
+        anchor_in_chain=True,
+    )
+    reuploaded = through_a_json_reader(pack)
+    result = verify_signed_proof_pack(reuploaded)
+    assert result["ok"] is True, result["errors"]
+    assert result["content_sha256"] == pack["content_sha256"]
+
+
+def test_a_mutated_byte_still_fails_after_a_browser_reparse():
+    pack = through_a_json_reader(
+        build_signed_proof_pack(
+            job_id="job-wire-9",
+            reconciliation=proven_reconciliation(),
+            job_success=True,
+        )
+    )
+    pack["gate8"]["source_rows"] = 7
+    assert verify_signed_proof_pack(pack)["ok"] is False
 
 
 def test_anchor_digest_survives_the_wire_and_still_finds_its_record():
@@ -174,3 +230,5 @@ def test_signed_field_reduction_ledger_verifies_after_the_wire():
     )
     shipped = over_the_wire(ledger)
     assert verify_field_reduction_ledger(shipped, job_id="job-wire-7")["ok"] is True
+    reuploaded = through_a_json_reader(ledger)
+    assert verify_field_reduction_ledger(reuploaded, job_id="job-wire-7")["ok"] is True

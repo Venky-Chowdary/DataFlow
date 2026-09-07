@@ -212,9 +212,41 @@ def _platform_secret() -> bytes:
         return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
 
 
+def _canonical_numbers(value: Any) -> Any:
+    """Render a number the way it comes back from a JSON round trip.
+
+    JSON has one number type. Python keeps two, and writes ``100.0`` for a float
+    that happens to be integral; every JSON reader between here and the operator
+    — the browser that downloads the pack, the editor that pretty-prints it, the
+    client that uploads it back to Verify — reads that as the number 100 and
+    writes it back as ``100``. Hashing the Python spelling therefore signed a
+    document nobody else can reproduce: a pack that had crossed the wire once
+    failed its own verify control with ``content_sha256 mismatch``, which reads
+    to a reviewer as tamper detection firing on the product's own evidence.
+
+    Both spellings are folded to the integer they denote, so signer and verifier
+    agree whichever side of the wire they sit on. Money is unaffected: exact
+    decimals travel as strings, not as floats.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _canonical_numbers(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_numbers(v) for v in value]
+    return value
+
+
 def canonical_json(payload: dict[str, Any]) -> str:
     """Stable JSON for hashing (sorted keys, no insignificant whitespace)."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=json_default)
+    return json.dumps(
+        _canonical_numbers(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=json_default,
+    )
 
 
 def json_ready_body(body: dict[str, Any]) -> dict[str, Any]:
