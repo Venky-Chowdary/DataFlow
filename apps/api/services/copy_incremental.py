@@ -513,8 +513,8 @@ def _apply_staging_to_mysql(
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
+        merge_staging_into_dest,
         mysql_upsert_from_staging_sql,
-        pk_join_count_sql,
         _result_with_upsert_proof,
     )
 
@@ -537,23 +537,22 @@ def _apply_staging_to_mysql(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            mysql_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=mysql_upsert_from_staging_sql(
                 dest_q, staging_q, target_cols, dest_pk, quote
-            )
+            ),
+            dest_q=dest_q,
+            staging_q=staging_q,
+            pk_ident=quote(dest_pk),
         )
-        pk_ident = quote(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,
@@ -605,8 +604,8 @@ def _apply_staging_to_pg(
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
+        merge_staging_into_dest,
         pg_upsert_from_staging_sql,
-        pk_join_count_sql,
         _result_with_upsert_proof,
     )
 
@@ -629,23 +628,22 @@ def _apply_staging_to_pg(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            pg_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=pg_upsert_from_staging_sql(
                 dest_ref, staging_ref, target_cols, dest_pk, _quote
-            )
+            ),
+            dest_q=dest_ref,
+            staging_q=staging_ref,
+            pk_ident=_quote(dest_pk),
         )
-        pk_ident = _quote(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_ref, staging_ref, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,
@@ -698,7 +696,7 @@ def _apply_staging_to_sqlite(
     from services.copy_sqlite_common import sqlite_ident
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
-        pk_join_count_sql,
+        merge_staging_into_dest,
         sqlite_upsert_from_staging_sql,
         _result_with_upsert_proof,
     )
@@ -722,23 +720,22 @@ def _apply_staging_to_sqlite(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            sqlite_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=sqlite_upsert_from_staging_sql(
                 dest_q, staging_q, target_cols, dest_pk, sqlite_ident
-            )
+            ),
+            dest_q=dest_q,
+            staging_q=staging_q,
+            pk_ident=sqlite_ident(dest_pk),
         )
-        pk_ident = sqlite_ident(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,

@@ -373,6 +373,17 @@ What this sweep did **not** prove, and what a client must therefore be told:
    hidden: see the register's "Full-suite state" note. The dominant category is
    SaaS connectors refusing a write by design or having no sandbox credentials.
 
+## Live PG/MySQL/MariaDB + SQLite/S3 neighbourhood (2026-08-10, `devin/qa-lead-integration`)
+
+Closed at the owner and recorded in `docs/OPEN_DEFECT_REGISTER.md` §8f: shared
+upsert `KeyCensus` (`merge_staging_into_dest`), tombstone upserts declined to the
+row path, SQLite fast-path snapshot guarantee metadata, SQLite COPY shard in the
+shared `_dataflow_write_ledger` with same-job retry skip, and a **source-table
+destruction** defect (post-rollback unqualified `DROP TABLE` resolved to the
+attached source) fixed by `main.`-qualifying the dest and rollback-only cleanup.
+Neighbourhood run: 1231 passed / 43 skipped. Not claimed: live MariaDB/PG runs
+of these paths in this exact commit (see §8f for the focused live counts).
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

@@ -125,13 +125,30 @@ class FastPathUnavailable(Exception):
 class _CreateScope:
     """Source catalog handed to a fast path, and the certificate it earned."""
 
-    __slots__ = ("catalog", "mappings", "pending", "report")
+    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report")
 
-    def __init__(self, catalog: Any, mappings: list[dict[str, Any]] | None) -> None:
+    def __init__(
+        self,
+        catalog: Any,
+        mappings: list[dict[str, Any]] | None,
+        dest_table: str = "",
+    ) -> None:
         self.catalog = catalog
         self.mappings = list(mappings or [])
+        self.dest_table = str(dest_table or "")
         self.pending: FastPathCreate | None = None
         self.report: dict[str, Any] | None = None
+
+    def owns(self, table: str) -> bool:
+        """Whether ``table`` is the destination this scope certifies.
+
+        A COPY upsert stages into ``_df_stg_<dest>`` with the same builder; a
+        staging CREATE must neither plan nor settle the destination's
+        certificate.
+        """
+        if not self.dest_table or not table:
+            return True
+        return table.strip().lower() == self.dest_table.strip().lower()
 
     def certificate(self) -> dict[str, Any] | None:
         """The settled certificate, or the pending plan downgraded to ``unknown``.
@@ -187,7 +204,9 @@ PLANNER_QUOTED_DIALECTS: frozenset[str] = frozenset(
 
 
 def begin_fast_path_create_scope(
-    source_schema_catalog: Any, mappings: list[dict[str, Any]] | None
+    source_schema_catalog: Any,
+    mappings: list[dict[str, Any]] | None,
+    dest_table: str = "",
 ) -> tuple[Token, _CreateScope]:
     """Make the source catalog visible to any CREATE a fast path renders.
 
@@ -197,7 +216,7 @@ def begin_fast_path_create_scope(
     carries the catalog in and the settled certificate out, so ``stream``
     stamps it on the summary.
     """
-    scope = _CreateScope(source_schema_catalog, mappings)
+    scope = _CreateScope(source_schema_catalog, mappings, dest_table)
     return _CREATE_SCOPE.set(scope), scope
 
 
@@ -228,7 +247,7 @@ def plan_fast_path_create(
     scope = _CREATE_SCOPE.get()
     targets = [t for _s, t in pairs]
     given = tuple(c for c in (primary_key or []) if c in targets)
-    if scope is None or scope.catalog is None:
+    if scope is None or scope.catalog is None or not scope.owns(dest_table):
         return FastPathCreate(primary_key=given)
     from services.schema_fidelity import resolve_create_fidelity_plan
 
@@ -324,6 +343,8 @@ def settle_fast_path_create(
     scope = _CREATE_SCOPE.get()
     if scope is None or scope.pending is None or scope.pending.plan is None:
         return
+    if not scope.owns(dest_table):
+        return
     from services.schema_fidelity import settle_create_new_on_destination
 
     create, scope.pending = scope.pending, None
@@ -370,6 +391,31 @@ def settle_fast_path_create_on(
         execute=cursor.execute,
         fetchall=fetchall,
         cursor=cursor,
+    )
+
+
+class CopyLedgerKey(NamedTuple):
+    """Identity of a whole-table COPY shard in ``_dataflow_write_ledger``.
+
+    A COPY commits one shard in one transaction; stamping it in the same
+    ledger the chunked writers use lets a retry of the same job find that
+    the shard already landed instead of appending it again (or declining to
+    the row path, which would then chunk-append a second copy).
+    """
+
+    job_id: str
+    batch_key: str
+    chunk_idx: int = 0
+
+
+def copy_ledger_key(job_id: str | None, dest_table: str) -> CopyLedgerKey | None:
+    if not job_id:
+        return None
+    from connectors.write_resilience import build_write_batch_key
+
+    return CopyLedgerKey(
+        job_id=str(job_id),
+        batch_key=build_write_batch_key(table_name=dest_table, extra="copy_shard"),
     )
 
 
@@ -814,14 +860,34 @@ def create_destination_like_source(
     collations = {k.lower(): v for k, v in shape.collations.items()}
     rename = {s.lower(): t for s, t in pairs}
 
-    cols: list[str] = []
-    for source_col, target_col in pairs:
+    declared_types: list[str] = []
+    for source_col, _target in pairs:
         declared = lowered.get(source_col.lower())
         if not declared:
             raise FastPathUnavailable(
                 f"source column {source_col!r} has no declared type"
             )
+        declared_types.append(declared)
+    # The key only carries when every one of its columns is being copied; a
+    # partial key is not the same constraint and must not be invented.
+    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
+    given_pk = [c for c in pk_targets if c] if shape.primary_key and all(pk_targets) else []
+    create = plan_fast_path_create(
+        dest_dialect="postgresql",
+        pairs=pairs,
+        ddls=declared_types,
+        primary_key=given_pk,
+        dest_table=table,
+        dest_schema=schema,
+    )
+
+    cols: list[str] = []
+    for (source_col, target_col), declared in zip(pairs, declared_types, strict=True):
         piece = f"{_quote(target_col)} {declared}"
+        if create.plan is not None:
+            piece += create.column_suffix(target_col)
+            cols.append(piece)
+            continue
         collation = collations.get(source_col.lower())
         if collation:
             piece += f" COLLATE {collation}"
@@ -837,15 +903,20 @@ def create_destination_like_source(
             piece += " NOT NULL"
         cols.append(piece)
 
-    # The key only carries when every one of its columns is being copied; a
-    # partial key is not the same constraint and must not be invented.
-    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
-    if shape.primary_key and all(pk_targets):
-        cols.append(
-            "PRIMARY KEY (" + ", ".join(_quote(c) for c in pk_targets if c) + ")"
-        )
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+        suffix = f" {create.create_suffix}" if create.create_suffix else ""
+    else:
+        suffix = ""
+        if create.primary_key:
+            cols.append(
+                "PRIMARY KEY (" + ", ".join(_quote(c) for c in create.primary_key) + ")"
+            )
     cur.execute(
-        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
+        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)}){suffix}"  # nosec B608
+    )
+    settle_fast_path_create_on(
+        cur, dest_dialect="postgresql", dest_table=table, dest_schema=schema or "public"
     )
 
 

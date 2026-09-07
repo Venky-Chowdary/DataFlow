@@ -393,7 +393,11 @@ def test_s3_nosuchkey_probe_does_not_invent_a_schema() -> None:
     ):
         _attach_db_sample(out, dest)
     assert out.get("schema") in ({}, None) or not out.get("schema")
-    assert out.get("table_exists") is None
+    assert out.get("schema_authority") in ({}, None)
+    # NoSuchKey is the bucket's own answer that the key is absent: create-new
+    # (a6355afa), not unknown. D1 forbids the invented compatible schema, not
+    # the measured existence bit; a login/permission failure still reads None.
+    assert out.get("table_exists") is False
     assert "NoSuchKey" in str(out.get("sample_error") or out.get("message") or "")
 
 

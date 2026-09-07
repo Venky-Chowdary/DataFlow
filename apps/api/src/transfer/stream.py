@@ -1046,6 +1046,7 @@ def _stream_database_transfer_impl(
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(src_type, mappings, schema, _src_rich_catalog),
         mappings,
+        resolve_dest_table(dest_type, destination, _source_name(source)),
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
@@ -1106,6 +1107,7 @@ def _stream_database_transfer_impl(
             incremental_cursor=cursor_source_col if incremental else "",
             incremental_watermark=pre_copy_watermark,
             incremental_pk=cursor_pk_source if incremental else "",
+            job_id=job_id,
         )
     finally:
         reset_copy_decline_capture(_decline_token)
@@ -1116,6 +1118,9 @@ def _stream_database_transfer_impl(
         _certificate = _create_scope.certificate()
         if _certificate is not None:
             dest_summary.setdefault("schema_fidelity", _certificate)
+        _fast_census = (dest_summary.get("source_snapshot") or {}).get(CENSUS_KEY)
+        if _fast_census:
+            dest_summary.setdefault(CENSUS_KEY, _fast_census)
         _fast_table = _source_name(source)
         _carry_single_table_foreign_keys(
             source,
