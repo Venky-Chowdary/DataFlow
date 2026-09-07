@@ -214,6 +214,7 @@ def copy_mysql_to_mysql(
     dest_conn = _mysql_connect(dest_cfg)
     created_here = False
     existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     try:
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
@@ -254,6 +255,7 @@ def copy_mysql_to_mysql(
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_local}")  # nosec B608
                 dest_occupied = int(dst_cur.fetchone()[0]) > 0
+                reset_empty_dest_on_failure = not dest_occupied
                 if dest_occupied and pk_map is None:
                     raise FastPathUnavailable(
                         "append into non-empty MySQL dest stays on the row path"
@@ -438,7 +440,7 @@ def copy_mysql_to_mysql(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
-        elif existed_before and pk_map is None:
+        elif existed_before and reset_empty_dest_on_failure:
             try:
                 with dest_conn.cursor() as cur:
                     cur.execute(f"TRUNCATE TABLE {dest_local}")  # nosec B608

@@ -471,6 +471,7 @@ def copy_oracle_to_oracle(
     conn = _oracle_connect(dest_cfg)
     created_here = False
     existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     cur = conn.cursor()
     try:
@@ -497,6 +498,7 @@ def copy_oracle_to_oracle(
             exists = False
         if exists:
             dest_occupied = _count(cur, dest_ref) > 0
+            reset_empty_dest_on_failure = not dest_occupied
             if dest_occupied and pk_map is None:
                 raise FastPathUnavailable(
                     "append into non-empty Oracle dest stays on the row path"
@@ -617,7 +619,7 @@ def copy_oracle_to_oracle(
                 cur.execute(_drop_sql(dest_ref))
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
-        elif existed_before and pk_map is None:
+        elif existed_before and reset_empty_dest_on_failure:
             try:
                 cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
             except Exception:

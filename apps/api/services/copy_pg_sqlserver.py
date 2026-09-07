@@ -335,6 +335,7 @@ def copy_postgres_to_sqlserver(
     dest_conn = _ss_connect(dest_cfg)
     created_here = False
     existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     preserve_dest_on_failure = False
     try:
@@ -372,6 +373,7 @@ def copy_postgres_to_sqlserver(
                 exists = False
             if exists:
                 dest_occupied = _ss_count(dst_cur, dest_ref) > 0
+                reset_empty_dest_on_failure = not dest_occupied
                 if dest_occupied and pk_map is None:
                     raise FastPathUnavailable(
                         "append into non-empty SQL Server dest stays on the row path"
@@ -601,7 +603,7 @@ def copy_postgres_to_sqlserver(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
-        elif existed_before and pk_map is None:
+        elif existed_before and reset_empty_dest_on_failure:
             try:
                 with dest_conn.cursor() as cur:
                     cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
