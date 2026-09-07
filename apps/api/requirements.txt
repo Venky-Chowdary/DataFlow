@@ -27,7 +27,7 @@ boto3>=1.34.0
 redis>=5.0.0
 elasticsearch>=8.0.0,<9.0.0
 sqlalchemy>=2.0.0
-sqlparse>=0.4.4  # Query playground read-only SQL validation
+sqlparse>=0.6.0  # Query playground read-only SQL validation (0.6.0 fixes 5 CVEs)
 duckdb>=0.9.0  # DuckDB engine (DBAPI) for local / generic_sql proofs
 duckdb-sqlalchemy>=0.5.0  # DuckDB via SQLAlchemy / generic_sql
 clickhouse-sqlalchemy>=0.3.0  # ClickHouse via SQLAlchemy / generic_sql
@@ -71,7 +71,7 @@ vertica-python>=1.3.0        # Vertica
 hdbcli>=2.18.0               # SAP HANA
 pydruid>=0.6.0               # Apache Druid
 pinotdb>=0.4.0               # Apache Pinot
-impyla==0.20.0               # Apache Impala (compatible with thrift 0.16.0)
+impyla==0.24.0               # Apache Impala (first release accepting thrift>=0.23)
 pyathena>=3.35.2,<3.36.0    # Amazon Athena — bounded to avoid pip resolution-too-deep
 firebolt-sqlalchemy>=0.4.0   # Firebolt
 fdb>=2.0.0                   # Firebird
@@ -79,8 +79,8 @@ thrift-sasl==0.4.3           # impyla dependency
 
 # Warehouses
 databricks-sqlalchemy>=2.0.0
-databricks-sql-connector>=4.2.5,<4.2.6  # keep thrift<0.21 for impyla 0.20.x
-thrift==0.16.0               # shared pin for databricks<4.3 and impyla
+databricks-sql-connector>=4.5.0,<4.6.0  # first line requiring thrift>=0.24
+thrift==0.24.0               # shared pin for databricks 4.5.x and impyla 0.24
 
 # Testing
 pytest>=9.0.3
