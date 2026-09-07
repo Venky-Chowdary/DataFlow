@@ -70,6 +70,73 @@ def test_integrity_blocks_unparseable_financial():
     assert any("unparseable" in i.lower() or "financial" in i.lower() for i in report["issues"])
 
 
+def _signed_contract(policy: str) -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="amount",
+        source_type="TEXT",
+        destination_type="NUMERIC",
+        execution_policy=policy,
+        reason="Operator accepts held-out rows for this migration",
+        approved_by="qa@dataflow.local",
+    )
+    payload = contract.to_dict()
+    payload["signature"] = contract.signature
+    return payload
+
+
+def _financial_check(mapping: dict, rows: list[dict]) -> dict:
+    from services.data_integrity import _check_financial_precision
+
+    return _check_financial_precision([mapping], {"amount": "TEXT"}, rows)
+
+
+def _amount_mapping(**extra: object) -> dict:
+    mapping = {
+        "source": "amount",
+        "target": "amount",
+        "confidence": 0.95,
+        "source_type": "TEXT",
+        "target_type": "NUMERIC",
+        "transform": "decimal",
+    }
+    mapping.update(extra)
+    return mapping
+
+
+CONTINUE_POLICIES = ["QUARANTINE_ROW", "SKIP_ROW", "CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"]
+
+
+@pytest.mark.parametrize("policy", CONTINUE_POLICIES)
+def test_financial_rejection_is_a_holdout_under_a_continue_contract(policy):
+    """A signed continue policy names the write-time disposition, so Validate releases."""
+    mapping = _amount_mapping(risk_acknowledged=True, risk_contract=_signed_contract(policy))
+    check = _financial_check(mapping, [{"amount": "10.50"}, {"amount": "abc"}])
+    assert check["blocks_transfer"] is False
+    assert check["issues"] == []
+    assert check["contracted_holdouts"] == ["amount: unparseable financial value 'abc'"]
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        _amount_mapping(),
+        _amount_mapping(risk_acknowledged=True),
+        _amount_mapping(risk_contract=_signed_contract("FAIL_JOB")),
+        _amount_mapping(risk_contract=_signed_contract("STOP_TABLE")),
+        _amount_mapping(risk_contract=_signed_contract("ABORT_TRANSACTION")),
+        _amount_mapping(risk_contract={**_signed_contract("QUARANTINE_ROW"), "reason": "edited"}),
+    ],
+    ids=["no-contract", "boolean-ack", "fail-job", "stop-table", "abort-txn", "tampered"],
+)
+def test_financial_rejection_stays_blocking_without_a_clearing_contract(mapping):
+    check = _financial_check(mapping, [{"amount": "10.50"}, {"amount": "abc"}])
+    assert check["blocks_transfer"] is True
+    assert check["issues"] == ["amount: unparseable financial value 'abc'"]
+    assert "contracted_holdouts" not in check
+
+
 def test_integrity_passes_clean_financial_data():
     rows = [{"amount": "$10,000.00"}, {"amount": "$5,000.00"}, {"amount": "$2,499.00"}]
     mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
