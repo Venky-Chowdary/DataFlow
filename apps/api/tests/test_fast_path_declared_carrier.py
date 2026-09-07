@@ -84,6 +84,33 @@ def test_engine_count_token_is_read_as_cardinality_not_a_digest():
     )
 
 
+def test_keyed_upsert_join_token_is_read_as_cardinality_too():
+    """A keyed upsert counts destination rows whose key is staged, so
+    ``pk_join_count:<n>`` is the same kind of proof as ``dest_count:<n>``."""
+    from src.transfer.reconcile_step import _engine_count_proof_only, _keyed_join_proof
+
+    upsert = {
+        "proof_scope": "staging_count_equals_source_and_dest_pk_join_equals_staging",
+        "checksum": "pk_join_count:500",
+    }
+    assert _engine_count_proof_only(upsert) == 500
+    assert _keyed_join_proof(upsert) is True
+    assert _keyed_join_proof(
+        {"proof_scope": "dest_count_equals_source_snapshot", "checksum": "dest_count:4"}
+    ) is False
+    # A writer that digested both populations in-engine is compared, not counted.
+    assert (
+        _engine_count_proof_only(
+            {
+                **upsert,
+                "engine_source_checksum": "abc",
+                "engine_target_checksum": "abc",
+            }
+        )
+        is None
+    )
+
+
 def test_engine_copy_reports_count_proof_without_claiming_value_fidelity(tmp_path: Path):
     src_path = tmp_path / "count_src.db"
     dst_path = tmp_path / "count_dst.db"
