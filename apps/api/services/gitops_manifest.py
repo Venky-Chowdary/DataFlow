@@ -11,6 +11,15 @@ from __future__ import annotations
 from typing import Any
 
 
+MANIFEST_KIND = "DatawrapManifest"
+
+# The product carried the DataFlow name first, and a manifest is a file a customer
+# commits: one exported before the rename still applies.
+MANIFEST_KINDS: tuple[str, ...] = (MANIFEST_KIND, "DataFlowManifest")
+
+RESOURCE_KINDS: tuple[str, ...] = ("PipelineSchedule", "DataContract", "MappingBundle")
+
+
 _SCHEDULE_RUNTIME_KEYS = frozenset(
     {
         "last_run_at",
@@ -135,7 +144,7 @@ def build_dataflow_manifest(
 
     return {
         "apiVersion": "dataflow.space/v1",
-        "kind": "DatawrapManifest",
+        "kind": MANIFEST_KIND,
         "metadata": {"generator": "dataflow-gitops-export"},
         "resources": resources,
     }
@@ -147,11 +156,16 @@ def _normalize_resources(payload: dict[str, Any] | list[Any]) -> list[dict[str, 
     if not isinstance(payload, dict):
         return []
     kind = str(payload.get("kind") or "")
-    if kind == "DatawrapManifest":
+    if kind in MANIFEST_KINDS:
         raw = payload.get("resources") or []
         return [r for r in raw if isinstance(r, dict)]
-    if kind in {"PipelineSchedule", "DataContract", "MappingBundle"}:
+    if kind in RESOURCE_KINDS:
         return [payload]
+    if kind:
+        raise ValueError(
+            f"unsupported kind {kind!r}: expected one of "
+            f"{', '.join((*MANIFEST_KINDS, *RESOURCE_KINDS))}"
+        )
     # Bare schedule/contract dict without kind — treat as schedule if it looks like one.
     if payload.get("source_connector_id") or payload.get("source_table"):
         return [{"kind": "PipelineSchedule", "spec": payload}]

@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any
 
 
+# Used only when apps/api is not importable (a CLI shipped on its own); the engine's
+# own tuples win whenever they can be read, and a test holds these two in step.
+FALLBACK_MANIFEST_KINDS: tuple[str, ...] = ("DatawrapManifest", "DataFlowManifest")
+FALLBACK_RESOURCE_KINDS: tuple[str, ...] = ("PipelineSchedule", "DataContract", "MappingBundle")
+
+
 def _ensure_api_path() -> None:
     """Allow ``--local`` to import ``services.*`` from apps/api."""
     here = Path(__file__).resolve()
@@ -33,6 +39,20 @@ def _ensure_api_path() -> None:
         p = str(api_root)
         if p not in sys.path:
             sys.path.insert(0, p)
+
+
+def _manifest_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The kinds the engine accepts, read from the engine when it is importable.
+
+    A CLI that keeps its own list drifts from the API and then refuses a manifest
+    the product's own ``export`` wrote.
+    """
+    _ensure_api_path()
+    try:
+        from services.gitops_manifest import MANIFEST_KINDS, RESOURCE_KINDS
+    except ImportError:
+        return FALLBACK_MANIFEST_KINDS, FALLBACK_RESOURCE_KINDS
+    return tuple(MANIFEST_KINDS), tuple(RESOURCE_KINDS)
 
 
 def _load_file(path: Path) -> dict[str, Any]:
@@ -48,7 +68,12 @@ def _load_file(path: Path) -> dict[str, Any]:
     if not isinstance(data, (dict, list)):
         raise SystemExit(f"{path}: manifest must be a mapping or list")
     if isinstance(data, list):
-        return {"apiVersion": "dataflow.space/v1", "kind": "DataFlowManifest", "resources": data}
+        manifest_kinds, _ = _manifest_kinds()
+        return {
+            "apiVersion": "dataflow.space/v1",
+            "kind": manifest_kinds[0],
+            "resources": data,
+        }
     return data
 
 
@@ -127,22 +152,39 @@ def _http_bytes(url: str, *, token: str = "") -> bytes:
 
 def cmd_validate(path: Path) -> int:
     data = _load_file(path)
+    manifest_kinds, resource_kinds = _manifest_kinds()
     kind = str(data.get("kind") or "")
-    if kind == "DataFlowManifest":
+    if kind in manifest_kinds:
         resources = data.get("resources") or []
         if not isinstance(resources, list) or not resources:
-            print("validate: FAIL — DataFlowManifest has no resources", file=sys.stderr)
+            print(f"validate: FAIL — {kind} has no resources", file=sys.stderr)
             return 1
         bad = [r for r in resources if not isinstance(r, dict) or not r.get("kind")]
         if bad:
             print(f"validate: FAIL — {len(bad)} resource(s) missing kind", file=sys.stderr)
             return 1
+        unknown = sorted({
+            str(r.get("kind"))
+            for r in resources
+            if str(r.get("kind")) not in resource_kinds
+        })
+        if unknown:
+            print(
+                f"validate: FAIL — unsupported resource kind(s) {', '.join(unknown)}; "
+                f"expected one of {', '.join(resource_kinds)}",
+                file=sys.stderr,
+            )
+            return 1
         print(f"validate: ok — {len(resources)} resource(s)")
         return 0
-    if kind in {"PipelineSchedule", "DataContract"}:
+    if kind in resource_kinds:
         print(f"validate: ok — single {kind}")
         return 0
-    print(f"validate: FAIL — unsupported kind {kind!r}", file=sys.stderr)
+    print(
+        f"validate: FAIL — unsupported kind {kind!r}: expected one of "
+        f"{', '.join((*manifest_kinds, *resource_kinds))}",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -152,7 +194,11 @@ def cmd_plan(path: Path, *, api: str, token: str, local: bool) -> int:
         _ensure_api_path()
         from services.gitops_manifest import plan_manifest
 
-        plan = plan_manifest(data)
+        try:
+            plan = plan_manifest(data)
+        except ValueError as exc:
+            print(f"plan: FAIL — {exc}", file=sys.stderr)
+            return 1
     else:
         base = api.rstrip("/")
         plan = _http_json("POST", f"{base}/schedules/gitops/plan", token=token, body=data)
@@ -174,16 +220,20 @@ def cmd_apply(
         _ensure_api_path()
         from services.gitops_manifest import apply_manifest, plan_manifest
 
-        plan = plan_manifest(data)
-        _print_plan(plan)
-        if not yes:
-            print("Re-run with --yes to apply.", file=sys.stderr)
-            return 2
-        result = apply_manifest(
-            data,
-            dry_run=False,
-            require_signed_contracts=require_signed_contracts,
-        )
+        try:
+            plan = plan_manifest(data)
+            _print_plan(plan)
+            if not yes:
+                print("Re-run with --yes to apply.", file=sys.stderr)
+                return 2
+            result = apply_manifest(
+                data,
+                dry_run=False,
+                require_signed_contracts=require_signed_contracts,
+            )
+        except ValueError as exc:
+            print(f"apply: FAIL — {exc}", file=sys.stderr)
+            return 1
     else:
         base = api.rstrip("/")
         plan = _http_json("POST", f"{base}/schedules/gitops/plan", token=token, body=data)
