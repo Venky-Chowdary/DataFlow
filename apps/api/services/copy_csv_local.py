@@ -1452,6 +1452,7 @@ def _pairs_and_ddls(
     from connectors.mysql_writer import mysql_type
     from connectors.postgresql_writer import pg_type
     from connectors.sqlite_writer import sqlite_type
+    from services.copy_fast_path import declared_copy_carrier
     from services.copy_mysql_pg import mysql_type_is_copy_safe
     from services.copy_sqlite_common import sqlite_type_is_copy_safe
 
@@ -1462,9 +1463,7 @@ def _pairs_and_ddls(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if dest in {"postgresql", "postgres"}:
             physical = pg_type(declared) if declared else "TEXT"
             if not pg_type_is_load_safe(physical):

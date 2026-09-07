@@ -39,6 +39,7 @@ from services.copy_sqlite_common import (
     sqlite_ident,
     sqlite_pg_type_is_copy_safe,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
 )
 
@@ -188,6 +189,7 @@ def copy_sqlite_to_postgres(
                 raise FastPathUnavailable(
                     f"dest column type {ddl} is not PostgreSQL COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, pg_ddls, where_sql)
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )

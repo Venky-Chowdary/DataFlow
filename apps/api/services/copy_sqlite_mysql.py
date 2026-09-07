@@ -38,6 +38,7 @@ from services.copy_sqlite_common import (
     sqlite_ddl_base,
     sqlite_ident,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
     sqlite_type_is_copy_safe,
 )
@@ -187,6 +188,7 @@ def copy_sqlite_to_mysql(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not MySQL COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, mysql_ddls, where_sql)
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )

@@ -50,6 +50,12 @@ _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
 #: owns that judgement, so COPY declines instead of storing the raw text.
 _CANONICAL_DECIMAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
+_INTEGER_BASES = frozenset({
+    "BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "INT2", "INT4", "INT8",
+})
+_FLOAT_BASES = frozenset({"FLOAT", "REAL", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLEPRECISION"})
+_BOOL_BASES = frozenset({"BOOLEAN", "BOOL"})
+
 _DATE_MIDNIGHT_CLOCKS = frozenset({
     "00:00:00",
     "00:00:00.000",
@@ -88,19 +94,10 @@ def sqlite_bind_from_text(ddl: str, declared: str = "") -> Callable[[str | None]
     alone cannot tell a money column from free text, and a grouped or
     currency-marked cell would land verbatim.
     """
-    base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
-    if base in {
-        "BIGINT",
-        "INT",
-        "INTEGER",
-        "SMALLINT",
-        "TINYINT",
-        "INT2",
-        "INT4",
-        "INT8",
-    }:
+    base = sqlite_ddl_base(ddl)
+    if base in _INTEGER_BASES:
         return _bind_int
-    if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
+    if base in _FLOAT_BASES or base.startswith("DOUBLE"):
         return _bind_float
     if declared:
         from services.decision_kernel import normalize_logical_type
@@ -305,6 +302,74 @@ def sqlite_connect(cfg: dict[str, Any]) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def _sqlite_census_predicate(column_sql: str, ddl: str) -> str | None:
+    """SQL that is true for a stored cell the declared carrier cannot hold.
+
+    SQLite does not enforce a column's declared type: an INTEGER column keeps
+    ``'abc'`` as text and a NUMERIC one keeps ``'not-a-number'``. An identity
+    COPY moves bytes, so the engine itself must prove every cell fits the
+    carrier the destination declares — otherwise the row path, which owns the
+    validation policy and quarantine, has to see the population.
+    """
+    base = sqlite_ddl_base(ddl)
+    if base in _INTEGER_BASES:
+        return f"typeof({column_sql}) NOT IN ('null', 'integer')"
+    if base in _FLOAT_BASES or base.startswith("DOUBLE"):
+        return f"typeof({column_sql}) NOT IN ('null', 'integer', 'real')"
+    if base in _BOOL_BASES:
+        return (
+            f"NOT (typeof({column_sql}) = 'null'"
+            f" OR (typeof({column_sql}) = 'integer' AND {column_sql} IN (0, 1))"
+            f" OR (typeof({column_sql}) = 'text' AND {column_sql} IN ('0', '1')))"
+        )
+    from services.decision_kernel import normalize_logical_type
+
+    if ddl and normalize_logical_type(ddl) == "decimal":
+        return (
+            f"NOT (typeof({column_sql}) IN ('null', 'integer', 'real')"
+            f" OR (typeof({column_sql}) = 'text'"
+            f" AND df_canonical_decimal({column_sql})))"
+        )
+    return None
+
+
+def _canonical_decimal_sql(value: Any) -> int:
+    return 1 if isinstance(value, str) and _CANONICAL_DECIMAL.match(value.strip()) else 0
+
+
+def sqlite_source_carrier_census(
+    conn: sqlite3.Connection,
+    src_ref: str,
+    source_cols: list[str],
+    dest_ddls: list[str],
+    where_sql: str = "",
+) -> None:
+    """Refuse an identity COPY whose source holds a cell the dest carrier cannot.
+
+    Runs one engine-side ``COUNT`` per numeric / boolean column over the same
+    population the COPY would move and raises ``FastPathUnavailable`` naming
+    the column, the count and one offending value, so the decline is recorded
+    and the row path quarantines those cells instead of landing them verbatim.
+    """
+    conn.create_function("df_canonical_decimal", 1, _canonical_decimal_sql, deterministic=True)
+    for col, ddl in zip(source_cols, dest_ddls, strict=True):
+        column_sql = sqlite_ident(col)
+        predicate = _sqlite_census_predicate(column_sql, ddl)
+        if predicate is None:
+            continue
+        glue = " AND " if where_sql.strip() else " WHERE "
+        row = conn.execute(
+            f"SELECT COUNT(*), MIN({column_sql}) FROM {src_ref}{where_sql}{glue}({predicate})"  # nosec B608
+        ).fetchone()
+        bad = int(row[0] or 0)
+        if bad:
+            raise FastPathUnavailable(
+                f"source column {col!r} holds {bad} cell(s) that are not "
+                f"{ddl or 'the declared carrier'} (e.g. {row[1]!r}); the row path "
+                "owns their validation and quarantine"
+            )
 
 
 def sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:

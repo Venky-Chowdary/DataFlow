@@ -35,6 +35,7 @@ from services.copy_sqlite_common import (
     sqlite_connect,
     sqlite_ident,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
     sqlite_type_is_copy_safe,
 )
@@ -141,6 +142,7 @@ def copy_sqlite_to_mongo(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not Mongo COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, mongo_ddls, "")
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
         )

@@ -7,7 +7,9 @@ the source COUNT is skip-complete. Occupied dest with a different COUNT
 declines. ``:memory:`` declines. This is **not** ``.dump`` / ``.import``.
 
 Declines (row path keeps quarantine): transforms that change values,
-BLOB, copy onto the same file, occupied dest with dest COUNT ≠ source.
+BLOB, copy onto the same file, occupied dest with dest COUNT ≠ source, and a
+source cell the destination carrier cannot hold (SQLite does not enforce its
+declared types, so the census is measured on the stored values).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from services.copy_sqlite_common import (
     sqlite_pragma_types,
     sqlite_resolved_path,
     sqlite_same_file,
+    sqlite_source_carrier_census,
     sqlite_table_exists,
     sqlite_type_is_copy_safe,
 )
@@ -103,6 +106,7 @@ def copy_sqlite_to_sqlite(
                 )
         cursor_where = (source_where or "").strip()
         where_sql = f" WHERE {cursor_where}" if cursor_where else ""
+        sqlite_source_carrier_census(conn, src_ref, source_cols, sqlite_ddls, where_sql)
         source_count = int(
             conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )
