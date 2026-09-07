@@ -299,6 +299,24 @@ What this sweep did **not** prove, and what a client must therefore be told:
    it predates D40), and **D42**, the destination-side DLQ write failing
    because the destination lacks the `_df_*` quarantine columns — quarantine
    evidence is control-plane only until that is decided.
+   **Both are now closed on `devin/qa-lead-integration` (PR #172,
+   `b3fec86b` → `59c37f01`; register §8 / §8a).** D41 was two COPY fast paths
+   bypassing validation (SQLite identity `INSERT … SELECT`; CSV→SQLite ignoring
+   `target_type`), fixed by one engine-side carrier census that declines the
+   fast path before the destination exists. The same class existed on the file
+   side — CSV → PostgreSQL/MySQL `COPY`/`LOAD DATA` aborted whole-load on one
+   `not-a-number` with no quarantine — and is closed by
+   `copy_fast_path.text_cell_copy_safe` censusing every cell before COPY. D42
+   was not a missing-columns problem: `dlq_endpoint` inherited the
+   destination's procedure / dest-DML `extra`, so DLQ rows went through the
+   client's own INSERT; the clone now strips `DEST_PROCEDURE_EXTRA_KEYS`.
+   Measured live on PostgreSQL (balanced quarantines 1 of 3 with a DLQ row,
+   strict fails closed with 0 rows, clean population still COPYs); focused
+   suites 32 passed, blast radius 189 passed / 2 pre-existing failures
+   (`test_file_stream_path`, `test_file_stream_skip_matrix`, identical on
+   `b3fec86b`). Unmeasured: MySQL `LOAD DATA` live cell, integer range
+   overflow inside a valid integer, full backend suite on `59c37f01`
+   (running; the previous run died at 36% with its shell).
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A
