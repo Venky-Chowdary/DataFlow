@@ -3,23 +3,10 @@ import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
+import { isReplayable, type QuarantineRow } from "./quarantineReplay";
 
-type QuarantineRow = {
-  row?: number;
-  column?: string;
-  target?: string;
-  value?: string;
-  reason?: string;
-  policy?: string;
-  values?: Record<string, string>;
-  chars?: string[];
-  suggested_transform?: string;
-  suggested_fix?: string;
-  suggested_target_type?: string;
-  retry_status?: string;
-  /** Destination DLQ row id — required to stamp `_df_promoted_at` after Promote. */
-  _df_qid?: string;
-};
+export { isReplayable };
+export type { QuarantineRow };
 
 export interface QuarantinePanelProps {
   jobId: string;
@@ -83,22 +70,6 @@ function buildTransformOverrides(rows: QuarantineRow[]): Record<string, string> 
     out[col] = xf;
   }
   return out;
-}
-
-/**
- * Whether replay could rebuild a row from this finding.
- *
- * Replay rewrites the stored quarantine payload; a finding that names no column
- * and carries no values dictionary has no payload, so the writer is handed an
- * empty record and the request is refused. Offering the control on an open count
- * alone produced a button that answered every click with the same 400.
- */
-export function isReplayable(row: QuarantineRow): boolean {
-  const named = String(row.column || row.target || "").trim();
-  if (named) return true;
-  const values = (row as { values?: Record<string, unknown> }).values;
-  const sourceValues = (row as { source_values?: Record<string, unknown> }).source_values;
-  return Object.keys(values ?? {}).length > 0 || Object.keys(sourceValues ?? {}).length > 0;
 }
 
 function isOpenFinding(row: QuarantineRow): boolean {

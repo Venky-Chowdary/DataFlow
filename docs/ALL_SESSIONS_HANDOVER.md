@@ -279,11 +279,26 @@ What this sweep did **not** prove, and what a client must therefore be told:
    shared a timestamp; and D31 at this tip. Still untested: job cancellation, an
    operator-driven schedule, Operations / Contracts / Proofs, workspace roles and
    member removal.
-2. **D40 is open and wider than first recorded.** A blocked route offers no
-   risk-policy selector and no signing control, on `TEXT → DECIMAL(38,15)` and
-   again on `DECIMAL(12,2) → DATE`, where Validate *names* the way out ("sign a
-   continue-policy Migration Risk Contract") and Map then offers neither
-   control. It also blocks D37's positive path, so fixing it closes two items.
+2. **D40 is closed, and it closed D37's positive half with it** (PR
+   [#171](https://github.com/Venky-Chowdary/DataFlow/pull/171), register §7).
+   The dead end had two causes: Map graded carrier *domains* while the engine
+   refuses on carrier *shape*, so it never asked for a contract on the routes
+   the engine actually refuses; and G9's financial check then blocked Validate
+   for a value the destination would reject even when the column carried a
+   signed continue-policy contract. Map now classifies by shape and offers a
+   per-row execution-policy selector with no hidden default; a rejection under
+   a continue policy is a contracted holdout, not a block. Browser-proved on a
+   live PG→PG route: `QUARANTINE_ROW` releases Map and Validate, the run
+   completed with quarantine (2 appended, 1 held out), an independent psycopg2
+   read measured `count(*) = 2` / `SUM(amount) = 30.50`, and Replay refused the
+   unchanged payload and accepted the edited one (`count(*) = 3` /
+   `SUM = 56.25`). Fail-closed is unchanged: no policy, `FAIL_JOB`,
+   `STOP_TABLE`, `ABORT_TRANSACTION` and a tampered signature all still block.
+   It opened two items: **D41**, a non-castable value written anyway on a
+   SQLite destination with `strict` not failing (reproduces on merged base, so
+   it predates D40), and **D42**, the destination-side DLQ write failing
+   because the destination lacks the `_df_*` quarantine columns — quarantine
+   evidence is control-plane only until that is decided.
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A

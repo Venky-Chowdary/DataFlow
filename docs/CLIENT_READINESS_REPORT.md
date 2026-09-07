@@ -376,8 +376,7 @@ written after the chain fix carry a monotonic `chain_seq` and none of them draws
 a finding (D39); and a hand-declared `VARCHAR(255)` survives Map → Validate →
 Map and drives the DDL (D26).
 
-**Implemented but not measured:** D37's *enabled* Replay path (no route through
-the UI reaches a payload-bearing write-time rejection — blocked by D40); D39's
+**Implemented but not measured:** D39's
 tie-break under two writes in one clock tick (no natural tie could be forced);
 D31's locale money behaviour at this tip; job cancellation; a schedule driven end
 to end by an operator; the Operations, Contracts and Proofs pages; workspace
@@ -395,14 +394,37 @@ more defects the automated suites could not have found — the approval inbox
 showing another tenant's parked schedule (D36), a Replay control offered on
 findings with no row to replay (D37), a schedule permanently bricked by editing
 its destination (D38), and Verify chain accusing an untampered store of 28
-broken links (D39). It also left one open: **D40**, a blocked route with no
-release path — no risk-policy selector, no signing control — reproduced on two
-unrelated type pairs (`TEXT → DECIMAL(38,15)` and `DECIMAL(12,2) → DATE`), the
-second of which has Validate *name* the contract an operator is supposed to sign
-and Map then offer no way to sign it. It is the single highest-value open item:
-it is the difference between "the gate refused me and told me what to do" and
-"the product is a dead end", and it also blocks the one quarantine path QA could
-not exercise.
+broken links (D39). It left **D40** open at the time — a blocked route with no
+release path, reproduced on two unrelated type pairs (`TEXT → DECIMAL(38,15)`
+and `DECIMAL(12,2) → DATE`), the second of which had Validate *name* the
+contract an operator was supposed to sign and Map then offer no way to sign it.
+
+**D40 is now closed and browser-proved** (PR
+[#171](https://github.com/Venky-Chowdary/DataFlow/pull/171)), and closing it
+also proved D37's positive Replay path, which nothing had ever reached. Map
+classifies by carrier *shape* (the basis on which the engine actually refuses),
+offers a per-row execution-policy selector with no hidden default, and a
+destination-rejected value under a signed continue policy is a **contracted
+holdout** rather than a Validate block. Measured on a live PG→PG route: the run
+completed with quarantine (2 appended, 1 held out) with a payload-bearing
+finding; an independent psycopg2 read — a connection the engine never touched —
+measured `count(*) = 2` and `SUM(amount) = 30.50` exactly; Replay refused the
+unchanged payload without mutating the destination and accepted the edited one
+(`count(*) = 3`, `SUM = 56.25`, keyed upsert, no duplicate ids). No policy,
+`FAIL_JOB`, `STOP_TABLE`, `ABORT_TRANSACTION` and a tampered signature all
+still block.
+
+Closing it opened two items a client would meet. **D41:** on a **SQLite**
+destination a non-castable value is written anyway — nothing rejected,
+`rejected_rows` `0`, and `strict` / `maximum` do not fail; it reproduces on
+merged base `66dadc93`, so it predates D40 and is the reason earlier QA passes
+never reached quarantine on a file route. **D42:** the destination-side DLQ
+write fails because the destination table has none of the `_df_*` quarantine
+columns, so a held-out row is durable on the control plane only, with no
+destination-side SQL evidence and a warning the client sees too. Not yet
+measured on this tip: the proof-pack export → download → re-upload round trip,
+and the guard that keeps a *silent magnitude shift* blocking even with a
+contract.
 
 The pattern is worth naming for the handover conversation: the assurance
 machinery is sound under test, and almost every defect found by *using* the
@@ -415,7 +437,7 @@ connector, SFTP, and a real IdP for SSO/SAML. Locally emulated stand-ins
 (MinIO, Azurite, fake-GCS, the BigQuery emulator, DynamoDB Local, Iceberg REST,
 Redpanda, Qdrant, Weaviate) prove the route's code path, not the vendor's.
 
-**Open defects:** D40 (the G19 block with no release path, above), D33 (an
+**Open defects:** D41 and D42 (above), D33 (an
 engine-side keyed upsert reports no insert/update/delete census), D34 (`kafka-python` absent, 47 matrix cells unmeasured), D35
 (Qdrant host resolution in the matrix fixtures, 24 cells unmeasured), plus the
 never-measured rows carried forward in §5.

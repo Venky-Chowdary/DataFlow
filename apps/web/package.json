@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "node scripts/run-tests.mjs",
     "brand:icons": "tsx scripts/export-brand-icons.mjs",
     "brand:social": "node scripts/export-social-brand.mjs"
   },

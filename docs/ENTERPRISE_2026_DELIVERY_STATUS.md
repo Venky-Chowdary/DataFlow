@@ -240,7 +240,7 @@ This sequence is closed. N2 [#133], N4 [#134] and N5 [#135] are merged.
 
 Implemented is not the same as proven, and the sweep exists to keep the two
 apart. Every item below was found by using the application, and each is closed
-with a test that fails on the previous code — except D40, which is open.
+with a test that fails on the previous code.
 
 | Defect | What was actually wrong | Where it lives now |
 |--------|-------------------------|--------------------|
@@ -249,7 +249,9 @@ with a test that fails on the previous code — except D40, which is open.
 | D37 | Promote / Replay was offered on quarantine findings with no row payload to rewrite, so every click refused into a toast that faded | `components/transfer/QuarantinePanel.tsx` |
 | D38 | Editing a schedule's destination kept the Decision Artifact stamp taken for the old one, so the tick and the "Run now" offered as recovery refused forever with nothing able to clear it | `services/schedule_store.py` |
 | D39 | Verify chain reported 28 broken links and forks on an untampered store: the chain was linked and re-walked by timestamp, and records written in one clock tick sort arbitrarily | `services/audit_log.py`, `services/evidence_chain.py` |
-| **D40 (open)** | A reachable G19 hard block (`TEXT → DECIMAL(38,15)`) offers no risk-policy selector, no signing path, and no statement that remapping is the only way forward — a dead end. A narrower `DECIMAL(6,2) → DECIMAL` route does expose both | Map release surface |
+| D40 | A reachable hard block (`TEXT → DECIMAL(38,15)`, and again `DECIMAL(12,2) → DATE`) offered no risk-policy selector and no signing path — a dead end where Validate itself named the contract to sign. Two causes: Map graded carrier *domains* while the engine refuses on carrier *shape*, and G9's financial check then blocked Validate for a destination-rejected value even under a signed continue-policy contract. Now: shape-aware classification, a per-row policy selector with no hidden default, and a contracted holdout instead of a block. Browser-proved end to end on a live PG→PG route through quarantine and Replay, with independent SQL reads; fail-closed policies and tampered signatures still block | `lib/typeCarrierFidelity.ts`, `lib/mapBlockers.ts`, `components/ColumnReviewPanel.tsx`, `services/data_integrity.py` |
+| **D41 (open)** | On a **SQLite** destination a non-castable value is written anyway: nothing is rejected, `rejected_rows` is `0`, and `strict` / `maximum` do not fail. Reproduces identically on merged base `66dadc93`, so it predates D40 — and it is why earlier QA passes never reached quarantine on a file/SQLite route | SQLite write path |
+| **D42 (open)** | The destination-side DLQ write fails because the destination table lacks the `_df_*` quarantine columns, so a held-out row is durable on the control plane only, with no destination-side SQL evidence and a warning the client also sees | writer DLQ provisioning (product decision) |
 
 The honest reading of this section: the 2026 capabilities are implemented and
 unit-proven, and the surfaces that *present* them to an operator are where the

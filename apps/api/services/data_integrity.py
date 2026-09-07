@@ -301,14 +301,22 @@ def _check_financial_precision(
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Detect values that could silently lose magnitude (e.g. comma/currency parsing failures)."""
+    from services.migration_risk_contract import mapping_has_clearing_risk_contract
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
     issues: list[str] = []
+    contracted: list[str] = []
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
         if not _FINANCIAL_NAME_PATTERNS.search(src) and not _FINANCIAL_NAME_PATTERNS.search(tgt):
             continue
+        # A signed continue-policy Migration Risk Contract on this column names
+        # the write-time disposition for a value the destination will reject, so
+        # the rejection is a contracted holdout, not a Validate block. A
+        # magnitude shift is a silent misparse with no rejection, so it stays
+        # blocking whatever the contract says.
+        holdouts_contracted = mapping_has_clearing_risk_contract(m)
         src_type = column_type_or_none(source_types, src) or source_types.get(src, "VARCHAR")
         transform = m.get("transform") or infer_transform_for_mapping(
             src, tgt, src_type, m.get("target_type"),
@@ -328,7 +336,8 @@ def _check_financial_precision(
                 continue
             converted, err = apply_transform(raw, transform)
             if err:
-                issues.append(f"{src}: unparseable financial value {raw!r}")
+                message = f"{src}: unparseable financial value {raw!r}"
+                (contracted if holdouts_contracted else issues).append(message)
                 continue
             # Null/missing sentinel coerced to None is a valid absence, not a parse failure.
             if converted is None:
@@ -336,7 +345,8 @@ def _check_financial_precision(
             try:
                 original_parsed, original_err = apply_transform(raw, "decimal")
                 if original_err:
-                    issues.append(f"{src}: unparseable financial value {raw!r}")
+                    message = f"{src}: unparseable financial value {raw!r}"
+                    (contracted if holdouts_contracted else issues).append(message)
                     continue
                 if original_parsed is None:
                     continue
@@ -353,12 +363,19 @@ def _check_financial_precision(
             except (InvalidOperation, ZeroDivisionError):
                 pass
     blocks = len(issues) > 0
-    return {
+    report: dict[str, Any] = {
         "check": "financial_precision",
         "passed": not blocks,
         "blocks_transfer": blocks,
         "issues": issues[:15],
     }
+    if contracted:
+        report["contracted_holdouts"] = contracted[:15]
+        report["contracted_holdout_count"] = len(contracted)
+        report["warnings"] = [
+            f"Contracted holdout (continue-policy): {c}" for c in contracted[:5]
+        ]
+    return report
 
 
 def _check_required_nulls(
