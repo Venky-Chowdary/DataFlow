@@ -1089,8 +1089,19 @@ def _stream_database_transfer_impl(
             dest_cfg,
             resolve_dest_table(dest_type, destination, _source_name(source)),
         )
+    # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
+    # by the destination writer; a server-to-server copy would write into the
+    # destination's current shape and fail on the column the source just grew.
+    # An occupied destination under backfill therefore stays on the row path.
+    writer_owns_evolution = bool(backfill_new_fields) and pre_write_rows_before is not None
+    if writer_owns_evolution and shape_runner is None:
+        logger.info(
+            "COPY fast path declined: backfill_new_fields on an existing %s "
+            "destination — schema evolution runs on the writer path",
+            dest_type,
+        )
     try:
-        fast = None if shape_runner is not None else _try_copy_fast_path(
+        fast = None if (shape_runner is not None or writer_owns_evolution) else _try_copy_fast_path(
             source=source,
             destination=destination,
             mappings=mappings,

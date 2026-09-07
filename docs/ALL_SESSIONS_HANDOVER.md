@@ -384,6 +384,17 @@ attached source) fixed by `main.`-qualifying the dest and rollback-only cleanup.
 Neighbourhood run: 1231 passed / 43 skipped. Not claimed: live MariaDB/PG runs
 of these paths in this exact commit (see §8f for the focused live counts).
 
+## Schema evolution vs COPY + Gate-8 engine digests (2026-08-10, `devin/qa-lead-integration`)
+
+Register §8g. An occupied destination under `backfill_new_fields` now stays on
+the writer path (COPY bypassed ADD COLUMN / widen); PG and MySQL writers defer
+the strict pre-scan verdict until the live carriers are final (fail-closed if
+setup changed nothing, rescan if it widened); Gate-8 no longer demands a stashed
+sample when a whole-population engine digest pair is already in hand. Live PG and
+MySQL backfill/widen tests and the PG control-total test pass; blast radius
+338 passed / 2 pre-existing failures (Informix merge stage bind, vector
+read_target_sample route) which are next.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

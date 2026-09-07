@@ -2442,6 +2442,9 @@ def run_reconciliation(
 
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
     # sample cannot claim key-aligned proof (Airbyte/Fivetran honesty bar).
+    # A whole-population engine digest pair (server-to-server COPY, or both
+    # sides re-read in the engines) already compared every mapped cell, so no
+    # sample is owed — a sample is a subset of the proof already in hand.
     is_streaming = bool(dest_summary.get("streaming"))
     if (
         strict_checksum
@@ -2450,6 +2453,7 @@ def run_reconciliation(
         and int(rows_written or 0) > 0
         and not sample_compare
         and not sample_records
+        and engine_digests is None
         and db_type
         not in {"pinecone", "qdrant", "weaviate", "milvus", "pgvector", "email"}
     ):
