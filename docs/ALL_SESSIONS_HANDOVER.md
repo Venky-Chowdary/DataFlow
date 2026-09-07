@@ -340,7 +340,8 @@ What this sweep did **not** prove, and what a client must therefore be told:
    key-addressed only with a mapped `_id`; Redis empty-prefix phantom schema
    fixed; SQLite text-boolean identity COPY declines to the row path. 580
    passed / 0 failed / 8 skipped on the 69-file changed-test selection with
-   PG/MySQL/Mongo/Redis live. Still open: source-only SaaS seeding (54), MariaDB
+   PG/MySQL/Mongo/Redis live. Source-only SaaS seeding (54) closed in register §8e
+   (`a3dc9da9`, harness only). Still open: MariaDB
    upsert, RI properties, `_Table.c` stubs, vector Gate-8.
    **CDC cursor wave (register §8d, `bfc565dd`):** the CDC cursor poll never
    advanced past page one (watermark reused as `cursor_after`, offset ignored

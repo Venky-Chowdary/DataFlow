@@ -240,7 +240,7 @@ Root-cause classes from the 152, fixed at the owner rather than per test.
 
 Measured on this head: changed-test + neighbourhood selection (69 files: every re-pointed route suite, sync-mode matrix, precount, redis, introspect, fast path, primary key, row conservation) **580 passed / 0 failed / 8 skipped** with PG/MySQL/Mongo/Redis live. Ruff on the touched files 149 → 139 (all remaining pre-existing BLE001/S110/DTZ001); mypy on the 6 touched modules unchanged at 55 baseline errors.
 
-Open from this wave (closed in §8d): the CDC cursor poll re-read the same page forever. Remaining 152-classes still open: source-only SaaS seeding (54), MariaDB upsert, RI properties, `_Table.c` stubs, vector Gate-8.
+Open from this wave (closed in §8d): the CDC cursor poll re-read the same page forever. Remaining 152-classes still open: MariaDB upsert, RI properties, `_Table.c` stubs, vector Gate-8.
 
 ## 8d. CDC keyset cursor + source population (2026-08-10, `bfc565dd`, branch `devin/qa-lead-integration`)
 
@@ -253,6 +253,12 @@ Open from this wave (closed in §8d): the CDC cursor poll re-read the same page 
 | new | `test_cdc_mysql_to_postgres_dest_owned_delete` wrote its proof to a hardcoded `/opt/cursor/artifacts` path. | test → `platform_config.data_dir()/proofs/…` (same owner as `live_fleet_proof`). | green. |
 
 Measured: CDC/keyset/cursor/incremental neighbourhood (56 files) **513 passed / 26 skipped**; P0 + carrier census + quarantine + keyset + sqlite stream 95/95. Still untracked, not committed: `services/write_pass_digest.py` + `tests/test_cdc_write_pass_digest.py` — a run-level keyed Gate-8 write-pass digest design (13/15 of its own tests pass; `CdcState.write_digest` is not wired). It is a design, not a defect fix; wire it or drop it deliberately, do not commit half.
+
+## 8e. Source-only SaaS matrix seeding (2026-08-10, `a3dc9da9`, branch `devin/qa-lead-integration`)
+
+| # | Root cause (measured) | Owner module | Closure evidence |
+|---|-----------------------|--------------|------------------|
+| 54× `test_execute_tracked_universal_matrix` | Every `database_rest_api_*` / `database_stripe_*` route failed before the transfer ran: `_seed_source` seeded the *source* through `write_destination_database`, which is `saas_common.write_not_supported` for `rest_api` and — for Stripe — correctly refused `2000.50` into integer cents (reverse-ETL writer is not a certified dest). The local stub already serves the two-row fixture (`seed_tabular_fixture`). Stub Stripe ids were `cus_1/cus_2`, breaking the matrix's `id INTEGER` contract (DynamoDB N key refused, hubspot/salesforce upsert-by-id landed 4 rows). | test harness only — engine unchanged. `tests/test_execute_tracked_universal_matrix.py::_stub_owns_fixture` asks `connector_capabilities.get_capabilities` (`write` false or `certified_dest` false) and relies on the stub fixture; `tests/saas_desktop_stub.py` stripe ids `1/2`. | stripe/rest_api slice **54 passed / 18 skipped** (was 51 failed + 3 failed after first fix); stub-backed suites (`desktop_lab_untested`, universal matrix saas slices, `test_saas_desktop_stub`) **113 passed / 36 skipped**. Engine refusals seen on the way (`DynamoDB key type N refused 'cus_1'`, Stripe integer-cents reject) are correct fail-closed behaviour, not defects. |
 
 ## 9. Closure protocol
 
