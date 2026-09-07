@@ -835,8 +835,17 @@ def _decider(request: Request, *, authorize: bool = False) -> str:
 
 
 @router.get("/approvals/open")
-async def list_open_approvals(request: Request, workspace_id: str = ""):
-    """Every schedule currently parked on a decision, newest first."""
+async def list_open_approvals(
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Every schedule currently parked on a decision, newest first.
+
+    The tenant comes from the same header every other schedule route reads. As a
+    plain argument it was a query parameter no caller sends, so the scope
+    resolved empty and the inbox listed schedules — with their connector ids —
+    from every workspace the operator was not looking at.
+    """
     import asyncio
 
     from services.schedule_approvals import open_approvals
