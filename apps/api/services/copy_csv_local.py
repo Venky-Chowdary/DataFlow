@@ -773,6 +773,7 @@ def copy_csv_to_sqlite(
     sqlite_ddls: list[str],
     source_count: int,
     replace_destination: bool,
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     """Mapped local CSV into SQLite executemany. Dest COUNT(*) is the proof."""
     from services.copy_sqlite_common import (
@@ -801,7 +802,13 @@ def copy_csv_to_sqlite(
     col_sql = ", ".join(sqlite_ident(c) for c in target_cols)
     placeholders = ", ".join(["?"] * len(target_cols))
     insert_sql = f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-    converters = [sqlite_bind_from_text(ddl) for ddl in sqlite_ddls]
+    declared_logical = list(declared_types or [""] * len(sqlite_ddls))
+    if len(declared_logical) != len(sqlite_ddls):
+        raise FastPathUnavailable("declared type list / DDL mismatch")
+    converters = [
+        sqlite_bind_from_text(ddl, decl)
+        for ddl, decl in zip(sqlite_ddls, declared_logical, strict=True)
+    ]
     delim = "\t" if ext == "tsv" else ","
     batch_size = csv_local_copy_batch()
 
@@ -1126,6 +1133,7 @@ def copy_csv_to_sqlite_incremental(
     pk_column: str = "",
     read_options: Any = None,
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     mode = (sync_mode or "").strip().lower()
     if mode not in COPY_INCREMENTAL_MODES:
@@ -1165,6 +1173,7 @@ def copy_csv_to_sqlite_incremental(
             sqlite_ddls=sqlite_ddls,
             source_count=source_count,
             replace_destination=True,
+            declared_types=declared_types,
         )
     return _finish_sqlite_incremental_staging(
         dest_cfg,
@@ -1439,7 +1448,7 @@ def _pairs_and_ddls(
     mappings: list[dict],
     schema: dict[str, str],
     dest_type: str,
-) -> tuple[list[tuple[str, str]], list[str]]:
+) -> tuple[list[tuple[str, str]], list[str], list[str]]:
     from connectors.mysql_writer import mysql_type
     from connectors.postgresql_writer import pg_type
     from connectors.sqlite_writer import sqlite_type
@@ -1449,6 +1458,7 @@ def _pairs_and_ddls(
     dest = (dest_type or "").strip().lower()
     pairs: list[tuple[str, str]] = []
     ddls: list[str] = []
+    declared_types: list[str] = []
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
@@ -1477,7 +1487,8 @@ def _pairs_and_ddls(
                 )
             ddls.append(physical)
         pairs.append((source_col, target_col))
-    return pairs, ddls
+        declared_types.append(declared)
+    return pairs, ddls, declared_types
 
 
 def _format_csv_copy(
@@ -1620,7 +1631,7 @@ def try_copy_local_csv(
         return None
 
     try:
-        pairs, ddls = _pairs_and_ddls(mappings, schema, dest_type)
+        pairs, ddls, declared_types = _pairs_and_ddls(mappings, schema, dest_type)
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None
@@ -1672,6 +1683,7 @@ def try_copy_local_csv(
                     pk_column=pk_column,
                     read_options=read_options,
                     file_type=file_type,
+                    declared_types=declared_types,
                 )
         else:
             with _mapped_csv_file(
@@ -1714,6 +1726,7 @@ def try_copy_local_csv(
                         sqlite_ddls=ddls,
                         source_count=source_count,
                         replace_destination=replace_destination,
+                        declared_types=declared_types,
                     )
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   acknowledgeMappingRisk,
+  applyDestTypeChange,
   mappingHasClearingRiskContract,
   mappingRequiresRiskAck,
   type EditableMapping,
@@ -122,6 +123,63 @@ describe("carryOperatorDecisions", () => {
     );
     assert.deepEqual(carried[0].codeCrosswalk, { A: "active", B: "blocked" });
     assert.equal(carried[0].codeCrosswalkSystem, "legacy_status→v2");
+  });
+
+  it("keeps a hand-picked destination carrier across regeneration", () => {
+    // The operator widened VARCHAR(4) → VARCHAR(255) in Map. Validate honoured
+    // it; coming back to Map re-inferred VARCHAR(4) and the widening was gone,
+    // so the run the operator reviewed was not the run Execute would make.
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    assert.equal(declared.destType, "VARCHAR(255)");
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" })],
+      [declared],
+    );
+
+    assert.equal(carried[0].destType, "VARCHAR(255)");
+    assert.equal(carried[0].destTypeDeclared, "VARCHAR(255)");
+  });
+
+  it("carries the approval that was signed for the declared carrier", () => {
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    const approved = { ...declared, approved: true, requiresReview: false };
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", inferredType: "VARCHAR(4)", destType: "VARCHAR(4)" })],
+      [approved],
+    );
+
+    assert.equal(carried[0].destType, "VARCHAR(255)");
+    assert.equal(carried[0].approved, true);
+  });
+
+  it("does not restore a carrier on a column the operator dropped", () => {
+    const declared = applyDestTypeChange(
+      clean({ source: "code", target: "code", destType: "VARCHAR(4)" }),
+      "VARCHAR(255)",
+    );
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", destType: "VARCHAR(4)" })],
+      [{ ...declared, transform: "omit", approved: true }],
+    );
+    assert.equal(carried[0].transform, "omit");
+    assert.equal(carried[0].destType, "VARCHAR(4)");
+  });
+
+  it("leaves an inferred carrier alone when nothing was declared", () => {
+    const carried = carryOperatorDecisions(
+      [clean({ source: "code", target: "code", destType: "VARCHAR(8)" })],
+      [clean({ source: "code", target: "code", destType: "VARCHAR(4)", approved: true })],
+    );
+    assert.equal(carried[0].destType, "VARCHAR(8)");
+    assert.equal(carried[0].destTypeDeclared, undefined);
   });
 
   it("does not omit a column the operator never dropped", () => {

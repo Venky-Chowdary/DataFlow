@@ -230,6 +230,28 @@ def test_sqlite_independent_sum_mismatch_fails(tmp_path: Path) -> None:
     assert Decimal(report["columns"][0]["dest_sum"]) == Decimal("3049")
 
 
+def test_sum_is_spelled_in_the_destination_dialect() -> None:
+    """``CAST(... AS TEXT)`` is a MySQL syntax error, so a declared ledger on a
+    MySQL destination would report *unproven* for a reason that is ours."""
+    from services.decimal_identity import dest_numeric_text_sql
+
+    expr = "COALESCE(SUM(`amount`), 0)"
+    assert dest_numeric_text_sql("mysql", expr) == f"CAST({expr} AS CHAR)"
+    assert dest_numeric_text_sql("mariadb", expr) == f"CAST({expr} AS CHAR)"
+    assert dest_numeric_text_sql("postgresql", expr) == f"({expr})::text"
+    assert dest_numeric_text_sql("sqlite", expr) == f"CAST({expr} AS TEXT)"
+    assert dest_numeric_text_sql("oracle", expr) == f"TO_CHAR({expr})"
+    assert dest_numeric_text_sql("clickhouse", expr) == f"toString({expr})"
+    assert dest_numeric_text_sql("bigquery", expr) == f"CAST({expr} AS STRING)"
+    assert dest_numeric_text_sql("snowflake", expr) == f"TO_VARCHAR({expr})"
+    assert dest_numeric_text_sql("trino", expr) == f"CAST({expr} AS VARCHAR)"
+    # No dialect claims a spelling it does not have: uncast, so the driver's own
+    # type decides and a float payload still fails closed.
+    assert dest_numeric_text_sql("teradata", expr) == expr
+    for engine in ("mysql", "mariadb", "oracle", "clickhouse", "snowflake"):
+        assert "AS TEXT" not in dest_numeric_text_sql(engine, expr)
+
+
 def test_mapping_item_keeps_control_total() -> None:
     from src.routers.preflight_router import MappingItem
 

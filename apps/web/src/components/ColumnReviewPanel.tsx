@@ -37,6 +37,8 @@ import {
   reductionReasonMeta,
   formatCodeCrosswalk,
   parseCodeCrosswalk,
+  isCodeCrosswalkCandidate,
+  isCodeCrosswalkDeclared,
   isSpecialtyLogicalType,
   isStructLogicalType,
   createNewRiskDetail,
@@ -122,6 +124,15 @@ function confidenceClass(
   if (c >= threshold) return "warn";
   if (c >= threshold - 0.1) return "warn";
   return "block";
+}
+
+/** The profiler or the catalog already called this column an enum. */
+function enumSignalled(m: EditableMapping): boolean {
+  return (
+    m.semanticRole === "string_enum" ||
+    /enum/i.test(String(m.destType || "")) ||
+    /enum/i.test(String(m.inferredType || ""))
+  );
 }
 
 const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
@@ -280,6 +291,9 @@ export function ColumnReviewPanel({
 
   /** Per-row execution policy choice — no hidden CAST_AND_CONTINUE default. */
   const [policyBySource, setPolicyBySource] = useState<Record<string, ExecutionPolicy | "">>({});
+  // Rows where the operator opened the crosswalk editor on a plain character
+  // carrier. Opening it declares nothing by itself.
+  const [crosswalkOpen, setCrosswalkOpen] = useState<Record<string, boolean>>({});
 
   const updateMapping = (index: number, patch: Partial<EditableMapping>) => {
     const next = mappings.map((m, i) => (i === index ? { ...m, ...patch } : m));
@@ -1031,7 +1045,17 @@ export function ColumnReviewPanel({
                           </option>
                         ))}
                       </select>
-                      {!omitted && (m.semanticRole === "string_enum" || m.codeCrosswalk || /enum/i.test(String(m.destType || "")) || /enum/i.test(String(m.inferredType || ""))) && (
+                      {!omitted && isCodeCrosswalkCandidate(m) && !enumSignalled(m) && !isCodeCrosswalkDeclared(m) && !crosswalkOpen[m.source] && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-ghost df2-btn-xs df2-column-crosswalk-declare"
+                          onClick={() => setCrosswalkOpen((prev) => ({ ...prev, [m.source]: true }))}
+                          title="G20 is opt-in: declare the code translation for this column and Validate proves every distinct value in the population has a target. Undeclared columns are reported as not asked."
+                        >
+                          Declare code crosswalk
+                        </button>
+                      )}
+                      {!omitted && isCodeCrosswalkCandidate(m) && (enumSignalled(m) || isCodeCrosswalkDeclared(m) || crosswalkOpen[m.source]) && (
                         <label className="df2-column-omit-block" title="G20: every distinct source code in the population must have a target. One unmapped code blocks. A=A is explicit identity — nothing passes through by default.">
                           <span className="df2-column-omit-target">Code crosswalk</span>
                           <textarea

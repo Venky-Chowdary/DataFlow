@@ -29,6 +29,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from services.decimal_identity import dest_numeric_text_sql
 from services.mapping_constraints import is_intentional_omit
 
 logger = logging.getLogger(__name__)
@@ -185,7 +186,7 @@ def independent_column_sum(
     table: str,
     column: str,
 ) -> dict[str, Any]:
-    """``SELECT CAST(COALESCE(SUM(col), 0) AS TEXT)`` on a fresh connection.
+    """``SELECT <dest text spelling of COALESCE(SUM(col), 0)>`` on a fresh connection.
 
     Returns ``{available, sum, reason}``. ``sum`` is a Decimal string when
     available. A float driver result is unproven.
@@ -209,8 +210,11 @@ def independent_column_sum(
 
     quoted_col = _quote_col(db_type, column)
     table_sql = _table_ref(db_type, schema, table)
-    # CAST AS TEXT keeps NUMERIC/INTEGER exact; a float SUM never becomes Decimal.
-    sql = f"SELECT CAST(COALESCE(SUM({quoted_col}), 0) AS TEXT) FROM {table_sql}"
+    # Text keeps NUMERIC/INTEGER exact; a float SUM never becomes Decimal. The
+    # spelling is the destination engine's own, not Postgres' — a wrong cast
+    # target is a syntax error that would leave a declared ledger unproven.
+    sum_text = dest_numeric_text_sql(db_type, f"COALESCE(SUM({quoted_col}), 0)")
+    sql = f"SELECT {sum_text} FROM {table_sql}"
     try:
         with engine.connect() as conn:
             row = conn.execute(sa.text(sql)).fetchone()
@@ -233,7 +237,7 @@ def independent_column_sum(
         "available": True,
         "sum": format(parsed, "f"),
         "reason": "",
-        "scan_sql": "CAST(COALESCE(SUM(col), 0) AS TEXT)",
+        "scan_sql": dest_numeric_text_sql(db_type, "COALESCE(SUM(col), 0)"),
     }
 
 

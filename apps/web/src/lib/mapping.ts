@@ -195,6 +195,15 @@ export interface EditableMapping {
    * until this is set (MONEY/CURRENCY/SMALLMONEY carriers default on).
    */
   controlTotal?: boolean;
+  /**
+   * The destination carrier the operator chose by hand, as distinct from the
+   * one Map inferred. Kept alongside `destType` because Map re-derives every
+   * row on re-entry: without a record of what was *declared*, a widened
+   * `VARCHAR(255)` was silently replaced by the inferred `VARCHAR(4)` on the
+   * way back from Validate. On an existing physical column this is the type
+   * the operator asked for, which still requires an ALTER or a remap.
+   */
+  destTypeDeclared?: string;
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -1855,6 +1864,7 @@ export function clearExistingDestTypeOverride(m: EditableMapping): EditableMappi
   return {
     ...m,
     reason,
+    destTypeDeclared: undefined,
     approved: false,
     requiresReview: mappingRequiresRiskAck(m),
   };
@@ -1876,6 +1886,7 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
   if (m.existsInDestination && nextDestType && nextDestType !== m.destType) {
     return {
       ...flagExistingTypeConflict(m, m.destType || "destination"),
+      destTypeDeclared: nextDestType,
       // Keep physical type for G3/G6; note the desired type in reason.
       reason: [
         m.reason,
@@ -1891,6 +1902,7 @@ export function applyDestTypeChange(m: EditableMapping, nextDestType: string): E
   return {
     ...m,
     destType: nextDestType,
+    destTypeDeclared: nextDestType,
     approved: false,
     riskAcknowledged: false,
     // Stale engine fidelity must not greenwash the new dest type until re-stamp.
@@ -1944,6 +1956,31 @@ export function isControlTotalCandidate(m: EditableMapping): boolean {
   const role = (m.semanticRole || "").toLowerCase();
   if (CONTROL_TOTAL_ROLES.has(role)) return true;
   return false;
+}
+
+const CHARACTER_CARRIER = /\b(CHAR|VARCHAR|NVARCHAR|NCHAR|TEXT|STRING|CLOB|KEYWORD)\b/i;
+
+/**
+ * Can an operator declare a G20 crosswalk on this row?
+ *
+ * Any character carrier can hold codes — a `varchar(4)` status column is the
+ * ordinary case, and it carries no enum marker to detect. So candidacy is the
+ * carrier's type, and declaring is still the operator's act: no crosswalk is
+ * inferred, and a row nobody declares is reported as *not asked*, never as
+ * covered.
+ */
+export function isCodeCrosswalkCandidate(m: EditableMapping): boolean {
+  if (isIntentionalOmit(m)) return false;
+  if (m.codeCrosswalk) return true;
+  if ((m.semanticRole || "").toLowerCase() === "string_enum") return true;
+  const types = `${m.inferredType || ""} ${m.destType || ""}`;
+  if (/enum/i.test(types)) return true;
+  return CHARACTER_CARRIER.test(types);
+}
+
+/** Already declared, or a carrier whose enum-ness the profiler asserted. */
+export function isCodeCrosswalkDeclared(m: EditableMapping): boolean {
+  return Boolean(m.codeCrosswalk && Object.keys(m.codeCrosswalk).length > 0);
 }
 
 export function applyTransformChange(m: EditableMapping, next: MappingTransform): EditableMapping {

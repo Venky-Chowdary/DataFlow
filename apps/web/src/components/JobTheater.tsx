@@ -19,7 +19,8 @@ import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
-import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/Gate8ProofCard";
+import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";

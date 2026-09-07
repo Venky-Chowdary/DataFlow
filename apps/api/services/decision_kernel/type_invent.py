@@ -1125,12 +1125,13 @@ def _stamp_create_new_mapping_target_type(
     # COLLATE on non-MySQL destinations.
     from services.collation_carry import apply_dest_native_collation
 
-    return apply_dest_native_collation(
+    collated: str = apply_dest_native_collation(
         stamped,
         dest_dialect=dest_db_type,
         source_dialect=source_db or active_source_engine(),
         source_type=src_type,
     )
+    return collated
 
 
 def refuse_create_new_numeric_collapse(

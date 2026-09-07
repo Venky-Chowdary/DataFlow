@@ -45,7 +45,9 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import threading
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
@@ -117,6 +119,122 @@ class FastPathUnavailable(Exception):
     def __init__(self, message: str = "") -> None:
         super().__init__(message)
         note_copy_decline(str(message), log=False)
+
+
+def declared_copy_carrier(
+    item: dict[str, Any],
+    schema: dict[str, str],
+    source_col: str,
+    target_col: str,
+) -> str:
+    """The carrier a fast-path CREATE declares for one mapped column.
+
+    A Map mapping states the destination carrier as ``target_type`` and the
+    source's as ``source_type``; only a schema-derived mapping carries ``type``.
+    Consulting ``type`` and the introspected schema alone meant a caller that
+    passes no schema — the multi-stream contract route passes an empty one and
+    re-introspects inside each stream — fell through to the ``TEXT`` default for
+    every column, so a declared BIGINT key landed as SQLite ``TEXT`` and its
+    values were stored as text.
+    """
+    return str(
+        item.get("type")
+        or item.get("target_type")
+        or item.get("source_type")
+        or schema.get(source_col)
+        or schema.get(target_col)
+        or ""
+    )
+
+
+def fifo_streaming_supported() -> bool:
+    """Does this host have named pipes the COPY routes stream through?"""
+    return hasattr(os, "mkfifo")
+
+
+def copy_spill_dir() -> str | None:
+    """Directory for the COPY spill file, when the operator names one.
+
+    A whole table lands here on a host without named pipes, and the default
+    temp directory is on the system volume. ``DATAFLOW_COPY_SPILL_DIR`` moves
+    it to a volume sized for the migration.
+    """
+    return (os.environ.get("DATAFLOW_COPY_SPILL_DIR") or "").strip() or None
+
+
+def stream_between_cursors(
+    *,
+    prefix: str,
+    producer: Callable[[str], None],
+    consumer: Callable[[str], None],
+    join_timeout: float = 120.0,
+) -> str:
+    """Move a COPY payload from ``producer`` to ``consumer`` through a path.
+
+    The two engines never speak to each other: one writes a TSV/binary stream,
+    the other reads it, and the only thing they share is a filesystem path.
+    Where the host has named pipes that path is a FIFO, so nothing is ever
+    fully materialised and a slow destination backpressures the source.
+
+    Windows has no ``os.mkfifo``, and every named-pipe route used to decline
+    there — a Windows-hosted DataFlow silently lost the server-side copy on
+    PG→MySQL, MySQL→PG and cross-instance MySQL→MySQL and fell back to the
+    3,200-row/sec Python writer. The payload is spilled to a real file
+    instead and read once the producer has finished: the same bytes in the
+    same order, sequential instead of overlapped, at the cost of the table's
+    text size on disk (see :func:`copy_spill_dir`).
+
+    Returns ``"fifo"`` or ``"spill"`` so the route can record which handoff
+    produced its rows; the proof is unaffected either way.
+    """
+    if not fifo_streaming_supported():
+        tmp = tempfile.mkdtemp(prefix=prefix, dir=copy_spill_dir())
+        path = os.path.join(tmp, "stream.tsv")
+        try:
+            producer(path)
+            consumer(path)
+        finally:
+            _discard_stream_path(path, tmp)
+        return "spill"
+
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    path = os.path.join(tmp, "stream.tsv")
+    os.mkfifo(path, 0o600)  # type: ignore[attr-defined]  # guarded above
+    failure: list[BaseException] = []
+
+    def _pump() -> None:
+        try:
+            producer(path)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller
+            failure.append(exc)
+
+    pump = threading.Thread(target=_pump, name=f"{prefix}fifo", daemon=True)
+    pump.start()
+    try:
+        consumer(path)
+    except BaseException:
+        # Opening a FIFO blocks until the other end appears: a producer that
+        # never got there would hold this join forever, so the failing path
+        # waits briefly and lets the real exception out.
+        pump.join(timeout=30)
+        raise
+    finally:
+        pump.join(timeout=join_timeout)
+        _discard_stream_path(path, tmp)
+    if failure:
+        raise failure[0]
+    return "fifo"
+
+
+def _discard_stream_path(path: str, directory: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        logger.debug("copy stream unlink skipped", exc_info=True)
+    try:
+        os.rmdir(directory)
+    except OSError:
+        logger.debug("copy stream rmdir skipped", exc_info=True)
 
 
 def skip_complete_identity_copy(

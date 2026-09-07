@@ -155,6 +155,28 @@ the PR that carries it):
 - SFTP daily Excel sync modes started, not finished.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
 
+**Found by driving the app before handover (2026-09-06,
+[#168](https://github.com/Venky-Chowdary/DataFlow/pull/168)) — register §5:**
+
+Closed with a live Postgres→MySQL proof and an independent destination reread:
+a declared control total failed the whole job on MySQL because the G21 scan
+emitted PostgreSQL-only `CAST(... AS TEXT)` (**D21**); Map had no way to declare
+a crosswalk for a plain `VARCHAR` code column, so G20 could never be asked
+(**D22**); a *proven* control total rendered nowhere an operator looks, only in
+the exported pack (**D23**); and the MySQL COPY fast paths raised the absence of
+`os.mkfifo` out of the fast path instead of declining it, so the row-writer
+fallback never ran and the destination was created empty (**D24**).
+
+Still open, and a client has to be told: a freshly exported proof pack fails the
+product's own **verify** control (`content_sha256` / HMAC / chain-anchor,
+**D25**); a destination-type override is lost on a Map → Validate → Map round
+trip (**D26**); and the Gate-8 card on a *completed* Theater is unproven because
+the active job is cleared the moment the run finishes, so that surface is
+transient by construction. Schedules/retries/overlap/DST, cancellation,
+quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
+pages, workspace roles, G19 reachability, and the Mongo and MinIO routes were
+untouched by this wave and remain unmeasured.
+
 ---
 
 ## 5. Skips, with reasons (no invented green)
@@ -208,6 +230,81 @@ not run; fixed-width dest export is still refused. YAML dest 100K was not
 measured.
 
 ---
+
+## 6b. Pre-handover sweep (2026-09-07, branch `devin/1788705057.72211-handover-gate-fixes`)
+
+Driven by the question "are we good to hand over for 46+ connectors and every
+feature". The answer recorded here is **no, not yet**, and this section is the
+reason, not a summary.
+
+Closed in this sweep, each with the measurement next to it in
+`docs/OPEN_DEFECT_REGISTER.md` §5–§6: D21–D24 (MySQL control totals, the missing
+G20 declaration path, an invisible proven control total, the Windows FIFO
+decline), D25 (a signed proof pack failing the product's own verify control),
+D26 (a hand-picked destination carrier lost on Map → Validate → Map), D27–D30
+(declared carrier ignored by the multi-table fast path; `dest_count` read as a
+digest; FIFO-or-spill; ODBC options passed to `pymssql`), D31 (dirty and
+EU-locale numeric cells forced through the SQLite fast path instead of declining
+to the row path) and D32 (`pk_join_count` refused every correct engine-side
+keyed upsert at Gate-8).
+
+A later browser pass in the same sweep reached the running application over CDP
+and closed four more, each found by using the product rather than reading it:
+**D36** (the approval inbox rendered another tenant's parked schedule and both
+its connector ids, because the route read `workspace_id` as a query parameter
+and ignored the header every client sends), **D37** (Promote / Replay offered on
+findings with no row payload to rewrite, refusing every click into a toast that
+faded), **D38** (editing a schedule's destination kept the Decision Artifact
+stamp taken for the old one, so the cadence tick and the "Run now" offered as
+recovery both refused forever, with no control anywhere that could clear it) and
+**D39** (Verify chain reported 28 broken links and forks on an untampered store,
+because the chain was linked and re-walked by timestamp alone and records
+written in one tick sort arbitrarily). The same pass also completed the D25
+closure: the pack failed verification again on the exact export → download →
+re-upload path, because JSON has one number type and the signer hashed `100.0`
+where the browser returned `100`.
+
+What this sweep did **not** prove, and what a client must therefore be told:
+
+1. **UI evidence is partial, and now says which half.** A second browser pass
+   re-proved D25 (export → download → re-upload verifies; a one-byte mutation
+   still fails all three checks), D38 (a destination edit drops the stale stamp,
+   `Run now` completes, the cadence tick judges the current route, and
+   rename-only and cadence-only edits preserve both hashes byte-identically),
+   D39 (22/22 post-fix records carry a monotonic `chain_seq` and no finding
+   lands on any of them) and D26 (the declared `VARCHAR(255)` survives the round
+   trip and drives the DDL). Three things it could **not** prove: D37's *enabled*
+   Replay path, because no route through the UI reaches a payload-bearing
+   write-time rejection; D39's tie-break, because no two post-fix audit writes
+   shared a timestamp; and D31 at this tip. Still untested: job cancellation, an
+   operator-driven schedule, Operations / Contracts / Proofs, workspace roles and
+   member removal.
+2. **D40 is open and wider than first recorded.** A blocked route offers no
+   risk-policy selector and no signing control, on `TEXT → DECIMAL(38,15)` and
+   again on `DECIMAL(12,2) → DATE`, where Validate *names* the way out ("sign a
+   continue-policy Migration Risk Contract") and Map then offers neither
+   control. It also blocks D37's positive path, so fixing it closes two items.
+3. **The Verify chain screen still reads `Chain verification failed — 36
+   record(s)`** even though every finding is on a pre-fix record. The fix stops
+   new ones; it cannot un-cross history without rewriting audit history. A
+   client sees a red verdict until those records are checkpointed or the screen
+   distinguishes legacy findings — that is a product decision, not a defect.
+4. **The connector matrix is still incomplete.** Local engines are up (Postgres,
+   MySQL, SQL Server, Mongo replica set, Redis, Elasticsearch, MinIO, Azurite,
+   fake-GCS, BigQuery emulator, DynamoDB Local, Iceberg REST, Qdrant, Weaviate,
+   Redpanda, ClickHouse, DuckDB, SQLite), and starting them converted silent
+   skips into real attempts — which is why the failure count went up. Kafka
+   cells now error on a missing `kafka-python` (D34) and Qdrant cells on a host
+   the fixtures resolve differently (D35). Hosted Snowflake / BigQuery /
+   Databricks, real S3 / GCS / ADLS, the SaaS connectors, SFTP and a real IdP
+   remain unproven for want of credentials.
+5. **Schedules have automated proof only** — 173 passed across the schedule
+   suites (cadence, due tick, retry/backoff, overlap, missed windows, DST,
+   workspace ownership, cancellation). No operator drove one through the UI in
+   this sweep.
+6. **The full suite is not green** and the failures are classified rather than
+   hidden: see the register's "Full-suite state" note. The dominant category is
+   SaaS connectors refusing a write by design or having no sandbox credentials.
 
 ## 7. Continuing this work
 

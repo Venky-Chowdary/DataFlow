@@ -38,6 +38,8 @@ import {
   uiTransformToEngine,
   widenMappingToVarchar,
   isControlTotalCandidate,
+  isCodeCrosswalkCandidate,
+  isCodeCrosswalkDeclared,
   type EditableMapping,
 } from "./mapping.js";
 import { needsMappingReview } from "./columnWorkbench.js";
@@ -1348,5 +1350,40 @@ describe("G21 control total wire", () => {
     };
     assert.equal(isControlTotalCandidate(money), true);
     assert.equal(isControlTotalCandidate(id), false);
+  });
+
+  it("lets an operator declare a crosswalk on a plain varchar code column", () => {
+    const base = { confidence: 0.99, approved: true, transform: "none" as const };
+    const status: EditableMapping = {
+      ...base,
+      source: "status",
+      target: "status",
+      inferredType: "VARCHAR(4)",
+      destType: "VARCHAR(4)",
+    };
+    // No enum marker anywhere, yet G20 must be askable — this is the ordinary
+    // mainframe status/code column.
+    assert.equal(status.semanticRole, undefined);
+    assert.equal(isCodeCrosswalkCandidate(status), true);
+    // Candidacy is not a declaration: nothing is mapped until the operator says so.
+    assert.equal(isCodeCrosswalkDeclared(status), false);
+    assert.equal(
+      isCodeCrosswalkDeclared({ ...status, codeCrosswalk: { A: "active" } }),
+      true,
+    );
+    const amount: EditableMapping = {
+      ...base,
+      source: "amount",
+      target: "amount",
+      inferredType: "DECIMAL(12,2)",
+      destType: "DECIMAL(12,2)",
+    };
+    assert.equal(isCodeCrosswalkCandidate(amount), false);
+    const omitted: EditableMapping = {
+      ...status,
+      transform: "omit",
+      target: "",
+    };
+    assert.equal(isCodeCrosswalkCandidate(omitted), false);
   });
 });

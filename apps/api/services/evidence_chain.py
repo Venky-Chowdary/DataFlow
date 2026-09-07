@@ -185,7 +185,10 @@ def read_chain(*, limit: int = MAX_VERIFY_EVENTS) -> list[dict[str, Any]]:
     coll = audit_log._mongo_collection()
     if coll is not None:
         try:
-            cursor = coll.find({}).sort("time", 1).limit(limit)
+            # Write order, not clock order: records sharing a timestamp would
+            # otherwise come back in an arbitrary order and be reported as
+            # broken links on a chain nobody had touched.
+            cursor = coll.find({}).sort(list(audit_log.CHAIN_ORDER)).limit(limit)
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
         except Exception as exc:
             logger.warning("Mongo chain read failed; falling back to file: %s", exc)
@@ -408,16 +411,34 @@ def anchor_evidence(
             "reason": f"audit store unavailable: {exc}",
             "hash_alg": "HMAC-SHA256",
         }
+    record = event if isinstance(event, dict) else {}
     return {
         "anchored": True,
         "evidence_kind": evidence_kind,
         "evidence_sha256": digest,
-        "event_id": event.get("id"),
-        "event_hash": event.get("event_hash"),
-        "prev_hash": event.get("prev_hash"),
-        "sealed_at": event.get("time"),
+        "event_id": _record_text(record.get("id")),
+        "event_hash": _record_text(record.get("event_hash")),
+        "prev_hash": _record_text(record.get("prev_hash")),
+        "sealed_at": _record_text(record.get("time")),
         "hash_alg": "HMAC-SHA256",
     }
+
+
+def _record_text(value: Any) -> str | None:
+    """A chain coordinate as the text a signed pack ships it as.
+
+    The store decides what an event id or timestamp is (``ObjectId``,
+    ``datetime``, ``str``), and this record is embedded in a document that gets
+    hashed and signed. Fixing the carrier here means the anchor a verifier reads
+    is the anchor the signer hashed, whatever backed the store.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value) or None
 
 
 def find_anchor(evidence_sha256: str, *, limit: int = MAX_VERIFY_EVENTS) -> dict[str, Any] | None:

@@ -157,6 +157,55 @@ def test_sibling_workspace_header_cannot_read_or_list_schedule(isolated) -> None
     assert owned.json()["id"] == sched.id
 
 
+def test_approval_inbox_is_scoped_to_the_declared_workspace(isolated) -> None:
+    """A parked schedule belongs to one tenant's inbox, not to every inbox.
+
+    The inbox row carries the schedule name and both connector ids, so listing it
+    under a sibling workspace discloses another tenant's route — and offers
+    Approve/Reject controls for it — even though execution later fails closed.
+    """
+    from services.schedule_approvals import build_approval_request, open_approval_request
+    from services.standing_authorization import binding_from_schedule
+
+    admin = _admin(isolated)
+    mine = _workspace(admin, "Mine")
+    sibling = _workspace(admin, "Sibling")
+    sched = schedule_store.create_schedule(
+        {
+            "name": "Mine nightly",
+            "source_connector_id": "src-secret",
+            "source_table": "orders",
+            "dest_connector_id": "dst-secret",
+            "dest_table": "orders_wh",
+            "interval": "daily",
+            "workspace_id": mine,
+        }
+    )
+    open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="source_drift",
+            code="SOURCE_SCHEMA_DRIFT",
+            finding="Source schema drift: column region was renamed",
+            corrective_action="Confirm the mapping, then accept the new shape.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+
+    crossed = admin.get(
+        "/api/v1/schedules/approvals/open", headers={"X-Workspace-Id": sibling}
+    )
+    assert crossed.status_code == 200, crossed.text
+    assert crossed.json()["count"] == 0
+    assert "src-secret" not in crossed.text
+
+    owned = admin.get(
+        "/api/v1/schedules/approvals/open", headers={"X-Workspace-Id": mine}
+    )
+    assert owned.status_code == 200, owned.text
+    assert [row["schedule_id"] for row in owned.json()["approvals"]] == [sched.id]
+
+
 def test_non_member_cannot_read_or_create_schedule(isolated) -> None:
     admin = _admin(isolated)
     mine = _workspace(admin, "Acme")

@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from services.checkpoint_service import Checkpoint
+from services.copy_fast_path import declared_copy_carrier
 
 from .models import EndpointConfig
 
@@ -2384,9 +2385,7 @@ def _try_pg_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
             note_copy_decline(
                 f"PG→MySQL COPY declined: {source_col} type {declared} is not LOAD DATA safe"
@@ -2557,9 +2556,7 @@ def _try_pg_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
             logger.info(
                 "PG→SQL Server COPY declined: %s type %s is not COPY-text safe",
@@ -2666,9 +2663,7 @@ def _try_pg_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
             logger.info(
                 "PG→Oracle COPY declined: %s type %s is not COPY-text safe",
@@ -2779,9 +2774,7 @@ def _try_pg_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
             logger.info(
                 "PG→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
@@ -2881,9 +2874,7 @@ def _try_pg_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_mongo_type_is_copy_safe(declared):
             logger.info(
                 "PG→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -2991,9 +2982,7 @@ def _try_pg_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_sqlite_type_is_copy_safe(declared):
             note_copy_decline(
                 f"PostgreSQL→SQLite COPY declined: {source_col} type {declared} is not COPY-safe"
@@ -3140,9 +3129,7 @@ def _try_pg_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_s3_type_is_copy_safe(declared):
             logger.info(
                 "PostgreSQL→S3 COPY declined: %s type %s is not COPY-safe",
@@ -3243,9 +3230,7 @@ def _try_iceberg_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             pg_type_is_load_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
@@ -3349,9 +3334,7 @@ def _try_iceberg_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mysql_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
@@ -3455,9 +3438,7 @@ def _try_iceberg_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             sqlserver_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
@@ -3564,9 +3545,7 @@ def _try_iceberg_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             iceberg_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
         ):
@@ -3679,9 +3658,7 @@ def _try_iceberg_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_mongo_type_is_copy_safe(declared):
             logger.info(
                 "Iceberg→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -3784,9 +3761,7 @@ def _try_iceberg_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
             logger.info(
                 "Iceberg→SQLite COPY declined: %s type %s is not COPY-safe",
@@ -3895,9 +3870,7 @@ def _try_iceberg_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
             logger.info(
                 "Iceberg→S3 COPY declined: %s type %s is not COPY-safe",
@@ -4000,9 +3973,7 @@ def _try_iceberg_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
             logger.info(
                 "Iceberg→Iceberg COPY declined: %s type %s is not COPY-safe",
@@ -4109,9 +4080,7 @@ def _try_sqlite_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_type_is_copy_safe(declared):
             note_copy_decline(
                 f"SQLite→SQLite COPY declined: {source_col} type {declared} is not COPY-safe"
@@ -4263,9 +4232,7 @@ def _try_sqlite_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_pg_type_is_copy_safe(declared):
             note_copy_decline(
                 f"SQLite→PG COPY declined: {source_col} type {declared} is not COPY-safe"
@@ -4405,9 +4372,7 @@ def _try_sqlite_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_s3_type_is_copy_safe(declared):
             logger.info(
                 "SQLite→S3 COPY declined: %s type %s is not COPY-safe",
@@ -4505,9 +4470,7 @@ def _try_sqlite_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_mongo_type_is_copy_safe(declared):
             logger.info(
                 "SQLite→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -4615,9 +4578,7 @@ def _try_sqlite_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_mysql_type_is_copy_safe(declared):
             note_copy_decline(
                 f"SQLite→MySQL COPY declined: {source_col} type {declared} is not MySQL COPY-safe"
@@ -4772,9 +4733,7 @@ def _try_sqlite_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_iceberg_type_is_copy_safe(declared):
             logger.info(
                 "SQLite→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
@@ -4887,9 +4846,7 @@ def _try_sqlite_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQLite→SQL Server COPY declined: %s type %s is not SQL Server COPY-safe",
@@ -5002,9 +4959,7 @@ def _try_sqlite_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_oracle_type_is_copy_safe(declared):
             logger.info(
                 "SQLite→Oracle COPY declined: %s type %s is not Oracle COPY-safe",
@@ -5118,9 +5073,7 @@ def _try_s3_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "string")
 
@@ -5211,9 +5164,7 @@ def _try_gcs_gcs_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         gcs_ddls.append(declared or "string")
 
@@ -5305,9 +5256,7 @@ def _try_adls_adls_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         adls_ddls.append(declared or "string")
 
@@ -5402,9 +5351,7 @@ def _try_dynamodb_dynamodb_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not dynamodb_type_is_copy_safe(declared):
             logger.info(
                 "DynamoDB→DynamoDB COPY declined: %s type %s is not COPY-safe",
@@ -5505,9 +5452,7 @@ def _try_snowflake_snowflake_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Snowflake→Snowflake COPY declined: column rename")
             return None
@@ -5610,9 +5555,7 @@ def _try_bigquery_bigquery_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("BigQuery→BigQuery COPY declined: column rename")
             return None
@@ -5715,9 +5658,7 @@ def _try_redis_redis_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Redis→Redis COPY declined: column rename")
             return None
@@ -5814,9 +5755,7 @@ def _try_elasticsearch_elasticsearch_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Elasticsearch→Elasticsearch COPY declined: column rename")
             return None
@@ -5912,9 +5851,7 @@ def _try_kafka_kafka_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Kafka→Kafka COPY declined: column rename")
             return None
@@ -6012,9 +5949,7 @@ def _try_duckdb_duckdb_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("DuckDB→DuckDB COPY declined: column rename")
             return None
@@ -6120,9 +6055,7 @@ def _try_qdrant_qdrant_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Qdrant→Qdrant COPY declined: column rename")
             return None
@@ -6231,9 +6164,7 @@ def _try_milvus_milvus_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Milvus→Milvus COPY declined: column rename")
             return None
@@ -6343,9 +6274,7 @@ def _try_weaviate_weaviate_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Weaviate→Weaviate COPY declined: column rename")
             return None
@@ -6455,9 +6384,7 @@ def _try_pinecone_pinecone_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("Pinecone→Pinecone COPY declined: column rename")
             return None
@@ -6570,9 +6497,7 @@ def _try_pgvector_pgvector_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
             logger.info("pgvector→pgvector COPY declined: column rename")
             return None
@@ -6719,9 +6644,7 @@ def _try_s3_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_type_is_load_safe(declared):
             logger.info(
                 "S3→PG COPY declined: %s type %s is not COPY-safe",
@@ -6820,9 +6743,7 @@ def _try_s3_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_type_is_copy_safe(declared):
             logger.info(
                 "S3→MySQL COPY declined: %s type %s is not COPY-safe",
@@ -6920,9 +6841,7 @@ def _try_s3_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_type_is_copy_safe(declared):
             logger.info(
                 "S3→SQLite COPY declined: %s type %s is not COPY-safe",
@@ -7022,9 +6941,7 @@ def _try_s3_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
@@ -7127,9 +7044,7 @@ def _try_s3_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         dest_ddl = ddl_type("iceberg", declared) if declared else "string"
         if declared and not iceberg_type_is_copy_safe(declared) and not iceberg_type_is_copy_safe(dest_ddl):
             logger.info(
@@ -7240,9 +7155,7 @@ def _try_s3_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         dest_ddl = ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
         if declared and not sqlserver_type_is_copy_safe(declared) and not sqlite_sqlserver_type_is_copy_safe(declared):
             logger.info(
@@ -7355,9 +7268,7 @@ def _try_s3_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             sqlite_oracle_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
         ):
@@ -7476,9 +7387,7 @@ def _try_mongo_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
@@ -7580,9 +7489,7 @@ def _try_mongo_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or mysql_mongo_type_is_copy_safe(declared)
         ):
@@ -7684,9 +7591,7 @@ def _try_mongo_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or sqlserver_mongo_type_is_copy_safe(declared)
         ):
@@ -7791,9 +7696,7 @@ def _try_mongo_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or oracle_mongo_type_is_copy_safe(declared)
         ):
@@ -7901,9 +7804,7 @@ def _try_mongo_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mongo_mongo_type_is_copy_safe(declared):
             logger.info(
                 "Mongo→Mongo COPY declined: %s type %s is not COPY-safe",
@@ -8005,9 +7906,7 @@ def _try_mongo_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or iceberg_mongo_type_is_copy_safe(declared)
         ):
@@ -8109,9 +8008,7 @@ def _try_mongo_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_s3_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
@@ -8216,9 +8113,7 @@ def _try_mongo_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
@@ -8332,9 +8227,7 @@ def _try_sqlserver_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→PG COPY declined: %s type %s is not COPY-safe",
@@ -8447,9 +8340,7 @@ def _try_mysql_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
             note_copy_decline(
                 f"MySQL→PG COPY declined: {source_col} type {declared} is not COPY-safe"
@@ -8598,9 +8489,7 @@ def _try_mysql_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
 
@@ -8747,9 +8636,7 @@ def _try_mysql_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
             logger.info(
                 "MySQL→SQL Server COPY declined: %s type %s is not COPY-safe",
@@ -8854,9 +8741,7 @@ def _try_sqlserver_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→MySQL COPY declined: %s type %s is not COPY-safe",
@@ -8959,9 +8844,7 @@ def _try_sqlserver_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→SQLite COPY declined: %s type %s is not COPY-safe",
@@ -9070,9 +8953,7 @@ def _try_sqlserver_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→S3 COPY declined: %s type %s is not COPY-safe",
@@ -9174,9 +9055,7 @@ def _try_mysql_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
             logger.info(
                 "MySQL→Oracle COPY declined: %s type %s is not COPY-safe",
@@ -9288,9 +9167,7 @@ def _try_mysql_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
             logger.info(
                 "MySQL→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
@@ -9388,9 +9265,7 @@ def _try_mysql_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_mongo_type_is_copy_safe(declared):
             logger.info(
                 "MySQL→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -9487,9 +9362,7 @@ def _try_mysql_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_s3_type_is_copy_safe(declared):
             logger.info(
                 "MySQL→S3 COPY declined: %s type %s is not COPY-safe",
@@ -9597,9 +9470,7 @@ def _try_mysql_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_type_is_copy_safe(declared):
             note_copy_decline(
                 f"MySQL→SQLite COPY declined: {source_col} type {declared} is not COPY-safe"
@@ -9748,9 +9619,7 @@ def _try_sqlserver_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_mongo_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -9852,9 +9721,7 @@ def _try_sqlserver_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
@@ -9958,9 +9825,7 @@ def _try_oracle_iceberg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not (
             oracle_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
@@ -10063,9 +9928,7 @@ def _try_oracle_mongo_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_mongo_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
@@ -10167,9 +10030,7 @@ def _try_oracle_mysql_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→MySQL COPY declined: %s type %s is not COPY-safe",
@@ -10272,9 +10133,7 @@ def _try_oracle_sqlite_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→SQLite COPY declined: %s type %s is not COPY-safe",
@@ -10384,9 +10243,7 @@ def _try_oracle_s3_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→S3 COPY declined: %s type %s is not COPY-safe",
@@ -10491,9 +10348,7 @@ def _try_sqlserver_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
             logger.info(
                 "SQL Server→Oracle COPY declined: %s type %s is not COPY-safe",
@@ -10608,9 +10463,7 @@ def _try_oracle_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→SQL Server COPY declined: %s type %s is not COPY-safe",
@@ -10717,9 +10570,7 @@ def _try_sqlserver_sqlserver_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
             ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
@@ -10819,9 +10670,7 @@ def _try_oracle_oracle_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         pairs.append((source_col, target_col))
         oracle_ddls.append(
             ddl_type("oracle", declared) if declared else "VARCHAR2(4000)"
@@ -10920,9 +10769,7 @@ def _try_oracle_pg_copy_fast_path(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
             logger.info(
                 "Oracle→PG COPY declined: %s type %s is not COPY-safe",

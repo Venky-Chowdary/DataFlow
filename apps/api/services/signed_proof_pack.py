@@ -19,7 +19,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, sanitize_json_value
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +212,63 @@ def _platform_secret() -> bytes:
         return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
 
 
+def _canonical_numbers(value: Any) -> Any:
+    """Render a number the way it comes back from a JSON round trip.
+
+    JSON has one number type. Python keeps two, and writes ``100.0`` for a float
+    that happens to be integral; every JSON reader between here and the operator
+    — the browser that downloads the pack, the editor that pretty-prints it, the
+    client that uploads it back to Verify — reads that as the number 100 and
+    writes it back as ``100``. Hashing the Python spelling therefore signed a
+    document nobody else can reproduce: a pack that had crossed the wire once
+    failed its own verify control with ``content_sha256 mismatch``, which reads
+    to a reviewer as tamper detection firing on the product's own evidence.
+
+    Both spellings are folded to the integer they denote, so signer and verifier
+    agree whichever side of the wire they sit on. Money is unaffected: exact
+    decimals travel as strings, not as floats.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {k: _canonical_numbers(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_numbers(v) for v in value]
+    return value
+
+
 def canonical_json(payload: dict[str, Any]) -> str:
     """Stable JSON for hashing (sorted keys, no insignificant whitespace)."""
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=json_default)
+    return json.dumps(
+        _canonical_numbers(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        default=json_default,
+    )
+
+
+def json_ready_body(body: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite ``body`` into the types a signed document can be shipped as.
+
+    A signature is only worth anything if the recipient hashes the same bytes
+    the signer did. A body straight off a job carries ``Decimal`` totals,
+    ``datetime`` stamps and ``ObjectId`` keys; the response serializer rewrites
+    all three on the way out (and turns a ``Decimal`` into a lossy float), so a
+    pack signed over the Python objects verified in-process and failed the
+    moment it came back over HTTP. Normalizing before hashing means the exported
+    document *is* the signed document, and money keeps every digit as exact
+    decimal text rather than becoming binary64.
+
+    Idempotent: a body that is already JSON-native is returned unchanged.
+
+    A non-finite number in evidence becomes JSON null rather than raising: an
+    export is a read of what already happened, and refusing to describe a
+    finished run leaves the operator with no evidence at all.
+    """
+    ready = sanitize_json_value(body, refuse_nonfinite=False)
+    return ready if isinstance(ready, dict) else {}
 
 
 def sha256_hex(text: str) -> str:
@@ -231,6 +285,7 @@ def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
     The subject binds a signature to the thing it describes, so a pack signed
     for one job cannot be replayed as evidence for another.
     """
+    body = json_ready_body(body)
     content_sha256 = sha256_hex(canonical_json(body))
     return {
         **body,
@@ -756,6 +811,9 @@ def build_signed_proof_pack(
     from services.ai_egress import proof_pack_ai_egress
 
     body["ai_egress"] = proof_pack_ai_egress(job_id)
+    # Normalize before anchoring: the anchor commits to the digest of the body,
+    # and that has to be the digest of the body as exported.
+    body = json_ready_body(body)
     if anchor_in_chain:
         from services.evidence_chain import anchor_evidence
 

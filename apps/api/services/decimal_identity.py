@@ -522,10 +522,31 @@ def identities_same_magnitude(source: DecimalIdentity, dest: DecimalIdentity) ->
 
 
 def dest_numeric_text_sql(engine: str, column_sql: str) -> str:
-    """Dest-engine decimal spelling. Certify digits from this, not Python Decimal."""
+    """Dest-engine decimal spelling. Certify digits from this, not Python Decimal.
+
+    Every engine spells "give me these digits as characters" differently, and
+    the wrong spelling is a syntax error, not a fallback: MySQL has no ``TEXT``
+    cast target, Oracle has no ``::`` cast operator, ClickHouse casts with a
+    function. An engine whose spelling is not known here is returned uncast —
+    the driver's own type then decides, and a float payload stays unproven.
+    """
     eng = _normalize_dest_db(engine)
     if eng in {"mysql", "mariadb", "tidb"}:
         return f"CAST({column_sql} AS CHAR)"
     if eng in {"sqlserver", "mssql", "azure_sql"}:
         return f"CONVERT(VARCHAR(64), {column_sql})"
-    return f"({column_sql})::text"
+    if eng.startswith("oracle"):
+        return f"TO_CHAR({column_sql})"
+    if eng.startswith("sqlite"):
+        return f"CAST({column_sql} AS TEXT)"
+    if eng == "clickhouse":
+        return f"toString({column_sql})"
+    if eng in {"bigquery", "databricks"}:
+        return f"CAST({column_sql} AS STRING)"
+    if eng == "snowflake":
+        return f"TO_VARCHAR({column_sql})"
+    if eng in {"duckdb", "trino", "presto"}:
+        return f"CAST({column_sql} AS VARCHAR)"
+    if eng in {"postgresql", "redshift"}:
+        return f"({column_sql})::text"
+    return column_sql

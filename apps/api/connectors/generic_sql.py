@@ -433,6 +433,100 @@ def _mssql_drivername() -> str:
     return "mssql+pyodbc"
 
 
+_MSSQL_ODBC_ONLY_KEYWORDS = (
+    ("server_certificate", "ServerCertificate"),
+    ("ssl_ca", "ServerCertificate"),
+    ("hostname_in_certificate", "HostNameInCertificate"),
+    ("application_intent", "ApplicationIntent"),
+    ("ApplicationIntent", "ApplicationIntent"),
+)
+
+_TRUTHY = (True, 1, "1", "true", "True", "yes", "Yes", "YES")
+
+
+def _mssql_connect_query(cfg: dict[str, Any], drivername: str) -> dict[str, str]:
+    """URL query for a SQL Server connect, in the vocabulary of the live DBAPI.
+
+    SQLAlchemy hands a ``mssql+pymssql`` URL's query straight to
+    ``pymssql.connect`` as keyword arguments, and pymssql speaks FreeTDS, not
+    ODBC: it has no ``TrustServerCertificate``, ``Encrypt`` or
+    ``ApplicationIntent``. Building the ODBC vocabulary regardless of driver
+    aborted every connect on a host without the Microsoft ODBC driver with
+    ``connect() got an unexpected keyword argument 'TrustServerCertificate'``,
+    which surfaced as "destination COUNT(*) failed" — an unprovable Gate-8 on a
+    reachable server.
+
+    Silently dropping the keywords instead would be worse: an operator who
+    declared a pinned certificate or a read-only intent would get an
+    unverified connection to the primary and no way to know. So the options
+    FreeTDS cannot honour refuse, naming the driver to install; the ones whose
+    FreeTDS behaviour already matches the declaration pass without a keyword.
+    """
+    if drivername == "mssql+pyodbc":
+        query = {"driver": _mssql_odbc_driver() or "ODBC Driver 17 for SQL Server"}
+        # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
+        multi = cfg.get("multi_subnet_failover")
+        if multi is None:
+            multi = cfg.get("MultiSubnetFailover")
+        if multi in _TRUTHY:
+            query["MultiSubnetFailover"] = "Yes"
+        intent = str(
+            cfg.get("application_intent") or cfg.get("ApplicationIntent") or ""
+        ).strip()
+        if intent:
+            # ReadOnly routes to a readable secondary when the AG allows it.
+            query["ApplicationIntent"] = intent
+        # TLS. ODBC Driver 18 encrypts by default and verifies the chain, so a
+        # server holding a self-signed or private-CA certificate (every default
+        # install, every container) fails the handshake with no way to say what
+        # to trust. These three keywords are the only honest exits, and each one
+        # has to be declared on the connector — the default stays verify-or-fail:
+        #   ``server_certificate``      pin the exact cert file (verify, no blanket trust)
+        #   ``hostname_in_certificate`` the CN/SAN to match when the host is an alias
+        #   ``trust_server_certificate`` skip chain verification (operator-declared)
+        cert = str(cfg.get("server_certificate") or cfg.get("ssl_ca") or "").strip()
+        if cert:
+            query["ServerCertificate"] = cert
+        host_in_cert = str(cfg.get("hostname_in_certificate") or "").strip()
+        if host_in_cert:
+            query["HostNameInCertificate"] = host_in_cert
+        if cfg.get("trust_server_certificate") in _TRUTHY:
+            query["TrustServerCertificate"] = "Yes"
+        encrypt = str(cfg.get("encrypt") or "").strip()
+        if encrypt:
+            # ``no`` only when the operator declares this server plaintext; the
+            # default is left to the driver (Driver 18: encrypt + verify).
+            query["Encrypt"] = encrypt
+        return query
+
+    unsupported = sorted(
+        {
+            odbc
+            for key, odbc in _MSSQL_ODBC_ONLY_KEYWORDS
+            if str(cfg.get(key) or "").strip()
+        }
+    )
+    encrypt = str(cfg.get("encrypt") or "").strip().lower()
+    if encrypt in ("yes", "true", "1", "strict", "mandatory"):
+        # FreeTDS negotiates login encryption but cannot be told to require it
+        # for the whole session per connection, and it never verifies the chain.
+        unsupported.append("Encrypt")
+    if unsupported:
+        raise ValueError(
+            "SQL Server options "
+            + ", ".join(unsupported)
+            + " need the Microsoft ODBC driver; this host only has pymssql "
+            "(FreeTDS), which cannot honour them. Install \"ODBC Driver 18 for "
+            "SQL Server\" (or 17) on the DataFlow host, or remove the option "
+            "from the connector — DataFlow refuses to connect as if it were "
+            "honoured."
+        )
+    # ``trust_server_certificate`` and ``multi_subnet_failover`` need no keyword:
+    # FreeTDS already does not verify the server chain, and it resolves every
+    # listener address itself.
+    return {}
+
+
 def adapt_mssql_sql(sql: str) -> str:
     """Rewrite ``%s`` placeholders for the live SQL Server DBAPI.
 
@@ -698,51 +792,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     query: dict[str, str] | None = None
     if drivername.startswith("mssql"):
         drivername = _mssql_drivername()
-        query = {}
-        if drivername == "mssql+pyodbc":
-            query["driver"] = _mssql_odbc_driver() or "ODBC Driver 17 for SQL Server"
-        # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
-        multi = cfg.get("multi_subnet_failover")
-        if multi is None:
-            multi = cfg.get("MultiSubnetFailover")
-        if multi in (True, 1, "1", "true", "True", "yes", "Yes", "YES"):
-            query["MultiSubnetFailover"] = "Yes"
-        intent = str(
-            cfg.get("application_intent") or cfg.get("ApplicationIntent") or ""
-        ).strip()
-        if intent:
-            # ReadOnly routes to a readable secondary when the AG allows it.
-            query["ApplicationIntent"] = intent
-        # TLS. ODBC Driver 18 encrypts by default and verifies the chain, so a
-        # server holding a self-signed or private-CA certificate (every default
-        # install, every container) fails the handshake with no way to say what
-        # to trust. These three keywords are the only honest exits, and each one
-        # has to be declared on the connector — the default stays verify-or-fail:
-        #   ``server_certificate``      pin the exact cert file (verify, no blanket trust)
-        #   ``hostname_in_certificate`` the CN/SAN to match when the host is an alias
-        #   ``trust_server_certificate`` skip chain verification (operator-declared)
-        cert = str(cfg.get("server_certificate") or cfg.get("ssl_ca") or "").strip()
-        if cert:
-            query["ServerCertificate"] = cert
-        host_in_cert = str(cfg.get("hostname_in_certificate") or "").strip()
-        if host_in_cert:
-            query["HostNameInCertificate"] = host_in_cert
-        if cfg.get("trust_server_certificate") in (
-            True,
-            1,
-            "1",
-            "true",
-            "True",
-            "yes",
-            "Yes",
-            "YES",
-        ):
-            query["TrustServerCertificate"] = "Yes"
-        encrypt = str(cfg.get("encrypt") or "").strip()
-        if encrypt:
-            # ``no`` only when the operator declares this server plaintext; the
-            # default is left to the driver (Driver 18: encrypt + verify).
-            query["Encrypt"] = encrypt
+        query = _mssql_connect_query(cfg, drivername)
         if not query:
             query = None
 

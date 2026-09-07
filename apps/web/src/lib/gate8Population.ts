@@ -73,6 +73,105 @@ export function formatProofScope(view: Gate8PopulationView): string {
   return `${coverage} · ${provenance}`;
 }
 
+export type ControlTotalRowView = {
+  column: string;
+  sourceSum: string;
+  destSum: string;
+  proven: boolean;
+  matched: boolean;
+  reason: string;
+};
+
+export type ControlTotalsView = {
+  declared: boolean;
+  /** exact | sampled | unmeasured — anything but `exact` is not proof. */
+  evidence: string;
+  proven: boolean;
+  mismatch: boolean;
+  rows: ControlTotalRowView[];
+};
+
+/**
+ * The G21 ledger as Theater shows it: declared money columns with both
+ * independent SUMs and whether they matched.
+ *
+ * Sums stay strings all the way to the DOM — `Number("618.75")` is a float,
+ * and a float is exactly the evidence G21 refuses. A column with no sums is
+ * rendered as unproven with its reason, never as a zero balance.
+ */
+export function readControlTotals(
+  reconciliation: Gate8ReconciliationPayload | null | undefined,
+): ControlTotalsView {
+  const ct = reconciliation?.control_totals;
+  const columns = Array.isArray(ct?.columns) ? ct.columns : [];
+  const rows: ControlTotalRowView[] = columns.map((c) => ({
+    column: text(c?.source) || text(c?.target),
+    sourceSum: text(c?.source_sum),
+    destSum: text(c?.dest_sum),
+    proven: c?.proven === true,
+    matched: c?.matched === true,
+    reason: text(c?.reason),
+  }));
+  const declared = ct?.declared === true && rows.length > 0;
+  return {
+    declared,
+    evidence: text(ct?.evidence) || "unmeasured",
+    // Proven only when the engine said `exact` and every column proved.
+    proven: declared && text(ct?.evidence) === "exact" && rows.every((r) => r.proven),
+    mismatch: ct?.any_mismatch === true,
+    rows,
+  };
+}
+
+/**
+ * What the engine's `evidence` token means to an operator.
+ *
+ * `unmeasured` is the engine's word for "no exact population proof", and it
+ * is also what a *mismatch* carries — two cent-exact sums that disagree were
+ * certainly measured, so echoing the raw token next to them reads as a
+ * contradiction. The raw token stays available for the auditor.
+ */
+export function controlTotalEvidenceLabel(view: ControlTotalsView): string {
+  return CONTROL_TOTAL_EVIDENCE[evidenceKey(view)].label;
+}
+
+/**
+ * The engine's own token, said in a way that cannot contradict the panel:
+ * a mismatch carries `unmeasured`, so the tooltip has to explain that the
+ * token is about *proof*, not about whether anything was summed.
+ */
+export function controlTotalEvidenceTitle(view: ControlTotalsView): string {
+  const { evidence } = view;
+  return `engine evidence token: ${evidence || "unmeasured"} — ${CONTROL_TOTAL_EVIDENCE[evidenceKey(view)].why}`;
+}
+
+type EvidenceKey = "exact" | "sampled" | "mismatch" | "none";
+
+const CONTROL_TOTAL_EVIDENCE: Record<EvidenceKey, { label: string; why: string }> = {
+  exact: {
+    label: "population SUM, exact",
+    why: "every row was summed on both sides with exact decimal arithmetic",
+  },
+  sampled: {
+    label: "sample SUM — not proof",
+    why: "only a sample was summed, so the population total is unproven",
+  },
+  mismatch: {
+    label: "measured, sums disagree",
+    why: "both sums were measured and they disagree, so nothing is proven",
+  },
+  none: {
+    label: "no exact population SUM",
+    why: "no exact population SUM was recorded for this run",
+  },
+};
+
+function evidenceKey(view: ControlTotalsView): EvidenceKey {
+  if (view.evidence === "exact") return "exact";
+  if (view.evidence === "sampled") return "sampled";
+  return view.mismatch ? "mismatch" : "none";
+}
+
 export type LineageEventView = {
   eventType: string;
   timestamp: string;
