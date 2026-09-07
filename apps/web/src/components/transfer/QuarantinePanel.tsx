@@ -85,6 +85,22 @@ function buildTransformOverrides(rows: QuarantineRow[]): Record<string, string> 
   return out;
 }
 
+/**
+ * Whether replay could rebuild a row from this finding.
+ *
+ * Replay rewrites the stored quarantine payload; a finding that names no column
+ * and carries no values dictionary has no payload, so the writer is handed an
+ * empty record and the request is refused. Offering the control on an open count
+ * alone produced a button that answered every click with the same 400.
+ */
+export function isReplayable(row: QuarantineRow): boolean {
+  const named = String(row.column || row.target || "").trim();
+  if (named) return true;
+  const values = (row as { values?: Record<string, unknown> }).values;
+  const sourceValues = (row as { source_values?: Record<string, unknown> }).source_values;
+  return Object.keys(values ?? {}).length > 0 || Object.keys(sourceValues ?? {}).length > 0;
+}
+
 function isOpenFinding(row: QuarantineRow): boolean {
   const status = (row.retry_status || "open").toLowerCase();
   return status !== "promoted" && status !== "abandoned";
@@ -169,6 +185,7 @@ export function QuarantinePanel({
       skipped?: boolean;
     };
   } | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
   const [destDlq, setDestDlq] = useState<import("../../lib/api").QuarantineInfo["dest_dlq"]>(undefined);
   const [quarantineDurable, setQuarantineDurable] = useState<boolean | null | undefined>(undefined);
   const [quarantineDlqError, setQuarantineDlqError] = useState<string | null | undefined>(undefined);
@@ -295,6 +312,7 @@ export function QuarantinePanel({
   const replay = async () => {
     setReplaying(true);
     setReplayResult(null);
+    setReplayError(null);
     try {
       const overrides = applySuggested && Object.keys(transformOverrides).length
         ? transformOverrides
@@ -341,6 +359,9 @@ export function QuarantinePanel({
       onReplayComplete?.(result.job_id);
       await load();
     } catch (e) {
+      // A toast disappears; a refused replay has to stay on screen, or the
+      // control reads as a silent no-op.
+      setReplayError((e as Error).message);
       toast({ title: "Replay failed", message: (e as Error).message, tone: "error" });
     } finally {
       setReplaying(false);
@@ -358,7 +379,10 @@ export function QuarantinePanel({
   const openCount = closure?.open_count ?? openFindings.length;
   const promotedCount = closure?.promoted_count ?? Math.max(0, rows.length - openFindings.length);
   const ledgerClosed = closure?.verdict === "closed" || (openCount === 0 && promotedCount > 0);
-  const canReplay = isWriteSource && openCount > 0 && !durableLost && !ledgerClosed;
+  const replayableFindings = openFindings.filter(isReplayable);
+  const nothingToRebuild = loaded && openFindings.length > 0 && replayableFindings.length === 0;
+  const canReplay =
+    isWriteSource && openCount > 0 && !durableLost && !ledgerClosed && !nothingToRebuild;
 
   return (
     <div className="df2-quarantine-panel">
@@ -466,6 +490,13 @@ export function QuarantinePanel({
               {quarantineDlqError ? <> ({quarantineDlqError})</> : null}. Replay is disabled because
               it would rewrite nothing — export the CSV now, fix the DLQ store, and re-run the
               transfer so rejects are persisted.
+            </p>
+          ) : nothingToRebuild ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              {openFindings.length} open finding(s) name no column and carry no stored cell
+              values, so there is <strong>no row payload to rewrite</strong> and replay is
+              disabled. Export the CSV, fix the mapping or the source, then re-run the transfer —
+              a replay here would only be refused.
             </p>
           ) : ledgerClosed ? (
             <p>
@@ -611,6 +642,11 @@ export function QuarantinePanel({
             </div>
           )}
 
+          {replayError && (
+            <div className="df2-quarantine-durable-warn" role="alert">
+              Replay refused: {replayError}
+            </div>
+          )}
           {replayResult && (
             <div className="df2-quarantine-replay-result" role="status">
               <DtIcon name="check" size={14} />

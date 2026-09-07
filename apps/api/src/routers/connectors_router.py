@@ -1267,7 +1267,14 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
     records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:
-        raise HTTPException(status_code=400, detail="Could not reconstruct rows from quarantine details")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot replay: none of the {len(details)} open finding(s) name a column "
+                "or carry stored cell values, so there is no row payload to rewrite. "
+                "Export the CSV, fix the mapping or the source, then re-run the transfer."
+            ),
+        )
 
     transfer_req = transfer_request_from_dict(payload)
     mappings = list(transfer_req.mappings or [])
