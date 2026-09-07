@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.db_type_utils import normalize_dest_kind
 from services.mapping_constraints import write_mappings
 
 GATE_ID = "g19_dest_schema_replacement"
@@ -58,7 +59,9 @@ def _live_type(target: str, live_types: dict[str, str]) -> str:
     return ""
 
 
-def carrier_would_truncate(source_type: str, live_type: str, *, dest_db: str = "") -> bool:
+def carrier_would_truncate(
+    source_type: str, live_type: str, *, dest_db: str = "", source_db: str = ""
+) -> bool:
     """True when the live declared carrier cannot hold the source *magnitude*.
 
     Deliberately narrower than :func:`is_lossy_coercion`, which also answers
@@ -76,19 +79,42 @@ def carrier_would_truncate(source_type: str, live_type: str, *, dest_db: str = "
         integer_storage_bounds,
         integer_width_would_narrow,
         interval_precision_would_narrow,
+        mysql_blob_tier_rank,
+        mysql_text_tier_rank,
         normalize_logical_type,
+        parse_binary_carrier_width,
         parse_numeric_precision_scale,
+        parse_string_carrier_width,
         string_width_would_narrow,
         temporal_precision_would_narrow,
     )
 
-    if integer_width_would_narrow(source_type, live_type, dest_db=dest_db):
+    # SQLite integers are a storage class (int64 affinity stamped BIGINT by
+    # introspection), not a declared width — the same unknown magnitude as an
+    # unbounded string below.
+    if normalize_dest_kind(source_db) != "sqlite" and integer_width_would_narrow(
+        source_type, live_type, dest_db=dest_db
+    ):
         return True
     if decimal_params_would_narrow(source_type, live_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, live_type):
+    # An unbounded source string/binary (PostgreSQL TEXT, BYTEA, CLOB) declares
+    # no magnitude, so the live bounded carrier is not *known* to be narrower —
+    # the population fit gate measures the rows; a recreate to the wide carrier
+    # contradicts nothing the operator declared. Only a declared source width
+    # (VARCHAR(n), or a LOB tier against another tier) larger than the live
+    # width is a silent replacement.
+    string_declared = parse_string_carrier_width(source_type) is not None or (
+        mysql_text_tier_rank(source_type) is not None
+        and mysql_text_tier_rank(live_type) is not None
+    )
+    if string_declared and string_width_would_narrow(source_type, live_type):
         return True
-    if binary_width_would_narrow(source_type, live_type):
+    binary_declared = parse_binary_carrier_width(source_type) is not None or (
+        mysql_blob_tier_rank(source_type) is not None
+        and mysql_blob_tier_rank(live_type) is not None
+    )
+    if binary_declared and binary_width_would_narrow(source_type, live_type):
         return True
     if bitstring_width_would_narrow(source_type, live_type):
         return True
@@ -143,7 +169,9 @@ def find_silent_replacements(
         source_type = str(src_types.get(source) or "").strip()
         if not source_type:
             continue
-        if not carrier_would_truncate(source_type, live, dest_db=destination_db_type):
+        if not carrier_would_truncate(
+            source_type, live, dest_db=destination_db_type, source_db=source_db_type
+        ):
             continue
         replacement = create_new_mapping_target_type(
             source_type, destination_db_type, source_db=source_db_type

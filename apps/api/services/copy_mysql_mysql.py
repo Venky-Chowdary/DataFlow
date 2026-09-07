@@ -27,6 +27,7 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    settle_fast_path_create_on,
     stream_between_cursors,
 )
 from services.copy_mysql_pg import (
@@ -269,6 +270,9 @@ def copy_mysql_to_mysql(
                 ]
                 dst_cur.execute(
                     _mysql_create_sql(dest_table, pairs, create_ddls, pk)
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
                 )
                 created_here = True
             dest_conn.commit()

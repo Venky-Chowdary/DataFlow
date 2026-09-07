@@ -31,6 +31,7 @@ from connectors.sqlite_common import sqlite_file_path
 from services.copy_fast_path import (
     CANONICAL_DECIMAL_TEXT,
     FastPathUnavailable,
+    plan_fast_path_create,
 )
 
 _UNSAFE_SQLITE_BASES = frozenset({
@@ -398,12 +399,19 @@ def sqlite_create_sql(
 ) -> str:
     from connectors.sqlite_writer import sqlite_type
 
+    create = plan_fast_path_create(
+        dest_dialect="sqlite", pairs=pairs, ddls=sqlite_ddls, primary_key=primary_key,
+        dest_table=table,
+    )
     cols = []
-    targets = [t for _s, t in pairs]
     for (_src, target), ddl in zip(pairs, sqlite_ddls, strict=True):
-        cols.append(f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}")
-    pk = [c for c in (primary_key or []) if c in targets]
-    if pk:
-        pk_sql = ", ".join(sqlite_ident(c) for c in pk)
+        cols.append(
+            f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}"
+            f"{create.column_suffix(target)}"
+        )
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+    elif create.primary_key:
+        pk_sql = ", ".join(sqlite_ident(c) for c in create.primary_key)
         cols.append(f"PRIMARY KEY ({pk_sql})")
     return f"CREATE TABLE {sqlite_ident(table)} ({', '.join(cols)})"

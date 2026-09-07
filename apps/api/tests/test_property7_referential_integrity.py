@@ -348,7 +348,11 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         )
     )
     try:
-        assert result.success, result.error
+        # Gate-8 G22 fails closed on destination orphans: rows land, the FK
+        # is not claimed, and the run is not certified.
+        assert not result.success, "orphans must not certify a run"
+        assert "referential integrity failed" in str(result.error).lower()
+        assert "1 orphan row(s)" in str(result.error)
         summary = _fk_summary(result)
         child_decision = _carried_child(summary, child)
         assert child_decision.get("integrity_violation") is True, child_decision

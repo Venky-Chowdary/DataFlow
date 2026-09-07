@@ -25,7 +25,12 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    settle_fast_path_create_on,
+)
 from services.copy_fast_path import _table_ref as _pg_table_ref
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -221,6 +226,10 @@ def copy_sqlite_to_postgres(
         else:
             dst_cur.execute(
                 _pg_create_sql(dest_schema_n, dest_table, pairs, pg_ddls, [])
+            )
+            settle_fast_path_create_on(
+                dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                dest_schema=dest_schema_n,
             )
             dest_conn.commit()
             created_here = True

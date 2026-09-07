@@ -39,6 +39,8 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    plan_fast_path_create,
+    settle_fast_path_create_on,
     _quote,
     _table_ref,
     stream_between_cursors,
@@ -385,15 +387,20 @@ def _mysql_create_sql(
     mysql_ddls: list[str],
     primary_key: list[str],
 ) -> str:
+    create = plan_fast_path_create(
+        dest_dialect="mysql", pairs=pairs, ddls=mysql_ddls, primary_key=primary_key,
+        dest_table=table,
+    )
     cols: list[str] = []
-    targets = [t for _s, t in pairs]
     for (_source, target), ddl in zip(pairs, mysql_ddls):
-        cols.append(f"{_mysql_ident(target)} {ddl}")
-    pk = [c for c in primary_key if c in targets]
-    if pk:
-        pk_sql = ", ".join(_mysql_ident(c) for c in pk)
+        cols.append(f"{_mysql_ident(target)} {ddl}{create.column_suffix(target)}")
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+    elif create.primary_key:
+        pk_sql = ", ".join(_mysql_ident(c) for c in create.primary_key)
         cols.append(f"PRIMARY KEY ({pk_sql})")
-    return f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)})"
+    suffix = f" {create.create_suffix}" if create.create_suffix else ""
+    return f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)}){suffix}"
 
 
 def _copy_select_sql(select_list: str, source_ref: str, predicate: str) -> str:
@@ -689,6 +696,9 @@ def copy_postgres_to_mysql(
                 ]
                 create_sql = _mysql_create_sql(dest_table, pairs, mysql_ddls, pk)
                 dst_cur.execute(create_sql)  # nosec B608
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
+                )
                 created_here = True
                 dest_conn.commit()
 

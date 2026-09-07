@@ -878,6 +878,49 @@ def stream_database_transfer(
 from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
 
 
+#: SQL sources whose catalog (types, nullability, defaults, keys) is read for
+#: Property 6 create-new fidelity and keyset pagination.
+_PK_INTROSPECT_TYPES: tuple[str, ...] = (
+    "postgresql",
+    "redshift",
+    "mysql",
+    "snowflake",
+    "sqlserver",
+    "oracle",
+    "sqlite",
+    "generic_sql",
+    "bigquery",
+    "databricks",
+)
+
+
+def _fast_path_source_catalog(
+    src_type: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    rich: tuple[dict[str, str], dict[str, bool], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Catalog payload for a fast-path CREATE, or ``None`` when nothing was read."""
+    types, nulls, keys = rich
+    if not (types or nulls or keys):
+        return None
+    from services.schema_fidelity import build_catalog_from_introspect, catalog_to_payload
+
+    try:
+        return catalog_to_payload(
+            build_catalog_from_introspect(
+                dialect=src_type,
+                columns=[str(m.get("source") or "") for m in mappings if m.get("source")],
+                column_types=types or dict(schema or {}),
+                nullable=nulls,
+                keys=keys,
+            )
+        )
+    except Exception as exc:
+        logger.debug("source schema catalog build failed: %s", exc, exc_info=exc)
+        return None
+
+
 def _stream_database_transfer_impl(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -974,11 +1017,36 @@ def _stream_database_transfer_impl(
     # silently copying the raw rows the operator asked to change.
     from services.copy_fast_path import (
         begin_copy_decline_capture,
+        begin_fast_path_create_scope,
         reset_copy_decline_capture,
+        reset_fast_path_create_scope,
     )
 
     copy_decline: list[str] = []
     _decline_token, _ = begin_copy_decline_capture(copy_decline)
+    # Property 6 — the source catalog (types, nullability, defaults, keys) is
+    # read once here so a fast path that creates the destination plans its
+    # DDL through the same schema-fidelity owner as the row path, and so the
+    # paged read below does not introspect a second time.
+    _src_rich_catalog: tuple[dict[str, str], dict[str, bool], dict[str, Any]] = (
+        {},
+        {},
+        {},
+    )
+    if src_type in _PK_INTROSPECT_TYPES:
+        try:
+            _src_rich_catalog = _introspect_table_schema_rich(
+                src_type,
+                src_cfg,
+                _source_name(source),
+                [str(m.get("source") or "") for m in mappings if m.get("source")],
+            )
+        except Exception as exc:
+            logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    _create_scope_token, _create_scope = begin_fast_path_create_scope(
+        _fast_path_source_catalog(src_type, mappings, schema, _src_rich_catalog),
+        mappings,
+    )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
     if incremental and cursor_source_col and shape_runner is None:
@@ -1041,9 +1109,23 @@ def _stream_database_transfer_impl(
         )
     finally:
         reset_copy_decline_capture(_decline_token)
+        reset_fast_path_create_scope(_create_scope_token)
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        _certificate = _create_scope.certificate()
+        if _certificate is not None:
+            dest_summary.setdefault("schema_fidelity", _certificate)
+        _fast_table = _source_name(source)
+        _carry_single_table_foreign_keys(
+            source,
+            destination,
+            _fast_table,
+            resolve_dest_table(dest_type, destination, _fast_table),
+            mappings,
+            dest_summary,
+            ddl_log,
+        )
         # Bulk COPY never pages the source; say so instead of leaving the
         # pagination fields absent (which reads as "unknown" to the operator).
         dest_summary.setdefault("pagination_mode", "bulk_copy")
@@ -1809,30 +1891,14 @@ def _stream_database_transfer_impl(
 
     keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
     pagination_warning = ""
-    _pk_introspect_types = (
-        "postgresql",
-        "redshift",
-        "mysql",
-        "snowflake",
-        "sqlserver",
-        "oracle",
-        "sqlite",
-        "generic_sql",
-        "bigquery",
-        "databricks",
-    )
+    _pk_introspect_types = _PK_INTROSPECT_TYPES
     # Property 6 — source catalog for create-new fidelity (any SQL sink that
-    # consumes it). Always introspect SQL sources: a contract PK is not a
-    # substitute for nullability / defaults / unique keys.
+    # consumes it). Introspected once ahead of the COPY fast path (whose CREATE
+    # answers to the same planner); the paged read reuses that catalog here.
     source_schema_catalog: dict[str, Any] | None = None
-    _src_schema_types: dict[str, str] = {}
-    _src_schema_nulls: dict[str, bool] = {}
-    _src_keys: dict[str, Any] = {}
+    _src_schema_types, _src_schema_nulls, _src_keys = _src_rich_catalog
     if src_type in _pk_introspect_types:
         try:
-            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
-                src_type, src_cfg, table, columns
-            )
             if not keyset_pk_cols:
                 keyset_pk_cols = [
                     c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
@@ -3588,29 +3654,46 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
-    # Single-table jobs carry references too: the parent is already on the
-    # destination instead of arriving in this run, so without this the child
-    # landed with its foreign keys silently dropped and the run still went green.
-    fk_context = _foreign_key_context(source, [table])
-    if fk_context.source_keys:
-        fk_context.column_maps[table] = {
-            str(m.get("source") or ""): str(m.get("target") or "")
-            for m in (mappings or [])
-            if m.get("source") and m.get("target")
-        }
-        fk_summary = _carry_foreign_keys_after_load(
-            destination, fk_context, {table: dest_table}
-        )
-        if fk_summary is not None:
-            dest_summary["foreign_keys"] = fk_summary
-            for decision in fk_summary.get("decisions") or []:
-                if decision.get("status") in {"carried", "unsupported"} and decision.get(
-                    "dest_ddl"
-                ):
-                    ddl_log.append(
-                        f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
-                    )
+    _carry_single_table_foreign_keys(
+        source, destination, table, dest_table, mappings, dest_summary, ddl_log
+    )
     return written, ddl_log, dest_summary, columns
+
+
+def _carry_single_table_foreign_keys(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    table: str,
+    dest_table: str,
+    mappings: list[dict] | None,
+    dest_summary: dict[str, Any],
+    ddl_log: list[str],
+) -> None:
+    """Carry the single table's references onto the destination after the load.
+
+    The parent is already on the destination instead of arriving in this run,
+    so without this the child lands with its foreign keys silently dropped and
+    the run still goes green — on the row path and the COPY fast path alike.
+    """
+    fk_context = _foreign_key_context(source, [table])
+    if not fk_context.source_keys:
+        return
+    fk_context.column_maps[table] = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in (mappings or [])
+        if m.get("source") and m.get("target")
+    }
+    fk_summary = _carry_foreign_keys_after_load(
+        destination, fk_context, {table: dest_table}
+    )
+    if fk_summary is None:
+        return
+    dest_summary["foreign_keys"] = fk_summary
+    for decision in fk_summary.get("decisions") or []:
+        if decision.get("status") in {"carried", "unsupported"} and decision.get(
+            "dest_ddl"
+        ):
+            ddl_log.append(f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}")
 
 
 

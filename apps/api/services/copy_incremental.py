@@ -36,7 +36,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import _pg_quoted_literal
 from services.keyset_pagination import (
     encode_keyset_bookmark,
@@ -803,6 +808,7 @@ def _prepare_sqlite_incremental_dest(
             dest_conn.execute(
                 sqlite_create_sql(dest_table, pairs, sqlite_ddls, [dest_pk])
             )
+            settle_fast_path_create_on(dest_conn, dest_dialect="sqlite", dest_table=dest_table)
             created_dest = True
         else:
             dest_pks = sqlite_table_pk_columns(dest_conn, dest_table)
@@ -969,6 +975,9 @@ def copy_postgres_to_mysql_incremental(
                     dest_table, pairs, mysql_ddls, [dest_pk]
                 )
                 dst_cur.execute(create_sql)  # nosec B608
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
+                )
                 dest_conn.commit()
                 created_dest = True
             else:
@@ -1238,6 +1247,10 @@ def copy_mysql_to_postgres_incremental(
                         dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
                     )
                 )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                    dest_schema=dest_schema,
+                )
                 created_dest = True
             else:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1361,6 +1374,9 @@ def copy_mysql_to_mysql_incremental(
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
                     _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
                 )
                 dest_conn.commit()
                 created_dest = True
@@ -1690,6 +1706,10 @@ def copy_sqlite_to_postgres_incremental(
                         dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
                     )
                 )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                    dest_schema=dest_schema,
+                )
                 created_dest = True
             else:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1797,6 +1817,9 @@ def copy_sqlite_to_mysql_incremental(
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
                     _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
                 )
                 dest_conn.commit()
                 created_dest = True

@@ -18,7 +18,11 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
     sqlite_connect,
@@ -130,6 +134,7 @@ def copy_sqlite_to_sqlite(
             exists = False
         if not exists:
             conn.execute(sqlite_create_sql(dest_table, pairs, sqlite_ddls))
+            settle_fast_path_create_on(conn, dest_dialect="sqlite", dest_table=dest_table)
             created_here = True
         sqlite_write = "overwrite" if replace_destination and dest_occupied else "insert"
         conn.execute(

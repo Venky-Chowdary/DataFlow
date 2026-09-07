@@ -122,6 +122,263 @@ class FastPathUnavailable(Exception):
         note_copy_decline(str(message), log=False)
 
 
+class _CreateScope:
+    """Source catalog handed to a fast path, and the certificate it earned."""
+
+    __slots__ = ("catalog", "mappings", "pending", "report")
+
+    def __init__(self, catalog: Any, mappings: list[dict[str, Any]] | None) -> None:
+        self.catalog = catalog
+        self.mappings = list(mappings or [])
+        self.pending: FastPathCreate | None = None
+        self.report: dict[str, Any] | None = None
+
+    def certificate(self) -> dict[str, Any] | None:
+        """The settled certificate, or the pending plan downgraded to ``unknown``.
+
+        A CREATE that was planned but never read back from the destination
+        catalog emitted its clauses as claims; nothing verified them.
+        """
+        if self.report is not None or self.pending is None or self.pending.plan is None:
+            return self.report
+        for item in self.pending.plan.report.items:
+            if item.status == "carried":
+                item.status = "unknown"
+                item.reason = (
+                    "Emitted by the fast path but not read back from the destination "
+                    f"catalog. Would have: {item.reason}"
+                )
+        return self.pending.plan.report.to_dict()
+
+
+_CREATE_SCOPE: ContextVar[_CreateScope | None] = ContextVar(
+    "df_copy_create_scope", default=None
+)
+
+class FastPathCreate(NamedTuple):
+    """A fast-path CREATE resolved against the schema fidelity planner.
+
+    ``column_suffixes`` / ``table_constraints`` / ``create_suffix`` are the
+    planner's own fragments (NOT NULL, DEFAULT, COLLATE, PRIMARY KEY, UNIQUE,
+    CHECK, placement) for a dialect whose quoting matches the builder's.
+    ``primary_key`` / ``not_null`` are the same facts for a builder that renders
+    those two aspects with its own identifiers and declines the rest.
+    """
+
+    plan: Any = None
+    primary_key: tuple[str, ...] = ()
+    not_null: frozenset[str] = frozenset()
+    column_suffixes: dict[str, tuple[str, ...]] = {}
+    table_constraints: tuple[str, ...] = ()
+    create_suffix: str = ""
+
+    def column_suffix(self, target: str) -> str:
+        frags = self.column_suffixes.get(target)
+        if frags is not None:
+            return "".join(f" {f}" for f in frags)
+        return " NOT NULL" if target in self.not_null else ""
+
+
+#: Dialects whose fast-path builders quote identifiers exactly as the planner
+#: does, so its DDL fragments can be rendered verbatim.
+PLANNER_QUOTED_DIALECTS: frozenset[str] = frozenset(
+    {"postgresql", "redshift", "mysql", "mariadb", "sqlite"}
+)
+
+
+def begin_fast_path_create_scope(
+    source_schema_catalog: Any, mappings: list[dict[str, Any]] | None
+) -> tuple[Token, _CreateScope]:
+    """Make the source catalog visible to any CREATE a fast path renders.
+
+    The row path plans create-new DDL through ``schema_fidelity`` and settles
+    the certificate from the destination catalog; a fast path that renders its
+    own CREATE must answer to the same planner or hand the load back. The scope
+    carries the catalog in and the settled certificate out, so ``stream``
+    stamps it on the summary.
+    """
+    scope = _CreateScope(source_schema_catalog, mappings)
+    return _CREATE_SCOPE.set(scope), scope
+
+
+def reset_fast_path_create_scope(token: Token) -> None:
+    _CREATE_SCOPE.reset(token)
+
+
+def plan_fast_path_create(
+    *,
+    dest_dialect: str,
+    pairs: list[tuple[str, str]],
+    ddls: list[str],
+    primary_key: list[str] | None,
+    dest_table: str = "",
+    dest_schema: str = "",
+) -> FastPathCreate:
+    """Resolve what a fast-path CREATE must render, or decline the fast path.
+
+    Outside a create scope the builder's own primary key is returned unchanged
+    (direct callers own their proof). In scope the plan is left pending until
+    ``settle_fast_path_create`` reads the destination back; the planner decides: a dialect
+    in ``PLANNER_QUOTED_DIALECTS`` gets every fragment the row path would
+    render; any other builder gets PRIMARY KEY / NOT NULL and declines when the
+    plan carries anything more (DEFAULT, UNIQUE, CHECK, identity, collation,
+    placement). A planned PRIMARY KEY that contradicts the one the builder was
+    given always declines.
+    """
+    scope = _CREATE_SCOPE.get()
+    targets = [t for _s, t in pairs]
+    given = tuple(c for c in (primary_key or []) if c in targets)
+    if scope is None or scope.catalog is None:
+        return FastPathCreate(primary_key=given)
+    from services.schema_fidelity import resolve_create_fidelity_plan
+
+    mappings = scope.mappings or [{"source": s, "target": t} for s, t in pairs]
+    plan = resolve_create_fidelity_plan(
+        source_schema_catalog=scope.catalog,
+        mappings=mappings,
+        target_columns=targets,
+        target_types=list(ddls),
+        dest_dialect=dest_dialect,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+    )
+    planned_pk = sorted(c.lower() for c in plan.primary_key)
+    given_pk = sorted(c.lower() for c in given)
+    if planned_pk and given_pk and planned_pk != given_pk:
+        raise FastPathUnavailable(
+            f"create-new must carry PRIMARY KEY ({', '.join(plan.primary_key)}) "
+            f"but the fast path was given ({', '.join(given)}) — the row path "
+            "creates and certifies the destination"
+        )
+    pk = tuple(plan.primary_key) or given
+    if dest_dialect.lower() in PLANNER_QUOTED_DIALECTS:
+        constraints = tuple(plan.table_constraints)
+        if not plan.primary_key and pk:
+            from connectors.sql_identifiers import quote_sql_identifier
+
+            quote = "`" if dest_dialect.lower() in {"mysql", "mariadb"} else '"'
+            constraints += (
+                "PRIMARY KEY ("
+                + ", ".join(quote_sql_identifier(c, quote) for c in pk)
+                + ")",
+            )
+        scope.pending = FastPathCreate(
+            plan=plan,
+            primary_key=pk,
+            not_null=frozenset(plan.not_null_columns),
+            column_suffixes={
+                c: tuple(frags) for c, frags in plan.column_suffixes.items()
+            },
+            table_constraints=constraints,
+            create_suffix=(plan.create_suffix or "").strip(),
+        )
+        return scope.pending
+    missing: list[str] = []
+    if plan.column_defaults:
+        missing.append(f"DEFAULT on {', '.join(plan.column_defaults)}")
+    if plan.unique_constraints:
+        missing.append(
+            "UNIQUE "
+            + ", ".join("(" + ", ".join(u) + ")" for u in plan.unique_constraints)
+        )
+    if plan.check_predicates:
+        missing.append(f"{len(plan.check_predicates)} CHECK constraint(s)")
+    if plan.identity_columns:
+        missing.append(f"identity on {', '.join(plan.identity_columns)}")
+    if plan.create_suffix:
+        missing.append("physical placement clause")
+    if any(
+        "COLLATE" in frag.upper() or "CHARACTER SET" in frag.upper()
+        for frags in plan.column_suffixes.values()
+        for frag in frags
+    ):
+        missing.append("column collation")
+    if missing:
+        raise FastPathUnavailable(
+            "create-new must carry "
+            + "; ".join(missing)
+            + " — the schema fidelity planner owns that DDL, so the row path "
+            "creates and certifies the destination"
+        )
+    scope.pending = FastPathCreate(
+        plan=plan, primary_key=pk, not_null=frozenset(plan.not_null_columns)
+    )
+    return scope.pending
+
+
+def settle_fast_path_create(
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> None:
+    """Run the plan's post-CREATE DDL and certify it from the destination catalog.
+
+    An emitted clause is a claim; the certificate the scope hands back to the
+    run summary is the one the destination catalog settled, exactly as on the
+    row path.
+    """
+    scope = _CREATE_SCOPE.get()
+    if scope is None or scope.pending is None or scope.pending.plan is None:
+        return
+    from services.schema_fidelity import settle_create_new_on_destination
+
+    create, scope.pending = scope.pending, None
+    scope.report = settle_create_new_on_destination(
+        create.plan,
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        table_already_exists=False,
+        execute=execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+def settle_fast_path_create_on(
+    cursor: Any, *, dest_dialect: str, dest_table: str, dest_schema: str = ""
+) -> None:
+    """``settle_fast_path_create`` over a DB-API cursor (or sqlite3 connection)."""
+    dialect = dest_dialect.lower()
+    if dialect in {"postgresql", "redshift", "mysql", "mariadb"}:
+        from services.identity_carry import dbapi_percent_fetchall
+
+        fetchall: Callable[[str, tuple[Any, ...]], Any] = dbapi_percent_fetchall(cursor)
+    elif dialect == "oracle":
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            bound = sql
+            for idx in range(1, len(params) + 1):
+                bound = bound.replace("?", f":{idx}", 1)
+            cursor.execute(bound, params)
+            return cursor.fetchall()
+
+    else:
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            ran = cursor.execute(sql, params)
+            return (ran if ran is not None else cursor).fetchall()
+
+    settle_fast_path_create(
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        execute=cursor.execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+def fast_path_create_certificate() -> dict[str, Any] | None:
+    """Certificate earned by the CREATE inside the current scope, if any."""
+    scope = _CREATE_SCOPE.get()
+    return None if scope is None else scope.certificate()
+
+
 def declared_copy_carrier(
     item: dict[str, Any],
     schema: dict[str, str],

@@ -62,8 +62,20 @@ def _run(request: TransferRequest) -> None:
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
     assert result.success is True, result.error
     assert result.records_transferred == 2
-    assert result.reconciliation.get("passed") is True
-    assert result.reconciliation.get("source_checksum") == result.reconciliation.get("target_checksum")
+    recon = result.reconciliation
+    assert recon.get("passed") is True
+    if recon.get("source_checksum"):
+        assert recon.get("source_checksum") == recon.get("target_checksum")
+        assert recon.get("checksum_match") is True
+    else:
+        # A server-side engine copy brings no row into this process, so the
+        # only digest it has is destination COUNT(*) against the source
+        # snapshot COUNT(*). Gate-8 must say so in its scope instead of
+        # comparing a count token to a hex digest (or claiming a match).
+        assert recon.get("checksum_scope") == "whole_table_not_comparable", recon
+        assert recon.get("checksum_match") is False
+        assert recon.get("target_rows") == 2
+        assert "no source value digest" in str(recon.get("message") or "").lower()
 
 
 def _seed_postgresql(table: str) -> None:

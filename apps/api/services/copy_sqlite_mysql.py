@@ -25,7 +25,11 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _mysql_connect, _mysql_ident
 from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
@@ -213,6 +217,7 @@ def copy_sqlite_to_mysql(
             exists = False
         if not exists:
             dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
+            settle_fast_path_create_on(dst_cur, dest_dialect="mysql", dest_table=dest_table)
             dest_conn.commit()
             created_here = True
 
