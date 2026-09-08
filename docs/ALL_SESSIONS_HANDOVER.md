@@ -465,9 +465,10 @@ Gate-8 on all 34 runs; the 7 skips are by-design capability refusals — SCD2/mi
 need a SQL table destination, SQLite has no log-CDC source). 100K scheduler totals:
 PG/MySQL duplex 31/0/0 · SQLite-src 18/0/3 · SQLite-dest 17/0/0 · Mongo-src 21/0/0 ·
 Mongo-dest 17/0/7 — **0 failures on any measured cell**.
-**Open:** hosted clouds remain unmeasured; CDC is at-least-once as measured;
-`create_connector` silently replacing a same-named connector orphans schedules
-bound to the old id (register §8l product note).
+**Open:** hosted clouds remain unmeasured; CDC is at-least-once as measured.
+Fixed on the way: `create_connector` now keeps the existing id on a same-named
+create (new config via `update_connector`) instead of delete + fresh id, so
+schedules bound to the connector are no longer orphaned (register §8l).
 
 ## 7. Continuing this work
 
