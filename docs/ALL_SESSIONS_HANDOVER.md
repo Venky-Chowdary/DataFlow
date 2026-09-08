@@ -480,6 +480,51 @@ action — one read-only SELECT/WITH, or `CALL schema.name(:param)` for a
 procedure that already exists in that engine — instead of "remove extra
 semicolons". Tests: `test_procedure_source.py`, `sqlEditorModel.test.ts`.
 
+## Cloud targets on local emulators (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+No hosted credentials, so the same scheduler harness ran against local
+cloud-compatible services: BigQuery = `goccy/bigquery-emulator`
+(`127.0.0.1:9050`, project `dataflow-test`), Snowflake = `fakesnow`
+(account `local`), Redshift = PostgreSQL `:5439`. **Emulator-measured only —
+not a hosted-cloud certificate.** Full detail: `docs/OPEN_DEFECT_REGISTER.md` §8m.
+
+Consolidated 2K matrix `cloud_emulators_2k_final.json`: **pass=11 fail=3 skip=7**.
+
+* fakesnow: all 7 sync modes pass (CDC at-least-once).
+* BigQuery: overwrite / append / incremental_append / incremental_deduped pass;
+  scd2, mirror, cdc fail closed on reproduced emulator limitations (typed
+  NUMERIC parameters decoded as STRING; `ALTER TABLE ADD COLUMN` never
+  materialises; MERGE rewritten to internal `googlesqlite_*` 500). No
+  workaround was added that would hide a real type mismatch on hosted BigQuery.
+* Redshift: 7 skips — capability registry says `redshift is Planned`; PG wire
+  compatibility does not promote it.
+
+Product defects fixed on the way (all regress green on PG/MySQL/SQLite/fakesnow
+— `regress_scd2_mirror_2k.json` 11/0/0, `regress_scd2_mirror_sqlite_sf_500.json` 4/0/0,
+61 SCD2/mirror unit tests):
+
+1. `connectors/generic_sql.py::_warehouse_creator` — SQLAlchemy engines for
+   Snowflake/BigQuery take their DBAPI connection from the native connector
+   owner (`snowflake_conn.get_connection`, `bigquery_conn.get_client`); the
+   `bigquery+dataflow` dialect stops `sqlalchemy-bigquery` from building an ADC
+   client of its own.
+2. `connectors/lsn_guards.py` — PostgreSQL LSN comparison on Snowflake is padded
+   lexicographic hex (fakesnow/DuckDB lack the `'XXXX'` number format).
+3. `services/target_sample.py` — BigQuery keyed read-back queries all rows with
+   typed parameters (`CAST(key AS STRING) IN (?)`) instead of a first-page scan
+   that missed a key's later version.
+4. `services/scd2_engine.py::key_column_types` / `typed_key_bind` — SCD2 key
+   predicates bind in the destination's physical type (INT64 vs text) for
+   snapshot fetch, expire and close-on-vanish; SCD2 map-finish reuses the SQL
+   writers' temporal/numeric bind owners.
+5. `services/mirror_engine.py::apply_inferred_deletes_via_staging` — correlated
+   `EXISTS` uses `df_stg` alias + bare target table name (`target_table=` from
+   both callers) instead of `dataset.table.col`.
+6. `connectors/bigquery_conn.py::_EmulatorClient.query_and_wait` — bounded 20 s
+   retry so emulator 500s fail closed instead of hanging (emulator client only).
+
+Still unmeasured: hosted BigQuery/Snowflake/Redshift, Databricks, Salesforce.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

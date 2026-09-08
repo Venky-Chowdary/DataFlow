@@ -59,6 +59,9 @@ DELETED_ROWS = max(1, ROWS // 200)
 RUN_TIMEOUT_S = int(os.environ.get("SCHED_RUN_TIMEOUT", "900"))
 SQLITE_DIR = Path(os.environ.get("SCHED_SQLITE_DIR", "/home/ubuntu/sched_proof"))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sched_cloud_engines as cloud  # noqa: E402
+
 ENGINES: dict[str, dict[str, Any]] = {
     "postgresql": dict(type="postgresql", host="localhost", port=5432, database="dataflow",
                        username="dataflow", password="dataflow", ssl=False),
@@ -67,6 +70,7 @@ ENGINES: dict[str, dict[str, Any]] = {
     "sqlite": dict(type="sqlite", host="", port=0, database="", username="", password="", ssl=False),
     "mongodb": dict(type="mongodb", host="localhost", port=27017, database="sched_proof",
                     username="", password="", ssl=False),
+    **cloud.CLOUD_ENGINES,
 }
 
 # Schedule vocabulary (schedule_store.SYNC_MODES). ``incremental`` is the
@@ -83,7 +87,8 @@ MODES: list[tuple[str, str]] = [
 ]
 
 # Engines that can be a schedule destination for row-versioned modes.
-SQL_ENGINES = {"postgresql", "mysql", "sqlite"}
+SQL_ENGINES = {"postgresql", "mysql", "sqlite", *cloud.CLOUD_ENGINES}
+CLOUD = set(cloud.CLOUD_ENGINES)
 CDC_SOURCES = {"postgresql", "mysql", "mongodb"}
 
 TYPES: dict[str, dict[str, str]] = {
@@ -91,6 +96,7 @@ TYPES: dict[str, dict[str, str]] = {
     "mysql": {"id": "BIGINT", "name": "VARCHAR(64)", "amount": "DECIMAL(12,3)", "updated_seq": "BIGINT"},
     "sqlite": {"id": "INTEGER", "name": "TEXT", "amount": "NUMERIC(12,3)", "updated_seq": "INTEGER"},
     "mongodb": {"id": "long", "name": "string", "amount": "decimal", "updated_seq": "long"},
+    **cloud.CLOUD_TYPES,
 }
 COLUMNS = ["id", "name", "amount", "updated_seq"]
 
@@ -106,6 +112,8 @@ CURSOR_SEMANTICS_FOR_MODE = {
 def _reachable(cfg: dict[str, Any]) -> bool:
     if cfg["type"] == "sqlite":
         return True
+    if cfg["type"] in CLOUD:
+        return cloud.reachable(cfg["type"], cfg)
     try:
         with socket.create_connection((cfg["host"], cfg["port"]), timeout=1):
             return True
@@ -114,6 +122,10 @@ def _reachable(cfg: dict[str, Any]) -> bool:
 
 
 # --------------------------------------------------------------------------- engines
+
+
+def _chunks(items: list[int], size: int) -> list[list[int]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 class Engine:
@@ -141,6 +153,8 @@ class Engine:
                                    password=c["password"], database=c["database"], autocommit=False)
         if self.name == "sqlite":
             return sqlite3.connect(c["database"])
+        if self.name in CLOUD:
+            return cloud.connect(self.name, c)
         raise AssertionError(self.name)
 
     def _mongo(self):
@@ -171,7 +185,15 @@ class Engine:
             conn.close()
 
     def _ph(self) -> str:
+        if self.name in CLOUD:
+            return cloud.PLACEHOLDER[self.name]
         return "?" if self.name == "sqlite" else "%s"
+
+    def t(self, table: str) -> str:
+        """Table reference in the harness's own SQL (dataset-qualified for BigQuery)."""
+        if self.name in CLOUD:
+            return cloud.table_ref(self.name, self.cfg, table)
+        return self.q(table)
 
     # -- seeding -------------------------------------------------------------
     @staticmethod
@@ -182,7 +204,7 @@ class Engine:
         if self.name == "mongodb":
             self._mongo().drop_collection(table)
             return
-        self.exec([f"DROP TABLE IF EXISTS {self.q(table)}"])
+        self.exec([f"DROP TABLE IF EXISTS {self.t(table)}"])
         if self.name == "postgresql":
             self._release_pg_cdc_artifacts(table)
 
@@ -218,6 +240,8 @@ class Engine:
                 cur.execute(f'DROP PUBLICATION IF EXISTS "{pub}"')
 
     def q(self, ident: str) -> str:
+        if self.name in CLOUD:
+            return cloud.quote(self.name, ident)
         return f"`{ident}`" if self.name == "mysql" else f'"{ident}"'
 
     def create_source(self, table: str, *, pk: bool) -> None:
@@ -235,9 +259,10 @@ class Engine:
                 db[table].create_index("id", unique=True)
             return
         t = TYPES[self.name]
-        key = " PRIMARY KEY" if pk else ""
+        # BigQuery has no enforced PRIMARY KEY; the schedule's declared key is the contract.
+        key = " PRIMARY KEY" if pk and self.name != "bigquery" else ""
         self.exec([
-            f"CREATE TABLE {self.q(table)} ({self.q('id')} {t['id']}{key}, "
+            f"CREATE TABLE {self.t(table)} ({self.q('id')} {t['id']}{key}, "
             f"{self.q('name')} {t['name']}, {self.q('amount')} {t['amount']}, "
             f"{self.q('updated_seq')} {t['updated_seq']})"
         ])
@@ -253,7 +278,7 @@ class Engine:
             return
         ph = self._ph()
         vals = [(r[0], r[1], str(r[2]) if self.name == "sqlite" else r[2], r[3]) for r in rows]
-        self.exec([f"INSERT INTO {self.q(table)} ({', '.join(self.q(c) for c in COLUMNS)}) "
+        self.exec([f"INSERT INTO {self.t(table)} ({', '.join(self.q(c) for c in COLUMNS)}) "
                    f"VALUES ({ph}, {ph}, {ph}, {ph})"], vals)
 
     def update(self, table: str, ids: list[int], seq: int) -> None:
@@ -263,25 +288,38 @@ class Engine:
             )
             return
         ph = self._ph()
-        concat = (f"{self.q('name')} || '-v2'" if self.name != "mysql"
-                  else f"CONCAT({self.q('name')}, '-v2')")
-        self.exec([f"UPDATE {self.q(table)} SET {self.q('name')} = {concat}, "
-                   f"{self.q('updated_seq')} = {seq} WHERE {self.q('id')} = {ph}"],
-                  [(i,) for i in ids])
+        if self.name in CLOUD:
+            concat = cloud.concat_sql(self.name, self.q("name"))
+        else:
+            concat = (f"{self.q('name')} || '-v2'" if self.name != "mysql"
+                      else f"CONCAT({self.q('name')}, '-v2')")
+        head = f"UPDATE {self.t(table)} SET {self.q('name')} = {concat}, {self.q('updated_seq')} = {seq}"
+        if self.name == "bigquery":
+            # One DML job per row is minutes at 100K; the emulator takes an IN list.
+            self.exec([f"{head} WHERE {self.q('id')} IN ({', '.join(str(i) for i in chunk)})"
+                       for chunk in _chunks(ids, 5000)])
+            return
+        self.exec([f"{head} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
 
     def delete(self, table: str, ids: list[int]) -> None:
         if self.name == "mongodb":
             self._mongo()[table].delete_many({"id": {"$in": ids}})
             return
         ph = self._ph()
-        self.exec([f"DELETE FROM {self.q(table)} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
+        if self.name == "bigquery":
+            self.exec([f"DELETE FROM {self.t(table)} WHERE {self.q('id')} IN ({', '.join(str(i) for i in chunk)})"
+                       for chunk in _chunks(ids, 5000)])
+            return
+        self.exec([f"DELETE FROM {self.t(table)} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
 
     # -- independent verification -----------------------------------------------
     def exists(self, table: str) -> bool:
         if self.name == "mongodb":
             return table in self._mongo().list_collection_names()
+        if self.name == "bigquery":
+            return cloud.bq_columns(self._conn(), self.cfg, table) is not None
         try:
-            self.query(f"SELECT 1 FROM {self.q(table)} WHERE 1=0")
+            self.query(f"SELECT 1 FROM {self.t(table)} WHERE 1=0")
             return True
         except Exception:  # noqa: BLE001 - probe verdict
             return False
@@ -292,6 +330,10 @@ class Engine:
             return [k for k in doc.keys() if k != "_id"]
         if self.name == "sqlite":
             return [r[1] for r in self.query(f"PRAGMA table_info({self.q(table)})")]
+        if self.name == "bigquery":
+            return [c.lower() for c in (cloud.bq_columns(self._conn(), self.cfg, table) or [])]
+        if self.name in CLOUD:
+            return [str(r[0]).lower() for r in self.query(cloud.columns_sql(self.name, self.cfg, table))]
         if self.name == "postgresql":
             return [r[0] for r in self.query(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = "
@@ -316,9 +358,12 @@ class Engine:
                 return {"count": 0, "sum_id": 0, "sum_amount": "0"}
             return {"count": int(out[0]["n"]), "sum_id": int(out[0]["sid"]),
                     "sum_amount": str(Decimal(str(out[0]["samt"])).quantize(Decimal("0.001")))}
-        amt = (f"SUM(CAST({self.q('amount')} AS DECIMAL(20,3)))" if self.name != "sqlite"
-               else f"SUM(CAST({self.q('amount')} AS REAL))")
-        rows = self.query(f"SELECT COUNT(*), SUM({self.q('id')}), {amt} FROM {self.q(table)} {where}")
+        if self.name in CLOUD:
+            amt = cloud.amount_sum_sql(self.name, self.q("amount"))
+        else:
+            amt = (f"SUM(CAST({self.q('amount')} AS DECIMAL(20,3)))" if self.name != "sqlite"
+                   else f"SUM(CAST({self.q('amount')} AS REAL))")
+        rows = self.query(f"SELECT COUNT(*), SUM({self.q('id')}), {amt} FROM {self.t(table)} {where}")
         n, sid, samt = rows[0]
         return {
             "count": int(n or 0),
@@ -360,6 +405,14 @@ def _connector(engine: Engine, role: str) -> str:
     data.pop("ssl", None)
     data["ssl"] = False
     return create_connector(data).id
+
+
+def _transfer_allowed(connector_type: str, role: str) -> tuple[bool, str]:
+    """Product capability registry verdict for one endpoint (same owner the
+    scheduler consults), so a Planned tier is recorded as a skip with its reason."""
+    from src.transfer.connector_capabilities import endpoint_allowed_for_role
+
+    return endpoint_allowed_for_role(connector_type, role)
 
 
 def _force_due(schedule_id: str) -> None:
@@ -449,7 +502,7 @@ def _measure(dst: Engine, table: str, mode: str) -> dict[str, Any]:
         cols = dst.columns(table)
         if "is_current" in cols:
             pred = {"postgresql": "is_current = TRUE", "mysql": "is_current = 1",
-                    "sqlite": "is_current IN (1, 'true', 'True')"}[dst.name]
+                    "sqlite": "is_current IN (1, 'true', 'True')"}.get(dst.name, "is_current = TRUE")
             out["current"] = dst.totals(table, f"WHERE {pred}")
         out["columns"] = cols
     if mode == "mirror":
@@ -460,9 +513,10 @@ def _measure(dst: Engine, table: str, mode: str) -> dict[str, Any]:
             out["deleted"] = dst.totals(table, mongo_filter={"_deleted": True})
         elif "_deleted" in cols:
             live = {"postgresql": "COALESCE(_deleted, FALSE) = FALSE", "mysql": "COALESCE(_deleted, 0) = 0",
-                    "sqlite": "COALESCE(_deleted, 0) IN (0, 'false', 'False')"}[dst.name]
+                    "sqlite": "COALESCE(_deleted, 0) IN (0, 'false', 'False')"}.get(
+                dst.name, "COALESCE(_deleted, FALSE) = FALSE")
             dead = {"postgresql": "_deleted = TRUE", "mysql": "_deleted = 1",
-                    "sqlite": "_deleted IN (1, 'true', 'True')"}[dst.name]
+                    "sqlite": "_deleted IN (1, 'true', 'True')"}.get(dst.name, "_deleted = TRUE")
             out["live"] = dst.totals(table, f"WHERE {live}")
             out["deleted"] = dst.totals(table, f"WHERE {dead}")
     return out
@@ -525,6 +579,13 @@ def run_cell(src: Engine, dst: Engine, mode: str, keyed: str, conn_ids: dict[str
         # modes need a SQL table destination. Refused at Validate by design.
         return {**cell, "verdict": "skip",
                 "reasons": [f"{mode} requires a SQL table destination; {dst.name} is refused at g9 by design"]}
+    for role, eng in (("source", src), ("destination", dst)):
+        allowed, why = _transfer_allowed(eng.cfg["type"], role)
+        if not allowed:
+            # Capability registry refuses the route before any row moves; the
+            # emulator cannot certify a Planned tier (a PostgreSQL-wire proxy is
+            # not Redshift), so the cell is an honest skip, not a pass.
+            return {**cell, "verdict": "skip", "reasons": [f"{role} refused by capability registry: {why}"]}
 
     sched_id = ""
     try:

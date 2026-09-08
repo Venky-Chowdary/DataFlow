@@ -723,11 +723,14 @@ def snowflake_lsn_match_predicate(
     both_pg = (
         f"(REGEXP_LIKE({inc}, '{pg_re}') AND REGEXP_LIKE({dest}, '{pg_re}'))"
     )
-    # Hex hi/lo via TO_NUMBER with hex format mask.
-    inc_hi = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    dest_hi = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    inc_lo = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    dest_lo = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 2), 'XXXXXXXXXXXXXXXX')"
+    # Both sides are guarded by ``pg_re`` (pure hex), so a zero-left-padded
+    # lower-case segment compares lexicographically exactly as its numeric
+    # value — no hex format mask, which SQL emulators do not implement.
+    def hexpad(expr: str, part: int) -> str:
+        return f"LPAD(LOWER(SPLIT_PART({expr}, '/', {part})), 16, '0')"
+
+    inc_hi, dest_hi = hexpad(inc, 1), hexpad(dest, 1)
+    inc_lo, dest_lo = hexpad(inc, 2), hexpad(dest, 2)
     pg_newer = (
         f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
     )

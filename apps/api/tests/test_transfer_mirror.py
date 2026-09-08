@@ -171,6 +171,51 @@ def test_staging_inferred_deletes_count_transitions_not_already_active(tmp_path:
     assert rows == {"1": 0, "2": 1, "3": 0}
 
 
+def test_staging_inferred_deletes_schema_qualified_uses_bare_outer_ref(
+    tmp_path: Path,
+) -> None:
+    """Correlated predicate never spells ``schema.table.column`` inside the
+    subquery (BigQuery: ``Unrecognized name: <dataset>``); it refers to the
+    outer row by bare table name and to staging through a fixed alias."""
+    import sqlalchemy as sa
+
+    from services.mirror_engine import apply_inferred_deletes_via_staging
+
+    db = tmp_path / "mirror_schema.db"
+    engine = sa.create_engine(f"sqlite:///{db}")
+    with engine.connect() as conn:
+        conn.execute(sa.text("CREATE TABLE dst (id INTEGER, name TEXT, _deleted INTEGER)"))
+        conn.execute(sa.text("CREATE TABLE stg (id INTEGER)"))
+        conn.execute(
+            sa.text("INSERT INTO dst VALUES (1,'a',0),(2,'b',0),(3,'c',1)")
+        )
+        conn.execute(sa.text("INSERT INTO stg VALUES (1),(3)"))
+        conn.commit()
+        seen: list[str] = []
+
+        @sa.event.listens_for(conn, "before_cursor_execute")
+        def _capture(_c, _cur, statement, *_a):  # type: ignore[no-untyped-def]
+            seen.append(statement)
+
+        census = apply_inferred_deletes_via_staging(
+            conn, '"main"."dst"', '"main"."stg"', ["id"],
+            dialect="sqlite", target_table="dst",
+        )
+        conn.commit()
+        rows = {
+            int(r[0]): int(r[1])
+            for r in conn.execute(sa.text("SELECT id, _deleted FROM dst")).fetchall()
+        }
+    assert census["reactivated"] == 1 and census["soft_deleted"] == 1
+    assert rows == {1: 0, 2: 1, 3: 0}
+    exists_stmts = [s for s in seen if "EXISTS" in s]
+    assert exists_stmts
+    for stmt in exists_stmts:
+        assert '"main"."dst"."id"' not in stmt, stmt
+        assert '"main"."stg"."id"' not in stmt, stmt
+        assert 'df_stg."id" = "dst"."id"' in stmt, stmt
+
+
 def test_buffered_mirror_census_is_dest_engine_staging_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

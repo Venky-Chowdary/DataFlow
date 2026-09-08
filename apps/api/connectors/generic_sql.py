@@ -844,8 +844,126 @@ def _engine(cfg: dict[str, Any]) -> Any:
     return get_pooled_engine(with_connection_options(cfg), _build_engine)
 
 
+def _warehouse_creator(cfg: dict[str, Any], db_type: str) -> tuple[sa.URL, Callable[[], Any]] | None:
+    """SQLAlchemy URL + DBAPI ``creator`` for warehouses whose connection is owned
+    by their native connector module.
+
+    Snowflake (account URL parsing, key-pair auth, fakesnow) and BigQuery
+    (service-account / ADC / emulator endpoint) already have one connection
+    owner each; the SQLAlchemy dialect only needs a DBAPI connection from it, so
+    ``host:port/database`` URL guessing is never a second, weaker login path.
+    """
+    if db_type == "snowflake":
+        from connectors.snowflake_conn import normalize_account
+        from services.copy_snowflake_common import (
+            snowflake_database_of,
+            snowflake_schema_of,
+        )
+
+        def _connect_snowflake() -> Any:
+            from connectors.snowflake_conn import get_connection
+
+            return get_connection(
+                account=normalize_account(str(cfg.get("host") or "")),
+                username=str(cfg.get("username") or cfg.get("user") or ""),
+                password=str(cfg.get("password") or ""),
+                database=snowflake_database_of(cfg),
+                schema=snowflake_schema_of(cfg),
+                warehouse=str(cfg.get("warehouse") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                role=str(cfg.get("role") or ""),
+                private_key=str(cfg.get("private_key") or ""),
+                private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
+            )
+
+        url = sa.URL.create(
+            "snowflake",
+            username=str(cfg.get("username") or cfg.get("user") or "") or None,
+            host=normalize_account(str(cfg.get("host") or "")) or "snowflake",
+            database=snowflake_database_of(cfg) or None,
+        )
+        return url, _connect_snowflake
+    if db_type == "bigquery":
+        project = str(cfg.get("database") or cfg.get("project_id") or cfg.get("host") or "")
+        dataset = str(cfg.get("schema") or cfg.get("dataset") or "dataflow")
+
+        def _connect_bigquery() -> Any:
+            from google.cloud.bigquery import dbapi
+
+            from connectors.bigquery_conn import get_client
+
+            client = get_client(
+                project_id=project,
+                credentials_path=str(cfg.get("connection_string") or ""),
+                service_account=str(cfg.get("service_account") or ""),
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 0),
+                connection_string=str(cfg.get("connection_string") or ""),
+            )
+            return dbapi.connect(client=client)
+
+        _register_bigquery_creator_dialect()
+        url = sa.URL.create("bigquery+dataflow", host=project or "bigquery", database=dataset)
+        return url, _connect_bigquery
+    return None
+
+
+_BQ_CREATOR_DIALECT = "bigquery.dataflow"
+
+
+def _register_bigquery_creator_dialect() -> None:
+    """``bigquery+dataflow://`` — the upstream dialect resolves Application
+    Default Credentials inside ``create_connect_args`` even when SQLAlchemy is
+    handed a ``creator``; this variant leaves connection ownership to
+    ``connectors.bigquery_conn.get_client`` (service account / ADC / emulator)."""
+    from sqlalchemy.dialects import registry
+
+    if _BQ_CREATOR_DIALECT in registry.impls:
+        return
+    registry.register(_BQ_CREATOR_DIALECT, __name__, "DataFlowBigQueryDialect")
+
+
+_bq_dialect_cls: type | None = None
+
+
+def _bigquery_creator_dialect_class() -> type:
+    global _bq_dialect_cls
+    if _bq_dialect_cls is None:
+        from sqlalchemy_bigquery import BigQueryDialect
+
+        class DataFlowBigQueryDialect(BigQueryDialect):  # type: ignore[misc]
+            supports_statement_cache = BigQueryDialect.supports_statement_cache
+
+            def create_connect_args(self, url: sa.URL) -> tuple[list[Any], dict[str, Any]]:
+                # Same project/dataset bookkeeping as upstream, minus its client build.
+                self.project_id = url.host or self.project_id
+                self.dataset_id = url.database or None
+                self.billing_project_id = self.billing_project_id or self.project_id
+                return [], {}
+
+        _bq_dialect_cls = DataFlowBigQueryDialect
+    return _bq_dialect_cls
+
+
+def __getattr__(name: str) -> Any:
+    # Resolved by SQLAlchemy's dialect registry; keeps sqlalchemy-bigquery an
+    # optional import for deployments that never touch BigQuery.
+    if name == "DataFlowBigQueryDialect":
+        return _bigquery_creator_dialect_class()
+    raise AttributeError(name)
+
+
 def _build_engine(cfg: dict[str, Any]) -> Any:
     """Construct a brand-new Engine. Called once per distinct target."""
+    warehouse = _warehouse_creator(cfg, (cfg.get("type") or "").lower().strip())
+    if warehouse is not None:
+        url, creator = warehouse
+        try:
+            from services.engine_pool import pool_settings
+
+            return create_engine(url, creator=creator, pool_pre_ping=True, **pool_settings())
+        except (NoSuchModuleError, ImportError) as exc:
+            raise _dialect_unavailable(url, cfg.get("type")) from exc
     url = _build_url(cfg)
     # Fast, safe defaults for local and network databases.
     db_type = (cfg.get("type") or "").lower()
@@ -931,39 +1049,43 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         return engine
     except (NoSuchModuleError, ImportError) as exc:
-        # SQLAlchemy raises NoSuchModuleError when the dialect is not installed.
-        # Convert it to a clear RuntimeError so callers can surface a 4xx/5xx
-        # response instead of an unhandled ExceptionGroup crashing the worker.
-        driver = getattr(url, "drivername", None) or str(url).split("://", 1)[0]
-        dialect_key = str(db_type or str(driver).split("+", 1)[0]).lower()
-        driver_s = str(driver).lower()
-        hint_by_dialect = {
-            "mysql": "pymysql (scheme mysql+pymysql://)",
-            "mariadb": "pymysql (scheme mysql+pymysql://)",
-            "postgresql": "psycopg2-binary (scheme postgresql+psycopg2://)",
-            "postgres": "psycopg2-binary (scheme postgresql+psycopg2://)",
-            "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
-            "snowflake": "snowflake-sqlalchemy",
-            "databricks": "databricks-sqlalchemy",
-        }
-        hint = hint_by_dialect.get(dialect_key)
-        if not hint:
-            if "mysql" in driver_s or "mariadb" in driver_s:
-                hint = "pymysql (scheme mysql+pymysql://)"
-            elif "postgres" in driver_s or "redshift" in driver_s:
-                hint = "psycopg2-binary (scheme postgresql+psycopg2://)"
-        detail = (
-            f"SQLAlchemy dialect/driver for '{db_type or driver}' is not available "
-            f"(tried '{driver}')."
+        raise _dialect_unavailable(url, db_type) from exc
+
+
+def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
+    """Clear RuntimeError for a missing SQLAlchemy dialect/DBAPI so callers can
+    surface a 4xx/5xx instead of an unhandled ExceptionGroup crashing the worker."""
+    driver = getattr(url, "drivername", None) or str(url).split("://", 1)[0]
+    dialect_key = str(db_type or str(driver).split("+", 1)[0]).lower()
+    driver_s = str(driver).lower()
+    hint_by_dialect = {
+        "mysql": "pymysql (scheme mysql+pymysql://)",
+        "mariadb": "pymysql (scheme mysql+pymysql://)",
+        "postgresql": "psycopg2-binary (scheme postgresql+psycopg2://)",
+        "postgres": "psycopg2-binary (scheme postgresql+psycopg2://)",
+        "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
+        "snowflake": "snowflake-sqlalchemy",
+        "bigquery": "sqlalchemy-bigquery",
+        "databricks": "databricks-sqlalchemy",
+    }
+    hint = hint_by_dialect.get(dialect_key)
+    if not hint:
+        if "mysql" in driver_s or "mariadb" in driver_s:
+            hint = "pymysql (scheme mysql+pymysql://)"
+        elif "postgres" in driver_s or "redshift" in driver_s:
+            hint = "psycopg2-binary (scheme postgresql+psycopg2://)"
+    detail = (
+        f"SQLAlchemy dialect/driver for '{db_type or driver}' is not available "
+        f"(tried '{driver}')."
+    )
+    if hint:
+        detail += f" Install/enable {hint}."
+    else:
+        detail += (
+            " Install the matching driver package "
+            "(e.g. pymysql, psycopg2-binary, snowflake-sqlalchemy, databricks-sqlalchemy)."
         )
-        if hint:
-            detail += f" Install/enable {hint}."
-        else:
-            detail += (
-                " Install the matching driver package "
-                "(e.g. pymysql, psycopg2-binary, snowflake-sqlalchemy, databricks-sqlalchemy)."
-            )
-        raise RuntimeError(detail) from exc
+    return RuntimeError(detail)
 
 
 def get_sqlalchemy_engine(cfg: dict[str, Any]) -> Any:

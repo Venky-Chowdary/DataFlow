@@ -418,6 +418,7 @@ def stream_scd2_mirror_transfer(
                         staging_qualified,
                         pk_cols,
                         dialect=dest_type,
+                        target_table=destination.table or staging.table,
                     )
                 )
                 conn.commit()

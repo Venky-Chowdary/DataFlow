@@ -343,6 +343,47 @@ First 100K run (`matrix_100k_pg_mysql.json`, PG/MySQL × PG/MySQL × 7 modes): t
 
 Dropped, not shipped: an untracked run-level CDC write-pass digest (`services/write_pass_digest.py`) — a second owner beside the existing CDC Gate-8 whole-destination grade against the live source image; its two failing tests were the unfinished wiring. Moved out of the tree rather than committed half-integrated.
 
+## 8m. Cloud targets on local emulators — emulator-measured, not hosted-cloud certified (2026-08-10, branch `devin/qa-lead-integration`)
+
+No hosted credentials exist, so the scheduler matrix was pointed at local
+cloud-compatible services: **BigQuery** = `goccy/bigquery-emulator` (compose
+service `bigquery-emulator`, `127.0.0.1:9050`, project `dataflow-test`, dataset
+`dataflow`); **Snowflake** = `fakesnow` (Snowflake SQL/wire on DuckDB, account
+`local`); **Redshift** = a PostgreSQL container on `:5439` (wire-compatible
+only). Every number below is *emulator-measured* and must not be read as a
+hosted BigQuery / Snowflake / Redshift certificate. Databricks and Salesforce
+have no faithful local emulator and stay unmeasured.
+
+| # | Root cause (measured) | Owner module | Closure evidence |
+|---|-----------------------|--------------|------------------|
+| PG → BigQuery/Snowflake run 1 failed `SQLAlchemy dialect/driver for 'bigquery'/'snowflake' is not available` although the native connectors worked | `generic_sql._build_url` guessed a `host:port/database` URL for warehouses whose login is owned by their native module (Snowflake account/key-pair/fakesnow; BigQuery service-account/ADC/emulator) — a second, weaker login path. | `connectors/generic_sql.py::_warehouse_creator` — the SQLAlchemy engine takes a DBAPI `creator` from `connectors.snowflake_conn.get_connection` / `connectors.bigquery_conn.get_client`; one connection owner per warehouse. | `cloud_dest_2k.json` (pre-fix, 6/15/0) → `cloud_sf_scd2_500.json` 2/0/0, `cloud_bq_500.json` 3/2/0. |
+| BigQuery via SQLAlchemy raised `Your default credentials were not found` even with a `creator` | `sqlalchemy-bigquery`'s `create_connect_args` builds its own client (ADC) before SQLAlchemy ever calls the creator. | `connectors/generic_sql.py` registers `bigquery+dataflow` (`DataFlowBigQueryDialect`): same project/dataset bookkeeping, no client build; connection ownership stays with `bigquery_conn.get_client`. | Direct engine probe executes and reflects without ADC; `cloud_bq_scd2_500.json` no longer shows the ADC error. |
+| fakesnow: `SPLIT_PART(…) with format argument not implemented` in the CDC LSN guard | `lsn_guards` compared PostgreSQL `X/Y` LSNs on Snowflake via `TRY_TO_NUMBER(…, 'XXXXXXXXXXXXXXXX')` — hex-format parsing fakesnow (DuckDB) lacks. | `connectors/lsn_guards.py` — padded lexicographic hex comparison (`LPAD(LOWER(SPLIT_PART(v,'/',n)),16,'0')`), engine-neutral, exact for 64-bit halves. | 51 LSN tests; direct fakesnow probe returns ids `[2,3,5,7]` as newer; `cloud_sf_cdc_500.json` **1/0/0** (CDC = at-least-once, as everywhere). |
+| BigQuery incremental_deduped run 2 read back `name-1` for `name-1-v2` (Gate-8 refused) / `No matching signature for operator IN … INT64 and {STRING}` | `services/target_sample.py` emulator branch scanned the first N rows in-process (so an updated key's later version was never sampled); the query branch bound text keys against INT64. | `target_sample.py` — one keyed query for local and hosted (`CAST(key AS STRING) IN (?)`, typed `ScalarQueryParameter`); emulator 5xx/timeout falls back to a *full* `list_rows` scan only when the table carries the requested columns (unknown column stays a refusal). | `cloud_bq_500.json`: full_refresh_append, incremental_append, incremental_deduped **pass** with Gate-8 read-back. |
+| BigQuery SCD2: `No matching signature for operator IN for argument types INT64 and {STRING}` on the key predicate | SCD2 keys travel as `conflict_key_wire` text and `_pk_or_clause` bound them as text; PG/MySQL/SQLite/Snowflake coerce, BigQuery refuses. | `services/scd2_engine.py::key_column_types` + `typed_key_bind` — the destination's reflected SQLAlchemy type decides the Python carrier (int/bool/Decimal/float) for every single- and composite-key segment; unparseable text keeps the wire form so a bad key fails loudly instead of matching another row. Snapshot fetch, expire and close-on-vanish share it. `_finish_scd2_map_bundle` now reuses `normalize_temporal_cells` + `bind_rows_keeping_numbers` (same owners as the SQL writers). | PG/MySQL duplex 2K scd2+mirror `regress_scd2_mirror_2k.json` **11/0/0**; PG → SQLite/fakesnow `regress_scd2_mirror_sqlite_sf_500.json` **4/0/0**; SCD2/mirror unit selection 61 passed. |
+| BigQuery mirror: `Unrecognized name: dataflow` | `mirror_engine.apply_inferred_deletes_via_staging` wrote the correlated predicate as `` `dataset`.`table`.`col` `` inside `EXISTS (…)` — PostgreSQL/MySQL/SQLite leniency BigQuery rejects. | `services/mirror_engine.py` — staging gets a fixed alias (`df_stg`), the outer row is referenced by bare table name (`target_table=`), from both callers (`mirror_engine`, `stream_scd2`). | `tests/test_transfer_mirror.py::test_staging_inferred_deletes_schema_qualified_uses_bare_outer_ref`; live re-runs above (PG/MySQL/SQLite/fakesnow mirror all green); BigQuery mirror advances past the join to the emulator limitation below. |
+| BigQuery `query_and_wait` hung indefinitely on emulator 500s | Bounded retry was only applied to `client.query`; the DBAPI cursor uses `query_and_wait`. | `connectors/bigquery_conn.py::_EmulatorClient.query_and_wait` — same 20 s deadline (emulator client only; hosted retry policy untouched). | Failing emulator cells now fail closed in seconds with the emulator's message instead of `did not finish within 900s`. |
+
+**Emulator limitations (reproduced directly, not product defects — cells recorded as fail-closed, not green):**
+
+* **BigQuery SCD2 — `Value has type STRING which cannot be inserted into column amount, which has type NUMERIC`.** The application row is `Decimal('0.002')` against a reflected `NUMERIC` column and the compiled statement binds `%(amount:NUMERIC)s`; a direct `ScalarQueryParameter("a","NUMERIC",Decimal("0.002"))` INSERT fails the same way on the emulator while `CAST(@a AS NUMERIC)` succeeds — the goccy emulator decodes typed NUMERIC/FLOAT64 query parameters as STRING. Hosted BigQuery accepts typed parameters; DataFlow keeps the typed bind (no `CAST`-everything workaround that would mask real type mismatches) and fails closed. Not measurable on this emulator.
+* **BigQuery mirror — `Unrecognized name: _deleted`.** `ALTER TABLE … ADD COLUMN _deleted BOOL` returns success on the emulator but the column never appears (`get_table().schema` still `['id','name']`, direct probe); the engine's next statement then fails closed. Hosted BigQuery applies `ADD COLUMN`. Not measurable on this emulator.
+* **Redshift** — `endpoint_allowed_for_role('redshift', …)` is *Planned*; the harness records the capability refusal as **skip** (same registry the scheduler consults), never as a PostgreSQL-wire pass.
+* **fakesnow** proves SQL semantics, not Snowflake stages/`COPY INTO`/warehouse behaviour.
+
+* **BigQuery CDC run 2 — emulator `500 failed to exec merge statement UPDATE … FROM (SELECT * FROM googlesqlite_merge_t_set …)`.** The engine's idempotent MERGE on `_df_lsn` is rewritten by the goccy emulator into an internal SQLite (`googlesqlite_*`) form that fails on the emulator side; run 1 (snapshot) passed, run 2 failed closed and Gate-8 refused (`rows 2100 != 2090`, `SUM(amount)` mismatch) — the watermark did not advance, so no change was acknowledged. Not measurable on this emulator; hosted BigQuery MERGE is a different executor.
+
+**Consolidated emulator matrix on this head** (`SCHED_ROWS=2000`, real schedule path, independent read-back, Gate-8):
+`/home/ubuntu/sched_proof/cloud_emulators_2k_final.json` — **pass=11 fail=3 skip=7**.
+
+| dest (emulator) | overwrite | append | incr_append | incr_deduped | scd2 | mirror | cdc |
+|---|---|---|---|---|---|---|---|
+| BigQuery (goccy) | pass | pass | pass | pass | fail — emulator NUMERIC param | fail — emulator `ADD COLUMN` | fail — emulator MERGE 500 (run 1 pass) |
+| Snowflake (fakesnow) | pass | pass | pass | pass | pass | pass | pass (at-least-once) |
+| Redshift (PG :5439) | skip ×7 — capability registry: `redshift is Planned`; not promoted on PostgreSQL wire compatibility |
+
+All three failures are reproduced emulator limitations (above), fail closed with the emulator's message, and none was recorded as green. Hosted BigQuery/Snowflake/Redshift remain **unmeasured** until credentials exist.
+
 ## 9. Closure protocol
 
 For each defect: reproduce on a live engine → fix in the one canonical owner →

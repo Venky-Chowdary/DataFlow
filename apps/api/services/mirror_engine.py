@@ -392,8 +392,15 @@ def apply_inferred_deletes_via_staging(
     *,
     soft_delete_column: str = SOFT_DELETE_COLUMN,
     dialect: str = "",
+    target_table: str = "",
 ) -> dict[str, Any]:
     """Set-based inferred deletes: keys in staging stay active; dest \\ staging soft-delete.
+
+    ``target_table`` is the bare destination table name: the correlated
+    predicate refers to the outer row through it (an unaliased table's
+    implicit alias on every SQL engine) and to staging through a fixed alias,
+    because ``schema.table.column`` inside a subquery is PostgreSQL/MySQL
+    leniency that BigQuery (``Unrecognized name: <dataset>``) refuses.
 
     This-run census is dest-engine COUNT of *transitions* before UPDATE:
 
@@ -426,28 +433,31 @@ def apply_inferred_deletes_via_staging(
     false_lit = sql_bool_false_literal(dialect_name)
     deleted_pred = sql_bool_is_true(dialect_name, col_quoted)
     active_pred = sql_bool_is_not_true(dialect_name, col_quoted)
+    outer_ref = quote_sql_identifier(target_table, q) if target_table else target_qualified
+    stg_alias = "df_stg"
+    staging_from = f"{staging_qualified} {stg_alias}"
     join_pred = " AND ".join(
-        f"{staging_qualified}.{quote_sql_identifier(c, q)} = "
-        f"{target_qualified}.{quote_sql_identifier(c, q)}"
+        f"{stg_alias}.{quote_sql_identifier(c, q)} = "
+        f"{outer_ref}.{quote_sql_identifier(c, q)}"
         for c in pk_columns
     )
     reactivated = _dest_engine_count(
         conn,
         f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
         f"WHERE {deleted_pred} "
-        f"AND EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})",
+        f"AND EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
     )
     soft_deleted = _dest_engine_count(
         conn,
         f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
         f"WHERE {active_pred} "
-        f"AND NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})",
+        f"AND NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
     )
     conn.execute(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
             f"SET {col_quoted} = {false_lit} "
-            f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
+            f"WHERE EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred}) "
             f"AND {deleted_pred}"
         )
     )
@@ -455,7 +465,7 @@ def apply_inferred_deletes_via_staging(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
             f"SET {col_quoted} = {true_lit} "
-            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred}) "
             f"AND {active_pred}"
         )
     )
@@ -806,6 +816,7 @@ def apply_inferred_soft_deletes(
                 pk_columns,
                 soft_delete_column=soft_delete_column,
                 dialect=dialect_name,
+                target_table=table,
             )
             conn.commit()
             active_rows, active_checksum = _compute_active_checksum(
