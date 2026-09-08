@@ -442,7 +442,7 @@ Still open from the sweep (not fixed, not claimed):
 - P2-1..5: Advanced drawer clipping, 12× duplicate React key, Query empty-state `Connector not found`, Pilot refusal counts (13 connectors/8 jobs vs sidebar), Help rendered in the public marketing frame while signed in.
 - Coverage gaps (never run this sweep): Connectors CRUD + wrong-password copy, Contracts menu end-to-end, Jobs Retry/Replay + Mapping/Log tabs, schedule second beat/history/pause-resume, Transforms incremental model + data test, CSV→PG bad-row quarantine, Overview CTA sweep, workspace switching.
 
-Blast-radius run on the quarantine change (43 quarantine/DLQ/accounting/conservation test files, live PG/MySQL) was still executing at push time; result to be appended here.
+Blast-radius run on the quarantine change (40 quarantine/DLQ/refused/rejected/accounting/conservation test files, live PG/MySQL, head `fb46e18d`): **470 passed / 0 failed / 8 skipped** (`sched_proof/quarantine_blast_fb46e18d.log`).
 
 ## 9. Closure protocol
 

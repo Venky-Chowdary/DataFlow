@@ -568,8 +568,9 @@ items in register §8h–§8n.
   schedule pause/resume/history, Transforms incremental + data test, CSV→PG
   bad-row quarantine, workspace switching.
 - Full backend suite on this head not re-counted (last measured 19977/152 on
-  `d693555f`; many classes since fixed). Blast-radius run on the quarantine
-  change was in flight at push.
+  `d693555f`; many classes since fixed). Blast radius on the quarantine
+  change (40 quarantine/DLQ/accounting/conservation files, live PG/MySQL):
+  470 passed / 0 failed / 8 skipped on `fb46e18d`.
 - Hosted clouds: emulator-measured only (register §8m); CDC at-least-once.
 
 ## 7. Continuing this work
