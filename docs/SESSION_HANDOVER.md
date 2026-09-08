@@ -383,17 +383,23 @@ material, and host routing in a real browser vhost (verified at service level on
 
 ## 5. Open defects (found, reproduced, not yet fixed)
 
-1. **`TIMESTAMPTZ → DATETIME(6)` refused as a fidelity collapse.** Three
+1. **`TIMESTAMPTZ → DATETIME(6)` refused as a fidelity collapse.** ~~Three
    `tests/test_typed_fidelity_transfer_matrix_e2e.py` cases fail (PostgreSQL→
    MySQL typed, into an existing MySQL `TIMESTAMP(6)` column, PostgreSQL→Redis).
-   An instant landing in an instant carrier should not need a Risk Contract.
-   Verified pre-existing on the parent commit; this is the next fix to make.
+   An instant landing in an instant carrier should not need a Risk Contract.~~
+   **Algorithm closed** (`test_instant_carrier_not_a_contract.py`,
+   `timezone_policy.py`): create-new MySQL stamps `TIMESTAMP(6)`; an explicit
+   `DATETIME(6)` target still needs a UTC-normalize contract; Redis JSON text
+   keeps the offset. Unit proof this session: **30 passed**. Live PG→MySQL /
+   Redis e2e cells were not re-run here (MySQL/Redis not listening).
 2. **Test isolation.** `tests/test_pilot_llm_wave41.py::test_hybrid_footnote_on_auth_failure`
    passes alone and in its own file, fails only in whole-suite order — provider
    state leaks between tests.
-3. **Scheduler shutdown logging.** Every suite run ends with
+3. **Scheduler shutdown logging.** ~~Every suite run ends with
    `ValueError: I/O operation on closed file` from
-   `services/transfer_scheduler.py:61`. Harmless in tests, wrong in a service.
+   `services/transfer_scheduler.py:61`.~~ **Closed:** `atexit` calls
+   `shutdown(wait=False, log=False)` so the interpreter-exit path does not
+   write to a closed logging stream.
 4. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
    assert a MariaDB build without `utf8mb4_0900_ai_ci`, and two PostgreSQL cases
    need the `vector` extension. They should skip on capability, not fail.
@@ -466,7 +472,9 @@ material, and host routing in a real browser vhost (verified at service level on
 
 ## 7. What "ready to deploy to a client" still needs
 
-1. Fix defect §4.1 (typed instant route) — it blocks a common real route.
+1. Live re-measure of the typed instant route (`test_typed_fidelity_transfer_matrix_e2e`
+   PG→MySQL / existing `TIMESTAMP(6)` / Redis) — algorithm is unit-closed; the
+   live cells need those services.
 2. Browser proof for every Settings tab: load, save, reload, validation, secret
    masking, failure state, tenant scope.
 3. Chatbot/RAG proven with a configured provider, including citations inside the
