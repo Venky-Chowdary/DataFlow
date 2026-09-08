@@ -22,8 +22,10 @@ what was measured.
 Environment
 -----------
 ``SCHED_ROWS`` (default 2000) source rows per cell; ``SCHED_ENGINES`` comma list
-subset of ``postgresql,mysql,sqlite,mongodb``; ``SCHED_MODES`` comma list
-subset of the sync modes; ``SCHED_OUT`` artifact path.
+subset of ``postgresql,mysql,sqlite,mongodb``; ``SCHED_SOURCES`` / ``SCHED_DESTS``
+restrict which of those engines take the source / destination role (default:
+every engine in both roles); ``SCHED_MODES`` comma list subset of the sync
+modes; ``SCHED_OUT`` artifact path.
 """
 
 from __future__ import annotations
@@ -756,6 +758,8 @@ def run_workspace_isolation_cell(src: Engine, dst: Engine, conn_ids: dict[str, s
 def main() -> int:
     engines_wanted = [e for e in (os.environ.get("SCHED_ENGINES") or ",".join(ENGINES)).split(",") if e]
     modes_wanted = set((os.environ.get("SCHED_MODES") or ",".join(m for m, _ in MODES)).split(","))
+    sources_wanted = set((os.environ.get("SCHED_SOURCES") or ",".join(engines_wanted)).split(","))
+    dests_wanted = set((os.environ.get("SCHED_DESTS") or ",".join(engines_wanted)).split(","))
     out_path = Path(os.environ.get("SCHED_OUT", "/home/ubuntu/sched_proof/live_schedule_matrix.json"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -779,7 +783,11 @@ def main() -> int:
     started = _now_iso()
     try:
         for sname, src in engines.items():
+            if sname not in sources_wanted:
+                continue
             for dname, dst in engines.items():
+                if dname not in dests_wanted:
+                    continue
                 for mode, keyed in MODES:
                     if mode not in modes_wanted:
                         continue
