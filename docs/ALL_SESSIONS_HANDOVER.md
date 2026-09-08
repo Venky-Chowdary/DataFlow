@@ -470,6 +470,16 @@ Fixed on the way: `create_connector` now keeps the existing id on a same-named
 create (new config via `update_connector`) instead of delete + fresh id, so
 schedules bound to the connector are no longer orphaned (register §8l).
 
+**Transfer Studio SQL/procedure paste UX** (`5e6c95cf`, `98ec7f84`): a pasted
+`CREATE PROCEDURE/FUNCTION/TABLE/VIEW` is diagnosed before the one-statement
+check by both owners (`services.procedure_source.definition_pasted_refusal`,
+web `sqlEditorModel.diagnoseSql`). A SQL Server T-SQL script pasted against
+a non-T-SQL engine (Snowflake) is named as such (≥2 markers: `@param` types,
+`GO`, `dbo.`, `SET NOCOUNT ON`, `BEGIN TRY`, `RAISERROR`) with one next
+action — one read-only SELECT/WITH, or `CALL schema.name(:param)` for a
+procedure that already exists in that engine — instead of "remove extra
+semicolons". Tests: `test_procedure_source.py`, `sqlEditorModel.test.ts`.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI
