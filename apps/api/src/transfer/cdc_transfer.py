@@ -1389,7 +1389,8 @@ def _run_cdc_shared_multi_table(
         engine=src_type,
         database=str(src_cfg.get("database") or ""),
         tables=tables,
-        job_id=job_id,
+        dest_type=dest_type,
+        dest_database=str(dest_cfg.get("database") or ""),
     )
     shared_wm = get_watermark(shared_key)
     if eos_active:

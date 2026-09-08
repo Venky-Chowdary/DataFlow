@@ -97,6 +97,64 @@ def _create_logical_slot(cur: Any, slot_name: str, plugin: str) -> tuple[str | N
     return lsn, plugin
 
 
+def release_pg_capture(
+    cfg: dict[str, Any],
+    *,
+    slot_name: str,
+    publication_name: str,
+) -> dict[str, Any]:
+    """Drop a route's replication slot and publication on the source.
+
+    Idempotent: a missing slot/publication is reported, not raised. An
+    *active* slot (another consumer attached) is left in place and reported
+    as ``slot=active`` so a live reader is never cut off.
+    """
+    database = str(cfg.get("database") or "postgres")
+    out: dict[str, Any] = {
+        "slot_name": slot_name,
+        "publication_name": publication_name,
+        "slot": "absent",
+        "publication": "absent",
+    }
+    conn = get_connection(
+        host=cfg.get("host") or "localhost",
+        port=cfg.get("port") or 5432,
+        database=database,
+        username=cfg.get("username") or "",
+        password=cfg.get("password") or "",
+        connection_string=cfg.get("connection_string") or "",
+        ssl=bool(cfg.get("ssl")),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT active FROM pg_replication_slots WHERE slot_name = %s",
+                (slot_name,),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                if bool(row[0]):
+                    out["slot"] = "active"
+                else:
+                    cur.execute("SELECT pg_drop_replication_slot(%s)", (slot_name,))
+                    out["slot"] = "dropped"
+            if publication_name:
+                cur.execute(
+                    "SELECT 1 FROM pg_publication WHERE pubname = %s",
+                    (publication_name,),
+                )
+                if cur.fetchone() is not None:
+                    from connectors.sql_identifiers import require_safe_identifier
+
+                    pub = require_safe_identifier(publication_name, preserve_case=False)
+                    cur.execute(f"DROP PUBLICATION IF EXISTS {pub}")
+                    out["publication"] = "dropped"
+        conn.commit()
+    finally:
+        conn.close()
+    return out
+
+
 def _publication_name(database: str, table: str | list[str], cursor_key: str) -> str:
     """Stable publication name for pgoutput (must match slot scoping)."""
     if isinstance(table, (list, tuple)):

@@ -1158,7 +1158,8 @@ def test_shared_transfer_eos_bundle_two_tables_one_dest_txn(tmp_path, monkeypatc
         engine="postgresql",
         database=f"app_{job_id}",
         tables=["orders", "users"],
-        job_id=job_id,
+        dest_type="sqlite",
+        dest_database=dest_path,
     )
     assert dest_watermark_lsn(dest_cfg, shared_key) == "0/2"
     first_orders = dest_engine_count(dest_cfg, "orders")

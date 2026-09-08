@@ -407,9 +407,13 @@ watermark stamped only after Gate-8, SCD2 close-on-vanish, mirror/deduped count
 tokens graded as digests, SQLite expression-depth on 2K-key predicates (SCD2,
 mirror, CDC LSN lookup), SQLite typed read-back checksum, SQLite reader/writer
 lock (WAL), PG slot-create fallback inside an aborted transaction masking the real
-refusal. **Open:** PG replication slot is not released when a CDC schedule is
-deleted (D-CDC-SLOT-LIFECYCLE); 100K/cell, MongoDB SCD2/mirror and hosted clouds
-remain unmeasured.
+refusal. D-CDC-SLOT-LIFECYCLE closed: `DELETE /schedules/{id}` releases the PG
+slot + publication through `services/cdc_capture_release.py` (route-shared and
+active slots are kept; unreachable source returns the exact DROP as next action)
+and the multi-table shared-reader key no longer embeds the job id (was one leaked
+slot + re-snapshot per beat). CDC-only matrix re-run pass=9 fail=0 skip=3
+(`matrix_cdc_release.json`) with the slot asserted absent after release.
+**Open:** 100K/cell, MongoDB SCD2/mirror and hosted clouds remain unmeasured.
 
 ## 7. Continuing this work
 

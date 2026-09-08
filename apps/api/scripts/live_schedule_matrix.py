@@ -180,6 +180,14 @@ class Engine:
         if self.name == "postgresql":
             self._release_pg_cdc_artifacts(table)
 
+    def pg_slot_exists(self, slot_name: str) -> bool:
+        with contextlib.closing(self._conn()) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s", (slot_name,)
+            )
+            return cur.fetchone() is not None
+
     def _release_pg_cdc_artifacts(self, table: str) -> None:
         """Drop this table's replication slots + publications (harness-owned).
 
@@ -584,6 +592,20 @@ def run_cell(src: Engine, dst: Engine, mode: str, keyed: str, conn_ids: dict[str
         verdict, reasons = _judge(mode, exp, measured, run1, run2, src_totals)
         if cell["run_history_len"] < 2:
             verdict, reasons = "fail", reasons + [f"run_history has {cell['run_history_len']} entries, expected 2"]
+        if mode == "cdc" and final is not None and os.environ.get("SCHED_KEEP") != "1":
+            # Product lifecycle: deleting the schedule must release the source
+            # slot/publication (the router does this; the harness proves it).
+            from services.cdc_capture_release import release_schedule_cdc_capture
+
+            release = release_schedule_cdc_capture(final)
+            cell["capture_release"] = release
+            if src.name == "postgresql":
+                if not release.get("released") or release.get("slot") != "dropped":
+                    verdict, reasons = "fail", reasons + [f"slot not released on delete: {release}"]
+                elif src.pg_slot_exists(release["slot_name"]):
+                    verdict, reasons = "fail", reasons + [
+                        f"slot {release['slot_name']} still in pg_replication_slots after release"
+                    ]
         cell.update(verdict=verdict, reasons=reasons)
         return cell
     except Exception as exc:  # noqa: BLE001 - recorded as cell failure

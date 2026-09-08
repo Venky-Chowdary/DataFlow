@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
     INTERVALS,
@@ -546,10 +547,11 @@ async def remove_pipeline_schedule(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     resolve_write_workspace(request, workspace_id)
-    _bound_schedule(request, schedule_id)
+    sched = _bound_schedule(request, schedule_id)
+    capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
-    return {"success": True}
+    return {"success": True, "capture_release": capture}
 
 
 @router.get("/{schedule_id}/history")

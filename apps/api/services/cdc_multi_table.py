@@ -48,12 +48,19 @@ def shared_route_cursor_key(
     engine: str,
     database: str,
     tables: list[str],
-    job_id: str = "",
+    dest_type: str = "",
+    dest_database: str = "",
 ) -> str:
-    """Stable cursor key for the shared log consumer (not per-table)."""
+    """Stable cursor key for the shared log consumer (not per-table).
+
+    Keyed by the *route* (source engine+database+table set → destination), never
+    by the job: the replication slot / binlog position derives from this key,
+    so a per-job key would open a fresh slot and re-snapshot on every scheduled
+    beat and leak one slot per run until ``max_replication_slots`` is hit.
+    """
     digest = tables_digest(tables)
-    jid = (job_id or "job")[:24]
-    return f"cdc-shared:{engine}:{database}:{digest}:{jid}"
+    dest = f"{dest_type}:{dest_database}" if dest_type or dest_database else "dest"
+    return f"cdc-shared:{engine}:{database}:{digest}→{dest}"
 
 
 def can_share_log_reader(src_type: str, table_count: int) -> bool:
