@@ -459,7 +459,12 @@ modes: `matrix_100k_mongo_src_fixed.json` **pass=12 fail=0 skip=0** (run 1 =
 MongoDB-destination 100K slice `matrix_100k_mongo_dest.json` 5/12/7 was a
 harness collision (two matrices sharing the connector store with identical
 connector names; `create_connector` replaces same-named connectors) — re-run
-alone: `matrix_100k_mongo_dest_v2.json` **RESULT_PENDING**.
+alone: `matrix_100k_mongo_dest_v2.json` **pass=17 fail=0 skip=7** (PG/MySQL/SQLite
+→ MongoDB × overwrite/append/incremental_append/incremental_deduped/cdc all green,
+Gate-8 on all 34 runs; the 7 skips are by-design capability refusals — SCD2/mirror
+need a SQL table destination, SQLite has no log-CDC source). 100K scheduler totals:
+PG/MySQL duplex 31/0/0 · SQLite-src 18/0/3 · SQLite-dest 17/0/0 · Mongo-src 21/0/0 ·
+Mongo-dest 17/0/7 — **0 failures on any measured cell**.
 **Open:** hosted clouds remain unmeasured; CDC is at-least-once as measured;
 `create_connector` silently replacing a same-named connector orphans schedules
 bound to the old id (register §8l product note).
