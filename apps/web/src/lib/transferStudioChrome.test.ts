@@ -747,7 +747,7 @@ describe("Transfer Studio chrome contracts", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const start = page.indexOf("const handleScheduleRoute");
     assert.ok(start >= 0, "handleScheduleRoute must exist");
-    const chunk = page.slice(start, start + 5500);
+    const chunk = page.slice(start, start + 9000);
     assert.match(chunk, /stream_contracts: streamContracts/);
     assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
     assert.match(chunk, /dateLocale,/);
@@ -763,7 +763,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /numberLocale/);
     assert.match(chunk, /persistedMappingRows/);
     assert.match(chunk, /Validate a mapping first/);
-    assert.match(chunk, /seedStudioIntent\?\.scheduleId/);
+    assert.match(chunk, /replayScheduleId/);
     assert.match(chunk, /updateSchedule\(replayId/);
   });
 
@@ -849,6 +849,9 @@ describe("Overview parked-decision attention", () => {
     assert.match(app, /getActiveWorkspaceId\(\)/);
     assert.match(app, /isStaleGeneration/);
     assert.match(app, /if \(!getActiveWorkspaceId\(\)\) return;/);
+    assert.match(dash, /overviewRecentMigrationsState/);
+    assert.match(dash, /d\.total \?\? d\.count/);
+    assert.match(dash, /WORKSPACE_CHANGED_EVENT/);
   });
 
   it("keep-alive Studio drops a deleted connection and remounts on workspace change", () => {
@@ -861,6 +864,18 @@ describe("Overview parked-decision attention", () => {
     assert.match(page, /connectorsLoading\) return;/);
     assert.match(page, /!connectors\.some\(\(c\) => c\.id === sourceConnectorId\)/);
     assert.match(page, /!connectors\.some\(\(c\) => c\.id === connectorId\)/);
+    assert.match(page, /studioSourceLabel/);
+    assert.match(page, /sourceLabel=\{sourceLabel\}/);
+    assert.doesNotMatch(page, /sourceLabel=\{file\?\.name \|\| sourceConnector\?\.name\}/);
+    const jobs = readFileSync(join(webRoot, "pages/JobsPage.tsx"), "utf8");
+    assert.match(jobs, /uniqueListKey\(job\._id, index, "job"\)/);
+  });
+});
+
+describe("signed-in Help stays in the app chrome", () => {
+  it("hash sync maps help routes to docs when a session exists", () => {
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(app, /signedInScreenFromHash/);
   });
 });
 

@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -52,6 +52,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   /** Why General could not be read. Empty means the values below are the API's. */
   const [settingsError, setSettingsError] = useState("");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [workspaceLabel, setWorkspaceLabel] = useState("");
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
@@ -117,7 +118,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setSettingsError(err instanceof Error ? err.message : "Could not load workspace settings.");
       })
       .finally(() => setSettingsLoading(false));
-  }, []);
+    fetchWorkspaces()
+      .then(({ workspaces: rows }) => {
+        const current = rows.find((w) => w.id === activeWorkspace);
+        setWorkspaceLabel(current?.name || "");
+      })
+      .catch(() => setWorkspaceLabel(""));
+  }, [activeWorkspace]);
 
   const loadModelsAndSso = useCallback(() => {
     fetchModelCapabilities()
@@ -556,6 +563,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-body">
                     <div className="df2-settings-grid df2-settings-grid--row">
                       <div className="df2-settings-field">
+                        <label htmlFor="workspace-name">This workspace</label>
+                        <input
+                          id="workspace-name"
+                          className="df2-input"
+                          value={workspaceLabel || (activeWorkspace ? "Unnamed workspace" : "No workspace selected")}
+                          disabled
+                          readOnly
+                          title="The Team workspace selected in the top bar. This is not the organization profile name."
+                        />
+                        <p className="df2-label-hint">
+                          Top-bar workspace name (Team). Rename it under Team — not here.
+                        </p>
+                      </div>
+                      <div className="df2-settings-field">
                         <label htmlFor="org-name">Organization name</label>
                         <input
                           id="org-name"
@@ -568,6 +589,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             setOrgName(e.target.value);
                           }}
                         />
+                        <p className="df2-label-hint">
+                          Shown on certificates and exports. This is not the Team workspace name in the top bar.
+                        </p>
                       </div>
                       <div className="df2-settings-field">
                         <label htmlFor="timezone">Default timezone</label>

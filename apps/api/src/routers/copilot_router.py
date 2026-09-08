@@ -128,11 +128,17 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         from ..ai.copilot.pilot_agent import carries_evidence
         from ..ai.copilot.tool_permissions import caller_role
 
+        from services.effective_role import workspace_id_from_request_headers
+
         agent = get_copilot_agent()
         history = [{"role": m.role, "content": m.content} for m in request.history]
         role, _actor = _caller(http_request)
+        data_context = dict(request.data_context or {})
+        ws = workspace_id_from_request_headers(http_request.headers)
+        if ws:
+            data_context["workspace_id"] = ws
         with caller_role(role):
-            result = agent.chat(request.message, history, data_context=request.data_context)
+            result = agent.chat(request.message, history, data_context=data_context or None)
         return CopilotChatResponse(
             answer=result.answer,
             intent=result.intent,

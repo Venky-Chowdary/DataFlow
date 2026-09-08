@@ -7634,7 +7634,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-drawer-body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-x: hidden;
+  min-width: 0;
+  overflow-x: auto;
   overflow-y: auto;
   padding: 16px 18px;
   display: flex;

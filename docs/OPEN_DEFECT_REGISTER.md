@@ -435,12 +435,19 @@ Browser sweep of every menu against the live local fleet (report:
 | P1-1 | Contracts `GET /api/v1/contracts` HTTP 500 — `bson.decimal128.Decimal128` not serializable | contracts router serializer | BSON Decimal128 → str at the boundary | closed earlier this branch |
 | P1-2 | Schedule `Run now`/`Activate` refused *no persisted column mappings* right after Validate approved them — Studio seeded from a schedule only offered "Schedule" after a **successful** run; a failed run left the schedule empty; and the footer PATCH reset the operator's cadence to daily/enabled | `TransferPage.handleScheduleRoute` | Execute in a schedule-seeded session persists the approved contract onto the schedule first (quiet path); Run footer gets `Save mapping to schedule`; replay PATCH no longer overwrites name/interval/enabled | `bb13fd55`; `npm run build` clean. Browser re-verification of the exact route **pending** |
 
-Still open from the sweep (not fixed, not claimed):
-- P1-3 Overview header counts vs Jobs page (50 DLQ events / 0 jobs vs sidebar 84) — not reconciled.
-- P1-4 Run panel showed stale source label `qa_amb.csv` on a PG→MySQL route (Studio state leakage between sessions).
-- P1-5 (unconfirmed) Settings → General org name differs from the active workspace name — by-design global profile or leakage, undetermined.
-- P2-1..5: Advanced drawer clipping, 12× duplicate React key, Query empty-state `Connector not found`, Pilot refusal counts (13 connectors/8 jobs vs sidebar), Help rendered in the public marketing frame while signed in.
+Still open from the sweep (not claimed unless this follow-up closed them):
+- ~~P1-3 Overview header counts vs Jobs page (50 DLQ events / 0 jobs vs sidebar 84)~~ **closed** `cursor/qa-lead-followup-1673`: DLQ `count`/`total` is whole-queue (`count_dlq_events`), not `len(events)` of `limit=50`; Overview recent-migrations empty state uses `history.total`; ops refetch on workspace change.
+- ~~P1-4 Run panel showed stale source label `qa_amb.csv` on a PG→MySQL route~~ **closed**: `studioSourceLabel` is the single chrome owner; file source is cleared when the kind is database/cloud; JobTheater uses that label.
+- P1-5 Settings → General org name vs Team workspace name — **confirmed by-design**, labeled: read-only "This workspace" (Team) vs editable "Organization name" (profile). Not merged.
+- ~~P2-5 Help rendered in the public marketing frame while signed in~~ **closed**: `#/help` and `#/help/<slug>` map to in-app `docs` when a session exists.
+- ~~P2-3 Query empty-state `Connector not found`~~ **closed**: tabs/history are workspace-scoped; a connector that is not in the current list is not introspected; 404 copy names the workspace.
+- ~~P2-4 Pilot refusal counts (13 connectors / 8 jobs vs sidebar)~~ **closed**: briefing uses `count_jobs` (whole history) and the request `X-Workspace-Id`; empty workspace id is not coerced to "all tenants".
+- ~~P2-1 Advanced drawer clipping~~ **closed**: drawer body `overflow-x: auto`, dest-advanced min-width 0.
+- ~~P2-2 12× duplicate React key~~ **closed**: list keys include index where identities collide (jobs, schema warnings, mapping chips, plan steps).
 - Coverage gaps (never run this sweep): Connectors CRUD + wrong-password copy, Contracts menu end-to-end, Jobs Retry/Replay + Mapping/Log tabs, schedule second beat/history/pause-resume, Transforms incremental model + data test, CSV→PG bad-row quarantine, Overview CTA sweep, workspace switching.
+- Browser re-run of the exact PG→MySQL scheduled deduped route on this head — still pending.
+- Full backend suite on this head not re-counted (last measured 19977/152 on `d693555f`).
+- Hosted clouds: emulator-measured only (register §8m); CDC at-least-once.
 
 Blast-radius run on the quarantine change (40 quarantine/DLQ/refused/rejected/accounting/conservation test files, live PG/MySQL, head `fb46e18d`): **470 passed / 0 failed / 8 skipped** (`sched_proof/quarantine_blast_fb46e18d.log`).
 

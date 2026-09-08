@@ -28,6 +28,22 @@ export function fileExtension(name: string) {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
 
+export type StudioSourceKind = "file" | "database" | "cloud";
+
+/** Run-panel and chrome share this — never prefer a leftover file name on a DB route. */
+export function studioSourceLabel(opts: {
+  sourceKind: StudioSourceKind;
+  fileName?: string | null;
+  cloudPath?: string;
+  sourceConnectorName?: string | null;
+}): string {
+  if (opts.sourceKind === "file") return opts.fileName?.trim() || "Choose source";
+  if (opts.sourceKind === "cloud") {
+    return opts.cloudPath?.trim() || opts.sourceConnectorName || "Cloud source";
+  }
+  return opts.sourceConnectorName || "Database source";
+}
+
 export function analysisFromPipeline(
   columns: string[],
   schema: Record<string, string>,

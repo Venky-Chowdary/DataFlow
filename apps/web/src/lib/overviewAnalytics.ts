@@ -110,6 +110,21 @@ export function buildOverviewJobStats(history: JobHistory): {
   };
 }
 
+/**
+ * Recent-migrations empty vs loaded-window vs true empty.
+ * Counting the page as "0 jobs" while history.total is 84 was Overview P1-3.
+ */
+export function overviewRecentMigrationsState(opts: {
+  listsLoading: boolean;
+  total: number;
+  loaded: number;
+}): "loading" | "empty" | "window-empty" | "ready" {
+  if (opts.listsLoading && opts.total === 0 && opts.loaded === 0) return "loading";
+  if (opts.total <= 0) return "empty";
+  if (opts.loaded <= 0) return "window-empty";
+  return "ready";
+}
+
 export function sparklineFromThroughput(series: DayThroughput[]): number[] {
   const vals = series.map((s) => s.rows);
   const max = Math.max(...vals, 1);

@@ -29,7 +29,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, readAppHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, readAppHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -756,7 +756,7 @@ function AppShell({
               {mountedScreens.has("query") && (
                 <div className={`df2-screen-keep ${showScreen("query")}`} hidden={screen !== "query"} aria-hidden={screen !== "query"}>
                 <PageErrorBoundary label="Query Playground">
-                  <QueryPage connectors={connectors} />
+                  <QueryPage connectors={connectors} connectorsLoading={!connectorsReady} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -965,9 +965,11 @@ function DataTransferAppInner() {
   useEffect(() => {
     const syncFromHash = () => {
       const hash = window.location.hash;
-      const screen = readAppHash();
-      const pub = publicRouteFromHash(hash);
       const session = readStoredUser();
+      const screen = session
+        ? signedInScreenFromHash(hash)
+        : readAppHash();
+      const pub = publicRouteFromHash(hash);
 
       if (session && screen) {
         setEntryScreen(screen);

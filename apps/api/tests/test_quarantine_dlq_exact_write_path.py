@@ -69,6 +69,18 @@ def test_list_dlq_events_keeps_long_fraction(tmp_path, monkeypatch):
     assert listed[0]["details"]["rejected_details"][0]["values"]["n"] == 1.5
 
 
+def test_count_dlq_events_is_not_the_page_length(tmp_path, monkeypatch):
+    import services.quarantine_dlq as dlq
+
+    path = tmp_path / "quarantine_dlq.jsonl"
+    lines = [_event_line(job_id=f"job_{i}") for i in range(12)]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(dlq, "DLQ_PATH", path)
+    monkeypatch.setattr(dlq, "_dlq_coll", lambda: None)
+    assert dlq.count_dlq_events() == 12
+    assert len(dlq.list_dlq_events(limit=5)) == 5
+
+
 def test_quarantine_details_from_dlq_keeps_long_fraction(tmp_path, monkeypatch):
     import services.quarantine_dlq as dlq
 

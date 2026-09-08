@@ -3136,6 +3136,10 @@ th.df2-type-string .df2-type-badge {
   margin: 0;
   color: #b45309;
 }
+.df2-dest-advanced-drawer {
+  min-width: 0;
+  min-height: 0;
+}
 .df2-dest-advanced-drawer .df2-policy-grid {
   display: grid;
   grid-template-columns: 1fr;

@@ -76,6 +76,28 @@ export function readAppHash(): Screen | null {
   return screenFromHash(window.location.hash);
 }
 
+/**
+ * Help hashes (`#/help`, `#/help/<slug>`, aliases) are public marketing when
+ * signed out. Signed-in operators must stay in the workspace Help screen —
+ * dumping them to MarketingSite was P2-5.
+ */
+export function isSignedInHelpHash(hash: string): boolean {
+  const raw = hash.replace(/^#\/?/, "").split("?")[0].trim().toLowerCase();
+  if (!raw) return false;
+  if (raw === "help" || raw === "guide" || raw === "documentation") return true;
+  if (raw.startsWith("help/")) return true;
+  if (raw.startsWith("help-")) return true;
+  return false;
+}
+
+/** Screen to open when a stored session exists. Help public hashes map to docs. */
+export function signedInScreenFromHash(hash: string): Screen | null {
+  const screen = screenFromHash(hash);
+  if (screen) return screen;
+  if (isSignedInHelpHash(hash)) return "docs";
+  return null;
+}
+
 export function writeAppHash(screen: Screen, replace = false) {
   if (typeof window === "undefined") return;
   const next = hashForScreen(screen);

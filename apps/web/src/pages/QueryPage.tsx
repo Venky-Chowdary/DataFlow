@@ -31,6 +31,7 @@ import {
 } from "../lib/sqlIntel";
 import {
   closeTab as closeTabIn,
+  connectorMissingFromWorkspace,
   createTab,
   duplicateTab as duplicateTabIn,
   filterHistory,
@@ -40,6 +41,7 @@ import {
   loadLayout,
   loadTabs,
   pushHistory,
+  querySchemaErrorCopy,
   retitleTab,
   saveHistory,
   saveLayout,
@@ -48,6 +50,7 @@ import {
   type QueryLayout,
   type QueryTab,
 } from "../lib/queryWorkspace";
+import { useActiveWorkspaceId } from "../lib/workspace";
 
 /**
  * Unified query workspace — one console for every connector family the engine
@@ -61,13 +64,15 @@ import {
 
 interface QueryPageProps {
   connectors: Connector[];
+  connectorsLoading?: boolean;
 }
 
 const FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet"];
 const LIMITS = [100, 500, 1000, 5000, 10000];
 
-export function QueryPage({ connectors }: QueryPageProps) {
+export function QueryPage({ connectors, connectorsLoading = false }: QueryPageProps) {
   const { toast } = useToast();
+  const workspaceId = useActiveWorkspaceId();
 
   const [tabs, setTabs] = useState<QueryTab[]>([]);
   const [activeId, setActiveId] = useState("");
@@ -101,15 +106,21 @@ export function QueryPage({ connectors }: QueryPageProps) {
   const [destTarget, setDestTarget] = useState("");
   const [destSyncMode, setDestSyncMode] = useState("append");
 
-  // Hydrate from localStorage on mount only — reading during render would make
-  // the first paint depend on storage and break SSR-style hydration.
+  const skipTabPersist = useRef(true);
+
+  // Hydrate tabs/history per workspace. Do not persist the previous workspace's
+  // tabs into the next workspace's storage key on the same tick.
   useEffect(() => {
-    const loaded = loadTabs();
+    skipTabPersist.current = true;
+    const loaded = loadTabs(workspaceId);
     setTabs(loaded.tabs);
     setActiveId(loaded.activeId);
-    setHistory(loadHistory());
+    setHistory(loadHistory(workspaceId));
     setLayout(loadLayout());
-  }, []);
+    setSchemaObjects([]);
+    setSchemaError("");
+    setResult(null);
+  }, [workspaceId]);
 
   const active = useMemo(
     () => tabs.find((t) => t.id === activeId) ?? tabs[0],
@@ -117,8 +128,12 @@ export function QueryPage({ connectors }: QueryPageProps) {
   );
 
   useEffect(() => {
-    if (tabs.length) saveTabs(tabs, activeId);
-  }, [tabs, activeId]);
+    if (skipTabPersist.current) {
+      skipTabPersist.current = false;
+      return;
+    }
+    if (tabs.length) saveTabs(tabs, activeId, workspaceId);
+  }, [tabs, activeId, workspaceId]);
   useEffect(() => {
     saveLayout(layout);
   }, [layout]);
@@ -138,6 +153,15 @@ export function QueryPage({ connectors }: QueryPageProps) {
     () => connectors.find((c) => c.id === active?.connectorId),
     [connectors, active?.connectorId],
   );
+  useEffect(() => {
+    if (connectorsLoading) return;
+    if (!active?.connectorId) return;
+    if (connectorMissingFromWorkspace(active.connectorId, connectors)) {
+      patchActive({ connectorId: "" });
+      setSchemaError("");
+      setSchemaObjects([]);
+    }
+  }, [connectorsLoading, connectors, active?.connectorId, patchActive]);
   const isMongo = selected?.type === "mongodb";
   const dialect = useMemo(() => dialectForConnector(selected?.type), [selected?.type]);
   const queryPlaceholder = isMongo
@@ -160,6 +184,13 @@ export function QueryPage({ connectors }: QueryPageProps) {
         setSchemaError("");
         return;
       }
+      if (connectorMissingFromWorkspace(connectorId, connectors)) {
+        setSchemaObjects([]);
+        setSchemaConnected(false);
+        setSchemaError("This connector is not in the current workspace. Choose a saved connection above.");
+        setSchemaLoading(false);
+        return;
+      }
       setSchemaLoading(true);
       setSchemaError("");
       try {
@@ -172,13 +203,13 @@ export function QueryPage({ connectors }: QueryPageProps) {
       } catch (e) {
         if (!isCurrent()) return;
         setSchemaObjects([]);
-        setSchemaError((e as Error).message || "Schema introspection failed");
+        setSchemaError(querySchemaErrorCopy((e as Error).message || "Schema introspection failed"));
         setSchemaConnected(false);
       } finally {
         if (isCurrent()) setSchemaLoading(false);
       }
     },
-    [],
+    [connectors],
   );
 
   const activeConnectorId = active?.connectorId ?? "";
@@ -278,7 +309,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
             truncated: data.truncated,
             ok: true,
           });
-          saveHistory(next);
+          saveHistory(next, workspaceId);
           return next;
         });
         if (scope !== "all" && isCurrent()) {
@@ -300,7 +331,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
             ok: false,
             error: message,
           });
-          saveHistory(next);
+          saveHistory(next, workspaceId);
           return next;
         });
         const dialectHint = /dialect|pymysql|psycopg|driver/i.test(message);
@@ -315,7 +346,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
         if (isCurrent()) setQueryLoading(false);
       }
     },
-    [active, paramsForRequest, selected?.name, selected?.type, toast],
+    [active, paramsForRequest, selected?.name, selected?.type, toast, workspaceId],
   );
 
   const runAll = useCallback(() => {
@@ -432,7 +463,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
     [history, historyTerm],
   );
 
-  if (connectors.length === 0) {
+  if (!connectorsLoading && connectors.length === 0) {
     return (
       <PageShell
         wide
@@ -816,7 +847,7 @@ export function QueryPage({ connectors }: QueryPageProps) {
                   className="df2-qw-icon-btn"
                   onClick={() => {
                     setHistory([]);
-                    saveHistory([]);
+                    saveHistory([], workspaceId);
                   }}
                   title="Clear history"
                   aria-label="Clear history"

@@ -298,8 +298,35 @@ def test_collect_workspace_briefing_counts_only_loaded_rows(monkeypatch):
     assert facts["schedules_parked"] == 1
     assert "failed transfer" in " ".join(facts["attention"])
     assert "approval" in " ".join(facts["attention"])
-    # Names come from the rows we loaded — not a catalog tile count.
     assert facts["connector_names"] == ["A", "B"]
+
+
+def test_collect_workspace_briefing_uses_whole_history_job_counts(monkeypatch):
+    import src.ai.copilot.workspace_briefing as wb
+
+    monkeypatch.setattr(
+        wb,
+        "_load_connectors",
+        lambda _ws: [{"name": "A", "last_test_ok": True}],
+    )
+    monkeypatch.setattr(
+        wb,
+        "_load_jobs",
+        lambda _ws: (
+            [{"id": "j1", "status": "failed", "source": "orders", "destination": "dest"}],
+            {
+                "total": 84,
+                "by_status": {"failed": 12, "completed": 70, "running": 2},
+            },
+        ),
+    )
+    monkeypatch.setattr(wb, "_load_schedules", lambda _ws: [])
+    monkeypatch.setattr(wb, "_load_contracts", lambda _ws: [])
+    facts = collect_workspace_briefing(workspace_id="ws-1")
+    assert facts["job_count"] == 84
+    assert facts["jobs_failed"] == 12
+    assert facts["jobs_ok"] == 70
+    assert facts["jobs_running"] == 2
 
 
 def test_greeting_and_history_through_agent():

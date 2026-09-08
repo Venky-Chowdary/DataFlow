@@ -378,6 +378,48 @@ def quarantine_details_from_dlq(
     return out
 
 
+def _dlq_query(*, job_id: str | None = None) -> dict[str, Any]:
+    query: dict[str, Any] = {}
+    if job_id:
+        query["job_id"] = job_id
+    return query
+
+
+def count_dlq_events(*, job_id: str | None = None) -> int:
+    """Whole-queue DLQ count — never the length of a paged ``list_dlq_events`` window.
+
+    Overview used ``len(events)`` with ``limit=50``, so a 200-event queue read as
+    "50 DLQ events". Count the store; the page remains a preview.
+    """
+    coll = _dlq_coll()
+    query = _dlq_query(job_id=job_id)
+    if coll is not None:
+        try:
+            return int(coll.count_documents(query))
+        except Exception:
+            logger.debug("DLQ Mongo count failed", exc_info=True)
+
+    path: Path = DLQ_PATH
+    if not path.exists():
+        return 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    n = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        ev = load_dlq_event(line)
+        if ev is None:
+            continue
+        if job_id and ev.get("job_id") != job_id:
+            continue
+        n += 1
+    return n
+
+
 def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
     coll = _dlq_coll()
     if coll is not None:

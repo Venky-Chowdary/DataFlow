@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { fetchOpsDlq, fetchOpsFreshness, fetchOpenScheduleApprovals } from "../lib/api";
+import { WORKSPACE_CHANGED_EVENT } from "../lib/workspace";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import type { JobHistory } from "../lib/jobHistory";
 import { jobHistoryFromResponse } from "../lib/jobHistory";
@@ -9,6 +10,7 @@ import {
   buildOverviewJobStats,
   buildStatusDistributionFromHistory,
   buildThroughputSeries,
+  overviewRecentMigrationsState,
 } from "../lib/overviewAnalytics";
 import { destProvenCount, formatJobRowMetric } from "../lib/conservationLedger";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
@@ -106,29 +108,34 @@ export function DashboardPage({
   } | null>(null);
 
   useEffect(() => {
-    fetchOpsFreshness(60)
-      .then((f) => {
-        setOpsLagSeconds(f.worst_lag_seconds);
-        setFreshness({
-          slo_status: f.slo_status,
-          warn_threshold_seconds: f.warn_threshold_seconds,
-          critical_threshold_seconds: f.critical_threshold_seconds,
-          stale_count: f.stale_count,
-          critical_count: f.critical_count,
-          worst_lag_seconds: f.worst_lag_seconds,
-          alerts: f.alerts,
+    const loadOps = () => {
+      fetchOpsFreshness(60)
+        .then((f) => {
+          setOpsLagSeconds(f.worst_lag_seconds);
+          setFreshness({
+            slo_status: f.slo_status,
+            warn_threshold_seconds: f.warn_threshold_seconds,
+            critical_threshold_seconds: f.critical_threshold_seconds,
+            stale_count: f.stale_count,
+            critical_count: f.critical_count,
+            worst_lag_seconds: f.worst_lag_seconds,
+            alerts: f.alerts,
+          });
+        })
+        .catch(() => {
+          setOpsLagSeconds(null);
+          setFreshness(null);
         });
-      })
-      .catch(() => {
-        setOpsLagSeconds(null);
-        setFreshness(null);
-      });
-    fetchOpsDlq(50)
-      .then((d) => setDlqCount(d.count))
-      .catch(() => setDlqCount(null));
-    fetchOpenScheduleApprovals()
-      .then((rows) => setParkedCount(rows.length))
-      .catch(() => setParkedCount(null));
+      fetchOpsDlq(50)
+        .then((d) => setDlqCount(d.total ?? d.count))
+        .catch(() => setDlqCount(null));
+      fetchOpenScheduleApprovals()
+        .then((rows) => setParkedCount(rows.length))
+        .catch(() => setParkedCount(null));
+    };
+    loadOps();
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, loadOps);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, loadOps);
   }, []);
 
   const jobHistory = useMemo(
@@ -187,6 +194,11 @@ export function DashboardPage({
 
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
   const hasJobs = stats.total > 0;
+  const recentState = overviewRecentMigrationsState({
+    listsLoading,
+    total: stats.total,
+    loaded: jobs.length,
+  });
   const pausedPipelines = schedules.filter((s) => !s.enabled).length;
   const scheduleNames = useMemo(() => {
     const map: Record<string, string> = {};
@@ -375,13 +387,17 @@ export function DashboardPage({
                   <h2 className="df2-overview-v3-card-title">Recent migrations</h2>
                   <p className="df2-overview-v3-card-sub">Latest governed transfers</p>
                 </div>
-                {onOpenJobs && jobs.length > 0 && (
+                {onOpenJobs && stats.total > 0 && (
                   <button type="button" className="df2-overview-v3-link" onClick={onOpenJobs}>
                     Job Theater →
                   </button>
                 )}
               </header>
-              {jobs.length === 0 ? (
+              {recentState === "loading" ? (
+                <div className="df2-overview-v3-table-empty">
+                  <p>Loading workspace history…</p>
+                </div>
+              ) : recentState === "empty" ? (
                 <div className="df2-overview-v3-table-empty">
                   <DtIcon name="transfer" size={22} />
                   <p>No migrations yet. Open Transfer Studio when you are ready.</p>
@@ -393,6 +409,19 @@ export function DashboardPage({
                       leadingIcon={<DtIcon name="transfer" size={14} />}
                     >
                       Open Transfer Studio
+                    </Button>
+                  )}
+                </div>
+              ) : recentState === "window-empty" ? (
+                <div className="df2-overview-v3-table-empty">
+                  <DtIcon name="jobs" size={22} />
+                  <p>
+                    {stats.total.toLocaleString()} job{stats.total === 1 ? "" : "s"} in this workspace
+                    — the recent table has not loaded a page yet.
+                  </p>
+                  {onOpenJobs && (
+                    <Button variant="secondary" size="sm" onClick={onOpenJobs}>
+                      Open Job Theater
                     </Button>
                   )}
                 </div>
@@ -411,8 +440,8 @@ export function DashboardPage({
                         </tr>
                       </thead>
                       <tbody>
-                        {jobs.slice(0, JOB_LIMIT).map((job) => (
-                          <tr key={job._id} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
+                        {jobs.slice(0, JOB_LIMIT).map((job, index) => (
+                          <tr key={job._id || `job-${index}`} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
                             <td>
                               <div className="df2-cell-title" title={job.source_name}>{job.source_name}</div>
                               <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>

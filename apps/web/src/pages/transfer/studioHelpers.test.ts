@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { analysisFromPipeline, formatFileSize, sealRemediationApproval } from "./studioHelpers";
+import { analysisFromPipeline, formatFileSize, sealRemediationApproval, studioSourceLabel } from "./studioHelpers";
 import type { EditableMapping } from "../../lib/mapping";
 
 describe("transfer studioHelpers (Phase F9)", () => {
@@ -31,5 +31,20 @@ describe("transfer studioHelpers (Phase F9)", () => {
     } as EditableMapping);
     assert.equal(m.approved, false);
     assert.equal(m.requiresReview, true);
+  });
+
+  it("never prefers a leftover file name on a database route", () => {
+    assert.equal(
+      studioSourceLabel({
+        sourceKind: "database",
+        fileName: "qa_amb.csv",
+        sourceConnectorName: "Local Postgres",
+      }),
+      "Local Postgres",
+    );
+    assert.equal(
+      studioSourceLabel({ sourceKind: "file", fileName: "qa_amb.csv" }),
+      "qa_amb.csv",
+    );
   });
 });

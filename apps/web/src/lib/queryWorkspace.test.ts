@@ -17,6 +17,8 @@ import {
   loadLayout,
   loadTabs,
   pushHistory,
+  querySchemaErrorCopy,
+  connectorMissingFromWorkspace,
   redactParams,
   retitleTab,
   saveHistory,
@@ -288,5 +290,32 @@ describe("formatRelativeTime", () => {
 
   it("falls back to a date for old entries", () => {
     assert.match(formatRelativeTime(now - 400 * 86_400_000, now), /\d/);
+  });
+});
+
+describe("workspace-scoped query tabs", () => {
+  it("does not leak tabs across workspace keys", () => {
+    const a = createTab({ title: "WS-A", query: "SELECT 1", connectorId: "c-a" });
+    saveTabs([a], a.id, "ws-a");
+    const b = createTab({ title: "WS-B", query: "SELECT 2", connectorId: "c-b" });
+    saveTabs([b], b.id, "ws-b");
+    assert.equal(loadTabs("ws-a").tabs[0]?.title, "WS-A");
+    assert.equal(loadTabs("ws-b").tabs[0]?.title, "WS-B");
+  });
+});
+
+describe("query schema error copy", () => {
+  it("rewrites a raw connector 404 into a workspace-scoped instruction", () => {
+    assert.match(
+      querySchemaErrorCopy("Connector not found"),
+      /not in the current workspace/i,
+    );
+    assert.equal(querySchemaErrorCopy("timeout"), "timeout");
+  });
+
+  it("detects a tab connector that is not in the workspace list", () => {
+    assert.equal(connectorMissingFromWorkspace("gone", [{ id: "here" }]), true);
+    assert.equal(connectorMissingFromWorkspace("here", [{ id: "here" }]), false);
+    assert.equal(connectorMissingFromWorkspace("gone", []), false);
   });
 });
