@@ -539,6 +539,39 @@ equal to the landed table (no duplicate keys after beat 2), a deliberately
 failing data test surfaced as `partial`. `transform_sched_2k.json` **6/0/0**.
 Detail: register §8n.
 
+## Menu readiness sweep — status at handover (2026-08-10, `devin/qa-lead-integration`, PR #172, head `bb13fd55`)
+
+Question asked: "are we at the Google/Microsoft handover standard?" Honest answer:
+**controlled handover on the measured routes only.**
+
+**Fixed this wave (all pushed):**
+1. MySQL/MariaDB `DEFAULT CURRENT_TIMESTAMP` on fractional `DATETIME(n)` (error 1067
+   after a green Validate) — `e0f2cca6`, live PG→MySQL regression.
+2. Fabricated quarantine count on a refused write unit with no findings
+   ("1,000 quarantined / 0 findings") — `bb13fd55`, 21 accounting tests.
+3. Typed-database decimals (`1.337` for `numeric(12,3)`) flagged invalid in
+   Validate cell preview — `e0f2cca6`, preview reads on the wire like Execute.
+4. Contracts page HTTP 500 (`Decimal128`) — closed earlier on this branch.
+5. Schedule Run-now/Activate "no persisted column mappings" after Validate —
+   `bb13fd55`, Execute persists the contract onto the seeded schedule; replay
+   PATCH keeps the operator's cadence.
+Earlier on the same branch: CSV→BigQuery/DynamoDB upsert Gate-8 census (`46dd9744`),
+connector same-name replacement, Snowflake T-SQL paste UX, all scheduler/CDC/Mongo
+items in register §8h–§8n.
+
+**Left open (do not claim):**
+- P1-3 Overview vs Jobs count reconciliation; P1-4 stale source label in the run
+  panel; P1-5 Settings org-name vs workspace (unconfirmed); P2-1..5 (register §8o).
+- Browser re-run of the exact PG→MySQL scheduled deduped route on `bb13fd55`
+  (Run now → second beat → history) — not yet done.
+- Sweep coverage gaps: Connectors CRUD, Contracts end-to-end, Jobs Retry/Replay,
+  schedule pause/resume/history, Transforms incremental + data test, CSV→PG
+  bad-row quarantine, workspace switching.
+- Full backend suite on this head not re-counted (last measured 19977/152 on
+  `d693555f`; many classes since fixed). Blast-radius run on the quarantine
+  change was in flight at push.
+- Hosted clouds: emulator-measured only (register §8m); CDC at-least-once.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

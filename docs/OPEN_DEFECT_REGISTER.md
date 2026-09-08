@@ -421,6 +421,29 @@ Not a defect but worth knowing: `unique` reports the number of duplicated
 *values* (dbt semantics), and `rows_affected` is `-1` where the driver does not
 report a rowcount for `CREATE TABLE AS` (SQLite).
 
+## 8o. Menu-by-menu readiness sweep — P0/P1 closure (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+Browser sweep of every menu against the live local fleet (report:
+`sched_proof/menu_readiness_report.md`, lead machine). Verdict at the time:
+**not at the Google/Microsoft bar** — 2×P0, 5×P1 (one unconfirmed), 5×P2.
+
+| id | defect | owner | fix | proof |
+|---|---|---|---|---|
+| P0-1a | PG→MySQL scheduled deduped run Validate-green then DDL `1067 Invalid default value for 'updated_at'` — PG `timestamp DEFAULT now()` rendered as `DATETIME(6) DEFAULT CURRENT_TIMESTAMP` | `services.schema_fidelity._mysql_clock_default` | clock defaults carry the column's fractional precision (`CURRENT_TIMESTAMP(6)`), MariaDB/PG/SQLite unchanged | `e0f2cca6`; unit + live PG→MySQL regression in `test_property6_schema_fidelity.py` (information_schema read-back) |
+| P0-1b | the same failed job read **1,000 quarantined / 0 findings** — writer fallback `source − written − skipped` counted rows no one judged; `row_accounting.rows_quarantined=1000` with no DLQ row and no destination | `src.transfer.job_quarantine.split_refused_unit` (+ `_persist_job_quarantine` empty-details path) | a refused unit with **no** finding is `rows_rolled_back`/`rows_refused_unit`, `rejected_rows=0`, `rejected_details_total=0`; rows with findings still quarantine and persist | `bb13fd55`; `tests/test_refused_unit_accounting.py` 21 passed (4 new: split, persist, both writer choke points) |
+| P0-2 | Validate flagged valid `numeric(12,3)` values (`1.337`, `2.674`) as invalid — cell preview parsed typed DB numerics under Auto locale (ambiguous `1.337` = 1337?) while Validate/Execute used WIRE | `preflight_router.CellPreviewRequest` → `typed_wire_number_locale` (one resolver) | preview carries `source_kind`/`source_type`; typed DB sources read on the wire like Validate/Execute; file sources keep Auto ambiguity | `e0f2cca6`; `test_preview_cells_transform_image.py` 5 passed |
+| P1-1 | Contracts `GET /api/v1/contracts` HTTP 500 — `bson.decimal128.Decimal128` not serializable | contracts router serializer | BSON Decimal128 → str at the boundary | closed earlier this branch |
+| P1-2 | Schedule `Run now`/`Activate` refused *no persisted column mappings* right after Validate approved them — Studio seeded from a schedule only offered "Schedule" after a **successful** run; a failed run left the schedule empty; and the footer PATCH reset the operator's cadence to daily/enabled | `TransferPage.handleScheduleRoute` | Execute in a schedule-seeded session persists the approved contract onto the schedule first (quiet path); Run footer gets `Save mapping to schedule`; replay PATCH no longer overwrites name/interval/enabled | `bb13fd55`; `npm run build` clean. Browser re-verification of the exact route **pending** |
+
+Still open from the sweep (not fixed, not claimed):
+- P1-3 Overview header counts vs Jobs page (50 DLQ events / 0 jobs vs sidebar 84) — not reconciled.
+- P1-4 Run panel showed stale source label `qa_amb.csv` on a PG→MySQL route (Studio state leakage between sessions).
+- P1-5 (unconfirmed) Settings → General org name differs from the active workspace name — by-design global profile or leakage, undetermined.
+- P2-1..5: Advanced drawer clipping, 12× duplicate React key, Query empty-state `Connector not found`, Pilot refusal counts (13 connectors/8 jobs vs sidebar), Help rendered in the public marketing frame while signed in.
+- Coverage gaps (never run this sweep): Connectors CRUD + wrong-password copy, Contracts menu end-to-end, Jobs Retry/Replay + Mapping/Log tabs, schedule second beat/history/pause-resume, Transforms incremental model + data test, CSV→PG bad-row quarantine, Overview CTA sweep, workspace switching.
+
+Blast-radius run on the quarantine change (43 quarantine/DLQ/accounting/conservation test files, live PG/MySQL) was still executing at push time; result to be appended here.
+
 ## 9. Closure protocol
 
 For each defect: reproduce on a live engine → fix in the one canonical owner →
