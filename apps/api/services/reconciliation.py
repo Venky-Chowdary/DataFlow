@@ -402,6 +402,31 @@ def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
     return None
 
 
+def overlay_physical_dest_types(
+    logical: dict[str, str], physical: dict[str, Any] | None
+) -> dict[str, str]:
+    """Steer read-back digests by the carrier rows landed in, not Map's intent.
+
+    A pre-existing column can contradict the plan (declared DATETIME(6),
+    physical datetime), so the writer's stamped physical type wins — except a
+    TEXT carrier holding a numeric logical type (SQLite has no DECIMAL
+    affinity). Steered as TEXT that column hashes its spelling, and
+    ``Decimal('1.000')`` on the write pass never equals ``'1.000'`` read back.
+    """
+    out = dict(logical)
+    if not isinstance(physical, dict):
+        return out
+    for k, v in physical.items():
+        if not v:
+            continue
+        key = str(k)
+        prior = out.get(key, "")
+        if str(v).strip().upper() == "TEXT" and prior and _is_numeric_logical(prior):
+            continue
+        out[key] = str(v)
+    return out
+
+
 @lru_cache(maxsize=4096)
 def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
     """Normalize a destination type stamp before it steers a fingerprint.
@@ -421,9 +446,31 @@ def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
     try:
         from services.decision_kernel.types import materialize_dest_ddl
 
-        return str(materialize_dest_ddl(engine, ddl) or ddl).upper()
+        physical = str(materialize_dest_ddl(engine, ddl) or ddl).upper()
     except Exception:
         return ddl.upper()
+    if physical == "TEXT" and _is_numeric_logical(ddl):
+        # A TEXT carrier for an exact decimal (SQLite) still holds a number.
+        # Steered as TEXT the digest followed the spelling — a typed
+        # Decimal('1.000') folded to 1 while the read-back text ``1.000`` did
+        # not — and an identical population hashed twice.
+        return ddl.upper()
+    return physical
+
+
+def _is_numeric_logical(ddl: str) -> bool:
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        normalize_logical_type,
+    )
+
+    return normalize_logical_type(ddl) in {
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+    }
 
 
 def _column_fingerprint_ddl(
@@ -748,8 +795,15 @@ def reconcile(
     rows_expanded: int = 0,
     target_rows_before: int | None = None,
     checksum_scope: str = "",
+    keyed_expected_delta: int | None = None,
 ) -> ReconciliationReport:
     """Compare source and destination evidence into one Gate-8 verdict.
+
+    ``keyed_expected_delta`` is the writer's key census for a merge into an
+    occupied destination (``inserts - deletes``). A keyed write does not grow
+    the destination by the batch size — a batch of 1,141 events that updated
+    1,041 existing keys grows it by 100 — so when the batch digest cannot be
+    re-scoped by key the census is the cardinality identity, never the batch.
 
     ``checksum_scope`` names the population the target digest covers. It is
     :data:`WRITTEN_BATCH_KEYS` when the destination was re-read by written key,
@@ -835,9 +889,35 @@ def reconcile(
             checksum_scope=CDC_SOURCE_IMAGE_COUNT,
             target_rows_before=target_rows_before,
         )
+    keyed_identity = (
+        keyed_expected_delta is not None
+        and allow_extra_rows
+        and checksum_scope != WRITTEN_BATCH_KEYS
+    )
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
+    if (
+        keyed_identity
+        and target_rows_before is not None
+        and target_rows - int(target_rows_before) != int(keyed_expected_delta)
+    ):
+        return append_row_count_report(
+            source_rows=source_rows,
+            target_rows=target_rows,
+            target_rows_before=target_rows_before,
+            expected_rows=expected_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            sample_note="",
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            keyed_expected_delta=int(keyed_expected_delta),
+        )
+    if keyed_identity and target_rows_before is not None:
+        row_count_ok = True
     if not row_count_ok:
         extra_note = (
             f" (target has {target_rows - expected_rows} extra rows)"
@@ -895,7 +975,7 @@ def reconcile(
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        has_extra = allow_extra_rows and target_rows > expected_rows
+        has_extra = allow_extra_rows and (target_rows > expected_rows or keyed_identity)
         extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
@@ -930,6 +1010,9 @@ def reconcile(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 sample_compare=sample_compare,
+                keyed_expected_delta=(
+                    int(keyed_expected_delta) if keyed_identity else None
+                ),
             )
         return ReconciliationReport(
             passed=False,
@@ -2628,6 +2711,7 @@ def verify_sqlite_table(
     host: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
     written_ids: list[str] | None = None,
     pk_column: str | None = None,
 ) -> tuple[int, str]:
@@ -2635,7 +2719,10 @@ def verify_sqlite_table(
 
     When ``written_ids`` + ``pk_column`` are set (upsert/append batch proof),
     the checksum fingerprints only those keys while ``count`` remains the
-    full-table cardinality for operator visibility.
+    full-table cardinality for operator visibility. ``dest_types`` steers the
+    digest exactly as the write pass was steered: SQLite hands an exact decimal
+    back as TEXT, and an unsteered read-back hashes ``'0.002'`` as a string
+    while the write pass hashed a number.
     """
     try:
         import sqlite3
@@ -2664,7 +2751,13 @@ def verify_sqlite_table(
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
         columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
-        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            projected,
+            columns,
+            limit=limit,
+            dest_db_type="sqlite",
+            dest_types=dest_types,
+        )
         conn.close()
         return int(count), checksum
     except sqlite3.OperationalError as exc:
@@ -3423,6 +3516,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
             written_ids=ids,
             pk_column=pk,
         )
@@ -3449,6 +3543,7 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                dest_types=dest_types,
                 written_ids=ids,
                 pk_column=pk,
             )
@@ -3995,7 +4090,13 @@ def fingerprint_for_reconcile(
             wire = None
         else:
             wire = converted
-    elif value is not None and not isinstance(value, (str, int, float, bool, bytes)):
+    elif value is not None and not isinstance(
+        value, (str, int, float, bool, bytes, Decimal)
+    ):
+        # A driver Decimal stays typed: rendered as text, ``1.000`` becomes a
+        # locale-ambiguous literal that ``_canonicalize_number`` refuses to fold,
+        # so a DECIMAL(12,3) read-back of 1.000 fingerprinted as "1.000" against
+        # the write pass's "1" and a faithful mirror failed its own digest.
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:

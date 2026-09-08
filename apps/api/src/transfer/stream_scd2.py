@@ -149,6 +149,10 @@ def stream_scd2_mirror_transfer(
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
     target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in schema}
+    # Read-back digests are steered by the same types the write pass used.
+    from services.mirror_engine import target_fingerprint_types
+
+    digest_types = target_fingerprint_types(mappings, schema)
 
     staging = _staging_endpoint(destination, job_id or "")
     staging_qualified = _qualified(staging.table, schema_name, dest_type)
@@ -334,7 +338,12 @@ def stream_scd2_mirror_transfer(
                             updated_total += int(closed.get("closed_missing_rows") or 0)
                             if closed.get("closed_missing_rows"):
                                 active_rows, active_checksum = _scd2_active_checksum(
-                                    conn, target_qualified, target_cols, batch_size, dest_type
+                                    conn,
+                                    target_qualified,
+                                    target_cols,
+                                    batch_size,
+                                    dest_type,
+                                    dest_types=digest_types,
                                 )
                     finally:
                         release_engine(engine)
@@ -413,7 +422,12 @@ def stream_scd2_mirror_transfer(
                 )
                 conn.commit()
                 active_count, active_checksum = _compute_active_checksum(
-                    conn, target_qualified, target_cols, "_deleted", batch_size=1_000
+                    conn,
+                    target_qualified,
+                    target_cols,
+                    "_deleted",
+                    batch_size=1_000,
+                    dest_types=digest_types,
                 )
                 conn.commit()
             release_engine(engine)

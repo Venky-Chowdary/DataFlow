@@ -836,9 +836,10 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
         base = compare_cursor_values(a_cur, b_cur)
         if base != 0:
             return base
-        if a_pk == b_pk:
-            return 0
-        return 1 if a_pk > b_pk else -1
+        # The tie-break is a key, typed like the cursor: comparing it as text
+        # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
+        # lexically largest key and the next run re-read every key above it.
+        return compare_cursor_values(a_pk, b_pk)
     from services.cdc_engine import compare_watermarks, infer_watermark_type
 
     wm_type = infer_watermark_type([sa, sb])

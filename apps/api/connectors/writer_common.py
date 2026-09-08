@@ -797,6 +797,10 @@ def row_checksum(
     )
 
 
+# Keys per LSN lookup statement; see services.scd2_engine.PK_CLAUSE_MAX_KEYS.
+LSN_LOOKUP_MAX_KEYS = 400
+
+
 def filter_stale_lsn_rows(
     cursor: Any,
     table_name: str,
@@ -823,35 +827,38 @@ def filter_stale_lsn_rows(
     # Build OR clauses. Reader-null / blank use IS NULL — never
     # ``col = '__DF_SQL_NULL__'``, which misses dest NULL PKs and fail-opens
     # the LSN gate on at-least-once redelivery.
-    params: list[Any] = []
-    clauses: list[str] = []
     q = quote_sql_identifier
     if schema:
         qualified = f"{q(schema, quote)}.{q(table_name, quote)}"
     else:
         qualified = f"{q(table_name, quote)}"
-    for row in rows:
-        parts = []
-        for idx in conflict_idxs:
-            val = row[idx]
-            col = conflict_cols[conflict_idxs.index(idx)]
-            if _is_nullish_conflict_key(val):
-                parts.append(f"{q(col, quote)} IS NULL")
-            else:
-                parts.append(f"{q(col, quote)} = {placeholder}")
-                params.append(val)
-        if parts:
-            clauses.append("(" + " AND ".join(parts) + ")")
-    if not clauses:
-        return rows, 0
-
-    existing: dict[tuple[Any, ...], Any] = {}
     select_cols = ", ".join(q(c, quote) for c in conflict_cols) + f", {q(DF_LSN_COL, quote)}"
-    stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
-    cursor.execute(stmt, params)
-    for found in cursor.fetchall():
-        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
-        existing[key] = found[-1]
+    existing: dict[tuple[Any, ...], Any] = {}
+    # One predicate per key, issued in bounded chunks: a 2K-row CDC batch as a
+    # single OR chain exceeds SQLite's expression depth (1000) and Oracle/SQL
+    # Server bind limits, and the lookup must fail closed rather than shrink.
+    for start in range(0, len(rows), LSN_LOOKUP_MAX_KEYS):
+        params: list[Any] = []
+        clauses: list[str] = []
+        for row in rows[start : start + LSN_LOOKUP_MAX_KEYS]:
+            parts = []
+            for idx in conflict_idxs:
+                val = row[idx]
+                col = conflict_cols[conflict_idxs.index(idx)]
+                if _is_nullish_conflict_key(val):
+                    parts.append(f"{q(col, quote)} IS NULL")
+                else:
+                    parts.append(f"{q(col, quote)} = {placeholder}")
+                    params.append(val)
+            if parts:
+                clauses.append("(" + " AND ".join(parts) + ")")
+        if not clauses:
+            continue
+        stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
+        cursor.execute(stmt, params)
+        for found in cursor.fetchall():
+            key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
+            existing[key] = found[-1]
 
     to_write: list[tuple] = []
     skipped = 0

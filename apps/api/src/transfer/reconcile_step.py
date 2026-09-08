@@ -43,6 +43,7 @@ from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
     checksum_rows,
+    overlay_physical_dest_types,
     read_target_sample,
     reconcile,
     sample_compare_rows,
@@ -505,10 +506,7 @@ def _maybe_engine_profile_ladder(
     if not pairs:
         return None
     physical = dest_summary.get("column_types") or dest_summary.get("target_types")
-    if isinstance(physical, dict):
-        for k, v in physical.items():
-            if v:
-                types[str(k)] = str(v)
+    types = overlay_physical_dest_types(types, physical)
 
     src_cfg = resolve_connector_config(source_endpoint)
     dst_cfg = resolve_connector_config(endpoint)
@@ -1682,10 +1680,7 @@ def run_reconciliation(
         )
     # Prefer physical types stamped by the writer when present.
     physical = dest_summary.get("column_types") or dest_summary.get("target_types")
-    if isinstance(physical, dict):
-        for k, v in physical.items():
-            if v:
-                dest_types[str(k)] = str(v)
+    dest_types = overlay_physical_dest_types(dest_types, physical)
     # The plan's target_type is Map's intent; the carrier the rows landed in is
     # what the digests must be taken against. A pre-existing destination column
     # contradicts the plan (declared DATETIME(6), physical datetime) and hashing
@@ -2650,6 +2645,23 @@ def run_reconciliation(
         # digest unavailable) must not compare last-batch ack to full dest.
         keyed_scope = CDC_SOURCE_IMAGE_COUNT
 
+    # A keyed merge into an occupied destination grows it by ``inserts -
+    # deletes``, not by the batch. When the batch digest could not be re-scoped
+    # by key (batch larger than the key stash, or a destination without keyed
+    # read-back) the writer's key census is the cardinality identity; grading
+    # the batch size as the expected delta failed every correct upsert whose
+    # events touched existing keys.
+    keyed_delta: int | None = None
+    if allow_extra and not keyed_scope:
+        from services.row_conservation import KIND_KEYED, KeyCensus, conservation_kind
+
+        census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
+        if (
+            census is not None
+            and conservation_kind(sync_mode, dest_count_before=rows_before) == KIND_KEYED
+        ):
+            keyed_delta = int(census.expected_delta)
+
     report = reconcile(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -2666,5 +2678,6 @@ def run_reconciliation(
         rows_expanded=rows_expanded,
         target_rows_before=rows_before,
         checksum_scope=keyed_scope,
+        keyed_expected_delta=keyed_delta,
     )
     return _finalize(report.to_dict())

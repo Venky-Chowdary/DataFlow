@@ -177,6 +177,31 @@ class Engine:
             self._mongo().drop_collection(table)
             return
         self.exec([f"DROP TABLE IF EXISTS {self.q(table)}"])
+        if self.name == "postgresql":
+            self._release_pg_cdc_artifacts(table)
+
+    def _release_pg_cdc_artifacts(self, table: str) -> None:
+        """Drop this table's replication slots + publications (harness-owned).
+
+        Slots pin WAL and count against ``max_replication_slots``; a matrix
+        that leaves one per cell exhausts the quota and every later CDC cell
+        fails to attach for a reason unrelated to the code under test.
+        """
+        db = self.cfg["database"]
+        slot_like = f"df_{db}_{table}_%".lower()
+        pub_like = f"df_pub_{db}_{table}_%".lower()
+        with contextlib.closing(self._conn()) as conn:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE %s",
+                (slot_like,),
+            )
+            for (slot,) in cur.fetchall():
+                cur.execute("SELECT pg_drop_replication_slot(%s)", (slot,))
+            cur.execute("SELECT pubname FROM pg_publication WHERE pubname LIKE %s", (pub_like,))
+            for (pub,) in cur.fetchall():
+                cur.execute(f'DROP PUBLICATION IF EXISTS "{pub}"')
 
     def q(self, ident: str) -> str:
         return f"`{ident}`" if self.name == "mysql" else f'"{ident}"'
@@ -569,6 +594,8 @@ def run_cell(src: Engine, dst: Engine, mode: str, keyed: str, conn_ids: dict[str
         if sched_id and os.environ.get("SCHED_KEEP") != "1":
             with contextlib.suppress(Exception):
                 delete_schedule(sched_id)
+            with contextlib.suppress(Exception):
+                src.drop(src_table)
 
 
 # --------------------------------------------------------------------------- operational cells

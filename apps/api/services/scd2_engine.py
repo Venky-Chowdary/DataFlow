@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
@@ -84,21 +85,52 @@ def _qchar(dialect: str) -> str:
     return quote_char_for(dialect) or '"'
 
 
+# Keys per membership predicate. Bounded by the tightest engine limits the
+# statement can hit: SQLite's expression-tree depth (1000) for OR chains,
+# Oracle's 1000-element IN list, SQL Server's 2100 bind parameters.
+PK_CLAUSE_MAX_KEYS = 400
+
+
+def iter_pk_key_chunks(keys: set[str] | list[str]) -> Iterator[list[str]]:
+    """Yield ``keys`` in predicate-sized chunks; order is stable."""
+    ordered = list(keys)
+    for start in range(0, len(ordered), PK_CLAUSE_MAX_KEYS):
+        yield ordered[start : start + PK_CLAUSE_MAX_KEYS]
+
+
 def _pk_or_clause(
     columns: list[str],
-    keys: set[str],
+    keys: set[str] | list[str],
     *,
     prefix: str,
     dialect: str = "",
 ) -> tuple[str, dict[str, Any]]:
-    """Build ``(c1=:p0_0 AND c2=:p0_1) OR …`` for composite PK membership."""
+    """Membership predicate for one chunk of composite keys.
+
+    Single-column keys bind as ``c IN (:p0, :p1, …)`` — flat, so no engine
+    expression-depth limit applies and the planner sees one list probe.
+    Composite keys use ``(c1=:p0_0 AND c2=:p0_1) OR …``. Callers must chunk
+    with :func:`iter_pk_key_chunks`; larger sets are refused, not silently cut.
+    """
     from connectors.writer_common import quote_sql_identifier
 
     if not keys or not columns:
         return "1=0", {}
+    if len(keys) > PK_CLAUSE_MAX_KEYS:
+        raise ValueError(
+            f"pk predicate over {len(keys)} keys exceeds {PK_CLAUSE_MAX_KEYS}; "
+            "chunk with iter_pk_key_chunks"
+        )
     quoted = [quote_sql_identifier(c, _qchar(dialect)) for c in columns]
-    clauses: list[str] = []
     params: dict[str, Any] = {}
+    if len(columns) == 1:
+        names: list[str] = []
+        for i, key in enumerate(keys):
+            pname = f"{prefix}{i}"
+            params[pname] = key
+            names.append(f":{pname}")
+        return f"{quoted[0]} IN ({', '.join(names)})", params
+    clauses: list[str] = []
     for i, key in enumerate(keys):
         parts = key.split(_KEY_SEP)
         if len(parts) != len(columns):
@@ -271,22 +303,24 @@ def _fetch_current_snapshots(
     q = _qchar(dialect_name)
     cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
-    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k", dialect=dialect_name)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
-    sql = (
-        f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
-        f"WHERE {where_keys} AND {current_pred}"
-    )
-    result = conn.execute(sa.text(sql), params)
     out: dict[str, dict[str, Any]] = {}
-    for row in result:
-        mapping = dict(row._mapping)
-        key = _compose_key(mapping, pk_columns)
-        attrs = {c: mapping.get(c) for c in attr_cols}
-        out[key] = {
-            "hash": str(mapping.get(ROW_HASH_COLUMN) or ""),
-            "attrs": attrs,
-        }
+    for chunk in iter_pk_key_chunks(keys):
+        where_keys, params = _pk_or_clause(
+            pk_columns, chunk, prefix="k", dialect=dialect_name
+        )
+        sql = (
+            f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
+            f"WHERE {where_keys} AND {current_pred}"
+        )
+        for row in conn.execute(sa.text(sql), params):
+            mapping = dict(row._mapping)
+            key = _compose_key(mapping, pk_columns)
+            attrs = {c: mapping.get(c) for c in attr_cols}
+            out[key] = {
+                "hash": str(mapping.get(ROW_HASH_COLUMN) or ""),
+                "attrs": attrs,
+            }
     return out
 
 
@@ -331,17 +365,22 @@ def _expire_rows(
     q = _qchar(dialect_name)
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
     valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN, q)
-    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="e", dialect=dialect_name)
-    params["ts"] = timestamp
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect_name)
-    sql = (
-        f"UPDATE {qualified} "  # nosec B608
-        f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
-        f"WHERE {where_keys} AND {current_pred}"
-    )
-    result = conn.execute(sa.text(sql), params)
-    return result.rowcount or 0
+    expired = 0
+    for chunk in iter_pk_key_chunks(keys):
+        where_keys, params = _pk_or_clause(
+            pk_columns, chunk, prefix="e", dialect=dialect_name
+        )
+        params["ts"] = timestamp
+        sql = (
+            f"UPDATE {qualified} "  # nosec B608
+            f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+            f"WHERE {where_keys} AND {current_pred}"
+        )
+        result = conn.execute(sa.text(sql), params)
+        expired += result.rowcount or 0
+    return expired
 
 
 def _iter_current_keys(
@@ -468,11 +507,13 @@ def _active_checksum(
     target_cols: list[str],
     batch_size: int,
     dialect_name: str,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Current-version digest: one streamed SELECT. Never OFFSET.
 
     SQL Server FETCH requires ORDER BY; Oracle/DB2 reject LIMIT; OFFSET is
-    O(n²) and can skip/duplicate. Same streaming kernel as Gate-8 read-back.
+    O(n²) and can skip/duplicate. Same streaming kernel as Gate-8 read-back,
+    steered by the same column types the write pass fingerprinted against.
     """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
@@ -490,6 +531,7 @@ def _active_checksum(
         attr_cols,
         itersize=max(1, int(batch_size)),
         dest_db_type=dialect_name,
+        dest_types=dest_types,
     )
 
 
@@ -969,7 +1011,12 @@ def apply_scd2(
                     expired_total += closed_missing
 
                 active_rows, active_checksum = _active_checksum(
-                    conn, qualified, target_cols, batch_size, dialect_name
+                    conn,
+                    qualified,
+                    target_cols,
+                    batch_size,
+                    dialect_name,
+                    dest_types=ctx["dest_types"],
                 )
         finally:
             release_engine(engine)

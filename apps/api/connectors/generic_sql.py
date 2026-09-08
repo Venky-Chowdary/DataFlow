@@ -870,9 +870,20 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # SQLAlchemy/sqlite3 accept Python Decimal (apply_transform decimal
             # wire) instead of ProgrammingError or IEEE float invent.
             if db_type == "sqlite" or "sqlite://" in connection_string:
-                from connectors.sqlite_common import register_sqlite_decimal_adapter
+                from sqlalchemy import event
+
+                from connectors.sqlite_common import (
+                    register_sqlite_decimal_adapter,
+                    tune_sqlite_connection,
+                )
 
                 register_sqlite_decimal_adapter()
+                if str(url).rstrip("/") not in ("sqlite://", "sqlite:///:memory:"):
+
+                    @event.listens_for(engine, "connect")
+                    def _sqlite_concurrent_session(dbapi_conn, _record):  # noqa: ANN001
+                        tune_sqlite_connection(dbapi_conn)
+
             return engine
         from services.engine_pool import pool_settings
 

@@ -395,6 +395,22 @@ MySQL backfill/widen tests and the PG control-total test pass; blast radius
 338 passed / 2 pre-existing failures (Informix merge stage bind, vector
 read_target_sample route) which are next.
 
+## Scheduler proof: all engines × all sync modes (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+Register §8h–§8i. Harness `apps/api/scripts/live_schedule_matrix.py` drives the
+real path (`create_schedule → _run_due_schedules → _dispatch_transfer →
+run_transfer_async → _finalize_run`) against local PG/MySQL/SQLite, mutates the
+source between beats and reads the destination back independently. 2K rows/cell:
+**pass=63 fail=0 skip=3** (`/home/ubuntu/sched_proof/matrix_2k_fix4.json`; skips =
+SQLite has no log-based CDC source). Closed on the way: schedule cursor contract,
+watermark stamped only after Gate-8, SCD2 close-on-vanish, mirror/deduped count
+tokens graded as digests, SQLite expression-depth on 2K-key predicates (SCD2,
+mirror, CDC LSN lookup), SQLite typed read-back checksum, SQLite reader/writer
+lock (WAL), PG slot-create fallback inside an aborted transaction masking the real
+refusal. **Open:** PG replication slot is not released when a CDC schedule is
+deleted (D-CDC-SLOT-LIFECYCLE); 100K/cell, MongoDB SCD2/mirror and hosted clouds
+remain unmeasured.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

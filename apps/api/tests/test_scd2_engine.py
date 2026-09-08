@@ -147,6 +147,40 @@ def test_scd2_reidentical_snapshot_is_idempotent():
             pass
 
 
+@pytest.mark.parametrize("composite", [False, True])
+def test_scd2_batch_above_sqlite_expression_depth_limit(composite):
+    """A 2K-key batch must not build one 2K-way OR chain (SQLite depth 1000)."""
+    from services.scd2_engine import PK_CLAUSE_MAX_KEYS, _pk_or_clause
+
+    with pytest.raises(ValueError):
+        _pk_or_clause(["id"], [str(i) for i in range(PK_CLAUSE_MAX_KEYS + 1)], prefix="k")
+    single, _ = _pk_or_clause(["id"], ["1", "2"], prefix="k")
+    assert single == '"id" IN (:k0, :k1)'
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path), table="wide")
+        pk = ["tenant", "id"] if composite else ["id"]
+        schema = {"tenant": "string", "id": "string", "v": "string"}
+
+        def rows(suffix: str):
+            return [{"tenant": "t", "id": str(i), "v": f"{i}{suffix}"} for i in range(2000)]
+
+        first = apply_scd2(endpoint, rows(""), columns=list(schema), schema=schema,
+                           mappings=None, conflict_columns=pk)
+        assert first["ok"] is not False, first.get("error")
+        assert first["rows_written"] == 2000
+        second = apply_scd2(endpoint, rows("x"), columns=list(schema), schema=schema,
+                            mappings=None, conflict_columns=pk)
+        assert second["ok"] is not False, second.get("error")
+        assert second["updated_rows"] == 2000
+        assert second["active_rows"] == 2000
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM wide").fetchone()[0] == 4000
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 def test_scd2_composite_primary_key():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     try:

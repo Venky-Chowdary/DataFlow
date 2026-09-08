@@ -53,6 +53,50 @@ def _end_transaction(conn: Any) -> None:
         _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
+_PLUGIN_MISSING_TOKENS = (
+    "could not access file",
+    "output plugin",
+    "no such file",
+    "does not exist",
+)
+
+
+def _plugin_unavailable(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(tok in text for tok in _PLUGIN_MISSING_TOKENS)
+
+
+def _create_logical_slot(cur: Any, slot_name: str, plugin: str) -> tuple[str | None, str]:
+    """Create ``slot_name`` and return ``(lsn, plugin_used)``.
+
+    ``pgoutput`` may be absent on a server (older builds), so the create falls
+    back to ``test_decoding`` — but only when the failure names the plugin.
+    The retry runs after ``ROLLBACK TO SAVEPOINT``: retrying inside the aborted
+    transaction raised ``current transaction is aborted`` and buried the real
+    refusal (slot quota, missing REPLICATION) that the operator has to act on.
+    A quota/privilege error is re-raised as is; no plugin swap can cure it.
+    """
+    cur.execute("SAVEPOINT df_slot_create")
+    try:
+        cur.execute(
+            "SELECT lsn::text FROM pg_create_logical_replication_slot(%s, %s)",
+            (slot_name, plugin),
+        )
+    except Exception as first:
+        cur.execute("ROLLBACK TO SAVEPOINT df_slot_create")
+        if plugin != "pgoutput" or not _plugin_unavailable(first):
+            raise
+        cur.execute(
+            "SELECT lsn::text FROM pg_create_logical_replication_slot(%s, %s)",
+            (slot_name, "test_decoding"),
+        )
+        plugin = "test_decoding"
+    created = cur.fetchone()
+    cur.execute("RELEASE SAVEPOINT df_slot_create")
+    lsn = str(created[0]) if created and created[0] else None
+    return lsn, plugin
+
+
 def _publication_name(database: str, table: str | list[str], cursor_key: str) -> str:
     """Stable publication name for pgoutput (must match slot scoping)."""
     if isinstance(table, (list, tuple)):
@@ -581,23 +625,9 @@ class PostgreSqlChangeStreamCdc:
                     # server is not really ready (e.g. lock_timeout / statement
                     # timeout disabled by session guards).
                     cur.execute("SET LOCAL statement_timeout = '5000ms'")
-                    try:
-                        cur.execute(
-                            "SELECT pg_create_logical_replication_slot(%s, %s)",
-                            (test_slot, plugin),
-                        )
-                        cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
-                    except Exception:
-                        if plugin == "pgoutput":
-                            # Fall back to test_decoding for availability probe.
-                            self.output_plugin = "test_decoding"
-                            cur.execute(
-                                "SELECT pg_create_logical_replication_slot(%s, %s)",
-                                (test_slot, "test_decoding"),
-                            )
-                            cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
-                        else:
-                            raise
+                    _lsn, used = _create_logical_slot(cur, test_slot, plugin)
+                    self.output_plugin = used
+                    cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
                 conn.commit()
             return True
         except Exception as exc:
@@ -705,22 +735,9 @@ class PostgreSqlChangeStreamCdc:
                 row = cur.fetchone()
                 created_new = False
                 if row is None:
-                    try:
-                        cur.execute(
-                            "SELECT lsn::text FROM pg_create_logical_replication_slot(%s, %s)",
-                            (self.slot_name, self.output_plugin),
-                        )
-                    except Exception:
-                        if self.output_plugin == "pgoutput":
-                            self.output_plugin = "test_decoding"
-                            cur.execute(
-                                "SELECT lsn::text FROM pg_create_logical_replication_slot(%s, %s)",
-                                (self.slot_name, "test_decoding"),
-                            )
-                        else:
-                            raise
-                    created = cur.fetchone()
-                    lsn = str(created[0]) if created and created[0] else None
+                    lsn, self.output_plugin = _create_logical_slot(
+                        cur, self.slot_name, self.output_plugin
+                    )
                     created_new = True
                 else:
                     # Honor existing slot plugin (cannot change without drop).

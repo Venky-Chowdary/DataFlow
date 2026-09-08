@@ -210,28 +210,10 @@ def _pk_or_clause(
     prefix: str,
     dialect: str = "",
 ) -> tuple[str, dict[str, Any]]:
-    from connectors.writer_common import quote_sql_identifier
+    """Composite-key membership predicate — one owner in ``scd2_engine``."""
+    from services.scd2_engine import _pk_or_clause as _owner
 
-    if not keys or not columns:
-        return "1=0", {}
-    q = _qchar(dialect)
-    quoted = [quote_sql_identifier(c, q) for c in columns]
-    clauses: list[str] = []
-    params: dict[str, Any] = {}
-    for i, key in enumerate(keys):
-        parts = key.split(_KEY_SEP)
-        if len(parts) != len(columns):
-            continue
-        ands = []
-        for j, col_q in enumerate(quoted):
-            pname = f"{prefix}{i}_{j}"
-            ands.append(f"{col_q} = :{pname}")
-            params[pname] = parts[j]
-        if ands:
-            clauses.append("(" + " AND ".join(ands) + ")")
-    if not clauses:
-        return "1=0", {}
-    return "(" + " OR ".join(clauses) + ")", params
+    return _owner(columns, keys, prefix=prefix, dialect=dialect)
 
 
 def _target_columns(
@@ -246,6 +228,21 @@ def _target_columns(
         target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
         return target_cols
     return records_columns
+
+
+def target_fingerprint_types(
+    mappings: list[dict[str, Any]] | None,
+    source_schema: dict[str, str] | None,
+) -> dict[str, str]:
+    """Target column → logical type, as the write pass fingerprints them."""
+    from connectors.writer_common import resolve_target_columns
+
+    if not mappings:
+        return {c: str(t) for c, t in (source_schema or {}).items() if t}
+    target_cols, logical = resolve_target_columns(
+        mappings, source_schema or {}, preserve_case=True
+    )
+    return {c: str(t) for c, t in zip(target_cols, logical) if t}
 
 
 def _ensure_soft_delete_column(
@@ -306,31 +303,31 @@ def _update_deleted_batch(
     activated = 0
     deactivated = 0
 
-    if activate_keys:
-        where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a",
-                                           dialect=dialect_name)
-        stmt = f"UPDATE {qualified} SET {col_quoted} = {false_lit} WHERE {where_keys}"  # nosec B608
-        try:
-            result = conn.execute(sa.text(stmt), params)
-            conn.commit()
-            activated = result.rowcount or 0
-        except Exception:
-            conn.rollback()
+    from services.scd2_engine import iter_pk_key_chunks
 
-    if delete_keys:
-        where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d",
-                                           dialect=dialect_name)
-        stmt = (
-            f"UPDATE {qualified} SET {col_quoted} = {true_lit} "  # nosec B608
-            f"WHERE {where_keys} "
-            f"AND ({col_quoted} IS NULL OR {col_quoted} = {false_lit})"
-        )
-        try:
-            result = conn.execute(sa.text(stmt), params)
-            conn.commit()
-            deactivated = result.rowcount or 0
-        except Exception:
-            conn.rollback()
+    try:
+        for chunk in iter_pk_key_chunks(activate_keys):
+            where_keys, params = _pk_or_clause(
+                pk_columns, chunk, prefix="a", dialect=dialect_name
+            )
+            stmt = f"UPDATE {qualified} SET {col_quoted} = {false_lit} WHERE {where_keys}"  # nosec B608
+            activated += conn.execute(sa.text(stmt), params).rowcount or 0
+        for chunk in iter_pk_key_chunks(delete_keys):
+            where_keys, params = _pk_or_clause(
+                pk_columns, chunk, prefix="d", dialect=dialect_name
+            )
+            stmt = (
+                f"UPDATE {qualified} SET {col_quoted} = {true_lit} "  # nosec B608
+                f"WHERE {where_keys} "
+                f"AND ({col_quoted} IS NULL OR {col_quoted} = {false_lit})"
+            )
+            deactivated += conn.execute(sa.text(stmt), params).rowcount or 0
+        conn.commit()
+    except Exception:
+        # A swallowed soft-delete would report 0 tombstones as if nothing was
+        # deleted; surface it so Gate-8 / the operator see the real failure.
+        conn.rollback()
+        raise
 
     return activated, deactivated
 
@@ -341,8 +338,14 @@ def _compute_active_checksum(
     target_cols: list[str],
     soft_delete_column: str,
     batch_size: int,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Active-row digest: one streamed SELECT. Never OFFSET."""
+    """Active-row digest: one streamed SELECT. Never OFFSET.
+
+    ``dest_types`` are the column types the write pass fingerprinted against;
+    the read-back must be steered by the same types or a decimal held in a
+    text carrier hashes by spelling on one side and by value on the other.
+    """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import sql_bool_is_not_true
@@ -360,6 +363,7 @@ def _compute_active_checksum(
         target_cols,
         itersize=max(1, int(batch_size)),
         dest_db_type=dialect_name,
+        dest_types=dest_types,
     )
 
 
@@ -805,7 +809,12 @@ def apply_inferred_soft_deletes(
             )
             conn.commit()
             active_rows, active_checksum = _compute_active_checksum(
-                conn, qualified, target_cols, soft_delete_column, batch_size
+                conn,
+                qualified,
+                target_cols,
+                soft_delete_column,
+                batch_size,
+                dest_types=target_fingerprint_types(mappings, schema),
             )
             conn.commit()
             _drop_pk_staging(conn, stg_qualified)
