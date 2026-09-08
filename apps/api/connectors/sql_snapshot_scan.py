@@ -9,6 +9,7 @@ writes; this is the Fivetran/Debezium-class sequential scan.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,37 @@ def scan_filter_value(filter_column: str, filter_after: Any) -> str | None:
         return None
     value, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
     return value
+
+
+def publish_scan_order(scan_state: dict[str, Any], order_cols: Sequence[str]) -> None:
+    """Record the ORDER BY a snapshot scan actually opened with.
+
+    The scan→keyset handoff in the stream engine seeks past the first scan page
+    on the keyset columns; that is only sound when the scan was ordered by
+    those same columns. Readers publish their order here so the engine can
+    refuse the seek instead of skipping every row the scan order left behind.
+    """
+    scan_state["order_cols"] = [str(c) for c in order_cols if c]
+
+
+def scan_order_supports_seek(
+    scan_order: Sequence[str] | None, keyset_order_cols: Sequence[str]
+) -> bool:
+    """True when a keyset seek may continue a snapshot scan's first page.
+
+    Requires the keyset columns to be a leading prefix (case-insensitive) of the
+    published scan order. An unpublished order is *not* trusted: a SQLite scan
+    ordered by ``rowid`` while the seek runs on a ``BIGINT PRIMARY KEY`` handed
+    the engine ids 2501..22500 first and then sought ``id > 22500`` — the 2,500
+    rows the heap had moved to the end were never read.
+    """
+    if scan_order is None:
+        return False
+    seek = [str(c).lower() for c in keyset_order_cols if c]
+    order = [str(c).lower() for c in scan_order if c]
+    if not seek or len(seek) > len(order):
+        return False
+    return order[: len(seek)] == seek
 
 
 def fetch_scan_page(cur: Any, batch_size: int) -> list[Any]:

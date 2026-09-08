@@ -3678,7 +3678,11 @@ def read_table_scan_batch(
     reflected table; a dialect whose reflection fails refuses rather than
     reading the whole table unfiltered.
     """
-    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
+    from connectors.sql_snapshot_scan import (
+        close_table_scan,
+        publish_scan_order,
+        scan_filter_value,
+    )
 
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
@@ -3757,11 +3761,12 @@ def read_table_scan_batch(
                 # which then compiles as DECLARE CURSOR FOR <ddl> and fails.
                 result = conn.execute(stmt.execution_options(stream_results=True))
                 headers = _catalog_headers(dialect, selected_cols)
+                scan_order = [str(c.name) for c in order_cols]
                 serialize = True
             except Exception:
                 if filter_value is not None:
                     raise
-                headers, result = _open_raw_table_scan(
+                headers, result, scan_order = _open_raw_table_scan(
                     conn, table, schema_name, dialect=dialect
                 )
                 selected_cols = []
@@ -3784,6 +3789,7 @@ def read_table_scan_batch(
             dialect=dialect,
             serialize=serialize,
         )
+        publish_scan_order(scan_state, scan_order)
 
     result = scan_state.get("result")
     headers = list(scan_state.get("headers") or [])
@@ -3810,8 +3816,12 @@ def _open_raw_table_scan(
     schema: str | None,
     *,
     dialect: str = "ansi",
-) -> tuple[list[str], Any]:
-    """Open one OFFSET-free SELECT for engines with thin reflection."""
+) -> tuple[list[str], Any, list[str]]:
+    """Open one OFFSET-free SELECT for engines with thin reflection.
+
+    Returns ``(headers, result, order_cols)`` — the last is the column the scan
+    is actually ordered by, so the engine can judge a keyset handoff.
+    """
     from connectors.sql_identifiers import quote_table_ref
     from services.dialect_profiles import (
         denormalize_result_key,
@@ -3824,11 +3834,12 @@ def _open_raw_table_scan(
     probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
     headers = _result_headers(dialect, probe)
     if not headers:
-        return [], None
+        return [], None, []
     q = quote_char_for(dialect) or '"'
     order_header = _orderable_header(dialect, headers, probe)
     if order_header is None:
         order_col = "ROWID"
+        order_name = "ROWID"
     else:
         order_name = denormalize_result_key(dialect, str(order_header))
         if q == "[":
@@ -3837,7 +3848,7 @@ def _open_raw_table_scan(
             order_col = quote_sql_identifier(order_name, q)
     sql = f"{base} ORDER BY {order_col}"  # nosec B608
     result = conn.execute(sa.text(sql))
-    return _result_headers(dialect, result), result
+    return _result_headers(dialect, result), result, [order_name]
 
 
 def read_table_cursor_batch(

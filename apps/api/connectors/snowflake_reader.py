@@ -19,7 +19,7 @@ from connectors.sql_identifiers import (
     quote_sql_identifier,
     require_safe_identifier,
 )
-from connectors.sql_snapshot_scan import close_table_scan
+from connectors.sql_snapshot_scan import close_table_scan, publish_scan_order
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -28,8 +28,8 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
-def snapshot_order_sql(columns: list[str], primary_key: str | None = "") -> str:
-    """ORDER BY first column plus PK so OFFSET pages cannot skip/duplicate rows."""
+def snapshot_order_columns(columns: list[str], primary_key: str | None = "") -> list[str]:
+    """First column plus PK — the order a stable page/scan is read in."""
     order_cols: list[str] = []
     if columns:
         order_cols.append(str(columns[0]))
@@ -38,6 +38,12 @@ def snapshot_order_sql(columns: list[str], primary_key: str | None = "") -> str:
         order_cols.append(pk)
     if not order_cols:
         raise RuntimeError("Snowflake table has no columns for stable pagination")
+    return order_cols
+
+
+def snapshot_order_sql(columns: list[str], primary_key: str | None = "") -> str:
+    """ORDER BY first column plus PK so OFFSET pages cannot skip/duplicate rows."""
+    order_cols = snapshot_order_columns(columns, primary_key=primary_key)
     return quote_column_list(
         [require_safe_identifier(str(c), preserve_case=True) for c in order_cols]
     )
@@ -291,6 +297,7 @@ def read_table_scan_batch(
                 cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
                 order_cols = [desc[0] for desc in (cur.description or [])]
             order_sql = snapshot_order_sql(order_cols, primary_key=cursor_primary_key)
+            scan_order = snapshot_order_columns(order_cols, primary_key=cursor_primary_key)
             arraysize = max(1, min(int(limit or _SF_SCAN_ARRAYSIZE), _SF_SCAN_ARRAYSIZE))
             try:
                 cur.arraysize = arraysize
@@ -321,6 +328,7 @@ def read_table_scan_batch(
             headers=headers,
             total=total,
         )
+        publish_scan_order(scan_state, scan_order)
     cur = scan_state["cur"]
     raw = cur.fetchmany(max(1, int(limit)))
     headers = list(scan_state.get("headers") or [])

@@ -411,7 +411,7 @@ def read_collection_scan_batch(
     inserts, can skip or duplicate documents. Mid-run resume must not call this
     from a non-zero offset — stream.py keeps the held cursor or seeks ``_id``.
     """
-    from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_snapshot_scan import close_table_scan, publish_scan_order
 
     state = scan_state if scan_state is not None else {}
     if not state.get("started"):
@@ -434,6 +434,7 @@ def read_collection_scan_batch(
             headers=list(columns or []),
             cfg=cfg,
         )
+        publish_scan_order(state, ["_id"])
     cursor = state["cur"]
     page: list[dict[str, Any]] = []
     n = max(1, int(limit))

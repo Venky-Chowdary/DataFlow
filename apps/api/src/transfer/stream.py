@@ -2052,10 +2052,28 @@ def _stream_database_transfer_impl(
             )
     pagination_mode = decision.pagination_mode
     if use_keyset and src_scan.get("started"):
-        # First page already landed from the snapshot scan; later pages seek.
-        from connectors.sql_snapshot_scan import close_table_scan
+        from connectors.sql_snapshot_scan import (
+            close_table_scan,
+            scan_order_supports_seek,
+        )
 
-        close_table_scan(src_scan)
+        if scan_order_supports_seek(src_scan.get("order_cols"), keyset_order_cols):
+            # First page already landed from the snapshot scan; later pages seek.
+            close_table_scan(src_scan)
+        else:
+            # The scan's ORDER BY is not the seek order (or is unpublished):
+            # seeking past its first page would skip every row the scan order
+            # placed before the page edge. Keep paging the held snapshot.
+            logger.warning(
+                "Snapshot scan on %s.%s is ordered by %r but the keyset seek would "
+                "run on %r — continuing the held scan instead of seeking.",
+                src_type,
+                table,
+                src_scan.get("order_cols"),
+                keyset_order_cols,
+            )
+            use_keyset = False
+            pagination_mode = "scan"
     elif (
         _is_resume
         and not use_keyset

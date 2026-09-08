@@ -266,7 +266,7 @@ def read_table_scan_batch(
     scan_state: dict[str, Any],
 ) -> ReadBatch:
     """One ``SELECT … ORDER BY`` job + iterator pages — no LIMIT/OFFSET."""
-    from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_snapshot_scan import close_table_scan, publish_scan_order
 
     del username, password, ssl, warehouse
     if scan_state.get("started"):
@@ -331,6 +331,7 @@ def read_table_scan_batch(
                 headers=headers,
                 total=len(rows_list),
             )
+            publish_scan_order(scan_state, order_cols)
         else:
             if known_total_rows is not None:
                 total = known_total_rows
@@ -362,6 +363,7 @@ def read_table_scan_batch(
                 headers=headers,
                 total=total,
             )
+            publish_scan_order(scan_state, [order_cols[0]])
         return _bigquery_scan_page(scan_state, offset=offset, limit=limit)
     except Exception as exc:
         close_table_scan(scan_state)

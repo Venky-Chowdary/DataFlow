@@ -424,8 +424,20 @@ PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0**
 overlap/failure-park/workspace cells **pass=31 fail=0 skip=0**
 (`matrix_100k_pg_mysql_v2.json`): run 1 = 100,000 rows and run 2 = the exact
 delta in every cell, Gate-8 passed on all 56 scheduled runs.
-**Open:** 100K SQLite-source cells for the other modes, MongoDB SCD2/mirror and
-hosted clouds remain unmeasured.
+SQLite-source 100K slice `matrix_100k_sqlite_src.json` **pass=18 fail=0 skip=3**
+(SQLite has no log-based CDC source). SQLite-destination 100K slice first ran
+pass=16 fail=1: PG→SQLite mirror lost all 2,500 updated keys under a green upsert
+ack (register §8k) — the SQLite snapshot scan was ordered by `rowid` while the
+engine's keyset seek continued on the `BIGINT PRIMARY KEY`, so the first-page
+handoff skipped every key the heap had placed after the page edge. Fixed at the
+shared owner: readers publish the ORDER BY they opened with
+(`sql_snapshot_scan.publish_scan_order`), `stream.py` only seeks when the keyset
+columns are a leading prefix of that order (`scan_order_supports_seek`) and
+otherwise keeps paging the held snapshot; the SQLite scan itself now orders by
+the declared PK. 20 regression tests in `tests/test_snapshot_scan_keyset_handoff.py`;
+re-run `matrix_100k_sqlite_dest.json` **pass=17 fail=0 skip=0**.
+**Open:** MongoDB SCD2/mirror and hosted clouds remain unmeasured; CDC is
+at-least-once as measured.
 
 ## 7. Continuing this work
 

@@ -6,6 +6,11 @@ import sqlite3
 from typing import Any
 
 from connectors.base import ReadBatch
+from connectors.sql_snapshot_scan import (
+    close_table_scan,
+    publish_scan_order,
+    scan_filter_value,
+)
 from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
 from services.value_serializer import cell_to_string
@@ -88,6 +93,28 @@ def read_table_batch(
             shared.close()
 
 
+def _primary_key_columns(cur: Any, table_quoted: str) -> list[str]:
+    """Declared PRIMARY KEY columns in key order (``PRAGMA table_info`` pk>0)."""
+    cur.execute(f"PRAGMA table_info({table_quoted})")
+    keyed = [(int(r[5]), str(r[1])) for r in cur.fetchall() if int(r[5] or 0) > 0]
+    return [name for _, name in sorted(keyed)]
+
+
+def _scan_order_columns(cur: Any, table_quoted: str, filter_column: str) -> list[str]:
+    """Order a snapshot scan by the seek key the engine will page on.
+
+    ``rowid`` is insertion order, not key order: a ``BIGINT PRIMARY KEY`` is not
+    a rowid alias, so a scan ordered by rowid disagrees with the keyset seek
+    that continues past its first page and skips every key the heap placed
+    later. Ordering by the declared primary key keeps both owners in step;
+    tables without a key fall back to rowid.
+    """
+    pk = _primary_key_columns(cur, table_quoted)
+    order = [filter_column] if filter_column else []
+    order += [c for c in pk if c.lower() != filter_column.lower()]
+    return order
+
+
 def read_table_scan_batch(
     *,
     host: str,
@@ -108,14 +135,13 @@ def read_table_scan_batch(
     filter_column: str = "",
     filter_after: str | None = None,
 ) -> ReadBatch:
-    """Page one ``SELECT … ORDER BY rowid`` with ``fetchmany`` — no OFFSET.
+    """Page one ``SELECT … ORDER BY <pk | rowid>`` with ``fetchmany`` — no OFFSET.
 
     ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
     (COUNT and SELECT alike) and order it by the cursor first — the incremental
     read for a table with no unique tie-break to seek on.
     """
     del port, username, password, schema, ssl, columns
-    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
     from services.source_snapshot import get_source_snapshot_conn
 
     path = sqlite_file_path(database, connection_string, host)
@@ -128,12 +154,10 @@ def read_table_scan_batch(
     filter_value = scan_filter_value(filter_column, filter_after)
     where_sql = ""
     params: tuple[Any, ...] = ()
-    order_prefix = ""
     if filter_value is not None:
         filter_q = quote_sql_identifier(filter_column)
         where_sql = f" WHERE {filter_q} > ?"
         params = (filter_value,)
-        order_prefix = f"{filter_q}, "
     if not scan_state.get("started"):
         shared = conn if conn is not None else get_source_snapshot_conn()
         close_conn = shared is None and conn is None
@@ -147,11 +171,17 @@ def read_table_scan_batch(
             else:
                 cur.execute(f"SELECT COUNT(*) FROM {table_quoted}{where_sql}", params)  # nosec B608
                 total = cur.fetchone()[0]
+            order_cols = _scan_order_columns(
+                cur, table_quoted, filter_column if filter_value is not None else ""
+            )
+            order_prefix = "".join(f"{quote_sql_identifier(c)}, " for c in order_cols)
             try:
                 cur.execute(
                     f"SELECT * FROM {table_quoted}{where_sql} ORDER BY {order_prefix}rowid",  # nosec B608
                     params,
                 )
+                if not order_cols:
+                    order_cols = ["rowid"]
             except sqlite3.OperationalError:
                 # WITHOUT ROWID tables have no rowid — still one SELECT, no OFFSET.
                 order_sql = f" ORDER BY {order_prefix[:-2]}" if order_prefix else ""
@@ -178,6 +208,7 @@ def read_table_scan_batch(
             headers=headers,
             total=total,
         )
+        publish_scan_order(scan_state, order_cols)
     cur = scan_state["cur"]
     raw = cur.fetchmany(max(1, int(limit)))
     headers = list(scan_state.get("headers") or [])
