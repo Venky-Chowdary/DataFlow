@@ -5,6 +5,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -20,6 +22,7 @@ from src.transfer.file_stream import (  # noqa: E402
     stream_file_to_database,
 )
 from src.transfer.models import EndpointConfig  # noqa: E402
+from src.transfer.reconcile_step import is_count_proof_token  # noqa: E402
 
 
 def _write_csv_file(path: Path, rows: int) -> list[str]:
@@ -52,7 +55,13 @@ def test_iter_csv_batches_from_path():
         assert batches[0][0] == {"id": "1", "name": "row1", "amount": "1.5"}
 
 
-def test_stream_file_to_database_from_path():
+@pytest.mark.parametrize("copy_fast_path", ["1", "0"])
+def test_stream_file_to_database_from_path(monkeypatch, copy_fast_path):
+    # Two proof contracts share this route. The local CSV COPY never hashes a
+    # row, so it reports a ``dest_count:<n>`` cardinality token with its
+    # proof_scope; the streamed path fingerprints every written row and stamps
+    # ``inline_write_pass``. Neither may borrow the other's claim.
+    monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", copy_fast_path)
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         p = tmp / "payments.csv"
@@ -71,7 +80,15 @@ def test_stream_file_to_database_from_path():
         )
         assert rows == 2
         assert summary.get("checksum")
-        assert summary.get("checksum_mode") == "inline_write_pass"
+        if copy_fast_path == "1":
+            assert summary.get("copy_fast_path") == "used"
+            assert is_count_proof_token(summary["checksum"])
+            assert "dest_count_equals_source_snapshot" in str(summary.get("proof_scope"))
+            assert summary.get("checksum_mode") != "inline_write_pass"
+        else:
+            assert summary.get("copy_fast_path") != "used"
+            assert summary.get("checksum_mode") == "inline_write_pass"
+            assert not is_count_proof_token(summary["checksum"])
         assert columns == ["id", "amount"]
 
 
