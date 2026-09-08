@@ -107,6 +107,44 @@ _DENIED_NAME_PREFIXES = (
     "sp_grantdbaccess",
 )
 
+_DDL_DEFINITION = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+(?:REPLACE|ALTER)\s+)?(?:TEMP(?:ORARY)?\s+|SECURE\s+)?"
+    r"(?P<kind>PROCEDURE|PROC|FUNCTION|TABLE|VIEW)\b",
+    re.IGNORECASE,
+)
+
+
+def definition_pasted_refusal(stripped: str, dialect: str, mode: str) -> str | None:
+    """A ``CREATE PROCEDURE …`` script is the object's definition, not an extract.
+
+    Operators paste the DDL they were handed instead of the ``CALL``; the
+    generic "one statement" / "verify the table name" hints then send them
+    hunting for semicolons. Name the real next action instead.
+    """
+    m = _DDL_DEFINITION.match(stripped)
+    if not m:
+        return None
+    kind = m.group("kind").upper()
+    engine = dialect or "the source engine"
+    if kind in {"PROCEDURE", "PROC", "FUNCTION"}:
+        call = "EXEC" if dialect in {"mssql", "sqlserver", "sybase"} else "CALL"
+        via = (
+            "Paste one read-only SELECT / WITH here, or switch to Stored procedure and "
+            if mode == MODE_QUERY
+            else "Then "
+        )
+        return (
+            f"This is a CREATE {kind} definition, not an extract. Create the object "
+            f"in {engine} with your own client first. {via}paste "
+            f"`{call} schema.name(:param)` for a procedure that already exists, "
+            "with binds set below."
+        )
+    return (
+        f"This is a CREATE {kind} statement — DataFlow only reads here. "
+        "Use Table, one read-only SELECT / WITH, or a stored procedure CALL."
+    )
+
+
 _DENIED_TOKENS = re.compile(
     r"\b("
     r"INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|"
@@ -374,6 +412,9 @@ def parse_callable_source(
         raise ProcedureSourceError(
             "Paste a single CALL / EXEC, or a read-only SELECT, then continue."
         )
+    definition = definition_pasted_refusal(stripped, dialect_n, mode_n)
+    if definition:
+        raise ProcedureSourceError(definition)
     if ";" in stripped.rstrip().rstrip(";"):
         raise ProcedureSourceError(
             "Only one statement is allowed — remove extra semicolons."

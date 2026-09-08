@@ -22,12 +22,15 @@ def stamp_source_row_count(
     *,
     reader_count: int,
     rows_written: int,
+    source: str = "committed_offset",
 ) -> None:
     """Record the reader's population count on the summary Gate-8 reads.
 
     ``reader_count`` is the committed offset — the sum of every committed
     batch's source rows — which is authoritative for the whole stream, unlike a
-    per-batch writer stamp that may have merged into the summary.
+    per-batch writer stamp that may have merged into the summary. ``source``
+    names the reader that counted (``committed_offset`` for the row stream,
+    ``cdc_reader_changes`` for changelog polls).
 
     A zero read is recorded as a measured zero only when the writer also
     acknowledged nothing. Zero read alongside rows written means the two counts
@@ -36,13 +39,13 @@ def stamp_source_row_count(
     """
     if reader_count > 0:
         dest_summary["source_row_count"] = reader_count
-        dest_summary["source_row_count_source"] = "committed_offset"
+        dest_summary["source_row_count_source"] = source
         return
     if int(rows_written or 0) == 0:
         # The read loop completed and nothing was in scope. Conservation holds
         # trivially: nothing was read and nothing was written.
         dest_summary["source_row_count"] = 0
-        dest_summary["source_row_count_source"] = "committed_offset_empty"
+        dest_summary["source_row_count_source"] = f"{source}_empty"
         return
     existing = dest_summary.get("source_row_count")
     if isinstance(existing, int) and existing > 0:

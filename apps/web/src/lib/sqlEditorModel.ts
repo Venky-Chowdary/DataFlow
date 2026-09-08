@@ -51,6 +51,10 @@ export function diagnoseSql(
           : "Paste one CALL / EXEC, or a set-returning function.",
     );
   }
+  const definition = definitionPasted(stripped, dialect, opts.mode);
+  if (definition) {
+    return fail(definition);
+  }
   if (stripped.includes(";") && stripped.replace(/;+\s*$/, "").includes(";")) {
     return fail("Only one statement is allowed — remove extra semicolons.");
   }
@@ -109,6 +113,24 @@ export function diagnoseSql(
     binds,
     error: "",
   };
+}
+
+const DDL_DEFINITION = /^\s*create\s+(?:or\s+(?:replace|alter)\s+)?(?:temp(?:orary)?\s+|secure\s+)?(procedure|proc|function|table|view)\b/i;
+
+/** A pasted `CREATE PROCEDURE …` script is the object's definition, not an extract. */
+function definitionPasted(stripped: string, dialect: string, mode: SqlEditorMode): string {
+  const m = stripped.match(DDL_DEFINITION);
+  if (!m) return "";
+  const kind = m[1].toUpperCase();
+  const engine = dialect || "the source engine";
+  if (kind === "PROCEDURE" || kind === "PROC" || kind === "FUNCTION") {
+    const call = /^(mssql|sqlserver|sybase)$/.test(dialect) ? "EXEC" : "CALL";
+    const via = mode === "query"
+      ? "Paste one read-only SELECT / WITH here, or switch to Stored procedure and "
+      : "Then ";
+    return `This is a CREATE ${kind} definition, not an extract. Create the object in ${engine} with your own client first. ${via}paste \`${call} schema.name(:param)\` for a procedure that already exists, with binds set below.`;
+  }
+  return `This is a CREATE ${kind} statement — DataFlow only reads here. Use Table, one read-only SELECT / WITH, or a stored procedure CALL.`;
 }
 
 function firstVerb(text: string): string {

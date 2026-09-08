@@ -31,7 +31,6 @@ from services.copy_s3_common import (
     s3_dest_count,
     s3_ext,
     s3_list_keys,
-    skip_complete_s3,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,12 +141,6 @@ def copy_s3_to_mysql(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"s3_read": "skip", "load_data": "skip"},
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied MySQL dest stays on the row path "

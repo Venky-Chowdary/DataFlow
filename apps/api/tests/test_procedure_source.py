@@ -529,3 +529,23 @@ def test_mapped_rows_skip_pending_dest_schema() -> None:
     assert len(rows) == 1
     assert rows[0] == (1,) or rows[0] == ("1",) or list(rows[0]) == [1] or list(rows[0]) == ["1"]
     assert len(rows[0]) == 1
+
+
+def test_create_procedure_script_names_next_action_not_semicolons():
+    ddl = (
+        "CREATE PROCEDURE dbo.TestTable @A INT = 1 AS BEGIN SET NOCOUNT ON; "
+        "SELECT 1; END;\nGO"
+    )
+    for mode in ("query", "procedure"):
+        with pytest.raises(ProcedureSourceError) as exc:
+            parse_callable_source(ddl, dialect="snowflake", mode=mode)
+        msg = str(exc.value)
+        assert "CREATE PROCEDURE definition, not an extract" in msg
+        assert "CALL schema.name(:param)" in msg
+        assert "semicolons" not in msg
+    with pytest.raises(ProcedureSourceError) as exc:
+        parse_callable_source(ddl, dialect="mssql", mode="procedure")
+    assert "EXEC schema.name(:param)" in str(exc.value)
+    with pytest.raises(ProcedureSourceError) as exc:
+        parse_callable_source("CREATE TABLE x (a INT)", dialect="mysql", mode="query")
+    assert "CREATE TABLE statement" in str(exc.value)

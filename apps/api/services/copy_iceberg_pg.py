@@ -285,25 +285,6 @@ def copy_iceberg_to_postgres(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count:
-                proof = f"dest_count:{dest_count_before}"
-                return FastPathResult(
-                    rows_copied=source_count,
-                    source_rows=source_count,
-                    source_checksum=proof,
-                    target_rows=dest_count_before,
-                    target_checksum=proof,
-                    source_snapshot={
-                        "copy_workers": 1,
-                        "copy_split": "skip",
-                        "copy_partitions": 1,
-                        "partitions_skipped": 1,
-                        "partitions_loaded": 0,
-                        "shard_mode": "table",
-                        "iceberg_read": "skip",
-                    },
-                    proof_scope="dest_count_equals_source_snapshot_count",
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied PostgreSQL dest stays on the row path "

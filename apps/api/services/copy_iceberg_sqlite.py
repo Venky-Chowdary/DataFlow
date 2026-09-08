@@ -33,12 +33,10 @@ from services.copy_iceberg_pg import (
     _ARROW_BATCH,
     _arrow_from_iceberg_files,
     _iceberg_source_count,
-    iceberg_type_is_copy_safe,
 )
 from services.copy_pg_iceberg import iceberg_copy_endpoint
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -161,13 +159,6 @@ def copy_iceberg_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                dest_conn.rollback()
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"iceberg_read": "skip", "sqlite_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"

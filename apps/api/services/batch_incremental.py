@@ -75,15 +75,14 @@ class BatchIncrementalBound:
             self.high_mark = mark
         return list(delta) if self.narrows_read else list(records)
 
-    def commit(self) -> None:
+    def commit(self, *, job_id: str = "") -> None:
         """Persist the watermark — only after the rows are proven at rest."""
         if not self.active or not self.high_mark:
             return
-        set_watermark(
-            self.scope.cursor_key,
-            self.high_mark,
-            metadata={"cursor_column": self.scope.cursor_column},
-        )
+        metadata: dict[str, Any] = {"cursor_column": self.scope.cursor_column}
+        if job_id:
+            metadata["job_id"] = job_id
+        set_watermark(self.scope.cursor_key, self.high_mark, metadata=metadata)
 
 
 def _dest_identity(destination: Any) -> tuple[str, str, str]:

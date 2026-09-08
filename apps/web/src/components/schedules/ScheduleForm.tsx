@@ -8,6 +8,7 @@ import { ConnectorSelect } from "../ui/ConnectorSelect";
 import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
 import { ContractBindField } from "../contracts/ContractBindField";
+import { CURSOR_SEMANTICS, CURSOR_SEMANTICS_LABELS } from "../../lib/cursorSemantics";
 import {
   DATE_LOCALES,
   DEFAULT_SYNC_MODE_IDS,
@@ -113,6 +114,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   // Sync
   const [syncMode, setSyncMode] = useState(initial?.sync_mode ?? "full_refresh_overwrite");
   const [cursorColumn, setCursorColumn] = useState(initial?.cursor_column ?? "");
+  const [cursorSemantics, setCursorSemantics] = useState(initial?.cursor_semantics ?? "");
   const [primaryKey, setPrimaryKey] = useState(initial?.primary_key ?? "");
   const [sourceReadMode, setSourceReadMode] = useState(initial?.source_read_mode || "table");
   const [procedureText, setProcedureText] = useState(
@@ -343,6 +345,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         multiSubnetFailover,
       }),
       cursor_column: showCursor ? cursorColumn.trim() : "",
+      cursor_semantics: showCursor ? cursorSemantics : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
       source_read_mode: sourceReadMode,
       procedure_call: sourceReadMode === "procedure" ? procedureText.trim() : "",
@@ -578,6 +581,26 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 <label className="df2-label" htmlFor="sched-cursor">Cursor column</label>
                 <input id="sched-cursor" className="df2-input" value={cursorColumn} onChange={(e) => setCursorColumn(e.target.value)} placeholder="updated_at" />
                 <span className="df2-field-hint">Watermark column tracked between runs for incremental / CDC sync.</span>
+              </div>
+            )}
+            {showCursor && (
+              <div className="df2-field">
+                <label className="df2-label" htmlFor="sched-cursor-semantics">Cursor meaning</label>
+                <select
+                  id="sched-cursor-semantics"
+                  className="df2-input"
+                  value={cursorSemantics}
+                  onChange={(e) => setCursorSemantics(e.target.value)}
+                >
+                  <option value="">Not declared</option>
+                  {CURSOR_SEMANTICS.map((value) => (
+                    <option key={value} value={value}>{CURSOR_SEMANTICS_LABELS[value]}</option>
+                  ))}
+                </select>
+                <span className="df2-field-hint">
+                  What the source does to this column. Strict validation refuses an undeclared cursor on
+                  a mode that promises update capture, so an unattended run cannot silently miss changed rows.
+                </span>
               </div>
             )}
             {showPrimaryKey && (

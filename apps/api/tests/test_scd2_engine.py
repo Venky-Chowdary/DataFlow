@@ -147,6 +147,40 @@ def test_scd2_reidentical_snapshot_is_idempotent():
             pass
 
 
+@pytest.mark.parametrize("composite", [False, True])
+def test_scd2_batch_above_sqlite_expression_depth_limit(composite):
+    """A 2K-key batch must not build one 2K-way OR chain (SQLite depth 1000)."""
+    from services.scd2_engine import PK_CLAUSE_MAX_KEYS, _pk_or_clause
+
+    with pytest.raises(ValueError):
+        _pk_or_clause(["id"], [str(i) for i in range(PK_CLAUSE_MAX_KEYS + 1)], prefix="k")
+    single, _ = _pk_or_clause(["id"], ["1", "2"], prefix="k")
+    assert single == '"id" IN (:k0, :k1)'
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path), table="wide")
+        pk = ["tenant", "id"] if composite else ["id"]
+        schema = {"tenant": "string", "id": "string", "v": "string"}
+
+        def rows(suffix: str):
+            return [{"tenant": "t", "id": str(i), "v": f"{i}{suffix}"} for i in range(2000)]
+
+        first = apply_scd2(endpoint, rows(""), columns=list(schema), schema=schema,
+                           mappings=None, conflict_columns=pk)
+        assert first["ok"] is not False, first.get("error")
+        assert first["rows_written"] == 2000
+        second = apply_scd2(endpoint, rows("x"), columns=list(schema), schema=schema,
+                            mappings=None, conflict_columns=pk)
+        assert second["ok"] is not False, second.get("error")
+        assert second["updated_rows"] == 2000
+        assert second["active_rows"] == 2000
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM wide").fetchone()[0] == 4000
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 def test_scd2_composite_primary_key():
     fd, db_path = tempfile.mkstemp(suffix=".db")
     try:
@@ -716,3 +750,127 @@ def test_scd2_fail_scan_collects_every_reject_before_merge():
             conn.close()
     finally:
         Path(db_path).unlink(missing_ok=True)
+
+
+def _scd2_load_two(db_path: str):
+    endpoint = _sqlite_endpoint(Path(db_path))
+    apply_scd2(
+        endpoint,
+        _records(),
+        columns=["id", "name", "price"],
+        schema={"id": "string", "name": "string", "price": "decimal"},
+        mappings=None,
+        conflict_columns=["id"],
+    )
+    return endpoint
+
+
+def _current_and_history(db_path: str) -> tuple[set[str], int]:
+    conn = sqlite3.connect(db_path)
+    try:
+        current = {
+            str(r[0])
+            for r in conn.execute(
+                f"SELECT id FROM products WHERE {IS_CURRENT_COLUMN} = 1"
+            )
+        }
+        history = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+    finally:
+        conn.close()
+    return current, int(history)
+
+
+def test_scd2_complete_snapshot_closes_keys_deleted_at_source():
+    """Kimball hard-delete close-out: a key gone from the whole source stops
+    being current but keeps its history row, and the current census equals
+    the source population — the identity Gate-8 proves on a scheduled run."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _scd2_load_two(db_path)
+        summary = apply_scd2(
+            endpoint,
+            [{"id": "1", "name": "A", "price": "10.00"}, {"id": "3", "name": "C", "price": "30.00"}],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=None,
+            conflict_columns=["id"],
+            complete_snapshot=True,
+        )
+        assert summary["rows_written"] == 1
+        assert summary["closed_missing_rows"] == 1
+        assert summary["updated_rows"] == 1
+        assert summary["active_rows"] == 2
+        current, history = _current_and_history(db_path)
+        assert current == {"1", "3"}
+        assert history == 3
+        conn = sqlite3.connect(db_path)
+        try:
+            closed = conn.execute(
+                f"SELECT {VALID_TO_COLUMN} FROM products WHERE id = '2'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert closed[0] is not None
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_partial_batch_never_closes_unseen_keys():
+    """A per-batch / limited caller is not a snapshot: absent keys stay current."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _scd2_load_two(db_path)
+        summary = apply_scd2(
+            endpoint,
+            [{"id": "1", "name": "A2", "price": "10.00"}],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=None,
+            conflict_columns=["id"],
+        )
+        assert summary["closed_missing_rows"] == 0
+        assert summary["active_rows"] == 2
+        current, history = _current_and_history(db_path)
+        assert current == {"1", "2"}
+        assert history == 3
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_close_missing_from_snapshot_table_is_set_based():
+    """Streaming twin: dest current \\ staging closed in one dest-engine UPDATE;
+    the closed count is measured before the UPDATE, not driver rowcount."""
+    import sqlalchemy as sa
+
+    from services.scd2_engine import close_versions_missing_from_snapshot
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        _scd2_load_two(db_path)
+        engine = sa.create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.execute(sa.text("CREATE TABLE stg (id TEXT)"))
+            conn.execute(sa.text("INSERT INTO stg (id) VALUES ('1')"))
+            out = close_versions_missing_from_snapshot(
+                conn, '"products"', '"stg"', ["id"], dialect="sqlite"
+            )
+            again = close_versions_missing_from_snapshot(
+                conn, '"products"', '"stg"', ["id"], dialect="sqlite"
+            )
+        engine.dispose()
+        assert out == {"closed_missing_rows": 1}
+        assert again == {"closed_missing_rows": 0}
+        current, history = _current_and_history(db_path)
+        assert current == {"1"}
+        assert history == 2
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass

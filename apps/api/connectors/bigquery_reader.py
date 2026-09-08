@@ -197,9 +197,18 @@ def read_table_cursor_batch(
             cur_val, split_pk = split_cursor_bookmark(
                 bookmark, has_tiebreak=has_tiebreak
             )
-            pk_val = split_pk if has_tiebreak else None
+            pk_val = split_pk if has_tiebreak and split_pk != "" else None
             params.append(bigquery.ScalarQueryParameter("cursor", "STRING", str(cur_val)))
-            if pk and pk != cursor_column and pk_val is not None:
+            if has_tiebreak and pk_val is None:
+                # Cursor-only watermark with a tie-break: seek on the cursor,
+                # order on both for a deterministic page edge.
+                pk_q = quote_column_list(
+                    [require_safe_identifier(pk, preserve_case=True)],
+                    quote_char="`",
+                )
+                where = f" WHERE {cursor_q} > @cursor"
+                order = f"{cursor_q}, {pk_q}"
+            elif pk and pk != cursor_column and pk_val is not None:
                 pk_q = quote_column_list(
                     [require_safe_identifier(pk, preserve_case=True)],
                     quote_char="`",

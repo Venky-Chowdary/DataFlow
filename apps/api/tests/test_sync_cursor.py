@@ -84,6 +84,21 @@ def test_compare_cursor_values_uses_typed_order():
     assert compare_cursor_values("500", None) == 1
 
 
+def test_composite_tiebreak_compares_typed_not_lexically():
+    from services.keyset_pagination import encode_keyset_bookmark
+
+    lo = encode_keyset_bookmark(["1", "999"])
+    hi = encode_keyset_bookmark(["1", "2000"])
+    assert compare_cursor_values(hi, lo) == 1
+    assert compare_cursor_values(lo, hi) == -1
+    assert compare_cursor_values(hi, hi) == 0
+    # A batch where every row shares the cursor value must end at the largest
+    # key, not the lexically largest one — otherwise the next read repeats
+    # every key above the text maximum.
+    rows = [["1", str(pk)] for pk in range(1, 2001)]
+    assert max_cursor_value(rows, ["updated_seq", "id"], "updated_seq", "id") == hi
+
+
 def test_incremental_read_narrows_only_delta_modes():
     from services.sync_cursor import incremental_read_narrows
 

@@ -8,7 +8,6 @@ from services.brand_env import getenv_brand
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -50,7 +49,6 @@ from services.row_conservation import (
     KeyCensusAccumulator,
     live_rows_for_digest,
     observe_keyed_batch,
-    record_stream_health,
     record_tombstone_digest_scope,
 )
 from services.resilience import (  # noqa: E402, F401
@@ -75,12 +73,10 @@ from .stream_row_accounting import (
     _raw_page_keyset,
     _raw_page_marked,
     _raw_page_rows,
-    begin_table_population,
     stamp_incremental_no_op,
     stamp_source_row_count,
 )
 from .stream_foreign_keys import (
-    ForeignKeyContext as _ForeignKeyContext,
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
     foreign_key_context as _foreign_key_context,
 )
@@ -882,6 +878,49 @@ def stream_database_transfer(
 from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
 
 
+#: SQL sources whose catalog (types, nullability, defaults, keys) is read for
+#: Property 6 create-new fidelity and keyset pagination.
+_PK_INTROSPECT_TYPES: tuple[str, ...] = (
+    "postgresql",
+    "redshift",
+    "mysql",
+    "snowflake",
+    "sqlserver",
+    "oracle",
+    "sqlite",
+    "generic_sql",
+    "bigquery",
+    "databricks",
+)
+
+
+def _fast_path_source_catalog(
+    src_type: str,
+    mappings: list[dict],
+    schema: dict[str, str],
+    rich: tuple[dict[str, str], dict[str, bool], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Catalog payload for a fast-path CREATE, or ``None`` when nothing was read."""
+    types, nulls, keys = rich
+    if not (types or nulls or keys):
+        return None
+    from services.schema_fidelity import build_catalog_from_introspect, catalog_to_payload
+
+    try:
+        return catalog_to_payload(
+            build_catalog_from_introspect(
+                dialect=src_type,
+                columns=[str(m.get("source") or "") for m in mappings if m.get("source")],
+                column_types=types or dict(schema or {}),
+                nullable=nulls,
+                keys=keys,
+            )
+        )
+    except Exception as exc:
+        logger.debug("source schema catalog build failed: %s", exc, exc_info=exc)
+        return None
+
+
 def _stream_database_transfer_impl(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -978,11 +1017,37 @@ def _stream_database_transfer_impl(
     # silently copying the raw rows the operator asked to change.
     from services.copy_fast_path import (
         begin_copy_decline_capture,
+        begin_fast_path_create_scope,
         reset_copy_decline_capture,
+        reset_fast_path_create_scope,
     )
 
     copy_decline: list[str] = []
     _decline_token, _ = begin_copy_decline_capture(copy_decline)
+    # Property 6 — the source catalog (types, nullability, defaults, keys) is
+    # read once here so a fast path that creates the destination plans its
+    # DDL through the same schema-fidelity owner as the row path, and so the
+    # paged read below does not introspect a second time.
+    _src_rich_catalog: tuple[dict[str, str], dict[str, bool], dict[str, Any]] = (
+        {},
+        {},
+        {},
+    )
+    if src_type in _PK_INTROSPECT_TYPES:
+        try:
+            _src_rich_catalog = _introspect_table_schema_rich(
+                src_type,
+                src_cfg,
+                _source_name(source),
+                [str(m.get("source") or "") for m in mappings if m.get("source")],
+            )
+        except Exception as exc:
+            logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    _create_scope_token, _create_scope = begin_fast_path_create_scope(
+        _fast_path_source_catalog(src_type, mappings, schema, _src_rich_catalog),
+        mappings,
+        resolve_dest_table(dest_type, destination, _source_name(source)),
+    )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
     if incremental and cursor_source_col and shape_runner is None:
@@ -1007,8 +1072,36 @@ def _stream_database_transfer_impl(
             refuse_unusable_cursor_state(
                 _scope, dest_type, dest_cfg, _dest_obj
             )
+    # Gate-8 append proof needs the destination cardinality from before the
+    # first write, whichever path performs it. Measured once here, ahead of the
+    # COPY fast path, and reused by the row path below. A resumed run already
+    # holds rows this job wrote, so its live COUNT is not a "before".
+    pre_write_rows_before: int | None = None
+    if not (
+        checkpoint
+        and (
+            getattr(checkpoint, "rows_processed", 0)
+            or getattr(checkpoint, "offset", 0)
+        )
+    ):
+        pre_write_rows_before = precount_table(
+            dest_type,
+            dest_cfg,
+            resolve_dest_table(dest_type, destination, _source_name(source)),
+        )
+    # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
+    # by the destination writer; a server-to-server copy would write into the
+    # destination's current shape and fail on the column the source just grew.
+    # An occupied destination under backfill therefore stays on the row path.
+    writer_owns_evolution = bool(backfill_new_fields) and pre_write_rows_before is not None
+    if writer_owns_evolution and shape_runner is None:
+        logger.info(
+            "COPY fast path declined: backfill_new_fields on an existing %s "
+            "destination — schema evolution runs on the writer path",
+            dest_type,
+        )
     try:
-        fast = None if shape_runner is not None else _try_copy_fast_path(
+        fast = None if (shape_runner is not None or writer_owns_evolution) else _try_copy_fast_path(
             source=source,
             destination=destination,
             mappings=mappings,
@@ -1025,12 +1118,35 @@ def _stream_database_transfer_impl(
             incremental_cursor=cursor_source_col if incremental else "",
             incremental_watermark=pre_copy_watermark,
             incremental_pk=cursor_pk_source if incremental else "",
+            job_id=job_id,
         )
     finally:
         reset_copy_decline_capture(_decline_token)
+        reset_fast_path_create_scope(_create_scope_token)
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        _certificate = _create_scope.certificate()
+        if _certificate is not None:
+            dest_summary.setdefault("schema_fidelity", _certificate)
+        _fast_census = (dest_summary.get("source_snapshot") or {}).get(CENSUS_KEY)
+        if _fast_census:
+            dest_summary.setdefault(CENSUS_KEY, _fast_census)
+        _fast_table = _source_name(source)
+        _carry_single_table_foreign_keys(
+            source,
+            destination,
+            _fast_table,
+            resolve_dest_table(dest_type, destination, _fast_table),
+            mappings,
+            dest_summary,
+            ddl_log,
+        )
+        # Bulk COPY never pages the source; say so instead of leaving the
+        # pagination fields absent (which reads as "unknown" to the operator).
+        dest_summary.setdefault("pagination_mode", "bulk_copy")
+        if pre_write_rows_before is not None:
+            dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if incremental:
             dest_summary["sync_mode"] = effective_sync
             wm = str(dest_summary.get("incremental_watermark") or "").strip()
@@ -1311,6 +1427,29 @@ def _stream_database_transfer_impl(
         _pool_baseline = None
         _schema_baseline = None
 
+    from services.keyset_pagination import (
+        cursor_unique_evidence,
+        incremental_read_needs_filtered_scan,
+    )
+
+    _cat_types, _cat_nulls, _cat_keys = _src_rich_catalog
+    _cursor_is_unique = cursor_unique_evidence(
+        cursor_source_col,
+        primary_key_columns=pk_source_cols or (_cat_keys.get("primary_key_columns") or []),
+        unique_keys=_cat_keys.get("unique_keys") or [],
+        nullable=_cat_nulls,
+    )
+    _filtered_scan_reason = incremental_read_needs_filtered_scan(
+        src_type=src_type,
+        incremental=bool(incremental),
+        cursor_column=cursor_source_col,
+        tiebreak_column=cursor_pk_source,
+        cursor_is_unique=_cursor_is_unique,
+        callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
+    )
+    if _filtered_scan_reason:
+        logger.info("%s.%s: %s", src_type, table, _filtered_scan_reason)
+
     def _cursor_read_args(cursor_after: str | None) -> dict[str, Any]:
         """The cursor arguments every read of this run must agree on.
 
@@ -1449,14 +1588,26 @@ def _stream_database_transfer_impl(
     _resume_bookmark = (
         getattr(checkpoint, "cursor_value", None) if checkpoint is not None else None
     )
-    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not (
-        _is_resume and _resume_bookmark not in (None, "")
+    # An incremental cursor with no unique tie-break also holds a scan: the
+    # filter is the run watermark and paging is fetchmany, so the bookmark a
+    # resume carries is a row count, never a seek key.
+    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and (
+        bool(_filtered_scan_reason)
+        or (
+            not incremental
+            and not (_is_resume and _resume_bookmark not in (None, ""))
+        )
     )
     _scan_kw: dict[str, Any] = {"scan_state": src_scan} if _hold_snapshot else {}
+    if _filtered_scan_reason:
+        _scan_kw["scan_filter"] = (cursor_source_col, watermark)
+        _probe_cursor_kw: dict[str, Any] = {}
+    else:
+        _probe_cursor_kw = _cursor_read_args(watermark)
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            **_cursor_read_args(watermark),
+            **_probe_cursor_kw,
             **_scan_kw,
         )
     )
@@ -1697,7 +1848,7 @@ def _stream_database_transfer_impl(
     # resumed run already appended rows, so its count is not a "before" and the
     # delta stays unproven rather than being reported wrong.
     if not (written or offset):
-        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        rows_before = pre_write_rows_before
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
@@ -1709,7 +1860,7 @@ def _stream_database_transfer_impl(
     # write, so even an append needs the dest-engine census (new keys vs
     # replaced keys) to close conservation — COUNT(*) growth alone reads a
     # correct re-write of the same keys as silent loss.
-    dest_key_addressed = dest_is_key_addressed(dest_type)
+    dest_key_addressed = dest_is_key_addressed(dest_type, pk_target_cols)
     if dest_key_addressed:
         dest_summary[KEY_ADDRESSED_KEY] = True
     keyed_upsert_scope = write_mode == "upsert" and bool(pk_target_cols)
@@ -1791,30 +1942,14 @@ def _stream_database_transfer_impl(
 
     keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
     pagination_warning = ""
-    _pk_introspect_types = (
-        "postgresql",
-        "redshift",
-        "mysql",
-        "snowflake",
-        "sqlserver",
-        "oracle",
-        "sqlite",
-        "generic_sql",
-        "bigquery",
-        "databricks",
-    )
+    _pk_introspect_types = _PK_INTROSPECT_TYPES
     # Property 6 — source catalog for create-new fidelity (any SQL sink that
-    # consumes it). Always introspect SQL sources: a contract PK is not a
-    # substitute for nullability / defaults / unique keys.
+    # consumes it). Introspected once ahead of the COPY fast path (whose CREATE
+    # answers to the same planner); the paged read reuses that catalog here.
     source_schema_catalog: dict[str, Any] | None = None
-    _src_schema_types: dict[str, str] = {}
-    _src_schema_nulls: dict[str, bool] = {}
-    _src_keys: dict[str, Any] = {}
+    _src_schema_types, _src_schema_nulls, _src_keys = _src_rich_catalog
     if src_type in _pk_introspect_types:
         try:
-            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
-                src_type, src_cfg, table, columns
-            )
             if not keyset_pk_cols:
                 keyset_pk_cols = [
                     c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
@@ -1889,8 +2024,15 @@ def _stream_database_transfer_impl(
         chunk_index=chunk_idx,
         cursor_after=keyset_after,
         snapshot_scan=bool(src_scan),
+        cursor_is_unique=_cursor_is_unique,
     )
     use_keyset = decision.use_keyset
+    if _filtered_scan_reason and use_keyset:
+        raise RuntimeError(
+            "pagination owners disagree: the read opened a filtered snapshot scan "
+            "but the keyset decision would seek on "
+            f"{keyset_order_cols!r} — refusing rather than risk skipped rows"
+        )
     keyset_order_cols = decision.order_cols
     _resume_scan_aligned = False
     if decision.resume_fallback:
@@ -2185,6 +2327,7 @@ def _stream_database_transfer_impl(
         elif (
             incremental
             and cursor_source_col
+            and not _filtered_scan_reason
             and source_bounds_cursor_reads(src_type)
         ):
             batch, _ = _unwrap_read(
@@ -2301,6 +2444,23 @@ def _stream_database_transfer_impl(
             return batch
         elif total_rows is not None and fetch_offset >= total_rows:
             return None
+        elif _filtered_scan_reason:
+            # One held scan bound to the *run* watermark; the page max never
+            # becomes the predicate, so rows tied at a page edge are kept.
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    **_scan_kw,
+                )
+            )
+            return batch
         else:
             batch, extra = _unwrap_read(
                 _read_batch(
@@ -3570,29 +3730,46 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
-    # Single-table jobs carry references too: the parent is already on the
-    # destination instead of arriving in this run, so without this the child
-    # landed with its foreign keys silently dropped and the run still went green.
-    fk_context = _foreign_key_context(source, [table])
-    if fk_context.source_keys:
-        fk_context.column_maps[table] = {
-            str(m.get("source") or ""): str(m.get("target") or "")
-            for m in (mappings or [])
-            if m.get("source") and m.get("target")
-        }
-        fk_summary = _carry_foreign_keys_after_load(
-            destination, fk_context, {table: dest_table}
-        )
-        if fk_summary is not None:
-            dest_summary["foreign_keys"] = fk_summary
-            for decision in fk_summary.get("decisions") or []:
-                if decision.get("status") in {"carried", "unsupported"} and decision.get(
-                    "dest_ddl"
-                ):
-                    ddl_log.append(
-                        f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
-                    )
+    _carry_single_table_foreign_keys(
+        source, destination, table, dest_table, mappings, dest_summary, ddl_log
+    )
     return written, ddl_log, dest_summary, columns
+
+
+def _carry_single_table_foreign_keys(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    table: str,
+    dest_table: str,
+    mappings: list[dict] | None,
+    dest_summary: dict[str, Any],
+    ddl_log: list[str],
+) -> None:
+    """Carry the single table's references onto the destination after the load.
+
+    The parent is already on the destination instead of arriving in this run,
+    so without this the child lands with its foreign keys silently dropped and
+    the run still goes green — on the row path and the COPY fast path alike.
+    """
+    fk_context = _foreign_key_context(source, [table])
+    if not fk_context.source_keys:
+        return
+    fk_context.column_maps[table] = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in (mappings or [])
+        if m.get("source") and m.get("target")
+    }
+    fk_summary = _carry_foreign_keys_after_load(
+        destination, fk_context, {table: dest_table}
+    )
+    if fk_summary is None:
+        return
+    dest_summary["foreign_keys"] = fk_summary
+    for decision in fk_summary.get("decisions") or []:
+        if decision.get("status") in {"carried", "unsupported"} and decision.get(
+            "dest_ddl"
+        ):
+            ddl_log.append(f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}")
 
 
 

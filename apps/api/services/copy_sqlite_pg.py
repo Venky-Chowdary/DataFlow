@@ -25,12 +25,16 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    settle_fast_path_create_on,
+)
 from services.copy_fast_path import _table_ref as _pg_table_ref
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_copy_bool_value,
     sqlite_copy_date_value,
@@ -39,6 +43,7 @@ from services.copy_sqlite_common import (
     sqlite_ident,
     sqlite_pg_type_is_copy_safe,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
 )
 
@@ -188,6 +193,7 @@ def copy_sqlite_to_postgres(
                 raise FastPathUnavailable(
                     f"dest column type {ddl} is not PostgreSQL COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, pg_ddls, where_sql)
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )
@@ -213,12 +219,6 @@ def copy_sqlite_to_postgres(
                     raise FastPathUnavailable(
                         "filtered COPY into occupied dest stays on the incremental staging path"
                     )
-                if dest_count_before == source_count:
-                    return skip_complete_sqlite(
-                        source_count=source_count,
-                        dest_count=dest_count_before,
-                        extra_snapshot={"sqlite_read": "skip"},
-                    )
                 raise FastPathUnavailable(
                     "append into occupied PostgreSQL dest stays on the row path "
                     "(identity COPY would duplicate)"
@@ -226,6 +226,10 @@ def copy_sqlite_to_postgres(
         else:
             dst_cur.execute(
                 _pg_create_sql(dest_schema_n, dest_table, pairs, pg_ddls, [])
+            )
+            settle_fast_path_create_on(
+                dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                dest_schema=dest_schema_n,
             )
             dest_conn.commit()
             created_here = True

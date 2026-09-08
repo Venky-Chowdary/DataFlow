@@ -206,7 +206,7 @@ def test_live_sqlite_sqlite_blob_declines(tmp_path):
     assert not dest.exists() or _dest_count(dest, "dst_t") == 0
 
 
-def test_live_sqlite_sqlite_skip_when_dest_count_matches(tmp_path):
+def test_live_sqlite_sqlite_equal_count_append_declines(tmp_path):
     src = tmp_path / "src.db"
     dest = tmp_path / "dst.db"
     _seed(src, "src_t", 800)
@@ -220,18 +220,16 @@ def test_live_sqlite_sqlite_skip_when_dest_count_matches(tmp_path):
         replace_destination=False,
     )
     assert first.target_rows == 800
-    second = copy_sqlite_to_sqlite(
-        source_cfg=_cfg(src, "src_t"),
-        source_table="src_t",
-        dest_cfg=_cfg(dest, "dst_t"),
-        dest_table="dst_t",
-        pairs=[("id", "id"), ("label", "label")],
-        sqlite_ddls=["INTEGER", "TEXT"],
-        replace_destination=False,
-    )
-    assert second.source_snapshot.get("copy_split") == "skip"
-    assert second.source_snapshot.get("partitions_skipped") == 1
-    assert second.source_snapshot.get("sqlite_write") == "skip"
+    with pytest.raises(FastPathUnavailable, match="occupied"):
+        copy_sqlite_to_sqlite(
+            source_cfg=_cfg(src, "src_t"),
+            source_table="src_t",
+            dest_cfg=_cfg(dest, "dst_t"),
+            dest_table="dst_t",
+            pairs=[("id", "id"), ("label", "label")],
+            sqlite_ddls=["INTEGER", "TEXT"],
+            replace_destination=False,
+        )
     assert _dest_count(dest, "dst_t") == 800
 
 
@@ -307,3 +305,72 @@ def test_live_sqlite_sqlite_stream_load_method(monkeypatch, tmp_path):
     assert int(summary.get("rejected_rows") or 0) == 0
     assert any("SQLite" in line for line in ddl_log)
     assert _dest_count(dest, "dst_t") == 800
+
+
+def test_failed_copy_never_touches_source_table_of_same_name(monkeypatch, tmp_path):
+    """A failed COPY rolls back the dest transaction and leaves the source intact.
+
+    Regression: with ``srcdb`` attached, an unqualified ``DROP TABLE "t"`` in
+    the failure cleanup resolved to ``srcdb."t"`` once the rollback had removed
+    ``main."t"`` — the operator's source table was destroyed.
+    """
+    import connectors.sqlite_writer as sqlite_writer
+
+    src = tmp_path / "src.sqlite"
+    dst = tmp_path / "dst.sqlite"
+    _seed(src, "t", 6)
+
+    def _kill(*_a, **_k):
+        raise RuntimeError("simulated kill after INSERT SELECT")
+
+    monkeypatch.setattr(sqlite_writer, "mark_raw_chunk_committed", _kill)
+    from services.copy_fast_path import copy_ledger_key
+
+    with pytest.raises(RuntimeError):
+        copy_sqlite_to_sqlite(
+            source_cfg=_cfg(src, "t"),
+            source_table="t",
+            dest_cfg=_cfg(dst, "t"),
+            dest_table="t",
+            pairs=[("id", "id"), ("label", "label")],
+            sqlite_ddls=["INTEGER", "TEXT"],
+            replace_destination=False,
+            ledger=copy_ledger_key(uuid.uuid4().hex[:24], "t"),
+        )
+    assert _dest_count(src, "t") == 6, "source table must survive a failed COPY"
+    conn = sqlite3.connect(dst)
+    try:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()
+    assert "t" not in names, "rolled-back dest CREATE must not persist"
+
+
+def test_ledger_retry_of_committed_copy_shard_does_not_duplicate(tmp_path):
+    """Same job_id retry after a committed COPY reads the shard from the ledger."""
+    from services.copy_fast_path import copy_ledger_key
+
+    src = tmp_path / "src.sqlite"
+    dst = tmp_path / "dst.sqlite"
+    _seed(src, "t", 5)
+    key = copy_ledger_key(uuid.uuid4().hex[:24], "t")
+    kwargs = dict(
+        source_cfg=_cfg(src, "t"),
+        source_table="t",
+        dest_cfg=_cfg(dst, "t"),
+        dest_table="t",
+        pairs=[("id", "id"), ("label", "label")],
+        sqlite_ddls=["INTEGER", "TEXT"],
+        replace_destination=False,
+        ledger=key,
+    )
+    first = copy_sqlite_to_sqlite(**kwargs)
+    assert first.rows_copied == 5
+    assert first.source_snapshot["guarantee"] == "sqlite_transaction_snapshot"
+    second = copy_sqlite_to_sqlite(**kwargs)
+    assert second.rows_copied == 5
+    assert second.proof_scope == "write_ledger_shard_already_committed"
+    assert _dest_count(dst, "t") == 5
+    # A different job into the occupied dest still declines (would duplicate).
+    with pytest.raises(FastPathUnavailable):
+        copy_sqlite_to_sqlite(**{**kwargs, "ledger": copy_ledger_key(uuid.uuid4().hex[:24], "t")})

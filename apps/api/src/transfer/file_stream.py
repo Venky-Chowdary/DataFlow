@@ -1266,8 +1266,11 @@ def stream_file_to_database(
         read_options=read_options,
     )
     if csv_fast is not None:
+        rows_before_copy = dest_summary.get(PRECOUNT_KEY)
         rows_copied, copy_ddl, dest_summary, columns = csv_fast
         dest_summary["copy_fast_path"] = "used"
+        if rows_before_copy is not None:
+            dest_summary.setdefault(PRECOUNT_KEY, int(rows_before_copy))
         if incremental:
             dest_summary["sync_mode"] = effective_sync
             dest_summary["cursor_key"] = cursor_key

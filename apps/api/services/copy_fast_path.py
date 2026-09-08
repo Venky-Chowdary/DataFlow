@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import threading
 from collections.abc import Callable
@@ -121,6 +122,309 @@ class FastPathUnavailable(Exception):
         note_copy_decline(str(message), log=False)
 
 
+class _CreateScope:
+    """Source catalog handed to a fast path, and the certificate it earned."""
+
+    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report")
+
+    def __init__(
+        self,
+        catalog: Any,
+        mappings: list[dict[str, Any]] | None,
+        dest_table: str = "",
+    ) -> None:
+        self.catalog = catalog
+        self.mappings = list(mappings or [])
+        self.dest_table = str(dest_table or "")
+        self.pending: FastPathCreate | None = None
+        self.report: dict[str, Any] | None = None
+
+    def owns(self, table: str) -> bool:
+        """Whether ``table`` is the destination this scope certifies.
+
+        A COPY upsert stages into ``_df_stg_<dest>`` with the same builder; a
+        staging CREATE must neither plan nor settle the destination's
+        certificate.
+        """
+        if not self.dest_table or not table:
+            return True
+        return table.strip().lower() == self.dest_table.strip().lower()
+
+    def certificate(self) -> dict[str, Any] | None:
+        """The settled certificate, or the pending plan downgraded to ``unknown``.
+
+        A CREATE that was planned but never read back from the destination
+        catalog emitted its clauses as claims; nothing verified them.
+        """
+        if self.report is not None or self.pending is None or self.pending.plan is None:
+            return self.report
+        for item in self.pending.plan.report.items:
+            if item.status == "carried":
+                item.status = "unknown"
+                item.reason = (
+                    "Emitted by the fast path but not read back from the destination "
+                    f"catalog. Would have: {item.reason}"
+                )
+        return self.pending.plan.report.to_dict()
+
+
+_CREATE_SCOPE: ContextVar[_CreateScope | None] = ContextVar(
+    "df_copy_create_scope", default=None
+)
+
+class FastPathCreate(NamedTuple):
+    """A fast-path CREATE resolved against the schema fidelity planner.
+
+    ``column_suffixes`` / ``table_constraints`` / ``create_suffix`` are the
+    planner's own fragments (NOT NULL, DEFAULT, COLLATE, PRIMARY KEY, UNIQUE,
+    CHECK, placement) for a dialect whose quoting matches the builder's.
+    ``primary_key`` / ``not_null`` are the same facts for a builder that renders
+    those two aspects with its own identifiers and declines the rest.
+    """
+
+    plan: Any = None
+    primary_key: tuple[str, ...] = ()
+    not_null: frozenset[str] = frozenset()
+    column_suffixes: dict[str, tuple[str, ...]] = {}
+    table_constraints: tuple[str, ...] = ()
+    create_suffix: str = ""
+
+    def column_suffix(self, target: str) -> str:
+        frags = self.column_suffixes.get(target)
+        if frags is not None:
+            return "".join(f" {f}" for f in frags)
+        return " NOT NULL" if target in self.not_null else ""
+
+
+#: Dialects whose fast-path builders quote identifiers exactly as the planner
+#: does, so its DDL fragments can be rendered verbatim.
+PLANNER_QUOTED_DIALECTS: frozenset[str] = frozenset(
+    {"postgresql", "redshift", "mysql", "mariadb", "sqlite"}
+)
+
+
+def begin_fast_path_create_scope(
+    source_schema_catalog: Any,
+    mappings: list[dict[str, Any]] | None,
+    dest_table: str = "",
+) -> tuple[Token, _CreateScope]:
+    """Make the source catalog visible to any CREATE a fast path renders.
+
+    The row path plans create-new DDL through ``schema_fidelity`` and settles
+    the certificate from the destination catalog; a fast path that renders its
+    own CREATE must answer to the same planner or hand the load back. The scope
+    carries the catalog in and the settled certificate out, so ``stream``
+    stamps it on the summary.
+    """
+    scope = _CreateScope(source_schema_catalog, mappings, dest_table)
+    return _CREATE_SCOPE.set(scope), scope
+
+
+def reset_fast_path_create_scope(token: Token) -> None:
+    _CREATE_SCOPE.reset(token)
+
+
+def plan_fast_path_create(
+    *,
+    dest_dialect: str,
+    pairs: list[tuple[str, str]],
+    ddls: list[str],
+    primary_key: list[str] | None,
+    dest_table: str = "",
+    dest_schema: str = "",
+) -> FastPathCreate:
+    """Resolve what a fast-path CREATE must render, or decline the fast path.
+
+    Outside a create scope the builder's own primary key is returned unchanged
+    (direct callers own their proof). In scope the plan is left pending until
+    ``settle_fast_path_create`` reads the destination back; the planner decides: a dialect
+    in ``PLANNER_QUOTED_DIALECTS`` gets every fragment the row path would
+    render; any other builder gets PRIMARY KEY / NOT NULL and declines when the
+    plan carries anything more (DEFAULT, UNIQUE, CHECK, identity, collation,
+    placement). A planned PRIMARY KEY that contradicts the one the builder was
+    given always declines.
+    """
+    scope = _CREATE_SCOPE.get()
+    targets = [t for _s, t in pairs]
+    given = tuple(c for c in (primary_key or []) if c in targets)
+    if scope is None or scope.catalog is None or not scope.owns(dest_table):
+        return FastPathCreate(primary_key=given)
+    from services.schema_fidelity import resolve_create_fidelity_plan
+
+    mappings = scope.mappings or [{"source": s, "target": t} for s, t in pairs]
+    plan = resolve_create_fidelity_plan(
+        source_schema_catalog=scope.catalog,
+        mappings=mappings,
+        target_columns=targets,
+        target_types=list(ddls),
+        dest_dialect=dest_dialect,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+    )
+    planned_pk = sorted(c.lower() for c in plan.primary_key)
+    given_pk = sorted(c.lower() for c in given)
+    if planned_pk and given_pk and planned_pk != given_pk:
+        raise FastPathUnavailable(
+            f"create-new must carry PRIMARY KEY ({', '.join(plan.primary_key)}) "
+            f"but the fast path was given ({', '.join(given)}) — the row path "
+            "creates and certifies the destination"
+        )
+    pk = tuple(plan.primary_key) or given
+    if dest_dialect.lower() in PLANNER_QUOTED_DIALECTS:
+        constraints = tuple(plan.table_constraints)
+        if not plan.primary_key and pk:
+            from connectors.sql_identifiers import quote_sql_identifier
+
+            quote = "`" if dest_dialect.lower() in {"mysql", "mariadb"} else '"'
+            constraints += (
+                "PRIMARY KEY ("
+                + ", ".join(quote_sql_identifier(c, quote) for c in pk)
+                + ")",
+            )
+        scope.pending = FastPathCreate(
+            plan=plan,
+            primary_key=pk,
+            not_null=frozenset(plan.not_null_columns),
+            column_suffixes={
+                c: tuple(frags) for c, frags in plan.column_suffixes.items()
+            },
+            table_constraints=constraints,
+            create_suffix=(plan.create_suffix or "").strip(),
+        )
+        return scope.pending
+    missing: list[str] = []
+    if plan.column_defaults:
+        missing.append(f"DEFAULT on {', '.join(plan.column_defaults)}")
+    if plan.unique_constraints:
+        missing.append(
+            "UNIQUE "
+            + ", ".join("(" + ", ".join(u) + ")" for u in plan.unique_constraints)
+        )
+    if plan.check_predicates:
+        missing.append(f"{len(plan.check_predicates)} CHECK constraint(s)")
+    if plan.identity_columns:
+        missing.append(f"identity on {', '.join(plan.identity_columns)}")
+    if plan.create_suffix:
+        missing.append("physical placement clause")
+    if any(
+        "COLLATE" in frag.upper() or "CHARACTER SET" in frag.upper()
+        for frags in plan.column_suffixes.values()
+        for frag in frags
+    ):
+        missing.append("column collation")
+    if missing:
+        raise FastPathUnavailable(
+            "create-new must carry "
+            + "; ".join(missing)
+            + " — the schema fidelity planner owns that DDL, so the row path "
+            "creates and certifies the destination"
+        )
+    scope.pending = FastPathCreate(
+        plan=plan, primary_key=pk, not_null=frozenset(plan.not_null_columns)
+    )
+    return scope.pending
+
+
+def settle_fast_path_create(
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> None:
+    """Run the plan's post-CREATE DDL and certify it from the destination catalog.
+
+    An emitted clause is a claim; the certificate the scope hands back to the
+    run summary is the one the destination catalog settled, exactly as on the
+    row path.
+    """
+    scope = _CREATE_SCOPE.get()
+    if scope is None or scope.pending is None or scope.pending.plan is None:
+        return
+    if not scope.owns(dest_table):
+        return
+    from services.schema_fidelity import settle_create_new_on_destination
+
+    create, scope.pending = scope.pending, None
+    scope.report = settle_create_new_on_destination(
+        create.plan,
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        table_already_exists=False,
+        execute=execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+def settle_fast_path_create_on(
+    cursor: Any, *, dest_dialect: str, dest_table: str, dest_schema: str = ""
+) -> None:
+    """``settle_fast_path_create`` over a DB-API cursor (or sqlite3 connection)."""
+    dialect = dest_dialect.lower()
+    if dialect in {"postgresql", "redshift", "mysql", "mariadb"}:
+        from services.identity_carry import dbapi_percent_fetchall
+
+        fetchall: Callable[[str, tuple[Any, ...]], Any] = dbapi_percent_fetchall(cursor)
+    elif dialect == "oracle":
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            bound = sql
+            for idx in range(1, len(params) + 1):
+                bound = bound.replace("?", f":{idx}", 1)
+            cursor.execute(bound, params)
+            return cursor.fetchall()
+
+    else:
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            ran = cursor.execute(sql, params)
+            return (ran if ran is not None else cursor).fetchall()
+
+    settle_fast_path_create(
+        dest_dialect=dest_dialect,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        execute=cursor.execute,
+        fetchall=fetchall,
+        cursor=cursor,
+    )
+
+
+class CopyLedgerKey(NamedTuple):
+    """Identity of a whole-table COPY shard in ``_dataflow_write_ledger``.
+
+    A COPY commits one shard in one transaction; stamping it in the same
+    ledger the chunked writers use lets a retry of the same job find that
+    the shard already landed instead of appending it again (or declining to
+    the row path, which would then chunk-append a second copy).
+    """
+
+    job_id: str
+    batch_key: str
+    chunk_idx: int = 0
+
+
+def copy_ledger_key(job_id: str | None, dest_table: str) -> CopyLedgerKey | None:
+    if not job_id:
+        return None
+    from connectors.write_resilience import build_write_batch_key
+
+    return CopyLedgerKey(
+        job_id=str(job_id),
+        batch_key=build_write_batch_key(table_name=dest_table, extra="copy_shard"),
+    )
+
+
+def fast_path_create_certificate() -> dict[str, Any] | None:
+    """Certificate earned by the CREATE inside the current scope, if any."""
+    scope = _CREATE_SCOPE.get()
+    return None if scope is None else scope.certificate()
+
+
 def declared_copy_carrier(
     item: dict[str, Any],
     schema: dict[str, str],
@@ -145,6 +449,82 @@ def declared_copy_carrier(
         or schema.get(target_col)
         or ""
     )
+
+
+#: Digits the destination engine's own text→number parser accepts verbatim.
+CANONICAL_DECIMAL_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_CANONICAL_INTEGER_TEXT = re.compile(r"^[+-]?\d+$")
+_ISO_DATE_TEXT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_TIME_TEXT = re.compile(r"^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$")
+_ISO_DATETIME_TEXT = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-]\d{2}(?::?\d{2})?)?$"
+)
+#: Boolean spellings every COPY-family loader (PostgreSQL COPY, MySQL strict
+#: LOAD DATA into TINYINT(1), SQLite) accepts without a cast the row path owns.
+_COPY_BOOLEAN_TEXT = frozenset({"0", "1"})
+
+
+def text_cell_copy_safe(
+    value: str | None,
+    logical: str,
+    *,
+    physical: str = "",
+    dest_db: str = "",
+) -> bool:
+    """Would the destination engine's bulk loader accept this text cell as-is?
+
+    An identity file COPY hands raw text to ``COPY FROM STDIN`` / ``LOAD DATA``
+    / ``executemany``, so the *engine* parses the cell. That parse is
+    all-or-nothing: one ``not-a-number`` fails the whole load and no cell is
+    quarantined. The census therefore runs over every cell before the
+    destination is touched, and a cell the carrier cannot hold declines the
+    fast path so the row path validates and quarantines it. Text carriers hold
+    anything; unknown logical types are left to the row path's own contract.
+
+    Syntax alone is not the carrier: ``99999999999999999999`` is an integer the
+    engine's BIGINT parser rejects at load, and ``0.016666668`` is a decimal
+    NUMBER(11,8) would round. When the ``physical`` destination type is known
+    the cell is also graded against the same range / precision-scale owners the
+    row path binds through (``fits_integer`` / ``fits_decimal``), so the census
+    and the writer agree on what fits.
+    """
+    if value is None:
+        return True
+    from services.decision_kernel import normalize_logical_type
+
+    kind = normalize_logical_type(logical) if logical else ""
+    if kind == "integer":
+        if not _CANONICAL_INTEGER_TEXT.match(value):
+            return False
+        if not physical:
+            return True
+        from connectors.writer_common import fits_integer
+
+        return fits_integer(value, physical, dest_db=dest_db)
+    if kind in {"decimal", "float"}:
+        if not CANONICAL_DECIMAL_TEXT.match(value):
+            return False
+        if not physical or kind != "decimal":
+            return True
+        from connectors.writer_common import (
+            fits_decimal,
+            parse_decimal_precision_scale,
+        )
+
+        params = parse_decimal_precision_scale(physical, dest_db=dest_db)
+        if params is None:
+            return True
+        return fits_decimal(value, params[0], params[1], dest_db=dest_db)
+    if kind == "boolean":
+        return value in _COPY_BOOLEAN_TEXT
+    if kind == "date":
+        return bool(_ISO_DATE_TEXT.match(value))
+    if kind == "datetime":
+        return bool(_ISO_DATETIME_TEXT.match(value))
+    if kind == "time":
+        return bool(_ISO_TIME_TEXT.match(value))
+    return True
 
 
 def fifo_streaming_supported() -> bool:
@@ -244,10 +624,17 @@ def skip_complete_identity_copy(
     shard_mode: str,
     extra_snapshot: dict[str, Any] | None = None,
 ) -> FastPathResult:
-    """Occupied dest whose COUNT already equals source COUNT — skip write, keep proof.
+    """Occupied key-addressed dest whose COUNT equals source COUNT — skip write.
 
-    Identity COPY engines share this result shape so skip-complete cannot drift
-    per connector. Proof remains dest COUNT, never upsert ack.
+    Only for destinations where a re-run rewrites the same keys or objects
+    (Redis keys, vector ids, object-store objects, Kafka compacted keys), so an
+    equal COUNT *is* the complete state. Row-addressed stores — SQL tables,
+    MongoDB collections, warehouse tables, Iceberg — must never call this:
+    ``full_refresh_append`` accumulates (two runs of N rows hold 2N), and an
+    equal COUNT is not proof the load already happened — the source may have
+    changed under the same cardinality. Those routes decline into an occupied
+    dest and the row path appends with a measured ``target_rows_before``.
+    Proof remains dest COUNT, never upsert ack.
     """
     proof = f"dest_count:{dest_count}"
     snapshot = {
@@ -473,14 +860,34 @@ def create_destination_like_source(
     collations = {k.lower(): v for k, v in shape.collations.items()}
     rename = {s.lower(): t for s, t in pairs}
 
-    cols: list[str] = []
-    for source_col, target_col in pairs:
+    declared_types: list[str] = []
+    for source_col, _target in pairs:
         declared = lowered.get(source_col.lower())
         if not declared:
             raise FastPathUnavailable(
                 f"source column {source_col!r} has no declared type"
             )
+        declared_types.append(declared)
+    # The key only carries when every one of its columns is being copied; a
+    # partial key is not the same constraint and must not be invented.
+    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
+    given_pk = [c for c in pk_targets if c] if shape.primary_key and all(pk_targets) else []
+    create = plan_fast_path_create(
+        dest_dialect="postgresql",
+        pairs=pairs,
+        ddls=declared_types,
+        primary_key=given_pk,
+        dest_table=table,
+        dest_schema=schema,
+    )
+
+    cols: list[str] = []
+    for (source_col, target_col), declared in zip(pairs, declared_types, strict=True):
         piece = f"{_quote(target_col)} {declared}"
+        if create.plan is not None:
+            piece += create.column_suffix(target_col)
+            cols.append(piece)
+            continue
         collation = collations.get(source_col.lower())
         if collation:
             piece += f" COLLATE {collation}"
@@ -496,15 +903,20 @@ def create_destination_like_source(
             piece += " NOT NULL"
         cols.append(piece)
 
-    # The key only carries when every one of its columns is being copied; a
-    # partial key is not the same constraint and must not be invented.
-    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
-    if shape.primary_key and all(pk_targets):
-        cols.append(
-            "PRIMARY KEY (" + ", ".join(_quote(c) for c in pk_targets if c) + ")"
-        )
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+        suffix = f" {create.create_suffix}" if create.create_suffix else ""
+    else:
+        suffix = ""
+        if create.primary_key:
+            cols.append(
+                "PRIMARY KEY (" + ", ".join(_quote(c) for c in create.primary_key) + ")"
+            )
     cur.execute(
-        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
+        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)}){suffix}"  # nosec B608
+    )
+    settle_fast_path_create_on(
+        cur, dest_dialect="postgresql", dest_table=table, dest_schema=schema or "public"
     )
 
 

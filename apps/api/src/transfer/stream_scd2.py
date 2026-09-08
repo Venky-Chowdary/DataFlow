@@ -149,6 +149,10 @@ def stream_scd2_mirror_transfer(
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in schema]
     target_cols, _ = resolve_target_columns(mappings, schema, preserve_case=True)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in schema}
+    # Read-back digests are steered by the same types the write pass used.
+    from services.mirror_engine import target_fingerprint_types
+
+    digest_types = target_fingerprint_types(mappings, schema)
 
     staging = _staging_endpoint(destination, job_id or "")
     staging_qualified = _qualified(staging.table, schema_name, dest_type)
@@ -311,9 +315,42 @@ def stream_scd2_mirror_transfer(
                             checkpoint={"phase": "scd2"},
                         )
 
+                if not scd2_block_error and not limit:
+                    # Staging is the complete source population, so a current
+                    # version with no key in staging was deleted at the source.
+                    from services.scd2_engine import (
+                        _active_checksum as _scd2_active_checksum,
+                        close_versions_missing_from_snapshot,
+                    )
+
+                    engine = get_sqlalchemy_engine(dest_cfg)
+                    try:
+                        with engine.connect() as conn:
+                            closed = close_versions_missing_from_snapshot(
+                                conn,
+                                target_qualified,
+                                staging_qualified,
+                                conflict_columns,
+                                dialect=dest_type,
+                            )
+                            conn.commit()
+                            dest_summary.update(closed)
+                            updated_total += int(closed.get("closed_missing_rows") or 0)
+                            if closed.get("closed_missing_rows"):
+                                active_rows, active_checksum = _scd2_active_checksum(
+                                    conn,
+                                    target_qualified,
+                                    target_cols,
+                                    batch_size,
+                                    dest_type,
+                                    dest_types=digest_types,
+                                )
+                    finally:
+                        release_engine(engine)
                 dest_summary["active_rows"] = active_rows
                 dest_summary["active_checksum"] = active_checksum
                 dest_summary["updated_rows"] = updated_total
+                _stamp_merge_source_digest(dest_summary, stage_summary)
                 dest_summary["rejected_details"] = stage_rejects + rejected_all
                 dest_summary["rejected_rows"] = len(stage_rejects) + len(rejected_all)
                 dest_summary["primary_key_columns"] = list(conflict_columns)
@@ -349,7 +386,7 @@ def stream_scd2_mirror_transfer(
 
             rows_written = rows_upserted
             dest_summary["upserted"] = rows_upserted
-            dest_summary["checksum"] = upsert_summary.get("checksum", "")
+            _stamp_merge_source_digest(dest_summary, stage_summary, upsert_summary)
             # Merge upsert quarantine into dest_summary — never drop stage/upsert DLQ.
             upsert_rejects = list(upsert_summary.get("rejected_details") or [])
             stage_rejects = list(stage_summary.get("rejected_details") or [])
@@ -385,7 +422,12 @@ def stream_scd2_mirror_transfer(
                 )
                 conn.commit()
                 active_count, active_checksum = _compute_active_checksum(
-                    conn, target_qualified, target_cols, "_deleted", batch_size=1_000
+                    conn,
+                    target_qualified,
+                    target_cols,
+                    "_deleted",
+                    batch_size=1_000,
+                    dest_types=digest_types,
                 )
                 conn.commit()
             release_engine(engine)
@@ -410,6 +452,35 @@ def stream_scd2_mirror_transfer(
     dest_summary.setdefault("rejected_rows", stage_summary.get("rejected_rows", 0))
     dest_summary.setdefault("coerced_null_rows", stage_summary.get("coerced_null_rows", 0))
     return rows_written, ddl_log, dest_summary, target_cols
+
+
+def _stamp_merge_source_digest(
+    dest_summary: dict[str, Any],
+    stage_summary: dict[str, Any] | None,
+    apply_summary: dict[str, Any] | None = None,
+) -> None:
+    """Give Gate-8 the source side of a staged merge.
+
+    The source→staging write-pass fingerprint is the remapped source
+    population; the staging→target apply digest covers the same rows when it
+    is a value digest. When both inner passes ran inside the engines (COPY),
+    the only proof is the apply's count token, so its proof scope is carried
+    and Gate-8 grades the active population by cardinality instead of
+    comparing a hash to a count or the destination digest to itself.
+    """
+    from .reconcile_step import source_digest_from_summaries
+
+    checksum, mode = source_digest_from_summaries(stage_summary, apply_summary)
+    if checksum:
+        dest_summary["checksum"] = checksum
+        dest_summary["checksum_mode"] = mode
+        return
+    apply_summary = apply_summary or {}
+    if apply_summary.get("checksum") and apply_summary.get("proof_scope"):
+        dest_summary["checksum"] = apply_summary["checksum"]
+        dest_summary["proof_scope"] = apply_summary["proof_scope"]
+        if apply_summary.get("source_snapshot") and "source_snapshot" not in dest_summary:
+            dest_summary["source_snapshot"] = apply_summary["source_snapshot"]
 
 
 def _read_staging_batches(

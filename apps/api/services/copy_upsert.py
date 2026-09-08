@@ -21,7 +21,12 @@ import hashlib
 import logging
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
+from services.row_conservation import CENSUS_KEY, KeyCensus
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,33 @@ def pk_join_count_sql(dest_q: str, staging_q: str, pk_ident: str) -> str:
     )
 
 
+def merge_staging_into_dest(
+    dst_cur: Any,
+    *,
+    merge_sql: str,
+    dest_q: str,
+    staging_q: str,
+    pk_ident: str,
+) -> tuple[int, int, int]:
+    """Apply the staged MERGE and return ``(preexisting, join_count, dest_count)``.
+
+    ``preexisting`` is the dest PK ⋈ staging PK count *before* the merge: the
+    dest-engine split of this batch into updates (held keys) and inserts (new
+    keys). Writer acknowledgements cannot give that split — MySQL counts an
+    ON DUPLICATE update as 2 — and COUNT(*) growth alone cannot tell a
+    correct re-write of the same keys from silent loss.
+    """
+    dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
+    preexisting = int(dst_cur.fetchone()[0])
+    dst_cur.execute(merge_sql)
+    dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
+    join_count = int(dst_cur.fetchone()[0])
+    dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
+    dest_count = int(dst_cur.fetchone()[0])
+    dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
+    return preexisting, join_count, dest_count
+
+
 def _result_with_upsert_proof(
     result: FastPathResult,
     *,
@@ -127,6 +159,7 @@ def _result_with_upsert_proof(
     dest_count: int,
     staging_table: str,
     dest_table: str,
+    dest_preexisting: int | None = None,
 ) -> FastPathResult:
     if join_count != int(result.source_rows):
         raise ValueError(
@@ -139,6 +172,14 @@ def _result_with_upsert_proof(
     snapshot["dest_table"] = dest_table
     snapshot["dest_count"] = dest_count
     snapshot["pk_join_count"] = join_count
+    if dest_preexisting is not None:
+        # Staging holds one row per source PK (source PK is unique), so the
+        # staged COUNT is the unique live key count of this batch.
+        snapshot[CENSUS_KEY] = KeyCensus(
+            unique_batch_keys=int(result.source_rows),
+            dest_preexisting=dest_preexisting,
+            events_read=int(result.source_rows),
+        ).to_dict()
     proof = f"pk_join_count:{join_count}"
     return FastPathResult(
         rows_copied=result.source_rows,
@@ -212,6 +253,9 @@ def copy_postgres_to_mysql_upsert(
                     dest_table, pairs, mysql_ddls, [dest_pk]
                 )
                 dst_cur.execute(create_sql)  # nosec B608
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
+                )
                 dest_conn.commit()
                 created_dest = True
     finally:
@@ -236,16 +280,15 @@ def copy_postgres_to_mysql_upsert(
         # transaction does not see MySQL 1412 (table definition changed).
         dest_conn = _mysql_connect(dest_cfg)
         with dest_conn.cursor() as dst_cur:
-            dst_cur.execute(
-                mysql_upsert_from_staging_sql(
+            preexisting, join_count, dest_count = merge_staging_into_dest(
+                dst_cur,
+                merge_sql=mysql_upsert_from_staging_sql(
                     dest_q, staging_q, target_cols, dest_pk, _mysql_ident
-                )
+                ),
+                dest_q=dest_q,
+                staging_q=staging_q,
+                pk_ident=pk_ident,
             )
-            dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
-            join_count = int(dst_cur.fetchone()[0])
-            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
-            dest_count = int(dst_cur.fetchone()[0])
-            dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
             dest_conn.commit()
         return _result_with_upsert_proof(
             result,
@@ -253,6 +296,7 @@ def copy_postgres_to_mysql_upsert(
             dest_count=dest_count,
             staging_table=staging,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
     except Exception:
         cleanup = dest_conn or _mysql_connect(dest_cfg)
@@ -357,17 +401,15 @@ def copy_between_postgres_upsert(
     try:
         dest_conn.autocommit = False
         with dest_conn.cursor() as dst_cur:
-            dst_cur.execute(
-                pg_upsert_from_staging_sql(
+            preexisting, join_count, dest_count = merge_staging_into_dest(
+                dst_cur,
+                merge_sql=pg_upsert_from_staging_sql(
                     dest_ref, staging_ref, target_cols, dest_pk, _quote
-                )
+                ),
+                dest_q=dest_ref,
+                staging_q=staging_ref,
+                pk_ident=_quote(dest_pk),
             )
-            pk_ident = _quote(dest_pk)
-            dst_cur.execute(pk_join_count_sql(dest_ref, staging_ref, pk_ident))
-            join_count = int(dst_cur.fetchone()[0])
-            dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
-            dest_count = int(dst_cur.fetchone()[0])
-            dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
             dest_conn.commit()
         return _result_with_upsert_proof(
             result,
@@ -375,6 +417,7 @@ def copy_between_postgres_upsert(
             dest_count=dest_count,
             staging_table=staging,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
     except Exception:
         dest_conn.rollback()

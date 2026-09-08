@@ -46,7 +46,6 @@ from services.copy_s3_common import (
     s3_ext,
     s3_iter_delimited_rows,
     s3_list_keys,
-    skip_complete_s3,
 )
 
 logger = logging.getLogger(__name__)
@@ -146,16 +145,6 @@ def copy_s3_to_iceberg(
                 )
 
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={
-                        "s3_read": "skip",
-                        "iceberg_write": "skip",
-                        "shard_mode": "table",
-                    },
-                )
             raise FastPathUnavailable(
                 "append into occupied Iceberg dest stays on the row path "
                 "(leftover MERGE / upsert); identity COPY would duplicate"

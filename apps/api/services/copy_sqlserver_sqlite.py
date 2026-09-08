@@ -41,7 +41,6 @@ from services.copy_sqlserver_sqlserver import (
     _table_ref as _ss_table_ref,
 )
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -164,17 +163,6 @@ def copy_sqlserver_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                dest_conn.rollback()
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={
-                        "sqlserver_isolation": isolation,
-                        "sqlserver_read": "skip",
-                        "sqlite_write": "skip",
-                    },
-                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"

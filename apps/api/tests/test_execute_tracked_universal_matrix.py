@@ -27,6 +27,7 @@ from src.transfer.adapters import write_destination_database  # noqa: E402
 from src.transfer.connector_capabilities import (  # noqa: E402
     default_port,
     driver_available,
+    get_capabilities,
     resolve_driver_type,
 )
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
@@ -635,7 +636,23 @@ def _uses_snowflake(*endpoints: EndpointConfig) -> bool:
     return any(ep.format == "snowflake" for ep in endpoints if ep.kind == "database")
 
 
+def _stub_owns_fixture(source: EndpointConfig) -> bool:
+    """SaaS sources whose two-row fixture is served by the local stub itself.
+
+    A source-only connector has no writer to seed through, and a reverse-ETL
+    writer that is not a certified destination (Stripe: integer cents, not the
+    matrix's DECIMAL) is not the seeding path either — the stub's
+    ``seed_tabular_fixture`` already holds the rows the read must return.
+    """
+    if not (source.extra or {}).get("local_stub_not_customer_org"):
+        return False
+    caps = get_capabilities(source.format)
+    return not caps.get("write") or caps.get("certified_dest") is False
+
+
 def _seed_source(source: EndpointConfig) -> dict[str, Any]:
+    if _stub_owns_fixture(source):
+        return {"seeded_by": "saas_desktop_stub"}
     rows, _, summary = write_destination_database(
         source, RECORDS, COLUMNS, SCHEMA, MAPPINGS
     )

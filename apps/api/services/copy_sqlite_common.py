@@ -20,7 +20,6 @@ path owns locale parsing and the validation policy that quarantines it.
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from collections.abc import Callable
 from datetime import date, datetime
@@ -29,7 +28,11 @@ from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
 from connectors.sqlite_common import sqlite_file_path
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    CANONICAL_DECIMAL_TEXT,
+    FastPathUnavailable,
+    plan_fast_path_create,
+)
 
 _UNSAFE_SQLITE_BASES = frozenset({
     "BLOB",
@@ -45,10 +48,11 @@ _UNSAFE_SQLITE_PG_BASES = _UNSAFE_SQLITE_BASES | frozenset({
     "JSONB",
 })
 
-#: A decimal the row path would not rewrite: no grouping, currency mark, or
-#: locale separator ambiguity. ``1,234`` is US 1234 or EU 1.234 — the parser
-#: owns that judgement, so COPY declines instead of storing the raw text.
-_CANONICAL_DECIMAL = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_INTEGER_BASES = frozenset({
+    "BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "INT2", "INT4", "INT8",
+})
+_FLOAT_BASES = frozenset({"FLOAT", "REAL", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLEPRECISION"})
+_BOOL_BASES = frozenset({"BOOLEAN", "BOOL"})
 
 _DATE_MIDNIGHT_CLOCKS = frozenset({
     "00:00:00",
@@ -88,19 +92,10 @@ def sqlite_bind_from_text(ddl: str, declared: str = "") -> Callable[[str | None]
     alone cannot tell a money column from free text, and a grouped or
     currency-marked cell would land verbatim.
     """
-    base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
-    if base in {
-        "BIGINT",
-        "INT",
-        "INTEGER",
-        "SMALLINT",
-        "TINYINT",
-        "INT2",
-        "INT4",
-        "INT8",
-    }:
+    base = sqlite_ddl_base(ddl)
+    if base in _INTEGER_BASES:
         return _bind_int
-    if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
+    if base in _FLOAT_BASES or base.startswith("DOUBLE"):
         return _bind_float
     if declared:
         from services.decision_kernel import normalize_logical_type
@@ -136,7 +131,7 @@ def _bind_decimal_text(value: str | None) -> str | None:
     """Keep the exact digits of a canonical decimal; anything else declines."""
     if value is None:
         return None
-    if _CANONICAL_DECIMAL.match(value.strip()):
+    if CANONICAL_DECIMAL_TEXT.match(value.strip()):
         return value
     raise FastPathUnavailable(f"DECIMAL cell {value!r} is not COPY-safe")
 
@@ -307,6 +302,74 @@ def sqlite_connect(cfg: dict[str, Any]) -> sqlite3.Connection:
     return conn
 
 
+def _sqlite_census_predicate(column_sql: str, ddl: str) -> str | None:
+    """SQL that is true for a stored cell the declared carrier cannot hold.
+
+    SQLite does not enforce a column's declared type: an INTEGER column keeps
+    ``'abc'`` as text and a NUMERIC one keeps ``'not-a-number'``. An identity
+    COPY moves bytes, so the engine itself must prove every cell fits the
+    carrier the destination declares — otherwise the row path, which owns the
+    validation policy and quarantine, has to see the population.
+    """
+    base = sqlite_ddl_base(ddl)
+    if base in _INTEGER_BASES:
+        return f"typeof({column_sql}) NOT IN ('null', 'integer')"
+    if base in _FLOAT_BASES or base.startswith("DOUBLE"):
+        return f"typeof({column_sql}) NOT IN ('null', 'integer', 'real')"
+    if base in _BOOL_BASES:
+        return (
+            f"NOT (typeof({column_sql}) = 'null'"
+            f" OR (typeof({column_sql}) = 'integer' AND {column_sql} IN (0, 1))"
+            f" OR (typeof({column_sql}) = 'text' AND {column_sql} IN ('0', '1')))"
+        )
+    from services.decision_kernel import normalize_logical_type
+
+    if ddl and normalize_logical_type(ddl) == "decimal":
+        return (
+            f"NOT (typeof({column_sql}) IN ('null', 'integer', 'real')"
+            f" OR (typeof({column_sql}) = 'text'"
+            f" AND df_canonical_decimal({column_sql})))"
+        )
+    return None
+
+
+def _canonical_decimal_sql(value: Any) -> int:
+    return 1 if isinstance(value, str) and CANONICAL_DECIMAL_TEXT.match(value.strip()) else 0
+
+
+def sqlite_source_carrier_census(
+    conn: sqlite3.Connection,
+    src_ref: str,
+    source_cols: list[str],
+    dest_ddls: list[str],
+    where_sql: str = "",
+) -> None:
+    """Refuse an identity COPY whose source holds a cell the dest carrier cannot.
+
+    Runs one engine-side ``COUNT`` per numeric / boolean column over the same
+    population the COPY would move and raises ``FastPathUnavailable`` naming
+    the column, the count and one offending value, so the decline is recorded
+    and the row path quarantines those cells instead of landing them verbatim.
+    """
+    conn.create_function("df_canonical_decimal", 1, _canonical_decimal_sql, deterministic=True)
+    for col, ddl in zip(source_cols, dest_ddls, strict=True):
+        column_sql = sqlite_ident(col)
+        predicate = _sqlite_census_predicate(column_sql, ddl)
+        if predicate is None:
+            continue
+        glue = " AND " if where_sql.strip() else " WHERE "
+        row = conn.execute(
+            f"SELECT COUNT(*), MIN({column_sql}) FROM {src_ref}{where_sql}{glue}({predicate})"  # nosec B608
+        ).fetchone()
+        bad = int(row[0] or 0)
+        if bad:
+            raise FastPathUnavailable(
+                f"source column {col!r} holds {bad} cell(s) that are not "
+                f"{ddl or 'the declared carrier'} (e.g. {row[1]!r}); the row path "
+                "owns their validation and quarantine"
+            )
+
+
 def sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
@@ -336,39 +399,19 @@ def sqlite_create_sql(
 ) -> str:
     from connectors.sqlite_writer import sqlite_type
 
+    create = plan_fast_path_create(
+        dest_dialect="sqlite", pairs=pairs, ddls=sqlite_ddls, primary_key=primary_key,
+        dest_table=table,
+    )
     cols = []
-    targets = [t for _s, t in pairs]
     for (_src, target), ddl in zip(pairs, sqlite_ddls, strict=True):
-        cols.append(f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}")
-    pk = [c for c in (primary_key or []) if c in targets]
-    if pk:
-        pk_sql = ", ".join(sqlite_ident(c) for c in pk)
+        cols.append(
+            f"{sqlite_ident(target)} {sqlite_type(ddl or 'TEXT')}"
+            f"{create.column_suffix(target)}"
+        )
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+    elif create.primary_key:
+        pk_sql = ", ".join(sqlite_ident(c) for c in create.primary_key)
         cols.append(f"PRIMARY KEY ({pk_sql})")
     return f"CREATE TABLE {sqlite_ident(table)} ({', '.join(cols)})"
-
-
-def skip_complete_sqlite(
-    *,
-    source_count: int,
-    dest_count: int,
-    extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "table",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
-    )

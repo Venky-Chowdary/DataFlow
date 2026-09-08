@@ -80,6 +80,54 @@ def test_write_dest_quarantine_sqlite_and_promote(tmp_path: Path):
     assert open_after["open_rows"] == 0
 
 
+def test_dlq_endpoint_is_a_plain_table_even_for_procedure_destinations(tmp_path: Path):
+    """D42: a dest-DML / procedure destination pushed `_df_*` rows through the
+    client's INSERT (which has none of those columns) instead of a DLQ table."""
+    from services.dest_quarantine import dlq_endpoint, write_dest_quarantine
+    from services.procedure_destination import plan_dest_procedure
+    from src.transfer.models import EndpointConfig
+
+    dest_path = tmp_path / "proc.db"
+    with sqlite3.connect(dest_path) as db:
+        db.execute("CREATE TABLE users (id INTEGER, age INTEGER)")
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        table="users",
+        database=str(dest_path),
+        extra={
+            "dest_write_mode": "query",
+            "dest_query_sql": "INSERT INTO users (id, age) VALUES (:id, :age)",
+            "unrelated_option": "kept",
+        },
+    )
+    assert plan_dest_procedure(dest) is not None
+    clone = dlq_endpoint(dest)
+    assert plan_dest_procedure(clone) is None
+    assert clone.extra == {"unrelated_option": "kept"}
+    assert plan_dest_procedure(dest) is not None, "primary destination untouched"
+
+    details = [
+        {
+            "row": 2,
+            "column": "age",
+            "target": "age",
+            "value": "x",
+            "reason": "invalid integer",
+            "policy": "quarantine",
+            "values": {"id": "2", "age": "x"},
+        }
+    ]
+    result = write_dest_quarantine(dest, details, job_id="job-dlq-proc")
+    assert result["ok"] is True, result
+    assert result["rows_written"] == 1
+    with sqlite3.connect(dest_path) as db:
+        assert db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+        assert db.execute(
+            "SELECT _df_column, _df_value FROM users_df_quarantine"
+        ).fetchall() == [("age", "x")]
+
+
 def test_mysql_dlq_idents_use_backticks_not_double_quotes():
     """MySQL without ANSI_QUOTES treats "col" as a string — open_rows would stay 0."""
     from services.dest_quarantine import _quote_ident

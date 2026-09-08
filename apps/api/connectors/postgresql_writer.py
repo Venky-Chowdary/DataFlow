@@ -1674,7 +1674,12 @@ def write_mapped_rows(
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _map_abort = scan_acc.abort_error(policy)
-        if _map_abort and not isinstance(dest_types, LiveDestTypes):
+        # Live carriers are not final either while backfill may still widen
+        # them in setup: a value that overflows today's NUMERIC(8,2) fits the
+        # NUMERIC(12,2) the source grew to, and the widen runs before any row.
+        if _map_abort and (
+            not isinstance(dest_types, LiveDestTypes) or backfill_new_fields
+        ):
             deferred_map_abort = _map_abort
             _map_abort = None
         if _map_abort:
@@ -2312,10 +2317,25 @@ def write_mapped_rows(
                     target_types = list(bind_types)
                     _pg_finish_kwargs["bind_types"] = bind_types
                 write_acc.dest_types = dest_types if isinstance(dest_types, dict) else {}
-                deferred_map_abort = None
                 final_sig = dest_types_signature(
                     dest_types if isinstance(dest_types, dict) else {}, target_cols
                 )
+                if deferred_map_abort and final_sig == scanned_dest_sig:
+                    # Setup left the carriers exactly as scanned: the verdict
+                    # computed against them stands.
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=deferred_map_abort,
+                        rejected_rows=rejected_rows,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+                deferred_map_abort = None
                 if policy == "fail" and final_sig != scanned_dest_sig:
                     scan_acc, source_row_count, scanned_types, scanned_bind = (
                         _pg_scan_finished_bundles(**_pg_finish_kwargs)

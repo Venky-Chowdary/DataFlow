@@ -263,7 +263,7 @@ def test_live_s3_mongo_empty_string_and_null_preserved():
         _delete_key(client, bucket, key)
 
 
-def test_live_s3_mongo_skip_when_dest_count_matches():
+def test_live_s3_mongo_equal_count_append_declines():
     client = _s3_client()
     tag = uuid.uuid4().hex[:8]
     mid = f"s3_mongo_skip_{tag}"
@@ -283,16 +283,16 @@ def test_live_s3_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_s3_to_mongo(
-            source_cfg=_s3_cfg(bucket, key),
-            source_table=key,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["BIGINT", "TEXT"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_s3_to_mongo(
+                source_cfg=_s3_cfg(bucket, key),
+                source_table=key,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["BIGINT", "TEXT"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         _drop_mongo(mid)

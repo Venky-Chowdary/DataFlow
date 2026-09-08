@@ -37,10 +37,10 @@ from services.copy_pg_iceberg import (
 )
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_ident,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
     sqlite_type_is_copy_safe,
 )
@@ -158,6 +158,7 @@ def copy_sqlite_to_iceberg(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not Iceberg COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, iceberg_ddls, "")
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}").fetchone()[0]  # nosec B608
         )
@@ -175,16 +176,6 @@ def copy_sqlite_to_iceberg(
                 )
 
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                try:
-                    source_conn.rollback()
-                except Exception:
-                    logger.debug("SQLite source rollback on skip skipped", exc_info=True)
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"sqlite_read": "skip", "iceberg_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied Iceberg dest stays on the row path "
                 "(leftover MERGE / upsert); identity COPY would duplicate"

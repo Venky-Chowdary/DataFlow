@@ -395,12 +395,22 @@ def read_table_cursor_batch(
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )
-                    cur.execute(
-                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
-                        f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
-                        (cur_val, pk_val, limit),
-                    )
+                    if pk_val == "":
+                        # Cursor-only watermark with a tie-break: seek on the
+                        # cursor, order on both for a deterministic page edge.
+                        cur.execute(
+                            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                            f"WHERE {cursor_q} > %s "
+                            f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
+                            (cur_val, limit),
+                        )
+                    else:
+                        cur.execute(
+                            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                            f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
+                            f"ORDER BY {cursor_q}, {pk_q} LIMIT %s",
+                            (cur_val, pk_val, limit),
+                        )
                 else:
                     bare, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
                     cur.execute(

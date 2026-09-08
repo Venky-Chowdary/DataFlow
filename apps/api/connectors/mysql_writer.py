@@ -798,6 +798,7 @@ def write_mapped_rows(
         materialize_batch=_sql_src["materialize_batch"],
         bind=True,
     )
+    deferred_map_abort: str | None = None
     if not studio_err and policy == "fail":
         scan_acc, source_row_count, target_types = _mysql_scan_finished_bundles(
             **_mysql_finish_kwargs
@@ -816,6 +817,12 @@ def write_mapped_rows(
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _map_abort = scan_acc.abort_error(policy)
+        # Live carriers are not final while backfill may still widen them in
+        # setup: a value that overflows today's DECIMAL(8,2) fits the
+        # DECIMAL(12,2) the source grew to, and the widen runs before any row.
+        if _map_abort and backfill_new_fields:
+            deferred_map_abort = _map_abort
+            _map_abort = None
         if _map_abort:
             _cleanup_spool()
             return WriteResult(
@@ -915,6 +922,7 @@ def write_mapped_rows(
         nonlocal transform_errors, rejected_details
         nonlocal insert_sql
         nonlocal scanned_dest_sig, source_row_count, rejected_rows, coerced_null_rows
+        nonlocal deferred_map_abort
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="mysql")
         if create_table:
@@ -1153,6 +1161,8 @@ def write_mapped_rows(
         )
         if overlay_err:
             raise RuntimeError(overlay_err)
+        if not physical and deferred_map_abort:
+            raise RuntimeError(deferred_map_abort)
         if physical:
             from connectors.writer_common import rematerialize_live_dest_types
 
@@ -1191,6 +1201,11 @@ def write_mapped_rows(
             final_sig = dest_types_signature(
                 dest_types if isinstance(dest_types, dict) else {}, target_cols
             )
+            if deferred_map_abort and final_sig == scanned_dest_sig:
+                # Setup left the carriers exactly as scanned: the verdict
+                # computed against them stands.
+                raise RuntimeError(deferred_map_abort)
+            deferred_map_abort = None
             if policy == "fail" and final_sig != scanned_dest_sig:
                 scan_acc, source_row_count, scanned_types = _mysql_scan_finished_bundles(
                     **_mysql_finish_kwargs

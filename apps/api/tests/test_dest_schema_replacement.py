@@ -118,6 +118,26 @@ def test_string_width_narrowing_is_a_replacement() -> None:
     assert [f["target"] for f in found] == ["name_txt"]
 
 
+def test_unbounded_source_string_declares_no_magnitude() -> None:
+    # PostgreSQL TEXT / BYTEA carry no declared width: the live VARCHAR(100) is
+    # not *known* to be narrower, and the recreate to LONGTEXT contradicts no
+    # declaration. The population fit gate measures the rows; G19 stays quiet.
+    assert not carrier_would_truncate("TEXT", "VARCHAR(100)", dest_db="mysql")
+    assert not carrier_would_truncate("BYTEA", "VARBINARY(16)", dest_db="mysql")
+    # Declared tiers and widths still are replacements.
+    assert carrier_would_truncate("LONGTEXT", "TINYTEXT", dest_db="mysql")
+    assert carrier_would_truncate("VARCHAR(64)", "VARCHAR(8)", dest_db="mysql")
+    assert carrier_would_truncate("VARBINARY(64)", "VARBINARY(16)", dest_db="mysql")
+    # SQLite INT is an int64 storage class, stamped BIGINT by introspection —
+    # not a declared width against the live INT4.
+    assert not carrier_would_truncate(
+        "BIGINT", "INT4", dest_db="postgresql", source_db="sqlite"
+    )
+    assert carrier_would_truncate(
+        "BIGINT", "INT4", dest_db="postgresql", source_db="postgresql"
+    )
+
+
 def test_fidelity_only_pairs_are_not_replacements() -> None:
     # CHAR(36) → UUID is a judgement about meaning, and on the second tick of a
     # schedule the UUID column is one Datawrap itself created. G19 stays quiet.

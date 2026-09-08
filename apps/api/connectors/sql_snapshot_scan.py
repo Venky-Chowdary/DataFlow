@@ -33,6 +33,37 @@ SNAPSHOT_SCAN_SOURCES = frozenset(
 )
 
 
+#: Snapshot-scan readers that accept ``filter_column`` / ``filter_after`` and
+#: push ``WHERE cursor > watermark`` into the one held SELECT. An incremental
+#: run on a table with no unique tie-break must page this way: a keyset seek
+#: on the cursor alone skips every peer row sharing a page-edge cursor value.
+FILTERED_SCAN_SOURCES = frozenset(
+    {"postgresql", "redshift", "mysql", "sqlite", "generic_sql", "sqlserver", "oracle"}
+)
+
+
+def scan_filter_value(filter_column: str, filter_after: Any) -> str | None:
+    """Decode the watermark a filtered snapshot scan binds, or None for no filter.
+
+    The bound is the *run* watermark (a cursor-only bookmark), never a page
+    edge — the scan itself pages with ``fetchmany``. A composite bookmark
+    cannot be bound against the cursor column alone and is refused here so a
+    mis-decoded watermark never silently reads zero rows.
+    """
+    from services.keyset_pagination import (
+        present_cursor_bookmark,
+        split_cursor_bookmark,
+    )
+
+    if not filter_column:
+        return None
+    bookmark = present_cursor_bookmark(filter_after)
+    if bookmark is None:
+        return None
+    value, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
+    return value
+
+
 def fetch_scan_page(cur: Any, batch_size: int) -> list[Any]:
     """Page a held snapshot cursor.
 

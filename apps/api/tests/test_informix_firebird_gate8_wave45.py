@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import sqlalchemy as sa
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -23,6 +25,7 @@ def test_informix_merge_temp_with_no_log_and_null_safe_on():
     class _Table:
         name = "sale"
         schema = "informix"
+        c = {"cust_id": sa.Column("cust_id", sa.Integer), "salecount": sa.Column("salecount", sa.Integer)}
 
     n = _informix_merge_upsert(
         _Conn(),
@@ -54,6 +57,7 @@ def test_firebird_merge_uses_rdb_database_stage():
     class _Table:
         name = "BOOKS"
         schema = None
+        c = {"isbn": sa.Column("isbn", sa.String), "price": sa.Column("price", sa.Numeric)}
 
     n = _firebird_merge_upsert(
         _Conn(),

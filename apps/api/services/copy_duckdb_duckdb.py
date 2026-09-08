@@ -46,7 +46,6 @@ from services.copy_duckdb_common import (
     duckdb_table_exists,
     duckdb_table_ref,
     duckdb_type_is_copy_safe,
-    skip_complete_duckdb,
 )
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -169,16 +168,6 @@ def copy_duckdb_to_duckdb(
                 conn, catalog=dest_catalog, schema=dest_schema, table=dest_table
             )
             if dest_occupied and not replace_destination:
-                if dest_count_before == source_count:
-                    conn.rollback()
-                    return skip_complete_duckdb(
-                        source_count=source_count,
-                        dest_count=dest_count_before,
-                        extra_snapshot={
-                            "duckdb_write": "skip",
-                            "duckdb_read": "skip",
-                        },
-                    )
                 raise FastPathUnavailable(
                     "append into occupied DuckDB dest stays on the row path "
                     "(identity COPY would duplicate)"

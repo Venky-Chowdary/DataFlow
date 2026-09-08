@@ -314,16 +314,22 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "stream": sched.source_table,
             "sync_mode": effective_mode,
             "cursor_field": sched.cursor_column,
+            "cursor_semantics": sched.cursor_semantics,
             "primary_key": sched.primary_key,
             "schema_policy": sched.schema_policy,
             "validation_mode": sched.validation_mode,
             **({"snapshot_mode": snapshot_mode} if snapshot_mode else {}),
         }]
-    elif snapshot_mode:
+    elif snapshot_mode or sched.cursor_semantics:
         stamped: list[dict] = []
         for raw in stream_contracts:
             row = dict(raw) if isinstance(raw, dict) else {}
-            row.setdefault("snapshot_mode", snapshot_mode)
+            if snapshot_mode:
+                row.setdefault("snapshot_mode", snapshot_mode)
+            # A schedule-level declaration fills streams that did not declare
+            # their own; a stream's own word about its cursor is never replaced.
+            if sched.cursor_semantics and not str(row.get("cursor_semantics") or "").strip():
+                row["cursor_semantics"] = sched.cursor_semantics
             stamped.append(row)
         stream_contracts = stamped
 

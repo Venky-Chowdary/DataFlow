@@ -52,7 +52,6 @@ from services.copy_s3_common import (
     s3_ext,
     s3_iter_delimited_rows,
     s3_list_keys,
-    skip_complete_s3,
 )
 from services.copy_sqlite_oracle import sqlite_value_to_oracle
 
@@ -124,16 +123,6 @@ def copy_s3_to_oracle(
             dest_count_before = _ora_count(dst_cur, dest_ref)
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={
-                        "s3_read": "skip",
-                        "oracle_write": "skip",
-                        "empty_string_as_null_cells": 0,
-                    },
-                )
             raise FastPathUnavailable(
                 "append into occupied Oracle dest stays on the row path "
                 "(identity COPY would duplicate)"

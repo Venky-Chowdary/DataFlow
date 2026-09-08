@@ -35,14 +35,19 @@ class _FakeMongo:
         return True
 
 
-def _make_source(rows: int, tmp_path: Path) -> Path:
+def _make_source(rows: int, tmp_path: Path, *, text_booleans: bool = True) -> Path:
+    """``text_booleans`` stores ``'true'``/``'false'`` text — cells a BOOLEAN
+    carrier cannot hold verbatim, so the identity COPY must decline them to the
+    row path. ``False`` stores 0/1, the carrier-fitting shape the COPY moves."""
     db = tmp_path / "src.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, amount TEXT, active TEXT)")
     for i in range(rows):
+        truthy = i % 2 == 0
+        active: object = ("true" if truthy else "false") if text_booleans else int(truthy)
         conn.execute(
             "INSERT INTO orders VALUES (?, ?, ?)",
-            (i + 1, f"{i * 1.5:.2f}", "true" if i % 2 == 0 else "false"),
+            (i + 1, f"{i * 1.5:.2f}", active),
         )
     conn.commit()
     conn.close()
@@ -52,7 +57,7 @@ def _make_source(rows: int, tmp_path: Path) -> Path:
 def test_stream_sqlite_to_sqlite_basic():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        src = _make_source(250, tmp_path)
+        src = _make_source(250, tmp_path, text_booleans=False)
         dst = tmp_path / "dst.db"
 
         source = EndpointConfig(
@@ -89,6 +94,50 @@ def test_stream_sqlite_to_sqlite_basic():
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
         conn.close()
         assert count == 250
+
+
+def test_stream_sqlite_text_booleans_decline_copy_and_land_as_0_1():
+    """'true'/'false' text under a BOOLEAN carrier: the identity COPY must not
+    move the bytes verbatim — it declines and the row path normalizes to 0/1."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(250, tmp_path, text_booleans=True)
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        rows_written, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            schema,
+            job_id="000000000000000000000000",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+
+        assert rows_written == 250
+        assert summary.get("copy_fast_path") == "declined"
+        assert "active" in str(summary.get("copy_decline_reason") or "")
+        assert summary.get("load_method") != "attach_insert_select_sqlite"
+        assert int(summary.get("rejected_rows") or 0) == 0
+
+        conn = sqlite3.connect(dst)
+        landed = conn.execute(
+            "SELECT active, typeof(active), COUNT(*) FROM orders_out GROUP BY 1, 2 ORDER BY 1"
+        ).fetchall()
+        conn.close()
+        assert landed == [(0, "integer", 125), (1, "integer", 125)]
 
 
 def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
@@ -249,7 +298,7 @@ def test_stream_resume_insert_without_primary_key_is_refused():
 def test_stream_sqlite_includes_ddl_log_and_summary():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        src = _make_source(5, tmp_path)
+        src = _make_source(5, tmp_path, text_booleans=False)
         dst = tmp_path / "dst.db"
 
         source = EndpointConfig(

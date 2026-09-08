@@ -299,6 +299,58 @@ What this sweep did **not** prove, and what a client must therefore be told:
    it predates D40), and **D42**, the destination-side DLQ write failing
    because the destination lacks the `_df_*` quarantine columns — quarantine
    evidence is control-plane only until that is decided.
+   **Both are now closed on `devin/qa-lead-integration` (PR #172,
+   `b3fec86b` → `59c37f01`; register §8 / §8a).** D41 was two COPY fast paths
+   bypassing validation (SQLite identity `INSERT … SELECT`; CSV→SQLite ignoring
+   `target_type`), fixed by one engine-side carrier census that declines the
+   fast path before the destination exists. The same class existed on the file
+   side — CSV → PostgreSQL/MySQL `COPY`/`LOAD DATA` aborted whole-load on one
+   `not-a-number` with no quarantine — and is closed by
+   `copy_fast_path.text_cell_copy_safe` censusing every cell before COPY. D42
+   was not a missing-columns problem: `dlq_endpoint` inherited the
+   destination's procedure / dest-DML `extra`, so DLQ rows went through the
+   client's own INSERT; the clone now strips `DEST_PROCEDURE_EXTRA_KEYS`.
+   Measured live on PostgreSQL (balanced quarantines 1 of 3 with a DLQ row,
+   strict fails closed with 0 rows, clean population still COPYs); focused
+   suites 32 passed, blast radius 189 passed / 2 pre-existing failures
+   (`test_file_stream_path`, `test_file_stream_skip_matrix`, identical on
+   `b3fec86b`). Both formerly unmeasured cells were then run live
+   (register §8b): MySQL `LOAD DATA` behaves like PostgreSQL for
+   `not-a-number`, and **integer range overflow inside a valid integer was a
+   real defect** — `99999999999999999999` passed the lexical census and
+   PostgreSQL `COPY` aborted on `out of range for type bigint`, while MySQL
+   quarantined it but then failed Gate-8 because the fingerprint remap graded
+   the held-out row against the unbounded logical `integer` stamp. Closed by
+   passing the physical DDL + dialect into the census
+   (`text_cell_copy_safe` → `fits_integer` / `fits_decimal`, the row path's
+   own owners) and by `writer_common.physical_integer_carrier` so Gate-8
+   holds out exactly what the writer quarantined. Live PG + MySQL, balanced
+   and strict, both green with a DLQ row; bounded decimals
+   (`0.016666668` into `NUMERIC(11,8)`) decline the same way. Focused suite
+   65 passed; blast radius 503 passed / 4 failed / 1 skipped, all 4
+   pre-existing (identical with the change stashed). Full backend
+   suite on `d693555f`: 19977 passed / 152 failed / 1105 skipped / 1 error;
+   the 19 failures in this neighbourhood fail identically on `b68e7c89`, and
+   54 of the 152 are one harness class (`_seed_source` through a
+   source-only rest_api/stripe connector). Class breakdown in register §8b.
+   **Append-contract wave (register §8c, same branch):** the equal-count
+   "skip complete" was removed from ~45 row-addressed COPY fast paths (one owner,
+   `copy_fast_path.skip_complete_identity_copy`, key-addressed dests only);
+   `target_rows_before` is now measured on the stream/file path; MongoDB is
+   key-addressed only with a mapped `_id`; Redis empty-prefix phantom schema
+   fixed; SQLite text-boolean identity COPY declines to the row path. 580
+   passed / 0 failed / 8 skipped on the 69-file changed-test selection with
+   PG/MySQL/Mongo/Redis live. Source-only SaaS seeding (54) closed in register §8e
+   (`a3dc9da9`, harness only). Still open: MariaDB
+   upsert, RI properties, `_Table.c` stubs, vector Gate-8.
+   **CDC cursor wave (register §8d, `bfc565dd`):** the CDC cursor poll never
+   advanced past page one (watermark reused as `cursor_after`, offset ignored
+   by keyset readers) — every multi-page poll re-read the same rows (OOM at
+   5 GB in the repro). Fixed at the owner: `_read_keyset_pages` seeks from the
+   page maximum `(cursor, pk)`, readers accept a cursor-only first bookmark,
+   non-advancing pages fail closed. Writer per-batch counts no longer pose as
+   the run's source population; the run stamps its reader count once.
+   513 passed / 26 skipped on the 56-file CDC/keyset neighbourhood.
 3. **The Verify chain screen still reads `Chain verification failed — 36
    record(s)`** even though every finding is on a pre-fix record. The fix stops
    new ones; it cannot un-cross history without rewriting audit history. A
@@ -320,6 +372,58 @@ What this sweep did **not** prove, and what a client must therefore be told:
 6. **The full suite is not green** and the failures are classified rather than
    hidden: see the register's "Full-suite state" note. The dominant category is
    SaaS connectors refusing a write by design or having no sandbox credentials.
+
+## Live PG/MySQL/MariaDB + SQLite/S3 neighbourhood (2026-08-10, `devin/qa-lead-integration`)
+
+Closed at the owner and recorded in `docs/OPEN_DEFECT_REGISTER.md` §8f: shared
+upsert `KeyCensus` (`merge_staging_into_dest`), tombstone upserts declined to the
+row path, SQLite fast-path snapshot guarantee metadata, SQLite COPY shard in the
+shared `_dataflow_write_ledger` with same-job retry skip, and a **source-table
+destruction** defect (post-rollback unqualified `DROP TABLE` resolved to the
+attached source) fixed by `main.`-qualifying the dest and rollback-only cleanup.
+Neighbourhood run: 1231 passed / 43 skipped. Not claimed: live MariaDB/PG runs
+of these paths in this exact commit (see §8f for the focused live counts).
+
+## Schema evolution vs COPY + Gate-8 engine digests (2026-08-10, `devin/qa-lead-integration`)
+
+Register §8g. An occupied destination under `backfill_new_fields` now stays on
+the writer path (COPY bypassed ADD COLUMN / widen); PG and MySQL writers defer
+the strict pre-scan verdict until the live carriers are final (fail-closed if
+setup changed nothing, rescan if it widened); Gate-8 no longer demands a stashed
+sample when a whole-population engine digest pair is already in hand. Live PG and
+MySQL backfill/widen tests and the PG control-total test pass; blast radius
+338 passed / 2 pre-existing failures (Informix merge stage bind, vector
+read_target_sample route) which are next.
+
+## Scheduler proof: all engines × all sync modes (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+Register §8h–§8i. Harness `apps/api/scripts/live_schedule_matrix.py` drives the
+real path (`create_schedule → _run_due_schedules → _dispatch_transfer →
+run_transfer_async → _finalize_run`) against local PG/MySQL/SQLite, mutates the
+source between beats and reads the destination back independently. 2K rows/cell:
+**pass=63 fail=0 skip=3** (`/home/ubuntu/sched_proof/matrix_2k_fix4.json`; skips =
+SQLite has no log-based CDC source). Closed on the way: schedule cursor contract,
+watermark stamped only after Gate-8, SCD2 close-on-vanish, mirror/deduped count
+tokens graded as digests, SQLite expression-depth on 2K-key predicates (SCD2,
+mirror, CDC LSN lookup), SQLite typed read-back checksum, SQLite reader/writer
+lock (WAL), PG slot-create fallback inside an aborted transaction masking the real
+refusal. D-CDC-SLOT-LIFECYCLE closed: `DELETE /schedules/{id}` releases the PG
+slot + publication through `services/cdc_capture_release.py` (route-shared and
+active slots are kept; unreachable source returns the exact DROP as next action)
+and the multi-table shared-reader key no longer embeds the job id (was one leaked
+slot + re-snapshot per beat). CDC-only matrix re-run pass=9 fail=0 skip=3
+(`matrix_cdc_release.json`) with the slot asserted absent after release.
+100K/cell (register §8j): the first PG/MySQL × 7-mode run at 100K found one real
+engine defect — incremental_append seeking `WHERE cursor > page_max` on a cursor
+with no unique tie-break skipped every row tied at a page edge (27,500 of 107,500
+landed). Fixed at the owner (`338266c9`): `cursor_unique_evidence` +
+`incremental_read_needs_filtered_scan` refuse the seek and the SQL readers page
+one held snapshot bound to the run watermark. 100K incremental_append re-run
+PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0**
+(`matrix_100k_incappend.json`); the full 100K PG/MySQL × 7-mode result is posted
+on PR #172 as it lands.
+**Open:** 100K SQLite-source cells for the other modes, MongoDB SCD2/mirror and
+hosted clouds remain unmeasured.
 
 ## 7. Continuing this work
 

@@ -25,7 +25,6 @@ from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_snowflake_common import (
     require_safe_table,
-    skip_complete_snowflake,
     snowflake_connect,
     snowflake_dest_count,
     snowflake_execute,
@@ -89,15 +88,6 @@ def copy_snowflake_to_snowflake(
     dest_count_before = snowflake_dest_count(dest_cfg, dest_table)
     dest_occupied = dest_count_before > 0
     if dest_occupied and not replace_destination:
-        if dest_count_before == source_count:
-            return skip_complete_snowflake(
-                source_count=source_count,
-                dest_count=dest_count_before,
-                extra_snapshot={
-                    "snowflake_write": "skip",
-                    "snowflake_read": "skip",
-                },
-            )
         raise FastPathUnavailable(
             "append into occupied Snowflake dest stays on the row path "
             "(identity COPY would duplicate)"

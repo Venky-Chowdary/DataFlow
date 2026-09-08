@@ -162,3 +162,31 @@ def test_incremental_append_still_narrows_after_the_scd2_carve_out():
     first.commit()
     second = _bind()
     assert second.bound(ROWS) == []
+
+
+def test_commit_stamps_the_proven_watermark_on_the_job_that_advanced_it(monkeypatch):
+    stamped: list[tuple[str, dict[str, Any]]] = []
+
+    def _stamp(job_id: str, cursor_key: str, watermark: str, cursor_column: str) -> None:
+        stamped.append((job_id, {"cursor_key": cursor_key, "cursor_value": watermark, "cursor_column": cursor_column}))
+
+    monkeypatch.setattr(sync_cursor, "_stamp_job_watermark", _stamp)
+    bound = _bind()
+    bound.bound(ROWS)
+    bound.commit(job_id="job-42")
+    assert stamped == [(
+        "job-42",
+        {"cursor_key": bound.scope.cursor_key, "cursor_value": bound.high_mark, "cursor_column": "updated_at"},
+    )]
+    assert sync_cursor.get_watermark(bound.scope.cursor_key) == bound.high_mark
+
+
+def test_commit_without_a_job_id_still_advances_the_route_watermark(monkeypatch):
+    def _never(*_a: Any, **_k: Any) -> None:
+        raise AssertionError("no job to stamp")
+
+    monkeypatch.setattr(sync_cursor, "_stamp_job_watermark", _never)
+    bound = _bind()
+    bound.bound(ROWS)
+    bound.commit()
+    assert sync_cursor.get_watermark(bound.scope.cursor_key) == bound.high_mark

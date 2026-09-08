@@ -21,7 +21,10 @@ from decimal import Decimal
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+)
 from services.copy_pg_mongo import mongo_collection, mongo_dest_count
 
 logger = logging.getLogger(__name__)
@@ -98,33 +101,6 @@ def insert_many_documents(coll: Any, docs: list[dict[str, Any]]) -> int:
     return inserted
 
 
-def skip_complete_mongo(
-    *,
-    source_count: int,
-    dest_count: int,
-    extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "table",
-        "mongo_write": "skip",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
-    )
-
 
 def prepare_mongo_dest(
     *,
@@ -144,12 +120,6 @@ def prepare_mongo_dest(
     dest_count_before = mongo_dest_count(dest_cfg, dest_table)
     dest_occupied = dest_count_before > 0
     if dest_occupied and not replace_destination:
-        if dest_count_before == source_count:
-            return skip_complete_mongo(
-                source_count=source_count,
-                dest_count=dest_count_before,
-                extra_snapshot=extra_snapshot,
-            )
         raise FastPathUnavailable(
             "append into occupied Mongo dest stays on the row path "
             "(identity COPY would duplicate)"

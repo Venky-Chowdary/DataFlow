@@ -255,7 +255,7 @@ def test_live_mongo_sqlite_nested_declines(tmp_path):
         mongo.close()
 
 
-def test_live_mongo_sqlite_skip_when_dest_count_matches(tmp_path):
+def test_live_mongo_sqlite_equal_count_append_declines(tmp_path):
     tag = uuid.uuid4().hex[:8]
     src_db = tmp_path / "src.db"
     dest_db = tmp_path / "dst.db"
@@ -273,16 +273,16 @@ def test_live_mongo_sqlite_skip_when_dest_count_matches(tmp_path):
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mongo_to_sqlite(
-            source_cfg=_mongo_cfg(src),
-            source_table=src,
-            dest_cfg=_cfg(dest_db, dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlite_ddls=["INTEGER", "TEXT"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_mongo_to_sqlite(
+                source_cfg=_mongo_cfg(src),
+                source_table=src,
+                dest_cfg=_cfg(dest_db, dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlite_ddls=["INTEGER", "TEXT"],
+                replace_destination=False,
+            )
         assert _dest_count(dest_db, dest) == 800
     finally:
         _drop_mongo(src)

@@ -153,3 +153,49 @@ def test_streaming_append_still_fails_without_sample_proof():
     # delta — not a whole-table checksum mismatch and not a sample pass.
     assert "unverified" in report["message"].lower()
     assert "checksum mismatch" not in report["message"].lower()
+
+
+def test_streaming_append_engine_digest_pair_needs_no_sample():
+    """A whole-population engine digest pair already compared every mapped
+    cell (server-to-server COPY); a stashed sample is a subset of that proof
+    and must not be demanded on top of it."""
+    endpoint = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        database="railway",
+        schema="public",
+        table="airports",
+    )
+    mappings = [{"source": "code", "target": "code"}, {"source": "city", "target": "city"}]
+    with patch(
+        "src.transfer.reconcile_step.resolve_connector_config",
+        return_value={"type": "postgresql", "database": "railway", "schema": "public", "ssl": False},
+    ), patch(
+        "src.transfer.reconcile_step.verify_target",
+        return_value=(30, "engine-digest"),
+    ), patch(
+        "src.transfer.reconcile_step.read_target_sample",
+        return_value=[],
+    ):
+        report = run_reconciliation(
+            endpoint=endpoint,
+            records=[],
+            columns=["code", "city"],
+            rows_written=30,
+            writer_checksum="x",
+            dest_summary={
+                "schema": "public",
+                "table": "airports",
+                "streaming": True,
+                "load_method": "copy_binary_server_to_server",
+                "source_row_count": 30,
+                "rows_written": 30,
+                "engine_source_checksum": "d1",
+                "engine_target_checksum": "d1",
+                "reconcile_sample": None,
+            },
+            mappings=mappings,
+            validation_mode="strict",
+        )
+    assert "no reconcile_sample" not in (report.get("message") or "")
+    assert report["passed"] is True, report

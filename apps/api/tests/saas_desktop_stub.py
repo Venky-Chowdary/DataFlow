@@ -217,8 +217,8 @@ def seed_tabular_fixture() -> None:
     STORE.rows["Account"] = [dict(r) for r in rows]
     STORE.rows["contacts"] = [dict(r) for r in rows]
     STORE.rows["customers"] = [
-        {"id": "cus_1", "object": "customer", "amount": 100000, "email": "a@example.com"},
-        {"id": "cus_2", "object": "customer", "amount": 200050, "email": "b@example.com"},
+        {"id": "1", "object": "customer", "amount": 100000, "email": "a@example.com"},
+        {"id": "2", "object": "customer", "amount": 200050, "email": "b@example.com"},
     ]
     STORE.rows["records"] = [
         {"id": "1", "amount": "1000.00"},

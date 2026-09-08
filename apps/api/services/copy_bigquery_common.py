@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathUnavailable,
+)
 
 _BIGQUERY_FAMILY = frozenset({
     "bigquery",
@@ -238,30 +240,3 @@ def bigquery_dest_count(cfg: dict[str, Any], table: str) -> int:
     if n is None:
         raise FastPathUnavailable("BigQuery dest COUNT(*) unknowable")
     return int(n)
-
-
-def skip_complete_bigquery(
-    *,
-    source_count: int,
-    dest_count: int,
-    extra_snapshot: dict[str, Any] | None = None,
-) -> FastPathResult:
-    proof = f"dest_count:{dest_count}"
-    snapshot = {
-        "copy_workers": 1,
-        "copy_split": "skip",
-        "copy_partitions": 1,
-        "partitions_skipped": 1,
-        "partitions_loaded": 0,
-        "shard_mode": "table",
-        **(extra_snapshot or {}),
-    }
-    return FastPathResult(
-        rows_copied=source_count,
-        source_rows=source_count,
-        source_checksum=proof,
-        target_rows=dest_count,
-        target_checksum=proof,
-        source_snapshot=snapshot,
-        proof_scope="dest_count_equals_source_snapshot_count",
-    )

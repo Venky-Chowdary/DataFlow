@@ -13,7 +13,7 @@ rule and never weak attributes like ``capital``.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Sequence
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 
@@ -129,15 +129,25 @@ def sync_requires_unique_identity(
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
 
 
-def dest_is_key_addressed(dest_kind: str | None) -> bool:
+def dest_is_key_addressed(
+    dest_kind: str | None,
+    key_columns: Sequence[str] | None = None,
+) -> bool:
     """True when every write to this destination is addressed by identity.
 
     Redis ``SET``, DynamoDB ``PutItem``, Elasticsearch index-by-``_id`` and
     vector upserts replace the value held at the key. Re-writing a key that
     already exists is the destination's defined behaviour, not a lost row, so
     cardinality growth cannot account for such a write.
+
+    MongoDB is addressed by ``_id`` alone: an insert whose ``_id`` is unmapped
+    gets a server-assigned ObjectId per document, so an append accumulates
+    rows exactly like a SQL table and its cardinality must be closed by
+    COUNT(*) delta, not a key census over some other mapped column.
     """
     kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    if kind == "mongodb":
+        return any((c or "").strip() == "_id" for c in (key_columns or ()))
     return kind in KEY_ADDRESSED_DESTS
 
 

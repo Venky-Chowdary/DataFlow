@@ -167,8 +167,14 @@ def append_row_count_report(
     rows_skipped: int,
     sample_compare: dict[str, Any] | None,
     target_rows_before: int | None = None,
+    keyed_expected_delta: int | None = None,
 ) -> Any:
     """Cardinality verdict for an append into a non-empty destination.
+
+    ``keyed_expected_delta`` is the writer's key census (``inserts - deletes``)
+    for a merge into an occupied destination: a keyed write grows the table by
+    the keys it inserted, not by the batch size, so it replaces ``expected_rows``
+    as the delta identity.
 
     The only cardinality proof available for append is the *delta*:
     ``target_rows - target_rows_before == expected_rows``. The final count on
@@ -216,15 +222,38 @@ def append_row_count_report(
         )
 
     delta = target_rows - int(target_rows_before)
-    if delta != expected_rows:
+    keyed = keyed_expected_delta is not None
+    identity = int(keyed_expected_delta) if keyed else expected_rows
+    verb = "merged" if keyed else "appended"
+    if delta != identity:
         return ReconciliationReport(
             passed=False,
             message=(
-                f"Append delta mismatch: destination held {target_rows_before} "
-                f"row(s) before the write and {target_rows} after — {delta} "
-                f"appended, {expected_rows} expected.{sample_note}"
+                f"{'Keyed' if keyed else 'Append'} delta mismatch: destination held "
+                f"{target_rows_before} row(s) before the write and {target_rows} "
+                f"after — {delta} {verb}, {identity} expected"
+                + (
+                    f" (batch of {expected_rows} event(s): inserts - deletes = "
+                    f"{identity}).{sample_note}"
+                    if keyed
+                    else f".{sample_note}"
+                )
             ),
             assurance_level="none",
+            **common,
+        )
+
+    if keyed:
+        return ReconciliationReport(
+            passed=True,
+            message=(
+                f"Keyed delta verified ({expected_rows} event(s) merged, "
+                f"{identity} net new key(s): {target_rows_before} → {target_rows}). "
+                "Whole-table digests are not comparable for a merge into "
+                "pre-existing rows — per-cell fidelity is NOT proven."
+                f"{sample_note}"
+            ),
+            assurance_level="row_count",
             **common,
         )
 

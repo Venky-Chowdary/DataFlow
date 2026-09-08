@@ -13,6 +13,7 @@ from typing import Any
 
 from services.checkpoint_service import Checkpoint
 from services.copy_fast_path import declared_copy_carrier
+from services.tombstone import detect_tombstone_column
 
 from .models import EndpointConfig
 
@@ -57,6 +58,7 @@ def _try_copy_fast_path(
     incremental_cursor: str = "",
     incremental_watermark: str | None = None,
     incremental_pk: str = "",
+    job_id: str | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Move the whole table server-to-server, or return ``None`` to stream rows.
 
@@ -640,6 +642,19 @@ def _try_copy_fast_path(
             f"sync mode {effective_sync!r} is not identity COPY (append/overwrite/upsert/incremental)"
         )
         return None
+    if merge_upsert:
+        # A staged server-side MERGE lands every source row, including ones the
+        # row path hard-DELETEs for a set soft-delete flag; the row path owns
+        # tombstone interpretation (boolean / deleted_at / __op parsing).
+        tombstone = detect_tombstone_column(
+            None, [str(m.get("target") or m.get("source") or "") for m in mappings or []]
+        )
+        if tombstone:
+            note_copy_decline(
+                f"upsert batch carries soft-delete column {tombstone!r}; tombstone "
+                "hard-DELETEs stay on the row path"
+            )
+            return None
 
     source_table = source.table or source.collection or ""
     from .stream import _source_name, resolve_dest_table
@@ -976,6 +991,7 @@ def _try_copy_fast_path(
                 incremental_cursor=incremental_cursor,
                 incremental_watermark=incremental_watermark,
                 incremental_pk=incremental_pk,
+                job_id=job_id,
             )
             if sqlite_sqlite is not None:
                 return sqlite_sqlite
@@ -4062,9 +4078,14 @@ def _try_sqlite_sqlite_copy_fast_path(
     incremental_cursor: str = "",
     incremental_watermark: str | None = None,
     incremental_pk: str = "",
+    job_id: str | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity SQLite→SQLite: ATTACH + INSERT SELECT. Dest COUNT is the proof."""
-    from services.copy_fast_path import FastPathUnavailable, note_copy_decline
+    from services.copy_fast_path import (
+        FastPathUnavailable,
+        copy_ledger_key,
+        note_copy_decline,
+    )
     from services.copy_incremental import COPY_INCREMENTAL_MODES, copy_sqlite_to_sqlite_incremental
     from services.copy_pg_mysql import mapping_is_plain_carry
     from services.copy_sqlite_common import sqlite_type_is_copy_safe
@@ -4113,6 +4134,7 @@ def _try_sqlite_sqlite_copy_fast_path(
                 pairs=pairs,
                 sqlite_ddls=sqlite_ddls,
                 replace_destination=replace_destination,
+                ledger=copy_ledger_key(job_id, dest_table),
             )
     except FastPathUnavailable as exc:
         logger.info("SQLite→SQLite COPY declined: %s", exc)

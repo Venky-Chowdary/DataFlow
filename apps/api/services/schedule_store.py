@@ -175,6 +175,10 @@ class PipelineSchedule:
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
+    #: What ``cursor_column`` means in the source (services.cursor_semantics).
+    #: The g9 gate refuses an undeclared cursor on a strict incremental run, so
+    #: a schedule that cannot carry the declaration can never run unattended.
+    cursor_semantics: str = ""
     primary_key: str = ""  # key for idempotent incremental/cdc upserts
     #: Callable extract — persist the CALL/SELECT, not just the stream label.
     source_read_mode: str = ""
@@ -294,6 +298,7 @@ class PipelineSchedule:
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),
+            cursor_semantics=str(data.get("cursor_semantics") or "").strip().lower(),
             primary_key=(data.get("primary_key") or "").strip(),
             source_read_mode=str(data.get("source_read_mode") or "").strip().lower(),
             procedure_call=str(data.get("procedure_call") or "").strip(),
@@ -679,6 +684,23 @@ def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: st
         raise ValueError(reason)
 
 
+def _assert_cursor_semantics(data: Mapping[str, Any] | None) -> None:
+    """Refuse a cursor meaning the product does not define.
+
+    Whether the declaration is *sufficient* for the sync mode is the g9 gate's
+    call at run time (it depends on validation mode and the live schema); an
+    unknown word is refused here so it never reaches a run.
+    """
+    from services.cursor_semantics import CURSOR_SEMANTICS
+
+    value = str((data or {}).get("cursor_semantics") or "").strip().lower()
+    if value and value not in CURSOR_SEMANTICS:
+        raise ValueError(
+            f"Unknown cursor semantics '{value}' — declare one of: "
+            + ", ".join(sorted(CURSOR_SEMANTICS))
+        )
+
+
 def find_studio_replay_target(
     schedule_id: str | None,
     source_connector_id: str,
@@ -755,6 +777,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
     _assert_callable_schedule_sync(payload, sync_mode)
+    _assert_cursor_semantics(payload)
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     rows = persisted_mapping_rows(payload.get("mappings"))
@@ -867,6 +890,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
         _assert_callable_schedule_sync(merged, sync_mode)
+        _assert_cursor_semantics(merged)
         from services.schedule_mapping_contract import (
             EMPTY_MAPPING_REFUSAL,
             persisted_mapping_rows,

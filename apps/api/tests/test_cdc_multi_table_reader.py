@@ -197,6 +197,9 @@ def test_shared_transfer_path_applies_per_table(tmp_path, monkeypatch) -> None:
     assert "shared_reader" in ddl[0]
     assert summary.get("cdc_shared_reader") is True
     assert "orders" in applied and "users" in applied
-    assert shared_route_cursor_key(
-        engine="postgresql", database="app", tables=["orders", "users"], job_id="job-shared"
-    ).startswith("cdc-shared:")
+    route_key = shared_route_cursor_key(
+        engine="postgresql", database="app", tables=["orders", "users"],
+        dest_type="sqlite", dest_database="/tmp/d.db",
+    )
+    assert route_key.startswith("cdc-shared:")
+    assert "job" not in route_key  # slot derives from the route, not the run

@@ -51,9 +51,31 @@ def _read_batch_impl(
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
     scan_state: dict[str, Any] | None = None,
+    scan_filter: tuple[str, str | None] | None = None,
 ):
     from connectors.generic_sql import connection_options
+    from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
     from services.procedure_source import is_callable_source, read_callable_batch
+
+    # Incremental read on a source with no unique tie-break: one held snapshot
+    # scan bounded by ``WHERE cursor > watermark``. Never falls back to an
+    # unfiltered scan or a cursor-only seek — both lose rows silently.
+    _scan_filter_kw: dict[str, Any] = {}
+    if scan_filter is not None:
+        if scan_state is None or cursor_column or cursor_key_columns:
+            raise ValueError(
+                "scan_filter requires a held scan_state and no keyset cursor arguments"
+            )
+        if src_type not in FILTERED_SCAN_SOURCES:
+            raise ValueError(
+                f"{src_type} cannot page an incremental read on cursor "
+                f"{scan_filter[0]!r} without a unique tie-break: declare a primary "
+                "key or a non-nullable unique column on the stream contract."
+            )
+        _scan_filter_kw = {
+            "filter_column": scan_filter[0],
+            "filter_after": scan_filter[1],
+        }
 
     # Procedure / custom-SQL extract — one CALL, then page the spool.
     # Must run before table readers so a leftover table name cannot hijack the read.
@@ -124,6 +146,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **_scan_filter_kw,
                 **connection_options(cfg),
             )
         if cursor_column:
@@ -179,6 +202,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **_scan_filter_kw,
             )
         if cursor_column:
             return read_table_cursor_batch(
@@ -486,6 +510,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **_scan_filter_kw,
             )
         from connectors.sqlite_reader import read_table_batch
 
@@ -526,6 +551,7 @@ def _read_batch_impl(
                 limit=limit,
                 known_total_rows=known_total_rows,
                 scan_state=scan_state,
+                **_scan_filter_kw,
                 **connection_options(cfg),
             )
         if cursor_column or cursor_key_columns:
@@ -588,6 +614,7 @@ def _read_batch_impl(
                 known_total_rows=known_total_rows,
                 type=src_type,
                 scan_state=scan_state,
+                **_scan_filter_kw,
                 **connection_options(cfg),
             )
         if cursor_column or cursor_key_columns:

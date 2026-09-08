@@ -41,7 +41,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    text_cell_copy_safe,
+)
 from services.copy_incremental import (
     COPY_INCREMENTAL_MODES,
     _apply_staging_to_mysql,
@@ -616,12 +620,33 @@ def _write_mapped_csv(
     watermark: str | None = None,
     pk_column: str = "",
     file_type: str = "",
+    declared_types: list[str] | None = None,
+    physical_types: list[str] | None = None,
+    dest_db: str = "",
 ) -> int:
-    """Write dest-ordered CSV with HEADER. Returns data-row COUNT."""
+    """Write dest-ordered CSV with HEADER. Returns data-row COUNT.
+
+    Every cell is censused against its declared carrier on the way through
+    (``text_cell_copy_safe``): the destination's bulk loader parses text
+    all-or-nothing, so a cell it would reject declines the whole fast path
+    here — before any destination object exists — and the row path
+    quarantines it.
+    """
     kind = (file_type or "").strip().lower()
     delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
     source_cols = [p[0] for p in pairs]
     dest_cols = [p[1] for p in pairs]
+    carriers = list(declared_types or [""] * len(pairs))
+    if len(carriers) != len(pairs):
+        raise FastPathUnavailable("declared type list / column list mismatch")
+    physicals = list(physical_types or [""] * len(pairs))
+    if len(physicals) != len(pairs):
+        raise FastPathUnavailable("physical type list / column list mismatch")
+    census = [
+        (col, logical, physical)
+        for col, logical, physical in zip(source_cols, carriers, physicals, strict=True)
+        if logical
+    ]
     count = 0
     unbounded = 0
     pending: list[dict[str, str | None]] = []
@@ -629,6 +654,16 @@ def _write_mapped_csv(
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
+            for col, logical, physical in census:
+                cell = rec.get(col)
+                if not text_cell_copy_safe(
+                    cell, logical, physical=physical, dest_db=dest_db
+                ):
+                    raise FastPathUnavailable(
+                        f"{col!r} cell {cell!r} (data row {count + written + 1}) is not "
+                        f"{physical or logical} COPY-safe; the row path owns its "
+                        "validation and quarantine"
+                    )
             writer.writerow([_csv_cell(rec.get(col)) for col in source_cols])
             written += 1
         return written
@@ -685,6 +720,9 @@ def _mapped_csv_file(
     watermark: str | None = None,
     pk_column: str = "",
     file_type: str = "",
+    declared_types: list[str] | None = None,
+    physical_types: list[str] | None = None,
+    dest_db: str = "",
 ) -> Iterator[tuple[str, int, str]]:
     kind = (file_type or "").strip().lower()
     ext = "tsv" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else "csv"
@@ -702,6 +740,9 @@ def _mapped_csv_file(
             watermark=watermark,
             pk_column=pk_column,
             file_type=file_type,
+            declared_types=declared_types,
+            physical_types=physical_types,
+            dest_db=dest_db,
         )
         yield path, count, ext
     finally:
@@ -785,7 +826,6 @@ def copy_csv_to_sqlite(
         sqlite_resolved_path,
         sqlite_table_exists,
         sqlite_type_is_copy_safe,
-        skip_complete_sqlite,
     )
 
     if not pairs or len(pairs) != len(sqlite_ddls):
@@ -824,13 +864,6 @@ def copy_csv_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                dest_conn.rollback()
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip", "sqlite_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"
@@ -920,7 +953,6 @@ def copy_csv_to_postgres(
     """Mapped local CSV into PostgreSQL COPY FROM STDIN. Dest COUNT(*) is the proof."""
     from services.copy_fast_path import _quote, _table_ref
     from services.copy_mysql_pg import _pg_connect, _pg_create_sql
-    from services.copy_s3_common import skip_complete_s3
 
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
@@ -960,12 +992,6 @@ def copy_csv_to_postgres(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip"},
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied PostgreSQL dest stays on the row path "
@@ -1024,7 +1050,6 @@ def copy_csv_to_mysql(
     from connectors.write_resilience import is_public_proxy_host
     from services.copy_mysql_pg import _mysql_connect, _mysql_ident
     from services.copy_pg_mysql import _mysql_create_sql
-    from services.copy_s3_common import skip_complete_s3
     from services.copy_s3_mysql import _load_delimited_into_mysql, _mysql_table_exists
 
     if not pairs or len(pairs) != len(mysql_ddls):
@@ -1050,12 +1075,6 @@ def copy_csv_to_mysql(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count and not replace_destination:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"csv_read": "skip", "load_data": "skip"},
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied MySQL dest stays on the row path "
@@ -1155,6 +1174,9 @@ def copy_csv_to_sqlite_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
+        physical_types=sqlite_ddls,
+        dest_db="sqlite",
     ) as (path, source_count, ext):
         if source_count == 0:
             return _empty_incremental(_sqlite_existing_count(dest_cfg, dest_table), mode)
@@ -1204,6 +1226,7 @@ def copy_csv_to_postgres_incremental(
     pk_column: str = "",
     read_options: Any = None,
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     from services.copy_fast_path import _table_ref
     from services.copy_mysql_pg import _pg_connect, _pg_create_sql
@@ -1233,6 +1256,9 @@ def copy_csv_to_postgres_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
+        physical_types=pg_ddls,
+        dest_db="postgresql",
     ) as (path, source_count, ext):
         dest_conn = _pg_connect(dest_cfg)
         try:
@@ -1329,6 +1355,7 @@ def copy_csv_to_mysql_incremental(
     pk_column: str = "",
     read_options: Any = None,
     file_type: str = "",
+    declared_types: list[str] | None = None,
 ) -> FastPathResult:
     from services.copy_mysql_pg import _mysql_connect, _mysql_ident
     from services.copy_pg_mysql import _mysql_create_sql
@@ -1357,6 +1384,9 @@ def copy_csv_to_mysql_incremental(
         watermark=watermark,
         pk_column=pk_column,
         file_type=file_type,
+        declared_types=declared_types,
+        physical_types=mysql_ddls,
+        dest_db="mysql",
     ) as (path, source_count, ext):
         dest_conn = _mysql_connect(dest_cfg)
         try:
@@ -1452,6 +1482,7 @@ def _pairs_and_ddls(
     from connectors.mysql_writer import mysql_type
     from connectors.postgresql_writer import pg_type
     from connectors.sqlite_writer import sqlite_type
+    from services.copy_fast_path import declared_copy_carrier
     from services.copy_mysql_pg import mysql_type_is_copy_safe
     from services.copy_sqlite_common import sqlite_type_is_copy_safe
 
@@ -1462,9 +1493,7 @@ def _pairs_and_ddls(
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
-        declared = str(
-            item.get("type") or schema.get(source_col) or schema.get(target_col) or ""
-        )
+        declared = declared_copy_carrier(item, schema, source_col, target_col)
         if dest in {"postgresql", "postgres"}:
             physical = pg_type(declared) if declared else "TEXT"
             if not pg_type_is_load_safe(physical):
@@ -1653,6 +1682,7 @@ def try_copy_local_csv(
                     pk_column=pk_column,
                     read_options=read_options,
                     file_type=file_type,
+                    declared_types=declared_types,
                 )
             elif dest_n in {"mysql", "mariadb"}:
                 result = copy_csv_to_mysql_incremental(
@@ -1668,6 +1698,7 @@ def try_copy_local_csv(
                     pk_column=pk_column,
                     read_options=read_options,
                     file_type=file_type,
+                    declared_types=declared_types,
                 )
             else:
                 result = copy_csv_to_sqlite_incremental(
@@ -1692,6 +1723,9 @@ def try_copy_local_csv(
                 pairs,
                 read_options=read_options,
                 file_type=file_type,
+                declared_types=declared_types,
+                physical_types=ddls,
+                dest_db=dest_n,
             ) as (path, source_count, ext):
                 if dest_n in {"postgresql", "postgres"}:
                     result = copy_csv_to_postgres(

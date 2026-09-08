@@ -14,7 +14,7 @@ from typing import Any, Callable
 from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
-from connectors.sqlite_common import sqlite_file_path
+from connectors.sqlite_common import sqlite_file_path, tune_sqlite_connection
 from connectors.write_resilience import (
     ensure_raw_write_ledger,
     mark_raw_chunk_committed,
@@ -1195,6 +1195,7 @@ def write_mapped_rows(
         ledger_chunks_skipped = 0
 
         conn = sqlite3.connect(path, timeout=8)
+        tune_sqlite_connection(conn)
         try:
             # Schema setup in its own transaction.
             with conn:

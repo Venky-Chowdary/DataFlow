@@ -69,6 +69,7 @@ from services.cdc_snapshot_mode import (
     snapshot_plan_stamp,
 )
 from services.error_handling import RetryBudget, with_retry
+from services.keyset_pagination import compare_keyset_bookmark, max_keyset_bookmark
 from services.replay_safety import classify_replay_safety
 from services.sync_cursor import (
     build_cursor_key,
@@ -79,6 +80,7 @@ from services.sync_cursor import (
     set_watermark,
 )
 from services.value_serializer import cell_to_string
+from .stream_row_accounting import stamp_source_row_count
 
 try:
     from .adapters import resolve_connector_config, resolve_dest_table
@@ -497,6 +499,9 @@ class CdcState:
     watermark: str | None = None
     running_cursor: str | None = None
     rows_written: int = 0
+    #: Rows the reader handed to the writer (inserts + updates) across every
+    #: batch — the run's source population when no source image COUNT exists.
+    source_changes_read: int = 0
     inserts: int = 0
     updates: int = 0
     deletes: int = 0
@@ -537,6 +542,10 @@ def _merge_cdc_dest_summary(
     overwritten.
     """
     incoming = dict(dest_summary or {})
+    # A writer stamps the batch it just wrote as ``source_row_count``; that is
+    # one page, not the run's population. The run stamps its own count once.
+    incoming.pop("source_row_count", None)
+    incoming.pop("source_row_count_source", None)
     new_details = [
         dict(d) for d in (incoming.get("rejected_details") or []) if isinstance(d, dict)
     ]
@@ -641,14 +650,16 @@ class CdcEngine:
 
     def _read(self, cursor_after: str | None = None) -> Iterator[tuple[list[str], list[list[str]]]]:
         """Yield (headers, rows) batches from the source table."""
-        offset = 0
-        cursor_type = None
         # Empty-string watermarks are valid (e.g. '' cursor after coalesce) —
         # truthiness checks would re-snapshot forever.
-        if cursor_after is not None:
-            samples = [cursor_after]
-            inferred = infer_watermark_type(samples)
-            cursor_type = inferred.value
+        if cursor_after is None:
+            yield from self._read_snapshot_pages()
+            return
+        yield from self._read_keyset_pages(cursor_after)
+
+    def _read_snapshot_pages(self) -> Iterator[tuple[list[str], list[list[str]]]]:
+        """Offset-paged full read (no cursor)."""
+        offset = 0
         while True:
             result, _ = _unwrap_read(
                 _read_batch(
@@ -658,20 +669,77 @@ class CdcEngine:
                     self.columns or None,
                     offset,
                     self.batch_size,
-                    cursor_column=self.cursor_field if cursor_after is not None else "",
-                    cursor_after=cursor_after,
-                    cursor_type=cursor_type,
+                    cursor_column="",
+                    cursor_after=None,
+                    cursor_type=None,
                     database=self.src_cfg.get("database", ""),
                 )
             )
-            if not result or not getattr(result, "rows", None):
-                break
-            headers = result.headers
-            rows = result.rows
+            rows = list(getattr(result, "rows", None) or []) if result else []
             if not rows:
                 break
-            yield headers, rows
+            yield result.headers, rows
             offset += len(rows)
+
+    def _keyset_tiebreak(self) -> str:
+        pk = (self.primary_key or "").strip()
+        return pk if pk and pk != self.cursor_field else ""
+
+    def _read_keyset_pages(
+        self, cursor_after: str
+    ) -> Iterator[tuple[list[str], list[list[str]]]]:
+        """Keyset-paged read of every row past ``cursor_after``.
+
+        Source readers ignore ``offset`` once a cursor is supplied, so each
+        page must seek from the previous page's maximum ``(cursor, pk)``
+        bookmark. The first seek is cursor-only (the persisted watermark);
+        every later seek is composite when a tie-break primary key exists, so
+        a page of rows sharing one cursor value still advances. A page whose
+        bookmark does not advance is a spin and fails closed instead of
+        re-reading the same rows forever.
+        """
+        cursor_type = infer_watermark_type([cursor_after]).value
+        tiebreak = self._keyset_tiebreak()
+        key_columns = [self.cursor_field] + ([tiebreak] if tiebreak else [])
+        bookmark = cursor_after
+        while True:
+            result, _ = _unwrap_read(
+                _read_batch(
+                    self.src_type,
+                    self.src_cfg,
+                    self.table_name,
+                    self.columns or None,
+                    0,
+                    self.batch_size,
+                    cursor_column=self.cursor_field,
+                    cursor_after=bookmark,
+                    cursor_type=cursor_type,
+                    cursor_primary_key=tiebreak or None,
+                    database=self.src_cfg.get("database", ""),
+                )
+            )
+            rows = list(getattr(result, "rows", None) or []) if result else []
+            if not rows:
+                break
+            headers = result.headers
+            next_bookmark = max_keyset_bookmark(rows, headers, key_columns)
+            if next_bookmark is None:
+                raise RuntimeError(
+                    f"CDC cursor page for {self.table_name!r} carries no "
+                    f"{key_columns!r} value to advance from; refusing to re-read"
+                )
+            order = compare_keyset_bookmark(next_bookmark, bookmark)
+            if order is not None and order <= 0:
+                raise RuntimeError(
+                    f"CDC cursor for {self.table_name!r} did not advance past "
+                    f"{bookmark!r} (page max {next_bookmark!r}); every row on the "
+                    "page shares the cursor value and no tie-break key can order "
+                    "them — declare a primary key or a unique cursor"
+                )
+            yield headers, rows
+            if len(rows) < self.batch_size:
+                break
+            bookmark = next_bookmark
 
     def _yield_batches(self, reader: Iterator[tuple[list[str], list[list[str]]]]) -> Iterator[ChangeBatch]:
         """Stream batches from a (headers, rows) reader without materializing all rows."""
@@ -1321,7 +1389,8 @@ def _run_cdc_shared_multi_table(
         engine=src_type,
         database=str(src_cfg.get("database") or ""),
         tables=tables,
-        job_id=job_id,
+        dest_type=dest_type,
+        dest_database=str(dest_cfg.get("database") or ""),
     )
     shared_wm = get_watermark(shared_key)
     if eos_active:
@@ -2511,6 +2580,7 @@ def _run_cdc_single_stream(
                 ),
             )
         state.rows_written += rows_written
+        state.source_changes_read += len(change.inserts) + len(change.updates)
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
         state.deletes += deleted
@@ -2790,6 +2860,15 @@ def _run_cdc_single_stream(
         table_name=table_name,
         events=int(state.inserts or 0) + int(state.updates or 0) + int(state.deletes or 0),
     )
+    if summary.get("source_row_count_source") != "cdc_source_image_count":
+        # No live source-table image to count (log/stream source or COUNT
+        # failed): the reader's own change population is the measured count.
+        stamp_source_row_count(
+            summary,
+            reader_count=int(state.source_changes_read or 0),
+            rows_written=int(state.rows_written or 0),
+            source="cdc_reader_changes",
+        )
     if capture_downgrade:
         summary.update(capture_downgrade)
     if hasattr(cdc, "close"):

@@ -50,6 +50,24 @@ MODE_ROW_APPLY = "row_apply"
 MODE_QUERY = "query"
 DEST_PROCEDURE_MODES = frozenset({MODE_HOOKS, MODE_ROW_APPLY, MODE_QUERY})
 DEST_ROW_MODES = frozenset({MODE_ROW_APPLY, MODE_QUERY})
+#: Every ``extra`` key that turns a plain table destination into a procedure /
+#: hook / DML destination. ``plan_dest_procedure`` reads only these; a clone
+#: that must be a plain table (the DLQ) strips exactly this set.
+DEST_PROCEDURE_EXTRA_KEYS = frozenset(
+    {
+        "dest_write_mode",
+        "dest_read_mode",
+        "dest_query_sql",
+        "dest_query",
+        "dest_procedure_before",
+        "dest_procedure_after",
+        "dest_procedure_call",
+        "dest_procedure",
+        "dest_procedure_params",
+        "dest_procedure_param_map",
+        "procedure_param_map",
+    }
+)
 
 REASON_DEST_ENGINE = "dest_procedure_engine_refused"
 REASON_DEST_CDC = "dest_procedure_refuses_history_sync"

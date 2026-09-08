@@ -36,7 +36,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    _quote,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import _pg_quoted_literal
 from services.keyset_pagination import (
     encode_keyset_bookmark,
@@ -508,8 +513,8 @@ def _apply_staging_to_mysql(
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
+        merge_staging_into_dest,
         mysql_upsert_from_staging_sql,
-        pk_join_count_sql,
         _result_with_upsert_proof,
     )
 
@@ -532,23 +537,22 @@ def _apply_staging_to_mysql(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            mysql_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=mysql_upsert_from_staging_sql(
                 dest_q, staging_q, target_cols, dest_pk, quote
-            )
+            ),
+            dest_q=dest_q,
+            staging_q=staging_q,
+            pk_ident=quote(dest_pk),
         )
-        pk_ident = quote(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,
@@ -600,8 +604,8 @@ def _apply_staging_to_pg(
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
+        merge_staging_into_dest,
         pg_upsert_from_staging_sql,
-        pk_join_count_sql,
         _result_with_upsert_proof,
     )
 
@@ -624,23 +628,22 @@ def _apply_staging_to_pg(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            pg_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=pg_upsert_from_staging_sql(
                 dest_ref, staging_ref, target_cols, dest_pk, _quote
-            )
+            ),
+            dest_q=dest_ref,
+            staging_q=staging_ref,
+            pk_ident=_quote(dest_pk),
         )
-        pk_ident = _quote(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_ref, staging_ref, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,
@@ -693,7 +696,7 @@ def _apply_staging_to_sqlite(
     from services.copy_sqlite_common import sqlite_ident
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
-        pk_join_count_sql,
+        merge_staging_into_dest,
         sqlite_upsert_from_staging_sql,
         _result_with_upsert_proof,
     )
@@ -717,23 +720,22 @@ def _apply_staging_to_sqlite(
             else UPSERT_PROOF_SCOPE,
         )
     if mode == "incremental_deduped":
-        dst_cur.execute(
-            sqlite_upsert_from_staging_sql(
+        preexisting, join_count, dest_count = merge_staging_into_dest(
+            dst_cur,
+            merge_sql=sqlite_upsert_from_staging_sql(
                 dest_q, staging_q, target_cols, dest_pk, sqlite_ident
-            )
+            ),
+            dest_q=dest_q,
+            staging_q=staging_q,
+            pk_ident=sqlite_ident(dest_pk),
         )
-        pk_ident = sqlite_ident(dest_pk)
-        dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
-        join_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
-        dest_count = int(dst_cur.fetchone()[0])
-        dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
         proven = _result_with_upsert_proof(
             result,
             join_count=join_count,
             dest_count=dest_count,
             staging_table=staging_name,
             dest_table=dest_table,
+            dest_preexisting=preexisting,
         )
         return _stamp_incremental(
             proven,
@@ -803,6 +805,7 @@ def _prepare_sqlite_incremental_dest(
             dest_conn.execute(
                 sqlite_create_sql(dest_table, pairs, sqlite_ddls, [dest_pk])
             )
+            settle_fast_path_create_on(dest_conn, dest_dialect="sqlite", dest_table=dest_table)
             created_dest = True
         else:
             dest_pks = sqlite_table_pk_columns(dest_conn, dest_table)
@@ -969,6 +972,9 @@ def copy_postgres_to_mysql_incremental(
                     dest_table, pairs, mysql_ddls, [dest_pk]
                 )
                 dst_cur.execute(create_sql)  # nosec B608
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
+                )
                 dest_conn.commit()
                 created_dest = True
             else:
@@ -1238,6 +1244,10 @@ def copy_mysql_to_postgres_incremental(
                         dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
                     )
                 )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                    dest_schema=dest_schema,
+                )
                 created_dest = True
             else:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1361,6 +1371,9 @@ def copy_mysql_to_mysql_incremental(
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
                     _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
                 )
                 dest_conn.commit()
                 created_dest = True
@@ -1690,6 +1703,10 @@ def copy_sqlite_to_postgres_incremental(
                         dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
                     )
                 )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                    dest_schema=dest_schema,
+                )
                 created_dest = True
             else:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1797,6 +1814,9 @@ def copy_sqlite_to_mysql_incremental(
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
                     _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="mysql", dest_table=dest_table
                 )
                 dest_conn.commit()
                 created_dest = True

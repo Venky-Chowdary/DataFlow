@@ -31,7 +31,6 @@ from services.copy_s3_common import (
     s3_ext,
     s3_iter_delimited_rows,
     s3_list_keys,
-    skip_complete_s3,
 )
 from services.copy_sqlite_common import (
     sqlite_bind_from_text,
@@ -128,13 +127,6 @@ def copy_s3_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                dest_conn.rollback()
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"s3_read": "skip", "sqlite_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"

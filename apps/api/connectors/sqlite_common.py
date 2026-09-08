@@ -41,6 +41,31 @@ def register_sqlite_decimal_adapter() -> None:
 register_sqlite_decimal_adapter()
 
 
+SQLITE_BUSY_TIMEOUT_MS = 30_000
+
+
+def tune_sqlite_connection(dbapi_conn: sqlite3.Connection) -> None:
+    """Configure a SQLite connection for a concurrent reader + writer.
+
+    SCD2/mirror stream a staging SELECT on one connection while merging into
+    the target on another, and both live in the same database file. Under
+    the default rollback journal the open reader blocks the writer's commit
+    and sqlite3 raises ``database is locked`` after its 5s default. WAL lets
+    the writer commit beside the reader; the busy timeout covers the brief
+    checkpoint/DDL contention that remains.
+    """
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        try:
+            cur.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            # Read-only / network filesystems refuse WAL; the timeout still applies.
+            pass
+    finally:
+        cur.close()
+
+
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     """Resolve the filesystem path to a SQLite database.
 

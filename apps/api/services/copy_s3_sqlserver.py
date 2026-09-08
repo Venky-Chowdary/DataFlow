@@ -35,7 +35,6 @@ from services.copy_s3_common import (
     s3_ext,
     s3_iter_delimited_rows,
     s3_list_keys,
-    skip_complete_s3,
 )
 from services.copy_sqlserver_pg import _close_ss, sqlserver_type_is_copy_safe
 from services.copy_sqlserver_s3 import _s3_proxy_fail_closed, _sqlserver_proxy_fail_closed
@@ -121,12 +120,6 @@ def copy_s3_to_sqlserver(
             dest_count_before = _ss_count(dst_cur, dest_ref)
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
-            if dest_count_before == source_count:
-                return skip_complete_s3(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"s3_read": "skip", "sqlserver_write": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied SQL Server dest stays on the row path "
                 "(identity COPY would duplicate)"

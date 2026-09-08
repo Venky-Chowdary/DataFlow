@@ -241,13 +241,30 @@ def read_table_scan_batch(
     known_total_rows: int | None = None,
     scan_state: dict[str, Any],
     conn: Any | None = None,
+    filter_column: str = "",
+    filter_after: str | None = None,
 ) -> ReadBatch:
-    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login."""
-    from connectors.sql_snapshot_scan import close_table_scan
+    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login.
+
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
+    (COUNT and SELECT alike) and order it by the cursor first — the incremental
+    read for a table with no unique tie-break to seek on.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
     from connectors.sql_identifiers import split_qualified_table
 
     _schema, table = split_qualified_table(table, schema)
     del schema, _schema
+    filter_value = scan_filter_value(filter_column, filter_after)
+    where_sql = ""
+    params: tuple[Any, ...] = ()
+    filter_q = ""
+    if filter_value is not None:
+        filter_q = quote_sql_identifier(
+            require_safe_identifier(filter_column, preserve_case=True), "`"
+        )
+        where_sql = f" WHERE {filter_q} > %s"
+        params = (filter_value,)
     if not scan_state.get("started"):
         table_ref = quote_table_ref(table, dialect="mysql")
         safe_table = require_safe_identifier(table, preserve_case=True)
@@ -268,7 +285,7 @@ def read_table_scan_batch(
             if known_total_rows is not None:
                 total = known_total_rows
             else:
-                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}{where_sql}", params)  # nosec B608
                 total = int(cur.fetchone()[0])
             identity = reflection_cache.dsn_identity(
                 driver="mysql",
@@ -279,12 +296,20 @@ def read_table_scan_batch(
                 connection_string=connection_string,
             )
             order_by = _order_by_clause(cur, safe_table, columns, identity=identity)
+            if filter_q:
+                order_by = f"{filter_q}, {order_by}"
             types = _column_types(cur, safe_table, identity=identity)
             col_list = _mysql_select_list(columns, types)
             if col_list is None:
-                cur.execute(f"SELECT * FROM {table_ref} ORDER BY {order_by}")  # nosec B608
+                cur.execute(
+                    f"SELECT * FROM {table_ref}{where_sql} ORDER BY {order_by}",  # nosec B608
+                    params,
+                )
             else:
-                cur.execute(f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by}")  # nosec B608
+                cur.execute(
+                    f"SELECT {col_list} FROM {table_ref}{where_sql} ORDER BY {order_by}",  # nosec B608
+                    params,
+                )
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
         except Exception:
             try:
@@ -388,14 +413,23 @@ def read_table_cursor_batch(
             bookmark = present_cursor_bookmark(cursor_after)
             if bookmark is not None:
                 if pk_q:
-                    query = (
-                        f"{base} WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
-                        f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
-                    )
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )
-                    cur.execute(query, (cur_val, pk_val, limit))
+                    if pk_val == "":
+                        # Cursor-only watermark with a tie-break: seek on the
+                        # cursor, order on both for a deterministic page edge.
+                        query = (
+                            f"{base} WHERE {cursor_q} > %s "
+                            f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
+                        )
+                        cur.execute(query, (cur_val, limit))
+                    else:
+                        query = (
+                            f"{base} WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
+                            f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
+                        )
+                        cur.execute(query, (cur_val, pk_val, limit))
                 else:
                     query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
                     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)

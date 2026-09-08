@@ -546,19 +546,30 @@ def _introspect_redis(
         "password": password,
         "connection_string": connection_string,
     }
-    pattern = table or "*"
+    from connectors.redis_reader import resolve_key_pattern
+
+    pattern = resolve_key_pattern(table)
     try:
         from services.object_store_introspect import introspect_redis_keys
 
         result = introspect_redis_keys(cfg, pattern=pattern)
         if not result.get("ok"):
             return {"ok": False, "error": result.get("error", "Redis introspection failed"), "columns": []}
+        row_estimate = int(result.get("total_rows") or 0)
+        # The reader's ``redis_key``/``redis_value``/``redis_type`` envelope is
+        # not a live schema: an empty keyspace has no fields, and reporting the
+        # envelope as typed columns made a writer refuse Map stamps for
+        # create-new ("live schema is missing mapped field(s)").
+        columns = list(result.get("columns") or [])
+        schema = dict(result.get("schema") or {})
+        if row_estimate <= 0:
+            columns, schema = [], {}
         return {
             "ok": True,
-            "columns": result.get("columns", []),
-            "column_types": result.get("schema", {}),
-            "tables": [pattern],
-            "row_estimate": result.get("total_rows", 0),
+            "columns": columns,
+            "column_types": schema,
+            "tables": [table or pattern],
+            "row_estimate": row_estimate,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}

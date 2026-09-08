@@ -21,7 +21,12 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    plan_fast_path_create,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import (
     _jsonable_bound,
     integer_pk_cuts,
@@ -228,13 +233,15 @@ def _create_sql(
     ddls: list[str],
     pk_dest: list[str],
 ) -> str:
+    carry = plan_fast_path_create(
+        dest_dialect="oracle", pairs=pairs, ddls=ddls, primary_key=pk_dest,
+        dest_table=dest_table,
+    )
     cols: list[str] = []
-    targets = [t for _s, t in pairs]
     for (_source, target), ddl in zip(pairs, ddls):
-        cols.append(f"{_ident(target)} {ddl}")
-    pk = [c for c in pk_dest if c in targets]
-    if pk:
-        pk_sql = ", ".join(_ident(c) for c in pk)
+        cols.append(f"{_ident(target)} {ddl}{carry.column_suffix(target)}")
+    if carry.primary_key:
+        pk_sql = ", ".join(_ident(c) for c in carry.primary_key)
         constraint = f"PK_{_fold(dest_table)}"[:128]
         cols.append(f"CONSTRAINT {_ident(constraint)} PRIMARY KEY ({pk_sql})")
     return f"CREATE TABLE {dest_ref} ({', '.join(cols)})"
@@ -471,6 +478,7 @@ def copy_oracle_to_oracle(
     conn = _oracle_connect(dest_cfg)
     created_here = False
     existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     cur = conn.cursor()
     try:
@@ -497,6 +505,7 @@ def copy_oracle_to_oracle(
             exists = False
         if exists:
             dest_occupied = _count(cur, dest_ref) > 0
+            reset_empty_dest_on_failure = not dest_occupied
             if dest_occupied and pk_map is None:
                 raise FastPathUnavailable(
                     "append into non-empty Oracle dest stays on the row path"
@@ -504,6 +513,9 @@ def copy_oracle_to_oracle(
         else:
             cur.execute(
                 _create_sql(dest_ref, dest_table, pairs, create_ddls, pk_dest)
+            )
+            settle_fast_path_create_on(
+                cur, dest_dialect="oracle", dest_table=dest_table, dest_schema=dst_schema
             )
             created_here = True
 
@@ -617,7 +629,7 @@ def copy_oracle_to_oracle(
                 cur.execute(_drop_sql(dest_ref))
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
-        elif existed_before and pk_map is None:
+        elif existed_before and reset_empty_dest_on_failure:
             try:
                 cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
             except Exception:

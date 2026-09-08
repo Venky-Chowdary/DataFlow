@@ -27,6 +27,8 @@ from typing import Any
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    plan_fast_path_create,
+    settle_fast_path_create_on,
     _quote,
     _table_ref,
     stream_between_cursors,
@@ -37,7 +39,6 @@ from services.copy_pg_mysql import (
     _pg_quoted_literal,
     integer_pk_cuts,
     key_ranges_from_cuts,
-    mapping_is_plain_carry,
     mapped_single_pk,
     mysql_pk_range_clause,
     pg_mysql_copy_partitions,
@@ -99,15 +100,20 @@ def _pg_create_sql(
     primary_key: list[str],
 ) -> str:
     dest_ref = _table_ref(schema, table)
+    create = plan_fast_path_create(
+        dest_dialect="postgresql", pairs=pairs, ddls=pg_ddls, primary_key=primary_key,
+        dest_table=table, dest_schema=schema,
+    )
     cols: list[str] = []
-    targets = [t for _s, t in pairs]
     for (_source, target), ddl in zip(pairs, pg_ddls):
-        cols.append(f"{_pg_ident(target)} {ddl}")
-    pk = [c for c in primary_key if c in targets]
-    if pk:
-        pk_sql = ", ".join(_pg_ident(c) for c in pk)
+        cols.append(f"{_pg_ident(target)} {ddl}{create.column_suffix(target)}")
+    if create.plan is not None:
+        cols.extend(create.table_constraints)
+    elif create.primary_key:
+        pk_sql = ", ".join(_pg_ident(c) for c in create.primary_key)
         cols.append(f"PRIMARY KEY ({pk_sql})")
-    return f"CREATE TABLE {dest_ref} ({', '.join(cols)})"
+    suffix = f" {create.create_suffix}" if create.create_suffix else ""
+    return f"CREATE TABLE {dest_ref} ({', '.join(cols)}){suffix}"
 
 
 def _mysql_table_pk_and_types(
@@ -391,6 +397,7 @@ def copy_mysql_to_postgres(
     dest_conn = _pg_connect(dest_cfg)
     created_here = False
     existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     try:
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
@@ -420,6 +427,7 @@ def copy_mysql_to_postgres(
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
                 dest_occupied = int(dst_cur.fetchone()[0]) > 0
+                reset_empty_dest_on_failure = not dest_occupied
                 if dest_occupied and pk_map is None:
                     raise FastPathUnavailable(
                         "append into non-empty PostgreSQL dest stays on the row path"
@@ -433,6 +441,10 @@ def copy_mysql_to_postgres(
                 ]
                 dst_cur.execute(
                     _pg_create_sql(dest_schema, dest_table, pairs, pg_ddls, pk)
+                )
+                settle_fast_path_create_on(
+                    dst_cur, dest_dialect="postgresql", dest_table=dest_table,
+                    dest_schema=dest_schema,
                 )
                 created_here = True
                 dest_conn.commit()
@@ -591,7 +603,7 @@ def copy_mysql_to_postgres(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
-        elif existed_before and pk_map is None:
+        elif existed_before and reset_empty_dest_on_failure:
             try:
                 with dest_conn.cursor() as cur:
                     cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608

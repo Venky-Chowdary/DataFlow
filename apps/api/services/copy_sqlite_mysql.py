@@ -25,12 +25,15 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _mysql_connect, _mysql_ident
 from services.copy_pg_mysql import _mysql_create_sql, mapping_is_plain_carry
 from services.copy_sqlite_common import (
-    skip_complete_sqlite,
     sqlite_connect,
     sqlite_copy_bool_value,
     sqlite_copy_date_value,
@@ -38,6 +41,7 @@ from services.copy_sqlite_common import (
     sqlite_ddl_base,
     sqlite_ident,
     sqlite_pragma_types,
+    sqlite_source_carrier_census,
     sqlite_resolved_path,
     sqlite_type_is_copy_safe,
 )
@@ -187,6 +191,7 @@ def copy_sqlite_to_mysql(
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not MySQL COPY-safe"
                 )
+        sqlite_source_carrier_census(source_conn, src_ref, source_cols, mysql_ddls, where_sql)
         source_count = int(
             source_conn.execute(f"SELECT COUNT(*) FROM {src_ref}{where_sql}").fetchone()[0]  # nosec B608
         )
@@ -202,12 +207,6 @@ def copy_sqlite_to_mysql(
                 raise FastPathUnavailable(
                     "filtered COPY into occupied dest stays on the incremental staging path"
                 )
-            if dest_count_before == source_count:
-                return skip_complete_sqlite(
-                    source_count=source_count,
-                    dest_count=dest_count_before,
-                    extra_snapshot={"sqlite_read": "skip", "load_data": "skip"},
-                )
             raise FastPathUnavailable(
                 "append into occupied MySQL dest stays on the row path "
                 "(identity COPY would duplicate)"
@@ -218,6 +217,7 @@ def copy_sqlite_to_mysql(
             exists = False
         if not exists:
             dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
+            settle_fast_path_create_on(dst_cur, dest_dialect="mysql", dest_table=dest_table)
             dest_conn.commit()
             created_here = True
 

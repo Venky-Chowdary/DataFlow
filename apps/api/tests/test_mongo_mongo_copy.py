@@ -227,7 +227,7 @@ def test_live_mongo_mongo_empty_string_and_null_preserved():
         _drop_mongo(dest)
 
 
-def test_live_mongo_mongo_skip_when_dest_count_matches():
+def test_live_mongo_mongo_equal_count_append_declines():
     pytest.importorskip("pymongo")
     tag = uuid.uuid4().hex[:8]
     src = f"mongo_mongo_skip_{tag}"
@@ -245,17 +245,16 @@ def test_live_mongo_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mongo_to_mongo(
-            source_cfg=_mongo_cfg(src),
-            source_table=src,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["long", "string"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable, match="occupied"):
+            copy_mongo_to_mongo(
+                source_cfg=_mongo_cfg(src),
+                source_table=src,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["long", "string"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         _drop_mongo(src)

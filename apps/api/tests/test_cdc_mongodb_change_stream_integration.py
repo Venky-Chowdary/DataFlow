@@ -55,6 +55,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_mongodb_change_stream_snapshot_then_poll_captures_real_cdc():
+    """Business-key pipeline with pre-images: insert, update and delete all land.
+
+    A delete event carries ``documentKey._id`` only, so a pipeline keyed on
+    ``id`` needs ``changeStreamPreAndPostImages`` (Mongo 6+) to address the
+    destination row — this is the documented remedy, exercised for real here.
+    """
     collection = "cdc_orders_" + uuid.uuid4().hex[:8]
     cdc = MongodbChangeStreamCdc(
         CFG, collection=collection, primary_key="id", max_wait_seconds=8.0
@@ -62,6 +68,9 @@ def test_mongodb_change_stream_snapshot_then_poll_captures_real_cdc():
     coll = cdc.coll
     try:
         coll.insert_many([{"id": 1, "amount": "10.00"}, {"id": 2, "amount": "20.00"}])
+        cdc.client[cdc.db_name].command(
+            "collMod", collection, changeStreamPreAndPostImages={"enabled": True}
+        )
 
         # Snapshot backfills existing docs and captures a resume token.
         batches = list(cdc.snapshot())
@@ -90,8 +99,8 @@ def test_mongodb_change_stream_snapshot_then_poll_captures_real_cdc():
         assert any(
             str(r.get("id")) == "1" and str(r.get("amount")).startswith("99") for r in updates
         ), f"update not captured: {updates}"
-        # Delete surfaces via documentKey; at least one change was captured.
-        assert changes, "expected change batches from the oplog tail"
+        deletes = [r for b in changes for r in b.deletes]
+        assert "2" in [str(k) for k in deletes], f"delete not captured: {deletes}"
     finally:
         try:
             coll.drop()
@@ -101,3 +110,37 @@ def test_mongodb_change_stream_snapshot_then_poll_captures_real_cdc():
             cdc.client.close()
         except Exception:
             pass
+
+
+def test_mongodb_business_key_delete_without_pre_images_fails_closed():
+    """Without pre-images a business-key delete cannot be addressed: refuse.
+
+    Applying nothing would leave the deleted row at the destination forever, so
+    the poll raises with the ``collMod`` remedy instead of advancing.
+    """
+    from services.cdc_capability import LogCaptureUnavailable
+
+    collection = "cdc_orders_" + uuid.uuid4().hex[:8]
+    cdc = MongodbChangeStreamCdc(
+        CFG, collection=collection, primary_key="id", max_wait_seconds=8.0
+    )
+    coll = cdc.coll
+    try:
+        coll.insert_many([{"id": 1, "amount": "10.00"}, {"id": 2, "amount": "20.00"}])
+        batches = list(cdc.snapshot())
+        resume = batches[-1].resume_token
+        assert resume is not None
+
+        coll.delete_one({"id": 2})
+        cdc_resume = MongodbChangeStreamCdc(
+            CFG,
+            collection=collection,
+            primary_key="id",
+            resume_token=resume,
+            max_wait_seconds=8.0,
+        )
+        with pytest.raises(LogCaptureUnavailable, match="collMod|pre-image"):
+            list(cdc_resume.poll())
+    finally:
+        coll.drop()
+        cdc.client.close()

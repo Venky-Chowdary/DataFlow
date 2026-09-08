@@ -33,7 +33,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
-from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session, mongo_type_is_copy_safe
+from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _mysql_connect, _mysql_ident
 from services.copy_pg_mongo import mongo_collection
@@ -198,26 +198,6 @@ def copy_mongo_to_mysql(
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
             dest_count_before = int(dst_cur.fetchone()[0])
             dest_occupied = dest_count_before > 0
-            if dest_occupied and dest_count_before == source_count:
-                proof = f"dest_count:{dest_count_before}"
-                return FastPathResult(
-                    rows_copied=source_count,
-                    source_rows=source_count,
-                    source_checksum=proof,
-                    target_rows=dest_count_before,
-                    target_checksum=proof,
-                    source_snapshot={
-                        "copy_workers": 1,
-                        "copy_split": "skip",
-                        "copy_partitions": 1,
-                        "partitions_skipped": 1,
-                        "partitions_loaded": 0,
-                        "shard_mode": "table",
-                        "mongo_read": "skip",
-                        "load_data": "skip",
-                    },
-                    proof_scope="dest_count_equals_source_snapshot_count",
-                )
             if dest_occupied:
                 raise FastPathUnavailable(
                     "append into occupied MySQL dest stays on the row path "

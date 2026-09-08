@@ -1431,6 +1431,7 @@ export interface ScheduleInput {
   cdc_row_filter?: string;
   multi_subnet_failover?: boolean;
   cursor_column: string;
+  cursor_semantics?: string;
   primary_key: string;
   source_read_mode?: string;
   procedure_call?: string;
@@ -1544,6 +1545,7 @@ export interface PipelineSchedule {
   cdc_row_filter?: string;
   multi_subnet_failover?: boolean;
   cursor_column: string;
+  cursor_semantics?: string;
   primary_key: string;
   cursor_value: string;
   source_read_mode?: string;
