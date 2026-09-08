@@ -574,7 +574,8 @@ items in register §8h–§8n.
 
 Follow-up on `cursor/qa-lead-followup-1673`: closed sweep P1-3, P1-4, P2-1..P2-5
 (register §8o). Overview DLQ count is whole-queue; Studio source chrome uses one
-label; signed-in `#/help` stays in-app Docs; Query tabs are workspace-scoped;
+label; signed-in `#/help` stays in-app Docs; Pilot citations open the cited
+article (not `#/docs` walkthrough, not marketing); Query tabs are workspace-scoped;
 Pilot briefing uses `count_jobs` + request workspace.
 
 ## 7. Continuing this work

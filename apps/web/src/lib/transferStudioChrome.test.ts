@@ -876,6 +876,12 @@ describe("signed-in Help stays in the app chrome", () => {
   it("hash sync maps help routes to docs when a session exists", () => {
     const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
     assert.match(app, /signedInScreenFromHash/);
+    assert.match(app, /signedInHelpArticleFromHash/);
+    assert.match(app, /helpArticle=\{helpArticle\}/);
+    assert.match(app, /isSignedInHelpHash\(window\.location\.hash\)/);
+    const docs = readFileSync(join(webRoot, "pages/DocsPage.tsx"), "utf8");
+    assert.match(docs, /WorkspaceHelp/);
+    assert.match(docs, /hideMarketingCta/);
   });
 });
 

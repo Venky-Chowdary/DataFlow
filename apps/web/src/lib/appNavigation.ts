@@ -1,3 +1,4 @@
+import { helpDocFromSlug, isHelpDocRoute, type HelpDocId } from "./helpDocs";
 import type { Screen } from "./types";
 
 const SCREENS: Screen[] = [
@@ -96,6 +97,20 @@ export function signedInScreenFromHash(hash: string): Screen | null {
   if (screen) return screen;
   if (isSignedInHelpHash(hash)) return "docs";
   return null;
+}
+
+/**
+ * Which operator-guide article a signed-in help hash should open.
+ * `#/help` is the space home; `#/help/<slug>` and `#/help-<id>` are articles.
+ * Returns null when the hash is not a help route (sidebar `#/docs` stays the walkthrough).
+ */
+export function signedInHelpArticleFromHash(hash: string): HelpDocId | "help" | null {
+  if (!isSignedInHelpHash(hash)) return null;
+  const raw = hash.replace(/^#\/?/, "").split("?")[0].split("#")[0].trim().toLowerCase();
+  const helpMatch = raw.match(/^help\/([a-z0-9-]+)$/);
+  if (helpMatch) return helpDocFromSlug(helpMatch[1]) ?? "help";
+  if (isHelpDocRoute(raw)) return raw;
+  return "help";
 }
 
 export function writeAppHash(screen: Screen, replace = false) {

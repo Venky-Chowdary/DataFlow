@@ -3,7 +3,13 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { focusFromHash, isSignedInHelpHash, screenFromHash, signedInScreenFromHash } from "./appNavigation.js";
+import {
+  focusFromHash,
+  isSignedInHelpHash,
+  screenFromHash,
+  signedInHelpArticleFromHash,
+  signedInScreenFromHash,
+} from "./appNavigation.js";
 
 describe("screenFromHash aliases", () => {
   it("maps Pipelines label URL to schedules screen", () => {
@@ -39,5 +45,17 @@ describe("signed-in Help hashes stay in the workspace", () => {
     assert.equal(signedInScreenFromHash("#/help/preflight-gates"), "docs");
     assert.equal(signedInScreenFromHash("#/docs"), "docs");
     assert.equal(signedInScreenFromHash("#/pricing"), null);
+  });
+
+  it("opens the cited article, not the Docs walkthrough home", () => {
+    assert.equal(signedInHelpArticleFromHash("#/help/preflight-gates"), "help-preflight-gates");
+    assert.equal(
+      signedInHelpArticleFromHash("#/help/data-pilot#what-is-quarantine"),
+      "help-data-pilot",
+    );
+    assert.equal(signedInHelpArticleFromHash("#/help-faq"), "help-faq");
+    assert.equal(signedInHelpArticleFromHash("#/help"), "help");
+    assert.equal(signedInHelpArticleFromHash("#/docs"), null);
+    assert.equal(signedInHelpArticleFromHash("#/pilot"), null);
   });
 });

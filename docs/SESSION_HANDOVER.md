@@ -397,9 +397,11 @@ material, and host routing in a real browser vhost (verified at service level on
 4. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
    assert a MariaDB build without `utf8mb4_0900_ai_ci`, and two PostgreSQL cases
    need the `vector` extension. They should skip on capability, not fail.
-5. **Pilot citations open the public docs shell.** Clicking a citation opens the
+5. **Pilot citations open the public docs shell.** ~~Clicking a citation opens the
    right Help article but with the marketing header, so the operator leaves the
-   authenticated workspace. Awaiting the user's decision.
+   authenticated workspace.~~ **Closed on `cursor/qa-lead-followup-1673`:** signed-in
+   `#/help/<slug>` stays in the workspace and renders that article (not `#/docs`
+   walkthrough, not MarketingSite).
 6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
    the UI shows `DATETIME(6)`; a separate physical/native type through
    introspection was proposed and not yet decided.

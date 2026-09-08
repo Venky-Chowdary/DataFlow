@@ -29,7 +29,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, readAppHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, isSignedInHelpHash, readAppHash, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -109,10 +109,15 @@ function AppShell({
   const connectorWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const { confirm } = useConfirm();
   const [screen, setScreenState] = useState<Screen>(() => {
+    const signed = signedInScreenFromHash(window.location.hash);
+    if (signed) return signed;
     const fromHash = readAppHash();
     if (fromHash) return fromHash;
     return initialScreen === "landing" ? "dashboard" : initialScreen;
   });
+  const [helpArticle, setHelpArticle] = useState<ReturnType<typeof signedInHelpArticleFromHash>>(
+    () => signedInHelpArticleFromHash(window.location.hash),
+  );
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [jobHistory, setJobHistory] = useState<JobHistory>(EMPTY_JOB_HISTORY);
   const jobs = jobHistory.jobs;
@@ -166,7 +171,20 @@ function AppShell({
 
   useEffect(() => {
     const onHash = () => {
-      const focus = focusFromHash(window.location.hash);
+      const hash = window.location.hash;
+      const article = signedInHelpArticleFromHash(hash);
+      setHelpArticle(article);
+      if (article) {
+        setScreenState("docs");
+        setMountedScreens((prev) => {
+          if (prev.has("docs")) return prev;
+          const nextSet = new Set(prev);
+          nextSet.add("docs");
+          return nextSet;
+        });
+        return;
+      }
+      const focus = focusFromHash(hash);
       if (!focus) return;
       setScreen(focus.screen);
       if (focus.jobId || focus.panel) {
@@ -857,7 +875,7 @@ function AppShell({
               {mountedScreens.has("docs") && (
                 <div className={`df2-screen-keep ${showScreen("docs")}`} hidden={screen !== "docs"} aria-hidden={screen !== "docs"}>
                 <PageErrorBoundary label="Docs">
-                  <DocsPage />
+                  <DocsPage helpArticle={helpArticle} onOpenTransfer={openFreshTransfer} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -1035,7 +1053,9 @@ function DataTransferAppInner() {
 
   const handleAuthenticated = (email: string) => {
     setUserEmail(email);
-    writeAppHash(entryScreen, true);
+    if (!isSignedInHelpHash(window.location.hash)) {
+      writeAppHash(entryScreen, true);
+    }
     setStage("app");
   };
 
@@ -1068,6 +1088,7 @@ function DataTransferAppInner() {
 
   useEffect(() => {
     if (stage === "app") {
+      if (isSignedInHelpHash(window.location.hash)) return;
       writeAppHash(entryScreen, true);
     }
   }, [stage, entryScreen]);
