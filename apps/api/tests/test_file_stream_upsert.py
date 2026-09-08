@@ -98,3 +98,59 @@ def test_csv_file_stream_to_duckdb_upsert():
         result = con.execute("SELECT id, amount FROM payments ORDER BY id").fetchall()
         con.close()
         assert result == [(1, 1111.0), (2, 2000.5), (3, 3000.0), (4, 4000.0)]
+
+
+def test_csv_file_stream_upsert_publishes_key_census():
+    """The file path is its own writer loop, so it must publish the same
+    dest-engine key census the database stream does — Gate-8 grades a keyed
+    upsert by new keys, not by batch size."""
+    from services.row_conservation import CENSUS_KEY, KeyCensus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        duckdb_path = Path(tmp) / "payments.duckdb"
+        dest = EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=str(duckdb_path),
+            table="payments",
+        )
+        contracts = [
+            {"selected": True, "sync_mode": "incremental_deduped", "primary_key": "id"}
+        ]
+        _, _, summary1, _ = stream_file_to_database(
+            _make_csv([(1, 1000.00), (2, 2000.50)]),
+            "payments.csv",
+            dest,
+            [],
+            {},
+            job_id="000000000000000000000001",
+            checkpoint_service=_FakeCheckpointService(),
+            sync_mode="incremental_deduped",
+            stream_contracts=contracts,
+        )
+        census1 = KeyCensus.from_mapping(summary1.get(CENSUS_KEY))
+        assert census1 is not None, summary1
+        assert census1.expected_delta == 2
+
+        # Key 1 exists (update), key 3 is new (insert): cardinality grows by
+        # exactly one although the batch carries two rows.
+        _, _, summary2, _ = stream_file_to_database(
+            _make_csv([(1, 1111.00), (3, 3000.00)]),
+            "payments.csv",
+            dest,
+            [],
+            {},
+            job_id="000000000000000000000002",
+            checkpoint_service=_FakeCheckpointService(),
+            sync_mode="incremental_deduped",
+            stream_contracts=contracts,
+        )
+        census2 = KeyCensus.from_mapping(summary2.get(CENSUS_KEY))
+        assert census2 is not None, summary2
+        assert census2.expected_delta == 1
+        assert summary2.get("target_rows_before") == 2
+
+        con = duckdb.connect(str(duckdb_path))
+        count = con.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+        con.close()
+        assert count == 3 == summary2["target_rows_before"] + census2.expected_delta

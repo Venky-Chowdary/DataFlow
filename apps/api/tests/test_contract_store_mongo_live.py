@@ -130,6 +130,17 @@ def test_a_contract_carrying_decimals_lands_in_mongo() -> None:
         assert loaded is not None
         assert loaded.name == "live decimal contract"
         assert loaded.columns[0].target_type == "DECIMAL(12,2)"
+        # The BSON carrier must not leak past the store: the list endpoint
+        # renders every contract through pydantic/JSON and a Decimal128 in
+        # metadata used to 500 the whole Contracts menu.
+        assert loaded.metadata["min"] == Decimal("1")
+        assert isinstance(loaded.metadata["min"], Decimal)
+        assert loaded.metadata["samples"] == [Decimal("0.01"), Decimal("-7.5")]
+        listed = {c.id: c for c in store.list_contracts(limit=500)}
+        assert contract_id in listed
+        from pydantic import TypeAdapter
+
+        TypeAdapter(dict).dump_json(listed[contract_id].to_dict())
     finally:
         client = _client()
         try:

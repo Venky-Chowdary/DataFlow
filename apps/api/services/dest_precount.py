@@ -688,6 +688,11 @@ def destination_key_hits(
     table = (table_name or "").strip()
     if not table or not cols:
         return None
+    if db_type == "generic_sql":
+        # Same engine identity owner as destination_row_count: the capability
+        # family name matches no dialect branch, so the probe would silently
+        # return None on an occupied table (DuckDB via SQLAlchemy).
+        db_type = count_dialect(str(cfg.get("type") or db_type))
     unique = _unique_key_tuples(keys or [], len(cols))
     if not unique:
         return 0

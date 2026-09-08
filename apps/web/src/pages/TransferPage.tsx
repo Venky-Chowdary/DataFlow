@@ -992,6 +992,8 @@ export function TransferPage({
       shape_recipe: recipePayload(shapeSteps),
       date_locale: dateLocale,
       number_locale: numberLocale,
+      source_kind: sourceKind,
+      source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -1002,7 +1004,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale, sourceKind, sourceConnector?.type]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.
@@ -4886,6 +4888,12 @@ export function TransferPage({
       return;
     }
 
+    if (replayScheduleId && isConnectorSource && destKindMode === "database") {
+      // The schedule replays the contract this run executes — persist it first.
+      const persisted = await handleScheduleRoute({ quiet: true });
+      if (!persisted) return;
+    }
+
     const enforcePreflight = true;
     const approvedDecisionArtifactHash = String(
       preflight?.proof_bundle?.decision_artifact_hash
@@ -5283,14 +5291,25 @@ export function TransferPage({
     setStep(STEP_MAP);
   }, []);
 
-  const handleScheduleRoute = async () => {
+  const replayScheduleId = String(seedStudioIntent?.scheduleId || "").trim();
+
+  /**
+   * Persist the Validate-approved mapping contract onto a schedule.
+   *
+   * ``quiet`` is the schedule-seeded Execute path: the beat must replay the
+   * same contract the operator just ran, so it is written before the run
+   * instead of waiting for a footer click that only exists after success.
+   * Returns true when the contract was persisted.
+   */
+  const handleScheduleRoute = async (opts: { quiet?: boolean } = {}): Promise<boolean> => {
+    const quiet = Boolean(opts.quiet);
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
         message: multiStreamScd2MirrorBlockCopy("schedule"),
         tone: "error",
       });
-      return;
+      return false;
     }
     if (destKindMode !== "database" || !connectorId) {
       toast({
@@ -5298,7 +5317,7 @@ export function TransferPage({
         message: "Select a saved destination connector to schedule a recurring pipeline.",
         tone: "info",
       });
-      return;
+      return false;
     }
     if (!isConnectorSource || !sourceConnectorId) {
       toast({
@@ -5306,14 +5325,14 @@ export function TransferPage({
         message: "Scheduling works for database-to-database routes with saved connectors on both ends.",
         tone: "info",
       });
-      return;
+      return false;
     }
     const sourceTableName = sourceKind === "cloud" ? cloudPath.trim() : primarySourceStream;
     if (!sourceTableName || !targetCollection.trim()) {
       toast({ title: "Route incomplete", message: "Source and destination table names are required.", tone: "warning" });
-      return;
+      return false;
     }
-    const replayId = String(seedStudioIntent?.scheduleId || "").trim();
+    const replayId = replayScheduleId;
     try {
       const mappingsForSchedule = mergeSignedRiskContracts(
         mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
@@ -5336,16 +5355,15 @@ export function TransferPage({
             "Unattended runs replay a Validate-approved contract. Map columns and run Validate, then Schedule from this footer — that persists mappings onto this schedule instead of creating another empty draft.",
           tone: "warning",
         });
-        return;
+        return false;
       }
       const payload = {
-        name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
         source_connector_id: sourceConnectorId,
         source_table: sourceTableName,
         dest_connector_id: connectorId,
         dest_table: targetCollection,
-        interval: "daily",
-        enabled: true,
+        // A replayed schedule keeps the cadence the operator chose.
+        ...(replayId ? {} : { interval: "daily", enabled: true }),
         sync_mode: syncMode,
         cursor_column: cursorField,
         primary_key: primaryKeyField,
@@ -5388,6 +5406,7 @@ export function TransferPage({
       };
       if (replayId) {
         await updateSchedule(replayId, payload);
+        if (quiet) return true;
         toast({
           title: "Mapping contract persisted",
           message:
@@ -5395,7 +5414,10 @@ export function TransferPage({
           tone: "success",
         });
       } else {
-        await createSchedule(payload);
+        await createSchedule({
+          ...payload,
+          name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
+        });
         toast({
           title: "Pipeline created",
           message: "Daily sync enabled. Manage cadence in Schedules.",
@@ -5403,12 +5425,14 @@ export function TransferPage({
         });
       }
       onOpenSchedules?.();
+      return true;
     } catch (e) {
       toast({
         title: replayId ? "Could not persist mapping contract" : "Could not create pipeline",
         message: e instanceof Error ? e.message : "Schedule API failed",
         tone: "error",
       });
+      return false;
     }
   };
 
@@ -7602,6 +7626,21 @@ export function TransferPage({
               </span>
             </div>
             <div className="df2-run-footer-actions">
+              {replayScheduleId && (
+                <button
+                  type="button"
+                  className="df2-btn"
+                  onClick={() => void handleScheduleRoute()}
+                  disabled={!isGovernedExecuteReady}
+                  title={
+                    isGovernedExecuteReady
+                      ? "Write this Validate-approved mapping contract onto the schedule so Run now / Activate can replay it"
+                      : "Requires API Validate with decision approve"
+                  }
+                >
+                  <DtIcon name="activity" size={14} /> Save mapping to schedule
+                </button>
+              )}
               <button
                 type="button"
                 className="df2-btn df2-btn-primary"

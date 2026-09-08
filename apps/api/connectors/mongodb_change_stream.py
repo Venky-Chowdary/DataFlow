@@ -203,6 +203,7 @@ class MongodbChangeStreamCdc:
         # ``_id`` — and refuse the delete rather than drop it if none arrives.
         self._needs_pre_image = self.primary_key != "_id"
         self._pre_images_enabled: bool | None = None
+        self._pre_images_probed = False
 
     @property
     def lease_holder_id(self) -> str:
@@ -360,6 +361,7 @@ class MongodbChangeStreamCdc:
         """
         self._acquire_cdc_lease()
         try:
+            self._assert_delete_keying_possible()
             start_token: Any = None
             try:
                 with self.coll.watch(full_document=self.full_document, max_await_time_ms=100) as stream:
@@ -424,9 +426,16 @@ class MongodbChangeStreamCdc:
                 )
                 if len(batch.rows) < self.batch_size:
                     break
+            # Hand the stream position to this instance too: a poll in the same
+            # job must resume from the pre-snapshot token, not from "now", or
+            # every event that landed during the snapshot is lost.
             if start_token is not None:
+                self.resume_token = start_token
                 yield ChangeBatch(resume_token=start_token)
             else:
+                self.resume_token = {
+                    "phase": "streaming", "offset": 0, "collection": self.collection
+                }
                 yield ChangeBatch(
                     resume_token={"phase": "streaming", "offset": 0, "collection": self.collection}
                 )
@@ -437,20 +446,49 @@ class MongodbChangeStreamCdc:
 
     def pre_images_enabled(self) -> bool:
         """Whether the collection records change-stream pre-images (Mongo 6+)."""
-        if self._pre_images_enabled is None:
-            enabled = False
+        return self.pre_images_state() is True
+
+    def pre_images_state(self) -> bool | None:
+        """Catalog answer for pre-images: True / False, or None when unreadable.
+
+        ``None`` (no ``listCollections`` privilege) must not be read as
+        disabled: the stream still attaches and refuses on the first delete
+        it cannot key, instead of refusing a deployment that may be fine.
+        """
+        if self._pre_images_enabled is None and not self._pre_images_probed:
+            self._pre_images_probed = True
             try:
                 info = self.client[self.db_name].command(
                     "listCollections", filter={"name": self.collection}
                 )
+                enabled = False
                 for entry in info.get("cursor", {}).get("firstBatch", []):
                     opts = entry.get("options") or {}
                     images = opts.get("changeStreamPreAndPostImages") or {}
                     enabled = bool(images.get("enabled"))
+                self._pre_images_enabled = enabled
             except Exception as exc:
                 logger.warning("pre-image capability probe failed: %s", exc)
-            self._pre_images_enabled = enabled
         return self._pre_images_enabled
+
+    def _assert_delete_keying_possible(self) -> None:
+        """Fail fast when a business-keyed pipeline can never key a delete.
+
+        The same refusal the first delete would raise mid-window, moved to
+        attach time so the operator sees the ``collMod`` remedy at run 1 rather
+        than after a snapshot and a partial catch-up.
+        """
+        if not self._needs_pre_image or self.pre_images_state() is not False:
+            return
+        from services.cdc_capability import (
+            LogCaptureUnavailable,
+            mongo_delete_key_refusal,
+        )
+
+        raise LogCaptureUnavailable(
+            mongo_delete_key_refusal(self.db_name, self.collection, self.primary_key),
+            "mongodb",
+        )
 
     def _watch_kwargs(self, base: dict[str, Any]) -> dict[str, Any]:
         """Add ``fullDocumentBeforeChange`` when deletes need a business key."""
@@ -582,6 +620,7 @@ class MongodbChangeStreamCdc:
     def poll(self) -> Iterator[ChangeBatch]:
         """Tail the change stream for a bounded window and yield one ChangeBatch."""
         self._acquire_cdc_lease()
+        self._assert_delete_keying_possible()
         if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
             yield from self.snapshot()
             return
@@ -657,6 +696,13 @@ class MongodbChangeStreamCdc:
                         deletes=deletes,
                         resume_token=last_token,
                     )
+                    # The consumer has applied this window once control returns
+                    # here; advance our own position so the next poll round
+                    # continues past it instead of replaying the same
+                    # ``batch_size`` events forever (catch-up stalled at one
+                    # batch per job, Mongo→SQL 100K run 2).
+                    if last_token is not None:
+                        self.resume_token = last_token
         except CdcCursorGapError:
             raise
         except Exception as exc:

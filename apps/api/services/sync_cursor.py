@@ -18,6 +18,7 @@ from services.atomic_file import write_json_atomic
 from services.keyset_pagination import (
     KEYSET_SEP,
     encode_keyset_bookmark,
+    incremental_tiebreak_column,
     split_cursor_bookmark,
 )
 from services.platform_config import data_dir
@@ -393,7 +394,7 @@ def resolve_incremental_read_scope(
         stream_name=contract.name if contract else "stream",
     )
     pk_cols = contract.primary_key_columns() if contract else []
-    tiebreak = next((c for c in pk_cols if c and c != cursor_column), "")
+    tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
     watermark, metadata = get_watermark_record(cursor_key)
     return IncrementalReadScope(
         cursor_column=cursor_column,

@@ -108,7 +108,7 @@ def test_filtered_scan_required_for_every_sql_scan_source(src_type):
         {"cursor_is_unique": True},
         {"callable_source": True},
         {"cursor_column": ""},
-        {"src_type": "snowflake"},
+        {"src_type": "snowflake", "tiebreak_column": "id"},
     ],
 )
 def test_filtered_scan_not_required(kwargs):
@@ -122,6 +122,35 @@ def test_filtered_scan_not_required(kwargs):
     )
     base.update(kwargs)
     assert incremental_read_needs_filtered_scan(**base) == ""
+
+
+@pytest.mark.parametrize("src_type", ["snowflake", "bigquery", "mongodb", "dynamodb"])
+def test_no_tiebreak_and_no_filtered_scan_refuses(src_type):
+    """A source that can neither tie-break nor hold a filtered scan fails closed.
+
+    The only read left is ``WHERE cursor > page_max LIMIT n`` — every peer row
+    past a page edge is lost silently (MongoDB 100K incremental_append landed
+    20,000 rows under a green Gate-8 before this refusal existed).
+    """
+    with pytest.raises(ValueError, match="unique tie-break"):
+        incremental_read_needs_filtered_scan(
+            src_type=src_type,
+            incremental=True,
+            cursor_column="updated_seq",
+            tiebreak_column="",
+            cursor_is_unique=False,
+            callable_source=False,
+        )
+
+
+def test_intrinsic_tiebreak_column():
+    from services.keyset_pagination import intrinsic_tiebreak_column
+
+    assert intrinsic_tiebreak_column("mongodb", "updated_seq") == "_id"
+    assert intrinsic_tiebreak_column("MongoDB ", "updated_seq") == "_id"
+    assert intrinsic_tiebreak_column("mongodb", "_id") == ""
+    assert intrinsic_tiebreak_column("postgresql", "updated_seq") == ""
+    assert intrinsic_tiebreak_column("", "updated_seq") == ""
 
 
 def test_scan_filter_value_decodes_run_watermark_only():

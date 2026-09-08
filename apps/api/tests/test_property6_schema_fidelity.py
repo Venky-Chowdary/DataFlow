@@ -953,3 +953,110 @@ def test_build_catalog_filters_primary_unique_entry():
     assert cat.primary_key == ["id"]
     assert cat.unique_keys == [["email"]]
     assert cat.defaults["email"] == "'x'"
+
+
+def test_mysql_clock_default_matches_column_fsp():
+    """MySQL rejects ``DATETIME(6) DEFAULT CURRENT_TIMESTAMP`` (error 1067), so a
+    carried clock default must spell the column's own fractional precision;
+    CURRENT_DATE/CURRENT_TIME are expression defaults and need parentheses."""
+    from services.schema_fidelity import _normalize_default_sql
+
+    assert _normalize_default_sql("now()", "mysql", "DATETIME(6)") == "CURRENT_TIMESTAMP(6)"
+    assert _normalize_default_sql("now()", "mariadb", "TIMESTAMP(3)") == "CURRENT_TIMESTAMP(3)"
+    assert _normalize_default_sql("CURRENT_TIMESTAMP", "mysql", "DATETIME") == "CURRENT_TIMESTAMP"
+    assert _normalize_default_sql("current_date", "mysql", "DATE") == "(CURRENT_DATE)"
+    assert _normalize_default_sql("now()", "postgresql", "TIMESTAMP(6)") == "CURRENT_TIMESTAMP"
+    assert _normalize_default_sql("now()", "sqlite", "TEXT") == "CURRENT_TIMESTAMP"
+
+
+def test_pg_timestamp_default_now_creates_on_mysql_live():
+    """The Transfer Studio route the menu sweep failed on: a PG ``timestamp NOT
+    NULL DEFAULT now()`` column, create-new MySQL destination."""
+    import psycopg2
+
+    pymysql = pytest.importorskip("pymysql")
+    pg = pg_creds("P6")
+    my = mysql_creds("P6")
+    suffix = uuid.uuid4().hex[:8]
+    src_table = f"p6_clock_src_{suffix}"
+    dst_table = f"p6_clock_dst_{suffix}"
+    conn = psycopg2.connect(
+        host=pg["host"], port=pg["port"], dbname=pg["database"],
+        user=pg["username"], password=pg["password"],
+    )
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{src_table}"')
+            cur.execute(
+                f'''CREATE TABLE public."{src_table}" (
+                      id integer NOT NULL PRIMARY KEY,
+                      amount numeric(12,3),
+                      updated_at timestamp NOT NULL DEFAULT now()
+                    )'''
+            )
+            cur.execute(
+                f'''INSERT INTO public."{src_table}" (id, amount, updated_at)
+                    VALUES (1, 1.337, '2024-01-01 10:00:00'),
+                           (2, 2.674, '2024-01-02 10:00:00')'''
+            )
+    finally:
+        conn.close()
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="postgresql", host=pg["host"], port=pg["port"],
+            database=pg["database"], username=pg["username"], password=pg["password"],
+            schema="public", table=src_table, ssl=False,
+        ),
+        destination=EndpointConfig(
+            kind="database", format="mysql", host=my["host"], port=my["port"],
+            database=my["database"], username=my["username"], password=my["password"],
+            schema="", table=dst_table, ssl=False,
+        ),
+        mappings=[
+            {"source": "id", "target": "id", "source_type": "INTEGER",
+             "target_type": "INT", "approved": True, "confidence": 0.99},
+            {"source": "amount", "target": "amount", "source_type": "DECIMAL(12,3)",
+             "target_type": "DECIMAL(12,3)", "approved": True, "confidence": 0.99},
+            {"source": "updated_at", "target": "updated_at", "source_type": "TIMESTAMP",
+             "target_type": "DATETIME(6)", "approved": True, "confidence": 0.99},
+        ],
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+    )
+    mconn = pymysql.connect(
+        host=my["host"], port=my["port"], database=my["database"],
+        user=my["username"], password=my["password"], autocommit=True,
+    )
+    try:
+        result = _run(req)
+        assert result.success, result.error
+        assert result.records_transferred == 2
+        recon = result.reconciliation or {}
+        assert recon.get("passed") is True, recon
+        assert not recon.get("rejected_rows"), recon
+        with mconn.cursor() as cur:
+            cur.execute(
+                "SELECT COLUMN_DEFAULT, COLUMN_TYPE FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s AND column_name = 'updated_at'",
+                (my["database"], dst_table),
+            )
+            default, ctype = cur.fetchone()
+            assert "CURRENT_TIMESTAMP(6)" in str(default).upper(), (default, ctype)
+            cur.execute(f"SELECT COUNT(*), SUM(amount) FROM `{dst_table}`")
+            n, s = cur.fetchone()
+            assert (n, str(s)) == (2, "4.011")
+    finally:
+        with mconn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst_table}`")
+        mconn.close()
+        conn = psycopg2.connect(
+            host=pg["host"], port=pg["port"], dbname=pg["database"],
+            user=pg["username"], password=pg["password"],
+        )
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{src_table}"')
+        conn.close()

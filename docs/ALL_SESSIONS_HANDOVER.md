@@ -420,10 +420,158 @@ landed). Fixed at the owner (`338266c9`): `cursor_unique_evidence` +
 `incremental_read_needs_filtered_scan` refuse the seek and the SQL readers page
 one held snapshot bound to the run watermark. 100K incremental_append re-run
 PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0**
-(`matrix_100k_incappend.json`); the full 100K PG/MySQL × 7-mode result is posted
-on PR #172 as it lands.
-**Open:** 100K SQLite-source cells for the other modes, MongoDB SCD2/mirror and
-hosted clouds remain unmeasured.
+(`matrix_100k_incappend.json`); full 100K PG/MySQL × PG/MySQL × 7 modes +
+overlap/failure-park/workspace cells **pass=31 fail=0 skip=0**
+(`matrix_100k_pg_mysql_v2.json`): run 1 = 100,000 rows and run 2 = the exact
+delta in every cell, Gate-8 passed on all 56 scheduled runs.
+SQLite-source 100K slice `matrix_100k_sqlite_src.json` **pass=18 fail=0 skip=3**
+(SQLite has no log-based CDC source). SQLite-destination 100K slice first ran
+pass=16 fail=1: PG→SQLite mirror lost all 2,500 updated keys under a green upsert
+ack (register §8k) — the SQLite snapshot scan was ordered by `rowid` while the
+engine's keyset seek continued on the `BIGINT PRIMARY KEY`, so the first-page
+handoff skipped every key the heap had placed after the page edge. Fixed at the
+shared owner: readers publish the ORDER BY they opened with
+(`sql_snapshot_scan.publish_scan_order`), `stream.py` only seeks when the keyset
+columns are a leading prefix of that order (`scan_order_supports_seek`) and
+otherwise keeps paging the held snapshot; the SQLite scan itself now orders by
+the declared PK. 20 regression tests in `tests/test_snapshot_scan_keyset_handoff.py`;
+re-run `matrix_100k_sqlite_dest.json` **pass=17 fail=0 skip=0**.
+MongoDB-source 100K slice `matrix_100k_mongo_src.json` (21 cells) first ran
+**pass=12 fail=9 skip=0** — three engine defect classes, each on all three SQL
+destinations (register §8l): (1) incremental_append landed 20,000 of 100,000
+with Gate-8 green — the Mongo cursor read had no tie-break on a non-unique
+cursor and preflight/population-fit derived the tie-break separately from the
+stream; one owner now (`keyset_pagination.incremental_tiebreak_column`, contract
+PK else Mongo `_id`) feeds execution, preflight scope and the fit scan, and the
+Mongo reader seeks on the composite `(cursor, _id)`. (2) SCD2 failed closed at
+write with `amount → DECIMAL(3,3)`: the SCD2 CREATE rebuilt types from the
+100-document peek instead of the Map/population-widened stamp preflight had
+proved against; `apply_scd2` now binds `dest_types`. (3) CDC run 2 applied
+1,000 of 7,500 events: `poll()` never advanced the instance's own resume token
+so every drain round replayed the first window; fixed with snapshot→stream
+handoff on the same instance, and the business-key-delete pre-image refusal
+moved to attach time (unreadable catalog ≠ disabled). Regression tests in
+`test_incremental_filtered_scan_no_tiebreak.py`, `test_scd2_engine.py`,
+`test_mongodb_change_stream.py`; live 2K probes green (`probe_mongo_incappend`,
+`probe_mongo_scd2`, `probe_mongo_cdc_2k` 5/0/0). 100K re-run of the three
+modes: `matrix_100k_mongo_src_fixed.json` **pass=12 fail=0 skip=0** (run 1 =
+100,000, run 2 = 7,500 delta, Gate-8 on all 18 runs) — MongoDB-source 21/21 at 100K. The
+MongoDB-destination 100K slice `matrix_100k_mongo_dest.json` 5/12/7 was a
+harness collision (two matrices sharing the connector store with identical
+connector names; `create_connector` replaces same-named connectors) — re-run
+alone: `matrix_100k_mongo_dest_v2.json` **pass=17 fail=0 skip=7** (PG/MySQL/SQLite
+→ MongoDB × overwrite/append/incremental_append/incremental_deduped/cdc all green,
+Gate-8 on all 34 runs; the 7 skips are by-design capability refusals — SCD2/mirror
+need a SQL table destination, SQLite has no log-CDC source). 100K scheduler totals:
+PG/MySQL duplex 31/0/0 · SQLite-src 18/0/3 · SQLite-dest 17/0/0 · Mongo-src 21/0/0 ·
+Mongo-dest 17/0/7 — **0 failures on any measured cell**.
+**Open:** hosted clouds remain unmeasured; CDC is at-least-once as measured.
+Fixed on the way: `create_connector` now keeps the existing id on a same-named
+create (new config via `update_connector`) instead of delete + fresh id, so
+schedules bound to the connector are no longer orphaned (register §8l).
+
+**Transfer Studio SQL/procedure paste UX** (`5e6c95cf`, `98ec7f84`): a pasted
+`CREATE PROCEDURE/FUNCTION/TABLE/VIEW` is diagnosed before the one-statement
+check by both owners (`services.procedure_source.definition_pasted_refusal`,
+web `sqlEditorModel.diagnoseSql`). A SQL Server T-SQL script pasted against
+a non-T-SQL engine (Snowflake) is named as such (≥2 markers: `@param` types,
+`GO`, `dbo.`, `SET NOCOUNT ON`, `BEGIN TRY`, `RAISERROR`) with one next
+action — one read-only SELECT/WITH, or `CALL schema.name(:param)` for a
+procedure that already exists in that engine — instead of "remove extra
+semicolons". Tests: `test_procedure_source.py`, `sqlEditorModel.test.ts`.
+
+## Cloud targets on local emulators (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+No hosted credentials, so the same scheduler harness ran against local
+cloud-compatible services: BigQuery = `goccy/bigquery-emulator`
+(`127.0.0.1:9050`, project `dataflow-test`), Snowflake = `fakesnow`
+(account `local`), Redshift = PostgreSQL `:5439`. **Emulator-measured only —
+not a hosted-cloud certificate.** Full detail: `docs/OPEN_DEFECT_REGISTER.md` §8m.
+
+Consolidated 2K matrix `cloud_emulators_2k_final.json`: **pass=11 fail=3 skip=7**.
+
+* fakesnow: all 7 sync modes pass (CDC at-least-once).
+* BigQuery: overwrite / append / incremental_append / incremental_deduped pass;
+  scd2, mirror, cdc fail closed on reproduced emulator limitations (typed
+  NUMERIC parameters decoded as STRING; `ALTER TABLE ADD COLUMN` never
+  materialises; MERGE rewritten to internal `googlesqlite_*` 500). No
+  workaround was added that would hide a real type mismatch on hosted BigQuery.
+* Redshift: 7 skips — capability registry says `redshift is Planned`; PG wire
+  compatibility does not promote it.
+
+Product defects fixed on the way (all regress green on PG/MySQL/SQLite/fakesnow
+— `regress_scd2_mirror_2k.json` 11/0/0, `regress_scd2_mirror_sqlite_sf_500.json` 4/0/0,
+61 SCD2/mirror unit tests):
+
+1. `connectors/generic_sql.py::_warehouse_creator` — SQLAlchemy engines for
+   Snowflake/BigQuery take their DBAPI connection from the native connector
+   owner (`snowflake_conn.get_connection`, `bigquery_conn.get_client`); the
+   `bigquery+dataflow` dialect stops `sqlalchemy-bigquery` from building an ADC
+   client of its own.
+2. `connectors/lsn_guards.py` — PostgreSQL LSN comparison on Snowflake is padded
+   lexicographic hex (fakesnow/DuckDB lack the `'XXXX'` number format).
+3. `services/target_sample.py` — BigQuery keyed read-back queries all rows with
+   typed parameters (`CAST(key AS STRING) IN (?)`) instead of a first-page scan
+   that missed a key's later version.
+4. `services/scd2_engine.py::key_column_types` / `typed_key_bind` — SCD2 key
+   predicates bind in the destination's physical type (INT64 vs text) for
+   snapshot fetch, expire and close-on-vanish; SCD2 map-finish reuses the SQL
+   writers' temporal/numeric bind owners.
+5. `services/mirror_engine.py::apply_inferred_deletes_via_staging` — correlated
+   `EXISTS` uses `df_stg` alias + bare target table name (`target_table=` from
+   both callers) instead of `dataset.table.col`.
+6. `connectors/bigquery_conn.py::_EmulatorClient.query_and_wait` — bounded 20 s
+   retry so emulator 500s fail closed instead of hanging (emulator client only).
+
+Still unmeasured: hosted BigQuery/Snowflake/Redshift, Databricks, Salesforce.
+
+## Transforms × Scheduler (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+Scheduler = when/how rows move; Transforms = dbt-style post-load SQL models
+(`ref()`/`source()`, view/table/incremental-merge, data tests, quarantine) that
+auto-run after any transfer — including every scheduled beat — landing a
+trigger table, with the outcome on the job (`destination_summary.transformations`).
+Not redundant; it is the "T" Airbyte delegates to dbt.
+
+Proof: `scripts/live_schedule_matrix.py::run_transform_cell` — PG → PG/MySQL/SQLite,
+two scheduled beats, rollup table model and incremental-merge model read back
+equal to the landed table (no duplicate keys after beat 2), a deliberately
+failing data test surfaced as `partial`. `transform_sched_2k.json` **6/0/0**.
+Detail: register §8n.
+
+## Menu readiness sweep — status at handover (2026-08-10, `devin/qa-lead-integration`, PR #172, head `bb13fd55`)
+
+Question asked: "are we at the Google/Microsoft handover standard?" Honest answer:
+**controlled handover on the measured routes only.**
+
+**Fixed this wave (all pushed):**
+1. MySQL/MariaDB `DEFAULT CURRENT_TIMESTAMP` on fractional `DATETIME(n)` (error 1067
+   after a green Validate) — `e0f2cca6`, live PG→MySQL regression.
+2. Fabricated quarantine count on a refused write unit with no findings
+   ("1,000 quarantined / 0 findings") — `bb13fd55`, 21 accounting tests.
+3. Typed-database decimals (`1.337` for `numeric(12,3)`) flagged invalid in
+   Validate cell preview — `e0f2cca6`, preview reads on the wire like Execute.
+4. Contracts page HTTP 500 (`Decimal128`) — closed earlier on this branch.
+5. Schedule Run-now/Activate "no persisted column mappings" after Validate —
+   `bb13fd55`, Execute persists the contract onto the seeded schedule; replay
+   PATCH keeps the operator's cadence.
+Earlier on the same branch: CSV→BigQuery/DynamoDB upsert Gate-8 census (`46dd9744`),
+connector same-name replacement, Snowflake T-SQL paste UX, all scheduler/CDC/Mongo
+items in register §8h–§8n.
+
+**Left open (do not claim):**
+- P1-3 Overview vs Jobs count reconciliation; P1-4 stale source label in the run
+  panel; P1-5 Settings org-name vs workspace (unconfirmed); P2-1..5 (register §8o).
+- Browser re-run of the exact PG→MySQL scheduled deduped route on `bb13fd55`
+  (Run now → second beat → history) — not yet done.
+- Sweep coverage gaps: Connectors CRUD, Contracts end-to-end, Jobs Retry/Replay,
+  schedule pause/resume/history, Transforms incremental + data test, CSV→PG
+  bad-row quarantine, workspace switching.
+- Full backend suite on this head not re-counted (last measured 19977/152 on
+  `d693555f`; many classes since fixed). Blast radius on the quarantine
+  change (40 quarantine/DLQ/accounting/conservation files, live PG/MySQL):
+  470 passed / 0 failed / 8 skipped on `fb46e18d`.
+- Hosted clouds: emulator-measured only (register §8m); CDC at-least-once.
 
 ## 7. Continuing this work
 

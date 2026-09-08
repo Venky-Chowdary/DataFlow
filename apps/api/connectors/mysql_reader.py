@@ -127,11 +127,10 @@ def _primary_key_columns(cur, table: str) -> list[str] | None:
     return None
 
 
-def _order_by_clause(cur, table: str, columns: list[str] | None, identity: str = "") -> str:
-    """Build a deterministic ORDER BY clause for stable pagination.
-
-    Uses the primary key when available; otherwise falls back to the first column
-    so LIMIT/OFFSET batches are reproducible and do not drop or duplicate rows.
+def _order_by_columns(
+    cur, table: str, columns: list[str] | None, identity: str = ""
+) -> list[str]:
+    """Columns a stable page/scan orders by: the primary key, else the first column.
 
     The primary key lookup is cached per table: a chunked read calls this once
     per chunk and a table's key does not change underneath a running transfer.
@@ -143,12 +142,28 @@ def _order_by_clause(cur, table: str, columns: list[str] | None, identity: str =
     else:
         pk = _primary_key_columns(cur, table)
     if pk:
-        return ", ".join(
-            quote_sql_identifier(require_safe_identifier(c, preserve_case=True), "`") for c in pk
-        )
+        return list(pk)
     if columns:
-        return quote_sql_identifier(require_safe_identifier(columns[0], preserve_case=True), "`")
-    return "1"
+        return [columns[0]]
+    return []
+
+
+def _order_by_sql(order_cols: list[str]) -> str:
+    if not order_cols:
+        return "1"
+    return ", ".join(
+        quote_sql_identifier(require_safe_identifier(c, preserve_case=True), "`")
+        for c in order_cols
+    )
+
+
+def _order_by_clause(cur, table: str, columns: list[str] | None, identity: str = "") -> str:
+    """Build a deterministic ORDER BY clause for stable pagination.
+
+    Uses the primary key when available; otherwise falls back to the first column
+    so LIMIT/OFFSET batches are reproducible and do not drop or duplicate rows.
+    """
+    return _order_by_sql(_order_by_columns(cur, table, columns, identity=identity))
 
 
 def read_table_batch(
@@ -250,7 +265,11 @@ def read_table_scan_batch(
     (COUNT and SELECT alike) and order it by the cursor first — the incremental
     read for a table with no unique tie-break to seek on.
     """
-    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
+    from connectors.sql_snapshot_scan import (
+        close_table_scan,
+        publish_scan_order,
+        scan_filter_value,
+    )
     from connectors.sql_identifiers import split_qualified_table
 
     _schema, table = split_qualified_table(table, schema)
@@ -295,9 +314,11 @@ def read_table_scan_batch(
                 username=username,
                 connection_string=connection_string,
             )
-            order_by = _order_by_clause(cur, safe_table, columns, identity=identity)
+            order_cols = _order_by_columns(cur, safe_table, columns, identity=identity)
+            order_by = _order_by_sql(order_cols)
             if filter_q:
                 order_by = f"{filter_q}, {order_by}"
+                order_cols = [filter_column] + order_cols
             types = _column_types(cur, safe_table, identity=identity)
             col_list = _mysql_select_list(columns, types)
             if col_list is None:
@@ -330,6 +351,7 @@ def read_table_scan_batch(
             total=total,
             types=types,
         )
+        publish_scan_order(scan_state, order_cols)
     cur = scan_state["cur"]
     raw = cur.fetchmany(max(1, int(limit)))
     headers = list(scan_state.get("headers") or [])

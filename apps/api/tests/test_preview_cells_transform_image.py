@@ -86,3 +86,42 @@ def test_a_recipe_that_cannot_run_refuses_rather_than_previewing_raw(client) -> 
         },
     )
     assert res.status_code == 400, res.text
+
+
+_DECIMAL_BODY = {
+    "headers": ["amount"],
+    "sample_rows": [["1.337"], ["2.674"], ["1.3370"], ["12,3x"]],
+    "mappings": [{"source": "amount", "target": "amount", "target_type": "DECIMAL(12,3)"}],
+    "column_types": {"amount": "DECIMAL(12,3)"},
+}
+
+
+def test_typed_database_decimals_read_on_the_wire_like_validate_and_execute(client) -> None:
+    """A PostgreSQL ``numeric(12,3)`` value ``1.337`` is a canonical wire number,
+    not a US/EU-ambiguous text cell; the preview must resolve the same WIRE
+    locale as ``/preflight/run`` and Execute, or Validate shows a refusal the
+    writer never issues (menu sweep P0)."""
+    res = client.post(
+        "/api/v1/preflight/preview-cells",
+        json={**_DECIMAL_BODY, "source_kind": "database", "source_type": "postgresql"},
+    )
+    assert res.status_code == 200, res.text
+    raws = sorted(c["raw"] for c in _findings(res.json()))
+    assert raws == ["12,3x"], raws  # only the unparsable cell
+
+
+def test_file_decimal_with_one_three_digit_group_stays_ambiguous_under_auto(client) -> None:
+    """Untyped text keeps the honest Auto rule: ``1.337`` may be 1337 (EU) —
+    the operator picks a locale instead of the preview guessing."""
+    res = client.post(
+        "/api/v1/preflight/preview-cells", json={**_DECIMAL_BODY, "source_kind": "file"}
+    )
+    assert res.status_code == 200, res.text
+    raws = sorted(c["raw"] for c in _findings(res.json()))
+    assert "1.337" in raws and "2.674" in raws
+    res = client.post(
+        "/api/v1/preflight/preview-cells",
+        json={**_DECIMAL_BODY, "source_kind": "file", "number_locale": "US"},
+    )
+    raws = sorted(c["raw"] for c in _findings(res.json()))
+    assert raws == ["12,3x"], raws

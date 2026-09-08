@@ -116,6 +116,17 @@ export function diagnoseSql(
 }
 
 const DDL_DEFINITION = /^\s*create\s+(?:or\s+(?:replace|alter)\s+)?(?:temp(?:orary)?\s+|secure\s+)?(procedure|proc|function|table|view)\b/i;
+const TSQL_DIALECTS = new Set([
+  "mssql", "sqlserver", "sybase", "azure_sql", "azure_sql_database",
+  "microsoft_sql_server", "amazon_rds_sql_server", "synapse",
+]);
+const TSQL_MARKERS = /(?:^|[;\s])go(?:\s|$)|@[a-z_]\w*\s+(?:n?varchar|int|bigint|bit|decimal|datetime)\b|\bset\s+nocount\s+on\b|\bbegin\s+try\b|\braiserror\s*\(|\bdbo\./gi;
+
+/** A T-SQL script pasted against a non-SQL-Server engine. */
+function foreignTsql(stripped: string, dialect: string): boolean {
+  if (!dialect || TSQL_DIALECTS.has(dialect)) return false;
+  return (stripped.match(TSQL_MARKERS) || []).length >= 2;
+}
 
 /** A pasted `CREATE PROCEDURE …` script is the object's definition, not an extract. */
 function definitionPasted(stripped: string, dialect: string, mode: SqlEditorMode): string {
@@ -124,10 +135,13 @@ function definitionPasted(stripped: string, dialect: string, mode: SqlEditorMode
   const kind = m[1].toUpperCase();
   const engine = dialect || "the source engine";
   if (kind === "PROCEDURE" || kind === "PROC" || kind === "FUNCTION") {
-    const call = /^(mssql|sqlserver|sybase)$/.test(dialect) ? "EXEC" : "CALL";
+    const call = TSQL_DIALECTS.has(dialect) ? "EXEC" : "CALL";
     const via = mode === "query"
       ? "Paste one read-only SELECT / WITH here, or switch to Stored procedure and "
       : "Then ";
+    if (foreignTsql(stripped, dialect)) {
+      return `This is a SQL Server T-SQL CREATE ${kind} script (@params, GO, dbo.), not a ${engine} extract — ${engine} cannot run it as written. ${via}paste \`CALL schema.name(:param)\` for a procedure that already exists in ${engine}, with binds set below.`;
+    }
     return `This is a CREATE ${kind} definition, not an extract. Create the object in ${engine} with your own client first. ${via}paste \`${call} schema.name(:param)\` for a procedure that already exists, with binds set below.`;
   }
   return `This is a CREATE ${kind} statement — DataFlow only reads here. Use Table, one read-only SELECT / WITH, or a stored procedure CALL.`;

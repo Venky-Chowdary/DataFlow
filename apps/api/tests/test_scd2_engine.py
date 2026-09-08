@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,56 @@ def test_scd2_initial_load_creates_history_table():
         rows = cur.fetchall()
         assert len(rows) == 2
         conn.close()
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+@pytest.mark.parametrize(
+    "stamp_key,stamp",
+    [("target_type", "NUMERIC(12,3)"), ("dest_type", "DECIMAL(12,3)")],
+)
+def test_scd2_create_binds_map_stamp_not_peeked_source_carrier(stamp_key, stamp):
+    """A schemaless peek sized ``amount`` DECIMAL(3,3) off 100 documents below 1;
+    the Map contract (operator / population-widened stamp) says NUMERIC(12,3).
+    The CREATE must bind the stamp — preflight proved fit against it — or every
+    value >= 1 fails at write under a green Validate (Mongo→SQL SCD2 100K)."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path), table="ledger")
+        summary = apply_scd2(
+            endpoint,
+            [
+                {"id": "1", "amount": Decimal("0.106")},
+                {"id": "2", "amount": Decimal("2090.5")},
+            ],
+            columns=["id", "amount"],
+            schema={"id": "INTEGER", "amount": "DECIMAL(3,3)"},
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "BIGINT"},
+                {"source": "amount", "target": "amount", stamp_key: stamp},
+            ],
+            conflict_columns=["id"],
+        )
+        assert summary.get("ok") is not False, summary.get("error")
+        assert summary["rows_written"] == 2
+        assert summary.get("rejected_rows", 0) == 0
+        conn = sqlite3.connect(db_path)
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'ledger'"
+        ).fetchone()[0]
+        got = {
+            str(r[0]): str(r[1])
+            for r in conn.execute(
+                f"SELECT id, amount FROM ledger WHERE {IS_CURRENT_COLUMN} = 1"
+            )
+        }
+        conn.close()
+        assert "(12, 3)" in ddl.replace("(12,3)", "(12, 3)"), ddl
+        assert "(3, 3)" not in ddl.replace("(3,3)", "(3, 3)"), ddl
+        assert got == {"1": "0.106", "2": "2090.5"}
     finally:
         try:
             Path(db_path).unlink(missing_ok=True)

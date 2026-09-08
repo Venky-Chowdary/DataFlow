@@ -22,8 +22,10 @@ what was measured.
 Environment
 -----------
 ``SCHED_ROWS`` (default 2000) source rows per cell; ``SCHED_ENGINES`` comma list
-subset of ``postgresql,mysql,sqlite,mongodb``; ``SCHED_MODES`` comma list
-subset of the sync modes; ``SCHED_OUT`` artifact path.
+subset of ``postgresql,mysql,sqlite,mongodb``; ``SCHED_SOURCES`` / ``SCHED_DESTS``
+restrict which of those engines take the source / destination role (default:
+every engine in both roles); ``SCHED_MODES`` comma list subset of the sync
+modes; ``SCHED_OUT`` artifact path.
 """
 
 from __future__ import annotations
@@ -46,12 +48,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("DATAFLOW_CONNECTOR_STORE_BACKEND", "mongo")
 
 WORKSPACE = "sched-proof"
+# create_connector() replaces a same-name/type/role connector in the workspace;
+# two matrix processes sharing the Mongo store must therefore never share a
+# connector name or one deletes the other's mid-run ("connector missing").
+RUN_TAG = uuid.uuid4().hex[:8]
 ROWS = int(os.environ.get("SCHED_ROWS", "2000"))
 NEW_ROWS = max(1, ROWS // 20)
 UPDATED_ROWS = max(1, ROWS // 40)
 DELETED_ROWS = max(1, ROWS // 200)
 RUN_TIMEOUT_S = int(os.environ.get("SCHED_RUN_TIMEOUT", "900"))
 SQLITE_DIR = Path(os.environ.get("SCHED_SQLITE_DIR", "/home/ubuntu/sched_proof"))
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sched_cloud_engines as cloud  # noqa: E402
 
 ENGINES: dict[str, dict[str, Any]] = {
     "postgresql": dict(type="postgresql", host="localhost", port=5432, database="dataflow",
@@ -61,6 +70,7 @@ ENGINES: dict[str, dict[str, Any]] = {
     "sqlite": dict(type="sqlite", host="", port=0, database="", username="", password="", ssl=False),
     "mongodb": dict(type="mongodb", host="localhost", port=27017, database="sched_proof",
                     username="", password="", ssl=False),
+    **cloud.CLOUD_ENGINES,
 }
 
 # Schedule vocabulary (schedule_store.SYNC_MODES). ``incremental`` is the
@@ -77,7 +87,8 @@ MODES: list[tuple[str, str]] = [
 ]
 
 # Engines that can be a schedule destination for row-versioned modes.
-SQL_ENGINES = {"postgresql", "mysql", "sqlite"}
+SQL_ENGINES = {"postgresql", "mysql", "sqlite", *cloud.CLOUD_ENGINES}
+CLOUD = set(cloud.CLOUD_ENGINES)
 CDC_SOURCES = {"postgresql", "mysql", "mongodb"}
 
 TYPES: dict[str, dict[str, str]] = {
@@ -85,6 +96,7 @@ TYPES: dict[str, dict[str, str]] = {
     "mysql": {"id": "BIGINT", "name": "VARCHAR(64)", "amount": "DECIMAL(12,3)", "updated_seq": "BIGINT"},
     "sqlite": {"id": "INTEGER", "name": "TEXT", "amount": "NUMERIC(12,3)", "updated_seq": "INTEGER"},
     "mongodb": {"id": "long", "name": "string", "amount": "decimal", "updated_seq": "long"},
+    **cloud.CLOUD_TYPES,
 }
 COLUMNS = ["id", "name", "amount", "updated_seq"]
 
@@ -100,6 +112,8 @@ CURSOR_SEMANTICS_FOR_MODE = {
 def _reachable(cfg: dict[str, Any]) -> bool:
     if cfg["type"] == "sqlite":
         return True
+    if cfg["type"] in CLOUD:
+        return cloud.reachable(cfg["type"], cfg)
     try:
         with socket.create_connection((cfg["host"], cfg["port"]), timeout=1):
             return True
@@ -108,6 +122,10 @@ def _reachable(cfg: dict[str, Any]) -> bool:
 
 
 # --------------------------------------------------------------------------- engines
+
+
+def _chunks(items: list[int], size: int) -> list[list[int]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 class Engine:
@@ -135,6 +153,8 @@ class Engine:
                                    password=c["password"], database=c["database"], autocommit=False)
         if self.name == "sqlite":
             return sqlite3.connect(c["database"])
+        if self.name in CLOUD:
+            return cloud.connect(self.name, c)
         raise AssertionError(self.name)
 
     def _mongo(self):
@@ -165,7 +185,15 @@ class Engine:
             conn.close()
 
     def _ph(self) -> str:
+        if self.name in CLOUD:
+            return cloud.PLACEHOLDER[self.name]
         return "?" if self.name == "sqlite" else "%s"
+
+    def t(self, table: str) -> str:
+        """Table reference in the harness's own SQL (dataset-qualified for BigQuery)."""
+        if self.name in CLOUD:
+            return cloud.table_ref(self.name, self.cfg, table)
+        return self.q(table)
 
     # -- seeding -------------------------------------------------------------
     @staticmethod
@@ -176,7 +204,7 @@ class Engine:
         if self.name == "mongodb":
             self._mongo().drop_collection(table)
             return
-        self.exec([f"DROP TABLE IF EXISTS {self.q(table)}"])
+        self.exec([f"DROP TABLE IF EXISTS {self.t(table)}"])
         if self.name == "postgresql":
             self._release_pg_cdc_artifacts(table)
 
@@ -212,20 +240,29 @@ class Engine:
                 cur.execute(f'DROP PUBLICATION IF EXISTS "{pub}"')
 
     def q(self, ident: str) -> str:
+        if self.name in CLOUD:
+            return cloud.quote(self.name, ident)
         return f"`{ident}`" if self.name == "mysql" else f'"{ident}"'
 
     def create_source(self, table: str, *, pk: bool) -> None:
         self.drop(table)
         if self.name == "mongodb":
             db = self._mongo()
-            db.create_collection(table)
+            # Pre-images are the operator prerequisite the engine's own refusal
+            # names for a business-keyed CDC pipeline: a delete event carries
+            # documentKey._id only, so ``id`` is recoverable only from the
+            # pre-image (Mongo 6+). Same collMod an operator runs.
+            db.create_collection(
+                table, changeStreamPreAndPostImages={"enabled": True}
+            )
             if pk:
                 db[table].create_index("id", unique=True)
             return
         t = TYPES[self.name]
-        key = " PRIMARY KEY" if pk else ""
+        # BigQuery has no enforced PRIMARY KEY; the schedule's declared key is the contract.
+        key = " PRIMARY KEY" if pk and self.name != "bigquery" else ""
         self.exec([
-            f"CREATE TABLE {self.q(table)} ({self.q('id')} {t['id']}{key}, "
+            f"CREATE TABLE {self.t(table)} ({self.q('id')} {t['id']}{key}, "
             f"{self.q('name')} {t['name']}, {self.q('amount')} {t['amount']}, "
             f"{self.q('updated_seq')} {t['updated_seq']})"
         ])
@@ -241,7 +278,7 @@ class Engine:
             return
         ph = self._ph()
         vals = [(r[0], r[1], str(r[2]) if self.name == "sqlite" else r[2], r[3]) for r in rows]
-        self.exec([f"INSERT INTO {self.q(table)} ({', '.join(self.q(c) for c in COLUMNS)}) "
+        self.exec([f"INSERT INTO {self.t(table)} ({', '.join(self.q(c) for c in COLUMNS)}) "
                    f"VALUES ({ph}, {ph}, {ph}, {ph})"], vals)
 
     def update(self, table: str, ids: list[int], seq: int) -> None:
@@ -251,25 +288,38 @@ class Engine:
             )
             return
         ph = self._ph()
-        concat = (f"{self.q('name')} || '-v2'" if self.name != "mysql"
-                  else f"CONCAT({self.q('name')}, '-v2')")
-        self.exec([f"UPDATE {self.q(table)} SET {self.q('name')} = {concat}, "
-                   f"{self.q('updated_seq')} = {seq} WHERE {self.q('id')} = {ph}"],
-                  [(i,) for i in ids])
+        if self.name in CLOUD:
+            concat = cloud.concat_sql(self.name, self.q("name"))
+        else:
+            concat = (f"{self.q('name')} || '-v2'" if self.name != "mysql"
+                      else f"CONCAT({self.q('name')}, '-v2')")
+        head = f"UPDATE {self.t(table)} SET {self.q('name')} = {concat}, {self.q('updated_seq')} = {seq}"
+        if self.name == "bigquery":
+            # One DML job per row is minutes at 100K; the emulator takes an IN list.
+            self.exec([f"{head} WHERE {self.q('id')} IN ({', '.join(str(i) for i in chunk)})"
+                       for chunk in _chunks(ids, 5000)])
+            return
+        self.exec([f"{head} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
 
     def delete(self, table: str, ids: list[int]) -> None:
         if self.name == "mongodb":
             self._mongo()[table].delete_many({"id": {"$in": ids}})
             return
         ph = self._ph()
-        self.exec([f"DELETE FROM {self.q(table)} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
+        if self.name == "bigquery":
+            self.exec([f"DELETE FROM {self.t(table)} WHERE {self.q('id')} IN ({', '.join(str(i) for i in chunk)})"
+                       for chunk in _chunks(ids, 5000)])
+            return
+        self.exec([f"DELETE FROM {self.t(table)} WHERE {self.q('id')} = {ph}"], [(i,) for i in ids])
 
     # -- independent verification -----------------------------------------------
     def exists(self, table: str) -> bool:
         if self.name == "mongodb":
             return table in self._mongo().list_collection_names()
+        if self.name == "bigquery":
+            return cloud.bq_columns(self._conn(), self.cfg, table) is not None
         try:
-            self.query(f"SELECT 1 FROM {self.q(table)} WHERE 1=0")
+            self.query(f"SELECT 1 FROM {self.t(table)} WHERE 1=0")
             return True
         except Exception:  # noqa: BLE001 - probe verdict
             return False
@@ -280,6 +330,10 @@ class Engine:
             return [k for k in doc.keys() if k != "_id"]
         if self.name == "sqlite":
             return [r[1] for r in self.query(f"PRAGMA table_info({self.q(table)})")]
+        if self.name == "bigquery":
+            return [c.lower() for c in (cloud.bq_columns(self._conn(), self.cfg, table) or [])]
+        if self.name in CLOUD:
+            return [str(r[0]).lower() for r in self.query(cloud.columns_sql(self.name, self.cfg, table))]
         if self.name == "postgresql":
             return [r[0] for r in self.query(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = "
@@ -304,9 +358,12 @@ class Engine:
                 return {"count": 0, "sum_id": 0, "sum_amount": "0"}
             return {"count": int(out[0]["n"]), "sum_id": int(out[0]["sid"]),
                     "sum_amount": str(Decimal(str(out[0]["samt"])).quantize(Decimal("0.001")))}
-        amt = (f"SUM(CAST({self.q('amount')} AS DECIMAL(20,3)))" if self.name != "sqlite"
-               else f"SUM(CAST({self.q('amount')} AS REAL))")
-        rows = self.query(f"SELECT COUNT(*), SUM({self.q('id')}), {amt} FROM {self.q(table)} {where}")
+        if self.name in CLOUD:
+            amt = cloud.amount_sum_sql(self.name, self.q("amount"))
+        else:
+            amt = (f"SUM(CAST({self.q('amount')} AS DECIMAL(20,3)))" if self.name != "sqlite"
+                   else f"SUM(CAST({self.q('amount')} AS REAL))")
+        rows = self.query(f"SELECT COUNT(*), SUM({self.q('id')}), {amt} FROM {self.t(table)} {where}")
         n, sid, samt = rows[0]
         return {
             "count": int(n or 0),
@@ -343,11 +400,19 @@ def _mapping_rows(src: str, dst: str, *, pk: bool) -> list[dict[str, Any]]:
 def _connector(engine: Engine, role: str) -> str:
     from services.connector_store import create_connector
 
-    data = {**engine.cfg, "name": f"sched-proof {engine.name} {role}", "role": role,
+    data = {**engine.cfg, "name": f"sched-proof {RUN_TAG} {engine.name} {role}", "role": role,
             "workspace_id": WORKSPACE}
     data.pop("ssl", None)
     data["ssl"] = False
     return create_connector(data).id
+
+
+def _transfer_allowed(connector_type: str, role: str) -> tuple[bool, str]:
+    """Product capability registry verdict for one endpoint (same owner the
+    scheduler consults), so a Planned tier is recorded as a skip with its reason."""
+    from src.transfer.connector_capabilities import endpoint_allowed_for_role
+
+    return endpoint_allowed_for_role(connector_type, role)
 
 
 def _force_due(schedule_id: str) -> None:
@@ -437,7 +502,7 @@ def _measure(dst: Engine, table: str, mode: str) -> dict[str, Any]:
         cols = dst.columns(table)
         if "is_current" in cols:
             pred = {"postgresql": "is_current = TRUE", "mysql": "is_current = 1",
-                    "sqlite": "is_current IN (1, 'true', 'True')"}[dst.name]
+                    "sqlite": "is_current IN (1, 'true', 'True')"}.get(dst.name, "is_current = TRUE")
             out["current"] = dst.totals(table, f"WHERE {pred}")
         out["columns"] = cols
     if mode == "mirror":
@@ -448,9 +513,10 @@ def _measure(dst: Engine, table: str, mode: str) -> dict[str, Any]:
             out["deleted"] = dst.totals(table, mongo_filter={"_deleted": True})
         elif "_deleted" in cols:
             live = {"postgresql": "COALESCE(_deleted, FALSE) = FALSE", "mysql": "COALESCE(_deleted, 0) = 0",
-                    "sqlite": "COALESCE(_deleted, 0) IN (0, 'false', 'False')"}[dst.name]
+                    "sqlite": "COALESCE(_deleted, 0) IN (0, 'false', 'False')"}.get(
+                dst.name, "COALESCE(_deleted, FALSE) = FALSE")
             dead = {"postgresql": "_deleted = TRUE", "mysql": "_deleted = 1",
-                    "sqlite": "_deleted IN (1, 'true', 'True')"}[dst.name]
+                    "sqlite": "_deleted IN (1, 'true', 'True')"}.get(dst.name, "_deleted = TRUE")
             out["live"] = dst.totals(table, f"WHERE {live}")
             out["deleted"] = dst.totals(table, f"WHERE {dead}")
     return out
@@ -513,6 +579,13 @@ def run_cell(src: Engine, dst: Engine, mode: str, keyed: str, conn_ids: dict[str
         # modes need a SQL table destination. Refused at Validate by design.
         return {**cell, "verdict": "skip",
                 "reasons": [f"{mode} requires a SQL table destination; {dst.name} is refused at g9 by design"]}
+    for role, eng in (("source", src), ("destination", dst)):
+        allowed, why = _transfer_allowed(eng.cfg["type"], role)
+        if not allowed:
+            # Capability registry refuses the route before any row moves; the
+            # emulator cannot certify a Planned tier (a PostgreSQL-wire proxy is
+            # not Redshift), so the cell is an honest skip, not a pass.
+            return {**cell, "verdict": "skip", "reasons": [f"{role} refused by capability registry: {why}"]}
 
     sched_id = ""
     try:
@@ -750,12 +823,189 @@ def run_workspace_isolation_cell(src: Engine, dst: Engine, conn_ids: dict[str, s
             delete_schedule(sched_id)
 
 
+def run_transform_cell(src: Engine, dst: Engine, conn_ids: dict[str, str], *,
+                       mode: str = "incremental_deduped") -> dict[str, Any]:
+    """A scheduled beat must drive the post-load transform project and its models
+    must read back independently: a rebuilt rollup equals the landed table's
+    totals after each beat, an incremental-merge model stays idempotent across
+    beats, and a failing data test is reported (not swallowed) on the job."""
+    from services.schedule_store import create_schedule, delete_schedule, get_schedule
+    from services.transform_models import DataTest, TransformModel
+    from services.transform_store import TransformProject, get_transform_store
+
+    tag = uuid.uuid4().hex[:6]
+    src_table = f"sp_src_tx_{tag}"
+    dst_table = f"sp_dst_{src.name}_tx_{tag}"
+    rollup, current, bad = f"tx_rollup_{tag}", f"tx_current_{tag}", f"tx_badtest_{tag}"
+    cell: dict[str, Any] = {"scenario": "post_load_transform", "source": src.name, "dest": dst.name,
+                            "sync_mode": mode, "rows": ROWS, "dst_table": dst_table,
+                            "models": [rollup, current, bad]}
+    if dst.name not in SQL_ENGINES:
+        return {**cell, "verdict": "skip", "reasons": ["post-load SQL models need a SQL destination"]}
+    sched_id = ""
+    project_id = ""
+    store = get_transform_store()
+    try:
+        src.create_source(src_table, pk=True)
+        src.insert(src_table, [Engine.row(i, 1) for i in range(1, ROWS + 1)])
+        for t in (dst_table, rollup, current, bad):
+            dst.drop(t)
+
+        dest_conn_id = conn_ids[f"{dst.name}:destination"]
+        amount_sum = ("SUM(CAST(amount AS REAL))" if dst.name == "sqlite"
+                      else "SUM(CAST(amount AS DECIMAL(20,3)))")
+        project = TransformProject(
+            name=f"sched-proof transforms {tag}",
+            destination_connector_id=dest_conn_id,
+            trigger_tables=[dst_table],
+            workspace_id=WORKSPACE,
+            models=[
+                TransformModel(
+                    name=rollup, materialization="table",
+                    sql=f"SELECT COUNT(*) AS n, SUM(id) AS sum_id, {amount_sum} AS sum_amount "
+                        f"FROM {{{{ source('{dst_table}') }}}}",
+                ),
+                TransformModel(
+                    name=current, materialization="incremental", unique_key="id",
+                    incremental_strategy="merge",
+                    sql=f"SELECT id, name, amount, updated_seq FROM {{{{ source('{dst_table}') }}}}",
+                    tests=[DataTest(test_type="unique", column="id"),
+                           DataTest(test_type="not_null", column="name")],
+                ),
+                TransformModel(
+                    name=bad, materialization="view",
+                    sql=f"SELECT id, updated_seq FROM {{{{ ref('{current}') }}}}",
+                    # Every row shares updated_seq=1 after beat 1 → this test MUST fail
+                    # and must be reported on the job; a green run here is a defect.
+                    tests=[DataTest(test_type="unique", column="updated_seq")],
+                ),
+            ],
+        )
+        project.validate()
+        project = store.save(project)
+        project_id = project.id
+        cell["project_id"] = project_id
+
+        sched = create_schedule({
+            "name": f"sched-proof transform {src.name}→{dst.name} {tag}",
+            "source_connector_id": conn_ids[f"{src.name}:source"], "source_table": src_table,
+            "dest_connector_id": dest_conn_id, "dest_table": dst_table,
+            "interval": "hourly", "enabled": True, "sync_mode": mode,
+            "validation_mode": "strict", "schema_policy": "manual_review",
+            "mappings": _mapping_rows(src.name, dst.name, pk=True),
+            "cursor_column": "updated_seq" if mode in CURSOR_SEMANTICS_FOR_MODE else "",
+            "cursor_semantics": CURSOR_SEMANTICS_FOR_MODE.get(mode, ""),
+            "primary_key": "id", "workspace_id": WORKSPACE, "max_retries": 0,
+        })
+        sched_id = sched.id
+        cell["schedule_id"] = sched_id
+
+        def _beat(label: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            _force_due(sched_id)
+            r = _beat_and_wait(sched_id)
+            s = r.get("schedule")
+            job = _job(s.last_job_id) if s and s.last_job_id else {}
+            summary = _run_summary(s, job)
+            summary["timeout"] = bool(r.get("timeout"))
+            tx = (job.get("destination_summary") or {}).get("transformations") or {}
+            summary["transformations"] = {
+                "ran": tx.get("ran"), "status": tx.get("status"), "message": str(tx.get("message") or "")[:300],
+                "models": [{"name": m.get("name"), "status": m.get("status"), "rows": m.get("rows_affected"),
+                            "error": str(m.get("error") or "")[:200],
+                            "tests": [(t.get("test_type"), t.get("column"), bool(t.get("passed")), t.get("failing_rows"))
+                                      for t in (m.get("tests") or [])]}
+                           for p in (tx.get("projects") or []) for m in (p.get("models") or [])],
+            }
+            cell[label] = summary
+            return summary, tx
+
+        def _check(label: str, summary: dict[str, Any], tx: dict[str, Any]) -> list[str]:
+            reasons: list[str] = []
+            if summary["timeout"]:
+                return [f"{label} did not finish within {RUN_TIMEOUT_S}s"]
+            if summary["status"] != "completed":
+                return [f"{label} status={summary['status']}: {summary['error'] or summary['approval']}"]
+            if summary.get("gate8_passed") is not True:
+                reasons.append(f"{label} gate8_passed={summary.get('gate8_passed')}: {summary.get('gate8_message')}")
+            if not tx.get("ran"):
+                return reasons + [f"{label}: post-load transform project did not run ({tx.get('message')!r})"]
+            landed = dst.totals(dst_table)
+            cell[f"{label}_landed"] = landed
+            # Rollup (table, full rebuild) must equal the landed table right now.
+            rows = dst.query(f"SELECT n, sum_id, sum_amount FROM {dst.t(rollup)}")
+            got = {"count": int(rows[0][0]), "sum_id": int(rows[0][1]),
+                   "sum_amount": str(Decimal(str(rows[0][2] or 0)).quantize(Decimal("0.001")))}
+            cell[f"{label}_rollup"] = got
+            if len(rows) != 1 or got != landed:
+                reasons.append(f"{label}: rollup {got} != landed {landed}")
+            # Incremental merge model must mirror the landed table by key (idempotent).
+            cur = dst.totals(current)
+            cell[f"{label}_current"] = cur
+            if cur != landed:
+                reasons.append(f"{label}: incremental-merge model {cur} != landed {landed}")
+            dup = dst.query(f"SELECT COUNT(*) FROM (SELECT id FROM {dst.t(current)} GROUP BY id HAVING COUNT(*) > 1) d")
+            if int(dup[0][0]) != 0:
+                reasons.append(f"{label}: incremental-merge model has {dup[0][0]} duplicated keys")
+            # The deliberately failing test must be reported, never a green run.
+            models = {m["name"]: m for m in summary["transformations"]["models"]}
+            bad_tests = [t for t in models.get(bad, {}).get("tests", []) if t[0] == "unique"]
+            if tx.get("status") not in {"partial", "failed"} or not bad_tests or bad_tests[0][2] is not False:
+                reasons.append(f"{label}: failing data test not reported (project status={tx.get('status')}, "
+                               f"test={bad_tests})")
+            if models.get(rollup, {}).get("status") != "success" or models.get(current, {}).get("status") != "success":
+                reasons.append(f"{label}: model statuses {[(k, v.get('status')) for k, v in models.items()]}")
+            return reasons
+
+        t0 = time.time()
+        s1, tx1 = _beat("run1")
+        s1["seconds"] = round(time.time() - t0, 1)
+        reasons = _check("run1", s1, tx1)
+        if reasons and (s1["timeout"] or s1["status"] != "completed" or not tx1.get("ran")):
+            cell.update(verdict="fail", reasons=reasons)
+            return cell
+
+        seq2 = 2
+        src.insert(src_table, [Engine.row(i, seq2) for i in range(ROWS + 1, ROWS + NEW_ROWS + 1)])
+        src.update(src_table, list(range(1, UPDATED_ROWS + 1)), seq2)
+        cell["source_after_mutation"] = src.totals(src_table)
+
+        t0 = time.time()
+        s2, tx2 = _beat("run2")
+        s2["seconds"] = round(time.time() - t0, 1)
+        reasons += _check("run2", s2, tx2)
+        final = get_schedule(sched_id)
+        cell["run_history_len"] = len(final.run_history) if final else 0
+        if cell["run_history_len"] < 2:
+            reasons.append(f"run_history has {cell['run_history_len']} entries, expected 2")
+        cell.update(verdict="pass" if not reasons else "fail", reasons=reasons)
+        return cell
+    except Exception as exc:  # noqa: BLE001 - recorded as cell failure
+        cell.update(verdict="fail", reasons=[f"harness exception: {exc!r}"],
+                    traceback=traceback.format_exc()[-1500:])
+        return cell
+    finally:
+        if os.environ.get("SCHED_KEEP") != "1":
+            if sched_id:
+                with contextlib.suppress(Exception):
+                    delete_schedule(sched_id)
+            if project_id:
+                with contextlib.suppress(Exception):
+                    store.delete(project_id)
+            with contextlib.suppress(Exception):
+                src.drop(src_table)
+            for t in (rollup, current, bad):
+                with contextlib.suppress(Exception):
+                    dst.drop(t)
+
+
 # --------------------------------------------------------------------------- main
 
 
 def main() -> int:
     engines_wanted = [e for e in (os.environ.get("SCHED_ENGINES") or ",".join(ENGINES)).split(",") if e]
     modes_wanted = set((os.environ.get("SCHED_MODES") or ",".join(m for m, _ in MODES)).split(","))
+    sources_wanted = set((os.environ.get("SCHED_SOURCES") or ",".join(engines_wanted)).split(","))
+    dests_wanted = set((os.environ.get("SCHED_DESTS") or ",".join(engines_wanted)).split(","))
     out_path = Path(os.environ.get("SCHED_OUT", "/home/ubuntu/sched_proof/live_schedule_matrix.json"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -779,7 +1029,11 @@ def main() -> int:
     started = _now_iso()
     try:
         for sname, src in engines.items():
+            if sname not in sources_wanted:
+                continue
             for dname, dst in engines.items():
+                if dname not in dests_wanted:
+                    continue
                 for mode, keyed in MODES:
                     if mode not in modes_wanted:
                         continue
@@ -793,8 +1047,12 @@ def main() -> int:
             ops.append(run_overlap_cell(engines["postgresql"], engines["mysql"], conn_ids))
             ops.append(run_failure_retry_cell(engines["postgresql"], engines["mysql"], conn_ids))
             ops.append(run_workspace_isolation_cell(engines["postgresql"], engines["mysql"], conn_ids))
+        if os.environ.get("SCHED_TRANSFORM", "1") == "1" and "postgresql" in engines:
+            for dname in ("postgresql", "mysql", "sqlite"):
+                if dname in engines and dname in dests_wanted:
+                    ops.append(run_transform_cell(engines["postgresql"], engines[dname], conn_ids))
         for op in ops:
-            print(f"[ops] {op.get('scenario')} {op['verdict']} {op.get('reasons') or ''}", flush=True)
+            print(f"[ops] {op.get('scenario')} {op.get('dest')} {op['verdict']} {op.get('reasons') or ''}", flush=True)
     finally:
         if os.environ.get("SCHED_KEEP") != "1":
             for cid in conn_ids.values():

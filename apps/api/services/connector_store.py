@@ -430,12 +430,23 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         workspace_id=data.get("workspace_id", ""),
     )
 
-    # Connector names must be unique per workspace/role/type.  Repeated test runs
-    # otherwise leave stale "Quarantine SQLite" duplicates that break implicit
-    # single-connector resolution in `_find_implicit_connector_id`.
-    for existing in list_connectors(role=conn.role, workspace_id=conn.workspace_id):
-        if existing.name == conn.name and existing.type == conn.type:
-            delete_connector(existing.id, workspace_id=conn.workspace_id)
+    # Connector names are unique per workspace/role/type. A same-named create
+    # keeps the existing connector's id and takes the new configuration:
+    # schedules, pipelines and jobs bind connectors by id, so replacing the
+    # document under a fresh id would orphan them ("connector missing").
+    same_named = [
+        existing
+        for existing in list_connectors(role=conn.role, workspace_id=conn.workspace_id)
+        if existing.name == conn.name and existing.type == conn.type
+    ]
+    if same_named:
+        keep, *stale = same_named
+        for dup in stale:
+            delete_connector(dup.id, workspace_id=conn.workspace_id)
+        payload = {**conn.to_dict(), "id": keep.id, "created_at": keep.created_at}
+        updated = update_connector(keep.id, payload, workspace_id=conn.workspace_id)
+        if updated is not None:
+            return updated
 
     if _use_mongo():
         try:

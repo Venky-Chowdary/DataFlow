@@ -90,6 +90,49 @@ def test_a_unit_with_no_row_numbered_findings_is_left_alone() -> None:
     assert "rows_rolled_back" not in summary
 
 
+def test_a_unit_refused_before_any_row_was_judged_quarantines_nothing() -> None:
+    """PG→MySQL scheduled run: CREATE TABLE failed (error 1067), the writer
+    counted ``source - kept`` = 1,000 and the job read "1,000 quarantined /
+    0 findings persisted". No row was judged, so none is quarantined."""
+    summary: dict[str, Any] = {"rejected_rows": 1000}
+    assert split_refused_unit([], 1000, summary) == 0
+    assert summary["rejected_rows"] == 0
+    assert summary["rows_rolled_back"] == 1000
+    assert summary["rows_refused_unit"] == 1000
+
+    untouched: dict[str, Any] = {}
+    assert split_refused_unit([], 0, untouched) == 0
+    assert untouched == {}
+
+
+def test_persist_job_quarantine_names_a_findingless_refusal() -> None:
+    from src.transfer.job_quarantine import _persist_job_quarantine
+
+    dest_summary: dict[str, Any] = {
+        "ok": False,
+        "error": "(1067, \"Invalid default value for 'updated_at'\")",
+        "rejected_rows": 1000,
+        "rejected_details": [],
+        "rejected_details_total": 1000,
+        "rows_written": 0,
+    }
+    _persist_job_quarantine("job-1067", dest_summary, None)
+    assert dest_summary["rejected_rows"] == 0
+    assert dest_summary["rejected_details_total"] == 0
+    assert dest_summary["rows_rolled_back"] == 1000
+    assert dest_summary["quarantine_durable"] is True
+
+
+@pytest.mark.parametrize("raise_fn", [raise_writer_failure, _raise_write_failure])
+def test_a_ddl_refusal_reaches_the_job_with_zero_quarantine(raise_fn) -> None:
+    result = _Result(1000, [])
+    result.error = "(1067, \"Invalid default value for 'updated_at'\")"
+    with pytest.raises(WriteBatchBlocked) as exc:
+        raise_fn(result, "MySQL batch write failed")
+    assert exc.value.rejected_rows == 0
+    assert exc.value.dest_summary["rows_rolled_back"] == 1000
+
+
 @pytest.mark.parametrize("raise_fn", [raise_writer_failure, _raise_write_failure])
 def test_both_writer_choke_points_agree_on_the_refused_unit(raise_fn) -> None:
     result = _Result(5000, _details(2500))

@@ -173,17 +173,16 @@ def _select_list(cur, schema: str, table: str, columns: list[str] | None, identi
     return sql.SQL(", ").join(parts)
 
 
-def _order_by_clause(
+def _order_by_columns(
     cur, schema: str, table: str, columns: list[str] | None, identity: str = ""
-) -> str:
-    """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination.
+) -> list[str]:
+    """Columns a stable page/scan orders by: the primary key, else the first column.
 
     The primary key lookup — a two-way join across ``information_schema`` — is
     cached per table, because a chunked read asks for it once per chunk and the
     answer cannot change under a running transfer without breaking the load
     anyway.
     """
-    from psycopg2 import sql
     if identity:
         pk = reflection_cache.get_or_load_by_identity(
             identity,
@@ -195,9 +194,21 @@ def _order_by_clause(
     else:
         pk = _primary_key_columns(cur, schema, table)
     if pk:
-        return ", ".join(sql.Identifier(c).as_string(cur) for c in pk)
+        return list(pk)
     if columns:
-        return sql.Identifier(columns[0]).as_string(cur)
+        return [columns[0]]
+    return []
+
+
+def _order_by_clause(
+    cur, schema: str, table: str, columns: list[str] | None, identity: str = ""
+) -> str:
+    """Return a deterministic ORDER BY for stable LIMIT/OFFSET pagination."""
+    from psycopg2 import sql
+
+    cols = _order_by_columns(cur, schema, table, columns, identity=identity)
+    if cols:
+        return ", ".join(sql.Identifier(c).as_string(cur) for c in cols)
     return "1"
 
 
@@ -317,7 +328,7 @@ def read_table_scan_batch(
     """
     from psycopg2 import sql
 
-    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
+    from connectors.sql_snapshot_scan import close_table_scan, publish_scan_order, scan_filter_value
     from services.source_snapshot import get_source_snapshot_conn
 
     schema, table = _bind(schema, table)
@@ -363,11 +374,17 @@ def read_table_scan_batch(
                 username=username,
                 connection_string=connection_string,
             )
-            order_by = _order_by_clause(
+            order_cols = _order_by_columns(
                 cur, schema, table, columns, identity=identity
+            )
+            order_by = (
+                ", ".join(sql.Identifier(c).as_string(cur) for c in order_cols)
+                if order_cols
+                else "1"
             )
             if filter_value is not None:
                 order_by = sql.Identifier(filter_column).as_string(cur) + ", " + order_by
+                order_cols = [filter_column] + order_cols
             order_sql = sql.SQL(order_by)
             col_sql = _select_list(cur, schema, table, columns, identity)
             if col_sql is None:
@@ -405,6 +422,7 @@ def read_table_scan_batch(
             headers=headers,
             total=total,
         )
+        publish_scan_order(scan_state, order_cols)
     cur = scan_state["cur"]
     raw = cur.fetchmany(max(1, int(limit)))
     headers = list(scan_state.get("headers") or [])

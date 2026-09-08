@@ -92,6 +92,12 @@ def test_postgresql_file_stream_skips_matrix(monkeypatch):
 
     monkeypatch.setattr("src.transfer.file_stream.records_to_matrix", _blocked)
     monkeypatch.setattr("src.transfer.file_stream._write_batch", fake_write_batch)
+    # The row-writer path is what this test exercises; the CSV COPY fast path
+    # would open a real PostgreSQL connection first.
+    monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", "0")
+    monkeypatch.setattr(
+        "services.dest_precount.destination_row_count", lambda *_a, **_k: 0
+    )
 
     dest = EndpointConfig(
         kind="database",

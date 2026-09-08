@@ -98,12 +98,59 @@ def iter_pk_key_chunks(keys: set[str] | list[str]) -> Iterator[list[str]]:
         yield ordered[start : start + PK_CLAUSE_MAX_KEYS]
 
 
+def key_column_types(table_obj: Any, columns: list[str]) -> dict[str, Any]:
+    """SQLAlchemy column types of ``columns`` on a reflected/declared table."""
+    cols = getattr(table_obj, "c", None)
+    if cols is None:
+        return {}
+    return {c: cols[c].type for c in columns if c in cols}
+
+
+def typed_key_bind(wire: str, sa_type: Any) -> Any:
+    """Bind one composed-key segment in the destination column's carrier.
+
+    Keys travel as ``conflict_key_wire`` text. Engines with implicit text
+    coercion (PostgreSQL, MySQL, SQLite, Snowflake) accept ``INT64 IN ('5')``;
+    BigQuery refuses it with *No matching signature for operator IN*. Binding
+    the Python type the column declares makes the predicate exact everywhere
+    and never relies on engine-side text coercion. Unparseable text keeps
+    the wire form so a bad key fails loudly rather than matching another row.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    if sa_type is None:
+        return wire
+    try:
+        py = sa_type.python_type
+    except (NotImplementedError, AttributeError):
+        return wire
+    try:
+        if py is bool:
+            from connectors.sql_bind import coerce_boolean_wire
+
+            parsed = coerce_boolean_wire(wire)
+            return wire if parsed is None else parsed
+        if py is int:
+            from connectors.sql_bind import coerce_integer_wire
+
+            parsed = coerce_integer_wire(wire, ddl_type="BIGINT")
+            return wire if parsed is None else int(parsed)
+        if py is Decimal:
+            return Decimal(wire)
+        if py is float:
+            return float(wire)
+    except (ValueError, TypeError, OverflowError, InvalidOperation):
+        return wire
+    return wire
+
+
 def _pk_or_clause(
     columns: list[str],
     keys: set[str] | list[str],
     *,
     prefix: str,
     dialect: str = "",
+    column_types: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Membership predicate for one chunk of composite keys.
 
@@ -111,6 +158,8 @@ def _pk_or_clause(
     expression-depth limit applies and the planner sees one list probe.
     Composite keys use ``(c1=:p0_0 AND c2=:p0_1) OR …``. Callers must chunk
     with :func:`iter_pk_key_chunks`; larger sets are refused, not silently cut.
+    ``column_types`` (see :func:`key_column_types`) binds each segment in the
+    destination column's Python carrier via :func:`typed_key_bind`.
     """
     from connectors.writer_common import quote_sql_identifier
 
@@ -121,13 +170,14 @@ def _pk_or_clause(
             f"pk predicate over {len(keys)} keys exceeds {PK_CLAUSE_MAX_KEYS}; "
             "chunk with iter_pk_key_chunks"
         )
+    types = column_types or {}
     quoted = [quote_sql_identifier(c, _qchar(dialect)) for c in columns]
     params: dict[str, Any] = {}
     if len(columns) == 1:
         names: list[str] = []
         for i, key in enumerate(keys):
             pname = f"{prefix}{i}"
-            params[pname] = key
+            params[pname] = typed_key_bind(key, types.get(columns[0]))
             names.append(f":{pname}")
         return f"{quoted[0]} IN ({', '.join(names)})", params
     clauses: list[str] = []
@@ -139,7 +189,7 @@ def _pk_or_clause(
         for j, col_q in enumerate(quoted):
             pname = f"{prefix}{i}_{j}"
             ands.append(f"{col_q} = :{pname}")
-            params[pname] = parts[j]
+            params[pname] = typed_key_bind(parts[j], types.get(columns[j]))
         if ands:
             clauses.append("(" + " AND ".join(ands) + ")")
     if not clauses:
@@ -291,6 +341,7 @@ def _fetch_current_snapshots(
     target_cols: list[str],
     keys: set[str],
     dialect_name: str,
+    column_types: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return {composite_key: {hash, attrs}} for current rows in ``keys``."""
     import sqlalchemy as sa
@@ -307,7 +358,8 @@ def _fetch_current_snapshots(
     out: dict[str, dict[str, Any]] = {}
     for chunk in iter_pk_key_chunks(keys):
         where_keys, params = _pk_or_clause(
-            pk_columns, chunk, prefix="k", dialect=dialect_name
+            pk_columns, chunk, prefix="k", dialect=dialect_name,
+            column_types=column_types,
         )
         sql = (
             f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
@@ -353,8 +405,9 @@ def _expire_rows(
     qualified: str,
     pk_columns: list[str],
     keys: set[str],
-    timestamp: str,
+    timestamp: datetime,
     dialect_name: str,
+    column_types: dict[str, Any] | None = None,
 ) -> int:
     """Mark the current versions of ``keys`` as historical."""
     import sqlalchemy as sa
@@ -370,7 +423,8 @@ def _expire_rows(
     expired = 0
     for chunk in iter_pk_key_chunks(keys):
         where_keys, params = _pk_or_clause(
-            pk_columns, chunk, prefix="e", dialect=dialect_name
+            pk_columns, chunk, prefix="e", dialect=dialect_name,
+            column_types=column_types,
         )
         params["ts"] = timestamp
         sql = (
@@ -416,6 +470,7 @@ def close_versions_missing_from_keys(
     timestamp: datetime,
     dialect_name: str,
     batch_size: int = 1_000,
+    column_types: dict[str, Any] | None = None,
 ) -> int:
     """Expire current versions whose key is not in a complete source key set.
 
@@ -441,6 +496,7 @@ def close_versions_missing_from_keys(
             set(missing[start : start + batch_size]),
             timestamp,
             dialect_name,
+            column_types=column_types,
         )
     return expired
 
@@ -658,6 +714,29 @@ def _finish_scd2_map_bundle(
             dest_db=str(ctx["dest_kind"] or ""),
             source_row_numbers=nums or None,
         )
+        # Same bind owners as every SQL writer: strict-typed engines (BigQuery)
+        # refuse STRING binds into NUMERIC/INT64/TIMESTAMP that PostgreSQL,
+        # MySQL and SQLite coerce implicitly.
+        from connectors.writer_common import (
+            bind_rows_keeping_numbers,
+            normalize_temporal_cells,
+        )
+
+        engine = str(ctx["dest_kind"] or "").strip().lower()
+        mapped = normalize_temporal_cells(
+            mapped, target_types, target_cols, engine=engine
+        )
+        mapped, nums = bind_rows_keeping_numbers(
+            mapped,
+            target_cols,
+            target_types,
+            details,
+            policy,
+            engine=engine,
+            dialect_label=(ctx["dest_kind"] or "SCD2").strip() or "SCD2",
+            mappings=list(ctx["effective_mappings"]) or None,
+            row_numbers=nums or None,
+        )
     dicts = [dict(zip(target_cols, row)) for row in mapped]
     pk_ok = _pk_validate_mapped_rows(
         dicts, list(ctx["pk_columns"]), details, row_numbers=nums or None
@@ -809,8 +888,9 @@ def _merge_scd2_bundle(
         key = _compose_key(row, pk_columns)
         if key and not all(p == "" for p in key.split(_KEY_SEP)):
             keys.add(key)
+    pk_types = key_column_types(table_obj, pk_columns)
     current_snaps = _fetch_current_snapshots(
-        conn, qualified, pk_columns, target_cols, keys, dialect_name
+        conn, qualified, pk_columns, target_cols, keys, dialect_name, pk_types
     )
     current_hashes = {k: str(v.get("hash") or "") for k, v in current_snaps.items()}
 
@@ -841,7 +921,8 @@ def _merge_scd2_bundle(
     expired = 0
     if to_expire:
         expired = _expire_rows(
-            conn, qualified, pk_columns, to_expire, timestamp, dialect_name
+            conn, qualified, pk_columns, to_expire, timestamp, dialect_name,
+            column_types=pk_types,
         )
     inserted = _insert_rows(conn, table_obj, to_insert)
     # Same-connection later bundles must see this bundle's current hash
@@ -957,8 +1038,12 @@ def apply_scd2(
 
         engine = get_sqlalchemy_engine(cfg)
         dialect_name = engine.dialect.name if engine.dialect else ""
+        # The CREATE binds the Map contract (operator / population-widened
+        # ``target_type`` stamps), never the peeked source carrier alone —
+        # preflight proved fit against the stamps, so the DDL must be the same.
         column_types: dict[str, str] = {
-            c: (schema or {}).get(c, "string") for c in target_cols
+            c: str(ctx["dest_types"].get(c) or (schema or {}).get(c) or "string")
+            for c in target_cols
         }
 
         try:
@@ -1007,6 +1092,7 @@ def apply_scd2(
                         timestamp,
                         dialect_name,
                         batch_size=batch_size,
+                        column_types=key_column_types(table_obj, pk_columns),
                     )
                     expired_total += closed_missing
 

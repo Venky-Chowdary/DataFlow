@@ -544,6 +544,9 @@ export async function previewQuarantineCells(payload: {
   shape_recipe?: ShapeRecipeWire | null;
   date_locale?: string;
   number_locale?: string;
+  /** Typed sources read their own numbers canonically — same owner as Validate/Execute. */
+  source_kind?: string;
+  source_type?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",

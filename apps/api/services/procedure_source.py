@@ -112,6 +112,30 @@ _DDL_DEFINITION = re.compile(
     r"(?P<kind>PROCEDURE|PROC|FUNCTION|TABLE|VIEW)\b",
     re.IGNORECASE,
 )
+_TSQL_DIALECTS = frozenset(
+    {
+        "mssql",
+        "sqlserver",
+        "sybase",
+        "azure_sql",
+        "azure_sql_database",
+        "microsoft_sql_server",
+        "amazon_rds_sql_server",
+        "synapse",
+    }
+)
+_TSQL_MARKERS = re.compile(
+    r"(?:^|[;\s])GO(?:\s|$)|@[A-Za-z_]\w*\s+(?:N?VARCHAR|INT|BIGINT|BIT|DECIMAL|DATETIME)\b"
+    r"|\bSET\s+NOCOUNT\s+ON\b|\bBEGIN\s+TRY\b|\bRAISERROR\s*\(|\bdbo\.",
+    re.IGNORECASE,
+)
+
+
+def _foreign_tsql(stripped: str, dialect: str) -> bool:
+    """True when a T-SQL script is pasted against a non-SQL-Server engine."""
+    if not dialect or dialect in _TSQL_DIALECTS:
+        return False
+    return len(_TSQL_MARKERS.findall(stripped)) >= 2
 
 
 def definition_pasted_refusal(stripped: str, dialect: str, mode: str) -> str | None:
@@ -127,12 +151,19 @@ def definition_pasted_refusal(stripped: str, dialect: str, mode: str) -> str | N
     kind = m.group("kind").upper()
     engine = dialect or "the source engine"
     if kind in {"PROCEDURE", "PROC", "FUNCTION"}:
-        call = "EXEC" if dialect in {"mssql", "sqlserver", "sybase"} else "CALL"
+        call = "EXEC" if dialect in _TSQL_DIALECTS else "CALL"
         via = (
             "Paste one read-only SELECT / WITH here, or switch to Stored procedure and "
             if mode == MODE_QUERY
             else "Then "
         )
+        if _foreign_tsql(stripped, dialect):
+            return (
+                f"This is a SQL Server T-SQL CREATE {kind} script (@params, GO, dbo.), "
+                f"not a {engine} extract — {engine} cannot run it as written. "
+                f"{via}paste `CALL schema.name(:param)` for a procedure that already "
+                f"exists in {engine}, with binds set below."
+            )
         return (
             f"This is a CREATE {kind} definition, not an extract. Create the object "
             f"in {engine} with your own client first. {via}paste "

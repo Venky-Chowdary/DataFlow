@@ -363,6 +363,40 @@ def cursor_unique_evidence(
     return False
 
 
+#: Sources whose every row carries an engine-enforced unique identity even when
+#: the stream contract declares no primary key. It is the tie-break an
+#: incremental cursor seeks on, so a cursor with ties (``updated_seq``,
+#: ``updated_at``) pages as ``(cursor, identity)`` instead of skipping peers.
+INTRINSIC_ROW_IDENTITY: dict[str, str] = {"mongodb": "_id"}
+
+
+def intrinsic_tiebreak_column(src_type: str, cursor_column: str) -> str:
+    """The engine-guaranteed unique column a cursor read may tie-break on."""
+    ident = INTRINSIC_ROW_IDENTITY.get((src_type or "").strip().lower(), "")
+    if not ident or ident == cursor_column:
+        return ""
+    return ident
+
+
+def incremental_tiebreak_column(
+    src_type: str, cursor_column: str, primary_key_columns: Sequence[str]
+) -> str:
+    """The column an incremental cursor read seeks on beside the cursor.
+
+    One owner for the stream engine, the preflight read scope, and the
+    population-fit scan: a composite watermark can only be decoded by a read
+    that names the same tie-break column it was written with. Contract primary
+    key first; otherwise the source engine's intrinsic row identity.
+    """
+    cursor = (cursor_column or "").strip()
+    if not cursor:
+        return ""
+    for col in primary_key_columns:
+        if col and col != cursor:
+            return str(col)
+    return intrinsic_tiebreak_column(src_type, cursor)
+
+
 def incremental_read_needs_filtered_scan(
     *,
     src_type: str,
@@ -380,6 +414,9 @@ def incremental_read_needs_filtered_scan(
     Those sources hold one ``WHERE cursor > run_watermark ORDER BY cursor``
     cursor and page it with ``fetchmany`` instead. A callable source already
     filters its spool against the run watermark and OFFSET-pages it.
+
+    Raises ``ValueError`` when the source can neither tie-break nor hold a
+    filtered scan: the only remaining read loses rows, so the run refuses.
     """
     if not incremental or not cursor_column or callable_source:
         return ""
@@ -387,8 +424,15 @@ def incremental_read_needs_filtered_scan(
         return ""
     from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
 
-    if (src_type or "").strip().lower() not in FILTERED_SCAN_SOURCES:
-        return ""
+    engine = (src_type or "").strip().lower()
+    if engine not in FILTERED_SCAN_SOURCES:
+        raise ValueError(
+            f"{engine or 'this source'} cannot page an incremental read on cursor "
+            f"{cursor_column!r} without a unique tie-break: rows sharing a cursor "
+            "value past a page edge would be skipped silently. Declare a primary "
+            "key or a non-nullable unique column on the stream contract, or run "
+            "this sync as full refresh."
+        )
     return (
         f"incremental cursor {cursor_column!r} has no unique tie-break "
         "(no primary key or enforced non-null unique key on the source): a read "

@@ -763,65 +763,84 @@ def read_target_sample(
                     port=int(dest.get("port") or 0),
                     connection_string=dest.get("connection_string", ""),
                 )
+                from google.cloud import bigquery as _bq
+
+                from services.copy_bigquery_common import bigquery_ident
+
                 table_id = f"{project_id}.{dataset_id}.{table_name}"
-                if is_local:
-                    # Emulator path: scan rows and filter in-process; avoids
-                    # query().result() hangs on the goccy emulator for some jobs.
-                    out: list[dict[str, Any]] = []
-                    scan_limit = (limit or 50) * 10 if (keys and sort_key) else (limit or 50)
-                    widened = set()
-                    if keys and sort_key:
-                        for k in keys:
-                            widened.update(numeric_sample_key_variants(k))
-                    for row in client.list_rows(table_id, max_results=scan_limit):
-                        d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
-                        if cols and cols != ["*"]:
-                            d = {k: v for k, v in d.items() if k in cols}
-                        if keys and sort_key:
-                            if d.get(sort_key) in widened:
-                                out.append(d)
-                        else:
-                            out.append(d)
-                        if len(out) >= (limit or 50):
-                            break
-                    return out
-                # Production: use a real BigQuery query with a bounded timeout.
                 col_sql = (
                     "*"
                     if cols == ["*"]
-                    else quote_column_list(
-                        [require_safe_identifier(c, preserve_case=True) for c in cols]
-                    )
+                    else ", ".join(bigquery_ident(c) for c in cols)
                 )
-                bq_order = (
-                    quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    if sort_key
-                    else "1"
-                )
+                bq_order = bigquery_ident(sort_key) if sort_key else "1"
+                bq_params: list[Any] = []
+                widened_keys: set[str] = set()
                 if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
+                    key_col = bq_order
+                    # BigQuery IN is type-strict (INT64 vs STRING has no
+                    # signature); compare on the STRING carrier so one keyed
+                    # read serves INT64/NUMERIC/STRING keys, widened the way
+                    # the writer may have stored them.
+                    for k in keys:
+                        widened_keys.update(
+                            str(v) for v in numeric_sample_key_variants(k)
+                        )
+                    widened_sorted = sorted(widened_keys)
+                    placeholders = ",".join(["?"] * len(widened_sorted))
                     sql = (
                         f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {bq_order} LIMIT %s"
+                        f"WHERE CAST({key_col} AS STRING) IN ({placeholders}) "
+                        f"ORDER BY {bq_order} LIMIT ?"
                     )
-                    params = (*keys, int(limit))
+                    bq_params = [
+                        _bq.ScalarQueryParameter(None, "STRING", v) for v in widened_sorted
+                    ]
                 else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT %s"  # nosec B608
-                    params = (int(limit),)
-                res = client.query(sql, timeout=60).result()
-                names = list(res.schema) if res.schema else cols
-                if names and names[0] and not isinstance(names[0], str):
-                    names = [f.name for f in names]
-                return [
-                    {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
-                    for row in res
-                ]
+                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT ?"  # nosec B608
+                bq_params.append(_bq.ScalarQueryParameter(None, "INT64", int(limit)))
+                job_config = _bq.QueryJobConfig(query_parameters=bq_params)
+                try:
+                    res = client.query(sql, job_config=job_config).result(timeout=60)
+                    rows_out = [dict(row.items()) for row in res]
+                except Exception as query_exc:
+                    from concurrent.futures import TimeoutError as _FutTimeout
+
+                    from google.api_core import exceptions as _gexc
+
+                    server_side = isinstance(query_exc, (_FutTimeout, _gexc.RetryError)) or (
+                        isinstance(query_exc, _gexc.GoogleAPICallError)
+                        and (query_exc.code or 0) >= 500
+                    )
+                    if not (is_local and server_side):
+                        raise
+                    # goccy emulator: a query job can wedge behind another
+                    # session's DDL lock, and every SQL refusal is a 500. Only
+                    # fall back to a full table scan (every page, so a duplicate
+                    # or later version of a key is never missed) when the table
+                    # really carries the requested columns — an unknown column
+                    # stays a refusal, never an empty sample.
+                    table_obj = client.get_table(table_id)
+                    present = {f.name for f in table_obj.schema}
+                    wanted = [c for c in cols if c != "*"] + ([sort_key] if sort_key else [])
+                    missing = [c for c in wanted if c not in present]
+                    if missing:
+                        raise TargetSampleUnavailable(
+                            f"Destination {table_name!r} has no column(s) {missing}; "
+                            f"query refused: {query_exc}"
+                        ) from query_exc
+                    rows_out = []
+                    for row in client.list_rows(table_id):
+                        d = dict(row.items())
+                        if widened_keys and str(d.get(sort_key)) not in widened_keys:
+                            continue
+                        rows_out.append(d)
+                    if sort_key:
+                        rows_out.sort(key=lambda r: (r.get(sort_key) is None, str(r.get(sort_key))))
+                    rows_out = rows_out[: int(limit)]
+                if cols and cols != ["*"]:
+                    rows_out = [{k: v for k, v in d.items() if k in cols} for d in rows_out]
+                return rows_out
             except TargetSampleUnavailable:
                 raise
             except Exception as exc:

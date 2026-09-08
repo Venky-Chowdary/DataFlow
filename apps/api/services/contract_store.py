@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from services.data_contract import CircuitBreaker, DataContract
-from services.value_serializer import bson_safe_document
+from services.value_serializer import bson_safe_document, python_document_from_bson
 
 
 class ContractStore(ABC):
@@ -124,7 +124,7 @@ class MongoContractStore(ContractStore):
                 doc = db["contracts"].find_one({"id": contract_id})
                 if doc:
                     doc.pop("_id", None)
-                    return DataContract.from_dict(doc)
+                    return DataContract.from_dict(python_document_from_bson(doc))
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_contract(contract_id)
@@ -139,7 +139,7 @@ class MongoContractStore(ContractStore):
                 docs = list(db["contracts"].find().sort("updated_at", -1).limit(limit))
                 for doc in docs:
                     doc.pop("_id", None)
-                    c = DataContract.from_dict(doc)
+                    c = DataContract.from_dict(python_document_from_bson(doc))
                     by_id[c.id] = c
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -177,7 +177,7 @@ class MongoContractStore(ContractStore):
                 doc = db["contract_breakers"].find_one({"contract_id": contract_id})
                 if doc:
                     doc.pop("_id", None)
-                    return CircuitBreaker.from_dict(doc)
+                    return CircuitBreaker.from_dict(python_document_from_bson(doc))
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return self._fallback.get_breaker(contract_id)

@@ -39,6 +39,14 @@ def split_refused_unit(
     the unit was rolled back with it.
     """
     found = rows_with_findings(details)
+    if not details and rejected_rows > 0:
+        # No finding at all: the unit was refused before any row was judged
+        # (DDL, permission, transport). Nothing is quarantined — there is no
+        # row to inspect or replay — the whole unit was rolled back.
+        summary["rows_rolled_back"] = rejected_rows
+        summary["rows_refused_unit"] = rejected_rows
+        summary["rejected_rows"] = 0
+        return 0
     if not found or rejected_rows <= found:
         return rejected_rows
     summary["rows_rolled_back"] = rejected_rows - found
@@ -142,6 +150,10 @@ def _persist_job_quarantine(
     """
     details = list(dest_summary.get("rejected_details") or [])
     if not details:
+        rejected = int(dest_summary.get("rejected_rows") or 0)
+        if rejected:
+            split_refused_unit(details, rejected, dest_summary)
+            dest_summary["rejected_details_total"] = 0
         dest_summary["quarantine_durable"] = True
         return
     from services.quarantine_dlq import (
