@@ -802,6 +802,27 @@ def bson_safe_document(value: Any) -> Any:
     return json_default(value)
 
 
+def python_document_from_bson(value: Any) -> Any:
+    """Inverse of ``bson_safe_document`` for a document read back from Mongo.
+
+    ``Decimal128`` is the BSON carrier for ``Decimal``; a document that keeps it
+    past the store boundary cannot be rendered by any JSON surface (pydantic,
+    ``json.dumps``) and the whole response is lost to a 500. Every other BSON
+    carrier with no Python equivalent settles through ``json_default``.
+    """
+    if isinstance(value, dict):
+        return {str(k): python_document_from_bson(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [python_document_from_bson(v) for v in value]
+    if _is_decimal128(value):
+        return value.to_decimal()
+    if value is None or isinstance(value, _BSON_NATIVE_SCALARS):
+        return value
+    if type(value).__module__.split(".")[0] == "bson":
+        return json_default(value)
+    return value
+
+
 _JSON_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
 
 
