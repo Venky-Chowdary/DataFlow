@@ -87,6 +87,14 @@ from services.dest_precount import (
     precount_table,
     stamp_overwrite_source_keys,
 )
+from services.dialect_profiles import schema_from_cfg
+from services.primary_key import dest_is_key_addressed
+from services.row_conservation import (
+    CENSUS_KEY,
+    KEY_ADDRESSED_KEY,
+    KeyCensusAccumulator,
+    observe_keyed_batch,
+)
 from services.excel_parser import (
     count_excel_rows,
     iter_excel_batches,
@@ -1169,6 +1177,25 @@ def stream_file_to_database(
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
+    # A keyed write into an occupied destination grows it by the keys it
+    # inserted, not by the batch, and a key-addressed destination replaces the
+    # value at the key on every write. Gate-8 needs the dest-engine key census
+    # (new keys vs held keys) for the cardinality identity — the same owner the
+    # database stream uses; without it a correct upsert that touched existing
+    # keys is graded as an append that lost rows.
+    dest_key_addressed = (
+        not object_store and dest_is_key_addressed(dest_type, pk_target_cols)
+    )
+    if dest_key_addressed:
+        dest_summary[KEY_ADDRESSED_KEY] = True
+    keyed_census_acc = (
+        KeyCensusAccumulator()
+        if pk_target_cols
+        and not object_store
+        and (write_mode == "upsert" or dest_key_addressed)
+        else None
+    )
+    census_schema = schema_from_cfg(dest_type, dest_cfg)
     last_checksum = ""
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped, so a resumed pass that starts
@@ -1627,6 +1654,28 @@ def stream_file_to_database(
                 )
             raise
 
+    key_source_fields: list[str] = []
+    for _target in pk_target_cols:
+        _field = _target
+        for _m in mappings or []:
+            if str(_m.get("target") or "").lower() == _target.lower() and _m.get("source"):
+                _field = str(_m["source"])
+                break
+        key_source_fields.append(_field)
+
+    def _key_projection(batch: list[dict]) -> list[list[Any]]:
+        """Target-named key cells per record; duplicates stay (census dedupes)."""
+        out: list[list[Any]] = []
+        for rec in batch:
+            row: list[Any] = []
+            for field, target in zip(key_source_fields, pk_target_cols):
+                raw = rec.get(field)
+                if raw is None and field != target:
+                    raw = rec.get(target)
+                row.append(raw)
+            out.append(row)
+        return out
+
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         # Worker threads do not inherit the caller's contextvars, so each chunk
         # must re-apply the resolved locales before any coercion runs.
@@ -1655,6 +1704,21 @@ def stream_file_to_database(
             if overwrite_keys_acc is not None
             else None
         )
+        if keyed_census_acc is not None:
+            # Probe dest key hits before this batch writes (its own inserts
+            # would otherwise read back as pre-existing). Key tuples only, so
+            # the spooled path keeps its memory bound.
+            observe_keyed_batch(
+                keyed_census_acc,
+                headers=list(pk_target_cols),
+                rows=_key_projection(batch),
+                mappings=None,
+                key_columns=pk_target_cols,
+                db_type=dest_type,
+                cfg=dest_cfg,
+                schema=census_schema,
+                table_name=dest_table,
+            )
         if use_source_spool:
             local_warnings = _apply_batch_audit(idx, headers, records=batch)
             spill = spill_engine_write_records(
@@ -1723,9 +1787,12 @@ def stream_file_to_database(
             # The pre-write count belongs to the FIRST batch: later batches see
             # rows this job already appended, which would hide the delta.
             prior_precount = dest_summary.get(PRECOUNT_KEY)
+            prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
             dest_summary = dict(batch_summary)
             if prior_precount is not None:
                 dest_summary[PRECOUNT_KEY] = prior_precount
+            if prior_key_addressed:
+                dest_summary[KEY_ADDRESSED_KEY] = True
             batch_ids = list(batch_summary.get("written_ids") or [])
             if prior_ids or batch_ids:
                 merged: list[str] = []
@@ -1917,6 +1984,10 @@ def stream_file_to_database(
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
     stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
+    if keyed_census_acc is not None:
+        census = keyed_census_acc.to_census()
+        if census is not None:
+            dest_summary[CENSUS_KEY] = census.to_dict()
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)
         dest_summary["primary_key_columns"] = list(pk_target_cols)
