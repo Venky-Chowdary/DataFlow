@@ -48,6 +48,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("DATAFLOW_CONNECTOR_STORE_BACKEND", "mongo")
 
 WORKSPACE = "sched-proof"
+# create_connector() replaces a same-name/type/role connector in the workspace;
+# two matrix processes sharing the Mongo store must therefore never share a
+# connector name or one deletes the other's mid-run ("connector missing").
+RUN_TAG = uuid.uuid4().hex[:8]
 ROWS = int(os.environ.get("SCHED_ROWS", "2000"))
 NEW_ROWS = max(1, ROWS // 20)
 UPDATED_ROWS = max(1, ROWS // 40)
@@ -220,7 +224,13 @@ class Engine:
         self.drop(table)
         if self.name == "mongodb":
             db = self._mongo()
-            db.create_collection(table)
+            # Pre-images are the operator prerequisite the engine's own refusal
+            # names for a business-keyed CDC pipeline: a delete event carries
+            # documentKey._id only, so ``id`` is recoverable only from the
+            # pre-image (Mongo 6+). Same collMod an operator runs.
+            db.create_collection(
+                table, changeStreamPreAndPostImages={"enabled": True}
+            )
             if pk:
                 db[table].create_index("id", unique=True)
             return
@@ -345,7 +355,7 @@ def _mapping_rows(src: str, dst: str, *, pk: bool) -> list[dict[str, Any]]:
 def _connector(engine: Engine, role: str) -> str:
     from services.connector_store import create_connector
 
-    data = {**engine.cfg, "name": f"sched-proof {engine.name} {role}", "role": role,
+    data = {**engine.cfg, "name": f"sched-proof {RUN_TAG} {engine.name} {role}", "role": role,
             "workspace_id": WORKSPACE}
     data.pop("ssl", None)
     data["ssl"] = False

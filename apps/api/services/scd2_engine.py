@@ -957,8 +957,12 @@ def apply_scd2(
 
         engine = get_sqlalchemy_engine(cfg)
         dialect_name = engine.dialect.name if engine.dialect else ""
+        # The CREATE binds the Map contract (operator / population-widened
+        # ``target_type`` stamps), never the peeked source carrier alone —
+        # preflight proved fit against the stamps, so the DDL must be the same.
         column_types: dict[str, str] = {
-            c: (schema or {}).get(c, "string") for c in target_cols
+            c: str(ctx["dest_types"].get(c) or (schema or {}).get(c) or "string")
+            for c in target_cols
         }
 
         try:

@@ -480,6 +480,17 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
 
 
+def _same_schedule_doc(existing: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
+    """True when ``payload`` carries exactly what the stored doc already holds."""
+    stored = {k: v for k, v in existing.items() if k not in ("_id", "version")}
+    try:
+        return json.dumps(stored, sort_keys=True, default=json_default) == json.dumps(
+            dict(payload), sort_keys=True, default=json_default
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 def _save_mongo(
     svc,
     schedules: list[PipelineSchedule],
@@ -488,10 +499,13 @@ def _save_mongo(
 ) -> None:
     """Persist schedules as individual docs with version CAS (no whole-blob races).
 
-    ``removed_ids`` names schedules this write deletes. It is what makes deleting
-    the *last* schedule land: an empty snapshot carries no id to compare against,
-    so the "not in the snapshot" sweep below has nothing to sweep.
+    ``removed_ids`` names the schedules this write deletes; nothing else is
+    ever removed. Docs equal to their stored copy are not re-written, so a
+    whole-snapshot save from one instance cannot clobber another instance's
+    concurrent beat, watermark, or newly created schedule.
     """
+    from pymongo.errors import DuplicateKeyError
+
     db = svc.get_database()
     coll = db["pipeline_schedules"]
     seen = set()
@@ -504,24 +518,35 @@ def _save_mongo(
         payload["id"] = s.id
         for attempt in range(5):
             existing = coll.find_one({"_id": s.id})
+            if existing is not None and _same_schedule_doc(existing, payload):
+                # Callers save the whole loaded snapshot. A schedule this
+                # write did not touch must not be re-stamped, or a stale copy
+                # would overwrite a concurrent instance's beat/watermark.
+                break
             version = int((existing or {}).get("version") or 0)
             filt = {"_id": s.id, "$or": [{"version": version}, {"version": {"$exists": False}}]}
             if existing is None:
                 filt = {"_id": s.id}
-            result = coll.find_one_and_update(
-                filt,
-                {"$set": {**payload, "version": version + 1}},
-                upsert=True,
-                return_document=True,
-            )
+            try:
+                result = coll.find_one_and_update(
+                    filt,
+                    {"$set": {**payload, "version": version + 1}},
+                    upsert=True,
+                    return_document=True,
+                )
+            except DuplicateKeyError:
+                # CAS lost: another instance bumped the version between our
+                # read and write, so the upsert tried to insert a second doc
+                # under the same ``_id``. Re-read and retry.
+                continue
             if result is not None:
                 break
         else:
             # Last writer wins for this schedule id after CAS retries.
             coll.replace_one({"_id": s.id}, {"_id": s.id, **payload, "version": 1}, upsert=True)
-    # Remove schedules deleted from the in-memory snapshot.
-    if seen:
-        coll.delete_many({"_id": {"$nin": list(seen)}})
+    # Only the ids a caller explicitly deleted are removed. Sweeping every doc
+    # absent from this snapshot deleted schedules another instance created
+    # between our load and this save.
     gone = [sid for sid in removed_ids if sid and sid not in seen]
     if gone:
         coll.delete_many({"_id": {"$in": gone}})

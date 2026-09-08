@@ -989,12 +989,16 @@ def _stream_database_transfer_impl(
         pk_target_cols = [
             map_source_to_target(col, mappings) for col in pk_source_cols
         ]
-        # Tie-break incremental watermarks with a stable source PK (Airbyte gap).
-        if incremental and cursor_source_col:
-            cursor_pk_source = next(
-                (p for p in pk_source_cols if p and p != cursor_source_col),
-                pk_source_cols[0] if pk_source_cols else "",
-            )
+    if incremental and cursor_source_col:
+        # Tie-break incremental watermarks with a stable source PK (Airbyte
+        # gap), or with the engine's own row identity (Mongo ``_id``) when the
+        # contract declares none — rows sharing a cursor value across a page
+        # edge are never skipped. Same owner as the preflight read scope.
+        from services.keyset_pagination import incremental_tiebreak_column
+
+        cursor_pk_source = incremental_tiebreak_column(
+            src_type, cursor_source_col, pk_source_cols
+        )
     if requires_upsert(effective_sync) and not pk_target_cols:
         # No contract key, but the destination table may declare one. That is
         # catalog evidence, not a guess, so an upsert keyed on it resolves rows

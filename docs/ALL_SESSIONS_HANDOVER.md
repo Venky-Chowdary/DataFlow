@@ -436,8 +436,33 @@ columns are a leading prefix of that order (`scan_order_supports_seek`) and
 otherwise keeps paging the held snapshot; the SQLite scan itself now orders by
 the declared PK. 20 regression tests in `tests/test_snapshot_scan_keyset_handoff.py`;
 re-run `matrix_100k_sqlite_dest.json` **pass=17 fail=0 skip=0**.
-**Open:** MongoDB SCD2/mirror and hosted clouds remain unmeasured; CDC is
-at-least-once as measured.
+MongoDB-source 100K slice `matrix_100k_mongo_src.json` (21 cells) first ran
+**pass=12 fail=9 skip=0** — three engine defect classes, each on all three SQL
+destinations (register §8l): (1) incremental_append landed 20,000 of 100,000
+with Gate-8 green — the Mongo cursor read had no tie-break on a non-unique
+cursor and preflight/population-fit derived the tie-break separately from the
+stream; one owner now (`keyset_pagination.incremental_tiebreak_column`, contract
+PK else Mongo `_id`) feeds execution, preflight scope and the fit scan, and the
+Mongo reader seeks on the composite `(cursor, _id)`. (2) SCD2 failed closed at
+write with `amount → DECIMAL(3,3)`: the SCD2 CREATE rebuilt types from the
+100-document peek instead of the Map/population-widened stamp preflight had
+proved against; `apply_scd2` now binds `dest_types`. (3) CDC run 2 applied
+1,000 of 7,500 events: `poll()` never advanced the instance's own resume token
+so every drain round replayed the first window; fixed with snapshot→stream
+handoff on the same instance, and the business-key-delete pre-image refusal
+moved to attach time (unreadable catalog ≠ disabled). Regression tests in
+`test_incremental_filtered_scan_no_tiebreak.py`, `test_scd2_engine.py`,
+`test_mongodb_change_stream.py`; live 2K probes green (`probe_mongo_incappend`,
+`probe_mongo_scd2`, `probe_mongo_cdc_2k` 5/0/0). 100K re-run of the three
+modes: `matrix_100k_mongo_src_fixed.json` **pass=12 fail=0 skip=0** (run 1 =
+100,000, run 2 = 7,500 delta, Gate-8 on all 18 runs) — MongoDB-source 21/21 at 100K. The
+MongoDB-destination 100K slice `matrix_100k_mongo_dest.json` 5/12/7 was a
+harness collision (two matrices sharing the connector store with identical
+connector names; `create_connector` replaces same-named connectors) — re-run
+alone: `matrix_100k_mongo_dest_v2.json` **RESULT_PENDING**.
+**Open:** hosted clouds remain unmeasured; CDC is at-least-once as measured;
+`create_connector` silently replacing a same-named connector orphans schedules
+bound to the old id (register §8l product note).
 
 ## 7. Continuing this work
 
