@@ -310,6 +310,14 @@ Same harness, 2,000 rows/cell, PG/MySQL/SQLite × PG/MySQL/SQLite × {full_refre
 
 Not claimed: 100K rows/cell, MongoDB SCD2/mirror, hosted clouds, exactly-once CDC (at-least-once measured), live multi-table shared-reader schedule.
 
+## 8j. Scheduler 100K/cell: incremental read on a non-unique cursor (2026-08-10, `338266c9`, branch `devin/qa-lead-integration`)
+
+First 100K run (`matrix_100k_pg_mysql.json`, PG/MySQL × PG/MySQL × 7 modes): the only failure was `postgresql → postgresql · incremental_append` — `rows 27500 != 107500`. The 2K matrix never hit it because 2K rows fit in fewer pages with fewer ties at the edges.
+
+| # | Root cause (measured) | Owner module | Closure evidence |
+|---|-----------------------|--------------|------------------|
+| Incremental page seek on a cursor with no unique tie-break silently skipped rows | The stream's incremental read seeks `WHERE updated_seq > :page_max` and the harness fixture's cursor is *not* unique (no PK on the append cell; many rows per `updated_seq`). Every row sharing the page-edge cursor value is skipped by the next page — 80,000 of 107,500 rows lost with a green writer ack. The engine no longer guesses uniqueness from the cursor's name or type. | `services/keyset_pagination.py::cursor_unique_evidence` (single-column PK, or an enforced non-nullable single-column unique key — a composite key that merely *contains* the cursor is not evidence), `decide_keyset_pagination(cursor_is_unique=)` refuses the cursor-only seek with `seek_refused_reason`, `incremental_read_needs_filtered_scan` is the one owner of the decision. Readers: `postgresql_reader` / `mysql_reader` / `sqlite_reader` / `generic_sql` (→ SQL Server, Oracle, Redshift) `read_table_scan_batch(filter_column, filter_after)` — one held server cursor bound to the **run** watermark (`WHERE cursor > :watermark`, same predicate on COUNT and SELECT, `ORDER BY cursor, <stable fallback>`, `fetchmany` paging). `src/transfer/batch_readers.py` propagates `scan_filter=` and fails closed for sources without the algorithm; `src/transfer/stream.py` holds the filtered snapshot for the probe and every page, so the advancing `fetch_cursor` is never the predicate. Unique-cursor and tie-break routes keep the keyset seek unchanged. | `tests/test_incremental_filtered_scan_no_tiebreak.py` (30: decision owner, evidence rules, SQLite + generic_sql tied rows across page edges, first run, at-watermark, dispatcher refusal); neighbourhood (pagination/snapshot/keyset/incremental/resume, 53 files) 2 failures — both the pre-existing §3 file-stream tests. Live: `SCHED_ROWS=100000 SCHED_MODES=incremental_append` PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0** (`/home/ubuntu/sched_proof/matrix_100k_incappend.json`); full 100K PG/MySQL × 7 modes re-run recorded on PR #172 when it lands. |
+
 ## 9. Closure protocol
 
 For each defect: reproduce on a live engine → fix in the one canonical owner →

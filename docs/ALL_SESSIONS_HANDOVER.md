@@ -413,7 +413,17 @@ active slots are kept; unreachable source returns the exact DROP as next action)
 and the multi-table shared-reader key no longer embeds the job id (was one leaked
 slot + re-snapshot per beat). CDC-only matrix re-run pass=9 fail=0 skip=3
 (`matrix_cdc_release.json`) with the slot asserted absent after release.
-**Open:** 100K/cell, MongoDB SCD2/mirror and hosted clouds remain unmeasured.
+100K/cell (register §8j): the first PG/MySQL × 7-mode run at 100K found one real
+engine defect — incremental_append seeking `WHERE cursor > page_max` on a cursor
+with no unique tie-break skipped every row tied at a page edge (27,500 of 107,500
+landed). Fixed at the owner (`338266c9`): `cursor_unique_evidence` +
+`incremental_read_needs_filtered_scan` refuse the seek and the SQL readers page
+one held snapshot bound to the run watermark. 100K incremental_append re-run
+PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0**
+(`matrix_100k_incappend.json`); the full 100K PG/MySQL × 7-mode result is posted
+on PR #172 as it lands.
+**Open:** 100K SQLite-source cells for the other modes, MongoDB SCD2/mirror and
+hosted clouds remain unmeasured.
 
 ## 7. Continuing this work
 
