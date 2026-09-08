@@ -306,14 +306,28 @@ def read_table_scan_batch(
     limit: int = 500,
     known_total_rows: int | None = None,
     scan_state: dict[str, Any],
+    filter_column: str = "",
+    filter_after: str | None = None,
 ) -> ReadBatch:
-    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one session."""
+    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one session.
+
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
+    (COUNT and SELECT alike) and order it by the cursor first — the incremental
+    read for a table with no unique tie-break to seek on.
+    """
     from psycopg2 import sql
 
-    from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
     from services.source_snapshot import get_source_snapshot_conn
 
     schema, table = _bind(schema, table)
+    filter_value = scan_filter_value(filter_column, filter_after)
+    if filter_value is not None:
+        where_sql = sql.SQL(" WHERE {} > %s").format(sql.Identifier(filter_column))
+        params: tuple[Any, ...] = (filter_value,)
+    else:
+        where_sql = sql.SQL("")
+        params = ()
     if not scan_state.get("started"):
         shared = get_source_snapshot_conn()
         close_conn = shared is None
@@ -333,10 +347,12 @@ def read_table_scan_batch(
                 total = known_total_rows
             else:
                 cur.execute(
-                    sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                    sql.SQL("SELECT COUNT(*) FROM {}.{}{}").format(
                         sql.Identifier(schema),
                         sql.Identifier(table),
-                    )
+                        where_sql,
+                    ),
+                    params,
                 )
                 total = int(cur.fetchone()[0])
             identity = reflection_cache.dsn_identity(
@@ -350,22 +366,26 @@ def read_table_scan_batch(
             order_by = _order_by_clause(
                 cur, schema, table, columns, identity=identity
             )
+            if filter_value is not None:
+                order_by = sql.Identifier(filter_column).as_string(cur) + ", " + order_by
             order_sql = sql.SQL(order_by)
             col_sql = _select_list(cur, schema, table, columns, identity)
             if col_sql is None:
-                query = sql.SQL("SELECT * FROM {}.{} ORDER BY {}").format(
+                query = sql.SQL("SELECT * FROM {}.{}{} ORDER BY {}").format(
                     sql.Identifier(schema),
                     sql.Identifier(table),
+                    where_sql,
                     order_sql,
                 )
             else:
-                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY {}").format(
+                query = sql.SQL("SELECT {} FROM {}.{}{} ORDER BY {}").format(
                     col_sql,
                     sql.Identifier(schema),
                     sql.Identifier(table),
+                    where_sql,
                     order_sql,
                 )
-            cur.execute(query)
+            cur.execute(query, params)
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
         except Exception:
             try:

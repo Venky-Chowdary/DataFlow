@@ -3482,12 +3482,26 @@ def _count_table_raw(
     schema: str | None,
     *,
     dialect: str = "ansi",
+    filter_column: str = "",
+    filter_value: str | None = None,
 ) -> int | None:
     from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import quote_char_for
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
+    where = ""
+    params: dict[str, Any] = {}
+    if filter_column and filter_value is not None:
+        q = quote_char_for(dialect)
+        from connectors.sql_identifiers import require_safe_identifier
+
+        col = quote_sql_identifier(require_safe_identifier(filter_column, preserve_case=True), q)
+        where = f" WHERE {col} > :df_after"
+        params = {"df_after": filter_value}
     try:
-        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()  # nosec B608
+        return conn.execute(
+            sa.text(f"SELECT COUNT(*) FROM {qualified}{where}"), params  # nosec B608
+        ).scalar()
     except Exception:
         # Never fabricate len(rows) as cardinality — that stops streaming after page one.
         return None
@@ -3649,18 +3663,27 @@ def read_table_scan_batch(
     limit: int = 100_000,
     known_total_rows: int | None = None,
     scan_state: dict[str, Any],
+    filter_column: str = "",
+    filter_after: str | None = None,
     **extra: Any,
 ) -> ReadBatch:
     """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login.
 
     Covers SQL Server, Oracle, Databricks, and other SQLAlchemy dialects that
     previously opened a new connection and OFFSET-paged every chunk.
+
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
+    (COUNT and SELECT alike) and order it by the cursor first — the incremental
+    read for a table with no unique tie-break to seek on. That bound needs the
+    reflected table; a dialect whose reflection fails refuses rather than
+    reading the whole table unfiltered.
     """
-    from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
 
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
+    filter_value = scan_filter_value(filter_column, filter_after)
     if not scan_state.get("started"):
         cfg = _cfg_from_params(
             host,
@@ -3690,7 +3713,12 @@ def read_table_scan_batch(
                 total = known_total_rows
             else:
                 total = _count_table_raw(
-                    conn, table, schema_name, dialect=dialect
+                    conn,
+                    table,
+                    schema_name,
+                    dialect=dialect,
+                    filter_column=filter_column if filter_value is not None else "",
+                    filter_value=filter_value,
                 )
             try:
                 table_obj = _reflect_table(engine, table, schema_name, columns)
@@ -3710,6 +3738,19 @@ def read_table_scan_batch(
                     else []
                 )
                 stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                if filter_value is not None:
+                    _fname = reflected_column_name(table_obj, str(filter_column))
+                    if _fname is None:
+                        raise ValueError(
+                            f"Cursor column '{filter_column}' not found in table {table}"
+                        )
+                    filter_col_obj = table_obj.c[_fname]
+                    stmt = stmt.where(
+                        filter_col_obj > sa.cast(sa.literal(filter_value), filter_col_obj.type)
+                    )
+                    order_cols = [filter_col_obj] + [
+                        c for c in order_cols if c is not filter_col_obj
+                    ]
                 if order_cols:
                     stmt = stmt.order_by(*order_cols)
                 # Statement-scoped: on the connection it leaks into later DDL,
@@ -3718,6 +3759,8 @@ def read_table_scan_batch(
                 headers = _catalog_headers(dialect, selected_cols)
                 serialize = True
             except Exception:
+                if filter_value is not None:
+                    raise
                 headers, result = _open_raw_table_scan(
                     conn, table, schema_name, dialect=dialect
                 )

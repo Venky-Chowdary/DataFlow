@@ -1427,6 +1427,29 @@ def _stream_database_transfer_impl(
         _pool_baseline = None
         _schema_baseline = None
 
+    from services.keyset_pagination import (
+        cursor_unique_evidence,
+        incremental_read_needs_filtered_scan,
+    )
+
+    _cat_types, _cat_nulls, _cat_keys = _src_rich_catalog
+    _cursor_is_unique = cursor_unique_evidence(
+        cursor_source_col,
+        primary_key_columns=pk_source_cols or (_cat_keys.get("primary_key_columns") or []),
+        unique_keys=_cat_keys.get("unique_keys") or [],
+        nullable=_cat_nulls,
+    )
+    _filtered_scan_reason = incremental_read_needs_filtered_scan(
+        src_type=src_type,
+        incremental=bool(incremental),
+        cursor_column=cursor_source_col,
+        tiebreak_column=cursor_pk_source,
+        cursor_is_unique=_cursor_is_unique,
+        callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
+    )
+    if _filtered_scan_reason:
+        logger.info("%s.%s: %s", src_type, table, _filtered_scan_reason)
+
     def _cursor_read_args(cursor_after: str | None) -> dict[str, Any]:
         """The cursor arguments every read of this run must agree on.
 
@@ -1565,14 +1588,26 @@ def _stream_database_transfer_impl(
     _resume_bookmark = (
         getattr(checkpoint, "cursor_value", None) if checkpoint is not None else None
     )
-    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not (
-        _is_resume and _resume_bookmark not in (None, "")
+    # An incremental cursor with no unique tie-break also holds a scan: the
+    # filter is the run watermark and paging is fetchmany, so the bookmark a
+    # resume carries is a row count, never a seek key.
+    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and (
+        bool(_filtered_scan_reason)
+        or (
+            not incremental
+            and not (_is_resume and _resume_bookmark not in (None, ""))
+        )
     )
     _scan_kw: dict[str, Any] = {"scan_state": src_scan} if _hold_snapshot else {}
+    if _filtered_scan_reason:
+        _scan_kw["scan_filter"] = (cursor_source_col, watermark)
+        _probe_cursor_kw: dict[str, Any] = {}
+    else:
+        _probe_cursor_kw = _cursor_read_args(watermark)
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            **_cursor_read_args(watermark),
+            **_probe_cursor_kw,
             **_scan_kw,
         )
     )
@@ -1989,8 +2024,15 @@ def _stream_database_transfer_impl(
         chunk_index=chunk_idx,
         cursor_after=keyset_after,
         snapshot_scan=bool(src_scan),
+        cursor_is_unique=_cursor_is_unique,
     )
     use_keyset = decision.use_keyset
+    if _filtered_scan_reason and use_keyset:
+        raise RuntimeError(
+            "pagination owners disagree: the read opened a filtered snapshot scan "
+            "but the keyset decision would seek on "
+            f"{keyset_order_cols!r} — refusing rather than risk skipped rows"
+        )
     keyset_order_cols = decision.order_cols
     _resume_scan_aligned = False
     if decision.resume_fallback:
@@ -2285,6 +2327,7 @@ def _stream_database_transfer_impl(
         elif (
             incremental
             and cursor_source_col
+            and not _filtered_scan_reason
             and source_bounds_cursor_reads(src_type)
         ):
             batch, _ = _unwrap_read(
@@ -2401,6 +2444,23 @@ def _stream_database_transfer_impl(
             return batch
         elif total_rows is not None and fetch_offset >= total_rows:
             return None
+        elif _filtered_scan_reason:
+            # One held scan bound to the *run* watermark; the page max never
+            # becomes the predicate, so rows tied at a page edge are kept.
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    **_scan_kw,
+                )
+            )
+            return batch
         else:
             batch, extra = _unwrap_read(
                 _read_batch(

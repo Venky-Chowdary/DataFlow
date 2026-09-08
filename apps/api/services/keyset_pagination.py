@@ -331,6 +331,73 @@ def safe_keyset_unique_columns(
     return []
 
 
+def cursor_unique_evidence(
+    cursor_column: str,
+    *,
+    primary_key_columns: Sequence[str],
+    unique_keys: list[Any] | None,
+    nullable: dict[str, bool] | None,
+) -> bool:
+    """True when the source catalog proves ``cursor_column`` alone is unique.
+
+    A single-column primary key or a single-column enforced, non-nullable
+    unique key on the cursor. A composite key that merely *contains* the
+    cursor is not evidence — two rows can share the cursor value.
+    """
+    if not cursor_column:
+        return False
+    pk = [c for c in primary_key_columns if c]
+    if pk == [cursor_column]:
+        return True
+    for uk in unique_keys or []:
+        if isinstance(uk, dict):
+            uk_cols = list(uk.get("columns") or [])
+        elif isinstance(uk, (list, tuple)):
+            uk_cols = list(uk)
+        else:
+            continue
+        if uk_cols != [cursor_column]:
+            continue
+        if safe_keyset_unique_columns([uk], [cursor_column], nullable) == [cursor_column]:
+            return True
+    return False
+
+
+def incremental_read_needs_filtered_scan(
+    *,
+    src_type: str,
+    incremental: bool,
+    cursor_column: str,
+    tiebreak_column: str,
+    cursor_is_unique: bool,
+    callable_source: bool,
+) -> str:
+    """Why an incremental read must page one filtered snapshot scan, or ``""``.
+
+    The advancing-page-max read (``WHERE cursor > page_max``) and the keyset
+    seek both assume a strict order on the seek key. A cursor with no unique
+    tie-break has ties, and every peer row past a page edge is lost silently.
+    Those sources hold one ``WHERE cursor > run_watermark ORDER BY cursor``
+    cursor and page it with ``fetchmany`` instead. A callable source already
+    filters its spool against the run watermark and OFFSET-pages it.
+    """
+    if not incremental or not cursor_column or callable_source:
+        return ""
+    if tiebreak_column or cursor_is_unique:
+        return ""
+    from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
+
+    if (src_type or "").strip().lower() not in FILTERED_SCAN_SOURCES:
+        return ""
+    return (
+        f"incremental cursor {cursor_column!r} has no unique tie-break "
+        "(no primary key or enforced non-null unique key on the source): a read "
+        "that seeks past each page's maximum would skip rows sharing that cursor "
+        f"value, so this run pages one filtered snapshot scan "
+        f"(WHERE {cursor_column} > watermark ORDER BY {cursor_column}) instead"
+    )
+
+
 @dataclass(frozen=True)
 class KeysetDecision:
     """How a stream will page, and the ordered columns it will seek on."""
@@ -339,6 +406,9 @@ class KeysetDecision:
     order_cols: list[str]
     pagination_mode: str
     resume_fallback: bool
+    #: Set when an incremental cursor has no unique tie-break: a strict ``>``
+    #: seek on that cursor would skip every peer row sharing a page-edge value.
+    seek_refused_reason: str = ""
 
 
 def decide_keyset_pagination(
@@ -352,6 +422,7 @@ def decide_keyset_pagination(
     chunk_index: int,
     cursor_after: Any,
     snapshot_scan: bool,
+    cursor_is_unique: bool = False,
 ) -> KeysetDecision:
     """Choose seek vs scan vs OFFSET paging — one owner for the whole engine.
 
@@ -363,6 +434,14 @@ def decide_keyset_pagination(
     offset but no bookmark also refuses to seek, or the seek would restart at
     the top of the table and re-read rows already committed — the stream then
     drains the held scan past that offset instead of OFFSET-paging.
+
+    An incremental cursor is only seekable when it is unique itself
+    (``cursor_is_unique``) or paired with a unique tie-break. A non-unique
+    cursor alone (``updated_at``, a batch sequence) is the Airbyte timestamp
+    trap: the first page ends inside a run of tied values and ``cursor > edge``
+    never returns the rest of that run. Such a run pages the *filtered*
+    snapshot scan (``WHERE cursor > watermark`` held on one server cursor)
+    instead, and ``seek_refused_reason`` says why.
     """
     order_cols = [c for c in keyset_order_cols if c]
     capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES
@@ -371,14 +450,34 @@ def decide_keyset_pagination(
         use_keyset = True
         if keyset_col not in order_cols:
             order_cols = [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
+    seek_refused_reason = ""
+    if (
+        use_keyset
+        and incremental
+        and keyset_col
+        and not keyset_tiebreak
+        and not cursor_is_unique
+        and [c for c in order_cols if c != keyset_col] == []
+    ):
+        use_keyset = False
+        seek_refused_reason = (
+            f"incremental cursor {keyset_col!r} has no unique tie-break "
+            "(no primary/unique key on the source): a seek past a page edge "
+            "would skip rows sharing that cursor value, so this run pages one "
+            f"filtered snapshot scan (WHERE {keyset_col} > watermark) instead"
+        )
     resume_fallback = False
     if use_keyset and (offset > 0 or chunk_index > 0) and cursor_after in (None, ""):
         use_keyset = False
         resume_fallback = True
-    mode = "keyset" if use_keyset else ("scan" if snapshot_scan else "offset")
+    if seek_refused_reason:
+        mode = "filtered_scan"
+    else:
+        mode = "keyset" if use_keyset else ("scan" if snapshot_scan else "offset")
     return KeysetDecision(
         use_keyset=use_keyset,
         order_cols=order_cols,
         pagination_mode=mode,
         resume_fallback=resume_fallback,
+        seek_refused_reason=seek_refused_reason,
     )

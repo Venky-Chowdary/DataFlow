@@ -105,10 +105,17 @@ def read_table_scan_batch(
     known_total_rows: int | None = None,
     scan_state: dict[str, Any],
     conn: Any | None = None,
+    filter_column: str = "",
+    filter_after: str | None = None,
 ) -> ReadBatch:
-    """Page one ``SELECT … ORDER BY rowid`` with ``fetchmany`` — no OFFSET."""
+    """Page one ``SELECT … ORDER BY rowid`` with ``fetchmany`` — no OFFSET.
+
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
+    (COUNT and SELECT alike) and order it by the cursor first — the incremental
+    read for a table with no unique tie-break to seek on.
+    """
     del port, username, password, schema, ssl, columns
-    from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_snapshot_scan import close_table_scan, scan_filter_value
     from services.source_snapshot import get_source_snapshot_conn
 
     path = sqlite_file_path(database, connection_string, host)
@@ -118,6 +125,15 @@ def read_table_scan_batch(
         raise ValueError("SQLite source table name required.")
 
     table_quoted = quote_sql_identifier(table)
+    filter_value = scan_filter_value(filter_column, filter_after)
+    where_sql = ""
+    params: tuple[Any, ...] = ()
+    order_prefix = ""
+    if filter_value is not None:
+        filter_q = quote_sql_identifier(filter_column)
+        where_sql = f" WHERE {filter_q} > ?"
+        params = (filter_value,)
+        order_prefix = f"{filter_q}, "
     if not scan_state.get("started"):
         shared = conn if conn is not None else get_source_snapshot_conn()
         close_conn = shared is None and conn is None
@@ -129,13 +145,20 @@ def read_table_scan_batch(
             if known_total_rows is not None:
                 total = known_total_rows
             else:
-                cur.execute(f"SELECT COUNT(*) FROM {table_quoted}")  # nosec B608
+                cur.execute(f"SELECT COUNT(*) FROM {table_quoted}{where_sql}", params)  # nosec B608
                 total = cur.fetchone()[0]
             try:
-                cur.execute(f"SELECT * FROM {table_quoted} ORDER BY rowid")  # nosec B608
+                cur.execute(
+                    f"SELECT * FROM {table_quoted}{where_sql} ORDER BY {order_prefix}rowid",  # nosec B608
+                    params,
+                )
             except sqlite3.OperationalError:
                 # WITHOUT ROWID tables have no rowid — still one SELECT, no OFFSET.
-                cur.execute(f"SELECT * FROM {table_quoted}")  # nosec B608
+                order_sql = f" ORDER BY {order_prefix[:-2]}" if order_prefix else ""
+                cur.execute(
+                    f"SELECT * FROM {table_quoted}{where_sql}{order_sql}",  # nosec B608
+                    params,
+                )
             headers = [d[0] for d in (cur.description or [])]
         except Exception:
             try:
