@@ -992,6 +992,8 @@ export function TransferPage({
       shape_recipe: recipePayload(shapeSteps),
       date_locale: dateLocale,
       number_locale: numberLocale,
+      source_kind: sourceKind,
+      source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -1002,7 +1004,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale, sourceKind, sourceConnector?.type]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.

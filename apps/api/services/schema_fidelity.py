@@ -738,7 +738,7 @@ def plan_create_new_fidelity(
                 )
             )
             continue
-        default_sql = _normalize_default_sql(expr, dest)
+        default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
         suffixes.setdefault(dest_col, []).append(f"DEFAULT {default_sql}")
         struct_defaults[dest_col] = default_sql
         def_carried += 1
@@ -2251,8 +2251,30 @@ def _q(ident: str, dialect: str) -> str:
     return quote_sql_identifier(ident, '"')
 
 
-def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
+_MYSQL_FSP_RE = re.compile(r"^(?:DATETIME|TIMESTAMP)\s*\((\d)\)", re.IGNORECASE)
+
+
+def _mysql_clock_default(keyword: str, dest_type: str) -> str:
+    """MySQL/MariaDB spelling of a clock default for the column it sits on.
+
+    MySQL accepts ``CURRENT_TIMESTAMP`` only on DATETIME/TIMESTAMP columns and
+    only with the column's own fractional precision: ``DATETIME(6) DEFAULT
+    CURRENT_TIMESTAMP`` is error 1067 at CREATE, which is how a PG
+    ``timestamp DEFAULT now()`` failed every MySQL destination after Validate
+    had passed. ``CURRENT_DATE``/``CURRENT_TIME`` are expression defaults and
+    need the parenthesised form (MySQL 8.0.13+, MariaDB 10.2+).
+    """
+    if keyword == "CURRENT_TIMESTAMP":
+        m = _MYSQL_FSP_RE.match((dest_type or "").strip())
+        if m and int(m.group(1)) > 0:
+            return f"CURRENT_TIMESTAMP({m.group(1)})"
+        return keyword
+    return f"({keyword})"
+
+
+def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") -> str:
     text = (expr or "").strip()
+    mysql_family = (dest_dialect or "").lower() in {"mysql", "mariadb"}
     if text.startswith("(") and text.endswith(")"):
         text = text[1:-1].strip()
     # Strip PG type cast: 'active'::text → 'active'
@@ -2273,15 +2295,15 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
         "localtimestamp",
         "localtimestamp()",
     }:
-        return "CURRENT_TIMESTAMP"
+        return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
     if lowered in {"current_date", "current_date()", "curdate()"}:
-        return "CURRENT_DATE"
+        return _mysql_clock_default("CURRENT_DATE", dest_type) if mysql_family else "CURRENT_DATE"
     if lowered in {"current_time", "current_time()", "curtime()"}:
-        return "CURRENT_TIME"
+        return _mysql_clock_default("CURRENT_TIME", dest_type) if mysql_family else "CURRENT_TIME"
     if text.lower() in {"datetime('now')", "(datetime('now'))"}:
         if (dest_dialect or "").lower() == "sqlite":
             return "(datetime('now'))"
-        return "CURRENT_TIMESTAMP"
+        return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
     return text
 
 

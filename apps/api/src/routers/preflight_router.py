@@ -651,6 +651,10 @@ class CellPreviewRequest(BaseModel):
     date_locale: str = ""
     number_locale: str = ""
     shape_recipe: dict[str, Any] | None = None
+    # Same owner as /preflight/run and Execute: a typed source's numbers read
+    # canonically (WIRE) when the operator declared no locale.
+    source_kind: str = "file"
+    source_type: str | None = None
 
 
 @router.post("/preview-cells")
@@ -672,8 +676,13 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
             set_active_number_locale,
         )
 
+        from ..transfer.connector_capabilities import typed_wire_number_locale
+
+        number_locale = body.number_locale or typed_wire_number_locale(
+            body.source_kind, body.source_type or ""
+        )
         locale_token = set_active_date_locale(body.date_locale)
-        number_token = set_active_number_locale(body.number_locale)
+        number_token = set_active_number_locale(number_locale)
         try:
             rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
             headers = list(body.headers)
