@@ -420,8 +420,10 @@ landed). Fixed at the owner (`338266c9`): `cursor_unique_evidence` +
 `incremental_read_needs_filtered_scan` refuse the seek and the SQL readers page
 one held snapshot bound to the run watermark. 100K incremental_append re-run
 PG/MySQL/SQLite × PG/MySQL/SQLite **pass=12 fail=0 skip=0**
-(`matrix_100k_incappend.json`); the full 100K PG/MySQL × 7-mode result is posted
-on PR #172 as it lands.
+(`matrix_100k_incappend.json`); full 100K PG/MySQL × PG/MySQL × 7 modes +
+overlap/failure-park/workspace cells **pass=31 fail=0 skip=0**
+(`matrix_100k_pg_mysql_v2.json`): run 1 = 100,000 rows and run 2 = the exact
+delta in every cell, Gate-8 passed on all 56 scheduled runs.
 **Open:** 100K SQLite-source cells for the other modes, MongoDB SCD2/mirror and
 hosted clouds remain unmeasured.
 
