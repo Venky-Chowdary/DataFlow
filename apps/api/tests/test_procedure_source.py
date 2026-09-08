@@ -540,12 +540,25 @@ def test_create_procedure_script_names_next_action_not_semicolons():
         with pytest.raises(ProcedureSourceError) as exc:
             parse_callable_source(ddl, dialect="snowflake", mode=mode)
         msg = str(exc.value)
-        assert "CREATE PROCEDURE definition, not an extract" in msg
+        assert "SQL Server T-SQL CREATE PROCEDURE script" in msg
+        assert "not a snowflake extract" in msg
         assert "CALL schema.name(:param)" in msg
         assert "semicolons" not in msg
     with pytest.raises(ProcedureSourceError) as exc:
         parse_callable_source(ddl, dialect="mssql", mode="procedure")
-    assert "EXEC schema.name(:param)" in str(exc.value)
+    msg = str(exc.value)
+    assert "CREATE PROCEDURE definition, not an extract" in msg
+    assert "EXEC schema.name(:param)" in msg
+    assert "T-SQL" not in msg
+    with pytest.raises(ProcedureSourceError) as exc:
+        parse_callable_source(
+            "CREATE OR REPLACE PROCEDURE p() RETURNS TABLE() LANGUAGE SQL AS $$ SELECT 1 $$",
+            dialect="snowflake",
+            mode="query",
+        )
+    msg = str(exc.value)
+    assert "CREATE PROCEDURE definition, not an extract" in msg
+    assert "T-SQL" not in msg
     with pytest.raises(ProcedureSourceError) as exc:
         parse_callable_source("CREATE TABLE x (a INT)", dialect="mysql", mode="query")
     assert "CREATE TABLE statement" in str(exc.value)

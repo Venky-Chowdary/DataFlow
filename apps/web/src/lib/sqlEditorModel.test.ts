@@ -20,11 +20,20 @@ describe("sqlEditorModel", () => {
     const ddl = "CREATE PROCEDURE dbo.T @A INT = 1 AS BEGIN SET NOCOUNT ON; SELECT 1; END;\nGO";
     const q = diagnoseSql(ddl, { mode: "query", dialect: "snowflake" });
     assert.equal(q.ok, false);
-    assert.match(q.error, /CREATE PROCEDURE definition, not an extract/);
+    assert.match(q.error, /SQL Server T-SQL CREATE PROCEDURE script/);
+    assert.match(q.error, /not a snowflake extract/);
     assert.match(q.error, /switch to Stored procedure/);
     assert.doesNotMatch(q.error, /semicolons/);
     const p = diagnoseSql(ddl, { mode: "procedure", dialect: "mssql" });
+    assert.match(p.error, /CREATE PROCEDURE definition, not an extract/);
     assert.match(p.error, /EXEC schema\.name\(:param\)/);
+    assert.doesNotMatch(p.error, /T-SQL/);
+    const sf = diagnoseSql(
+      "CREATE OR REPLACE PROCEDURE p() RETURNS TABLE() LANGUAGE SQL AS $$ SELECT 1 $$",
+      { mode: "query", dialect: "snowflake" },
+    );
+    assert.match(sf.error, /CREATE PROCEDURE definition, not an extract/);
+    assert.doesNotMatch(sf.error, /T-SQL/);
     const t = diagnoseSql("CREATE TABLE x (a INT)", { mode: "query" });
     assert.match(t.error, /CREATE TABLE statement/);
   });
