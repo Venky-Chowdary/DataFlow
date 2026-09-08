@@ -111,8 +111,18 @@ def test_sqlite_to_csv_to_sqlite_roundtrip():
         import_result = engine.execute_tracked(import_request, uuid.uuid4().hex[:24])
         assert import_result.success is True, import_result.error
         assert import_result.records_transferred == len(EXPECTED)
-        assert import_result.reconciliation.get("passed") is True
-        assert import_result.reconciliation.get("source_checksum") == import_result.reconciliation.get("target_checksum")
+        recon = import_result.reconciliation or {}
+        assert recon.get("passed") is True
+        # CSV -> SQLite runs on the local COPY fast path: Gate-8 grades it by
+        # destination COUNT(*) against the source snapshot and must say so —
+        # never a checksum_match it did not compute. Step 3 below is the
+        # independent value read-back for this route.
+        if recon.get("assurance_level") == "row_count":
+            assert recon.get("checksum_match") is False
+            assert recon.get("migration_proven") is False
+            assert recon.get("source_rows") == recon.get("target_rows") == len(EXPECTED)
+        else:
+            assert recon.get("source_checksum") == recon.get("target_checksum")
 
         # 3. Verify target SQLite content
         conn = sqlite3.connect(target_db)
