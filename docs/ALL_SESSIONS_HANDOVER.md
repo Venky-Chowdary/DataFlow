@@ -525,6 +525,20 @@ Product defects fixed on the way (all regress green on PG/MySQL/SQLite/fakesnow
 
 Still unmeasured: hosted BigQuery/Snowflake/Redshift, Databricks, Salesforce.
 
+## Transforms × Scheduler (2026-08-10, `devin/qa-lead-integration`, PR #172)
+
+Scheduler = when/how rows move; Transforms = dbt-style post-load SQL models
+(`ref()`/`source()`, view/table/incremental-merge, data tests, quarantine) that
+auto-run after any transfer — including every scheduled beat — landing a
+trigger table, with the outcome on the job (`destination_summary.transformations`).
+Not redundant; it is the "T" Airbyte delegates to dbt.
+
+Proof: `scripts/live_schedule_matrix.py::run_transform_cell` — PG → PG/MySQL/SQLite,
+two scheduled beats, rollup table model and incremental-merge model read back
+equal to the landed table (no duplicate keys after beat 2), a deliberately
+failing data test surfaced as `partial`. `transform_sched_2k.json` **6/0/0**.
+Detail: register §8n.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

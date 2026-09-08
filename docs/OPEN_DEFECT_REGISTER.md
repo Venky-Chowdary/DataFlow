@@ -384,6 +384,43 @@ have no faithful local emulator and stay unmeasured.
 
 All three failures are reproduced emulator limitations (above), fail closed with the emulator's message, and none was recorded as green. Hosted BigQuery/Snowflake/Redshift remain **unmeasured** until credentials exist.
 
+## 8n. Post-load Transforms driven by the scheduler — measured (2026-08-10, `devin/qa-lead-integration`)
+
+Question raised: how Transforms differ from the Scheduler and whether the
+feature is redundant. They are orthogonal — the scheduler owns *when/how rows
+move* (trigger, sync mode, watermark, retries, overlap, history); Transforms
+own *what the data becomes after landing* (dbt-style SQL models with
+`ref()`/`source()` dependencies, view/table/incremental-merge materialization,
+data tests, quarantine — `services/transform_models.py` plans,
+`services/transform_runner.py` executes, `services/post_load_transform.py` is
+the single post-load hook called from all three engine completion paths).
+Every scheduled beat that lands a project's trigger table runs the project and
+records the outcome in the job's `destination_summary.transformations`
+(rendered by `TransformationsCard` / Jobs).
+
+New harness cell `scripts/live_schedule_matrix.py::run_transform_cell`
+(PG source → PG / MySQL / SQLite dest, `incremental_deduped`, two beats with
++5% inserts and 2.5% updates between them). Per beat it asserts, by independent
+read-back: (1) a `table` rollup model equals COUNT/SUM(id)/SUM(amount) of the
+landed table; (2) an `incremental` merge model on `unique_key=id` equals the
+landed table with zero duplicated keys after the second beat (idempotent
+merge, not append); (3) a deliberately failing `unique` data test on a
+dependent `view` is reported as `partial` on the job — a green run there would
+be a defect; (4) Gate-8 passed and `run_history` has both beats.
+
+`transform_sched_2k.json` — **pass=6 fail=0 skip=0** (3 transform cells +
+overlap / failure-park / workspace cells). Beat 1: landed = rollup = merge model
+= `{2000, 2001000, 2007.000}`; beat 2: `{2100, 2206050, 2212.350}` on all
+three destinations; failing test surfaced as
+`Data landed successfully, but 1 data test(s) failed … derived models are not current`.
+`transform_sched_100k.json` (PG → PG / MySQL, 100,000 rows) — **pass=5 fail=0 skip=0**;
+beat 1 `{100000, 5000050000, 5000350.000}`, beat 2 `{105000, 5512552500, 5512867.500}`,
+landed = rollup = merge model on both.
+
+Not a defect but worth knowing: `unique` reports the number of duplicated
+*values* (dbt semantics), and `rows_affected` is `-1` where the driver does not
+report a rowcount for `CREATE TABLE AS` (SQLite).
+
 ## 9. Closure protocol
 
 For each defect: reproduce on a live engine → fix in the one canonical owner →

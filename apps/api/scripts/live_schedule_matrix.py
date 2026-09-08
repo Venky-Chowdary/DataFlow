@@ -823,6 +823,181 @@ def run_workspace_isolation_cell(src: Engine, dst: Engine, conn_ids: dict[str, s
             delete_schedule(sched_id)
 
 
+def run_transform_cell(src: Engine, dst: Engine, conn_ids: dict[str, str], *,
+                       mode: str = "incremental_deduped") -> dict[str, Any]:
+    """A scheduled beat must drive the post-load transform project and its models
+    must read back independently: a rebuilt rollup equals the landed table's
+    totals after each beat, an incremental-merge model stays idempotent across
+    beats, and a failing data test is reported (not swallowed) on the job."""
+    from services.schedule_store import create_schedule, delete_schedule, get_schedule
+    from services.transform_models import DataTest, TransformModel
+    from services.transform_store import TransformProject, get_transform_store
+
+    tag = uuid.uuid4().hex[:6]
+    src_table = f"sp_src_tx_{tag}"
+    dst_table = f"sp_dst_{src.name}_tx_{tag}"
+    rollup, current, bad = f"tx_rollup_{tag}", f"tx_current_{tag}", f"tx_badtest_{tag}"
+    cell: dict[str, Any] = {"scenario": "post_load_transform", "source": src.name, "dest": dst.name,
+                            "sync_mode": mode, "rows": ROWS, "dst_table": dst_table,
+                            "models": [rollup, current, bad]}
+    if dst.name not in SQL_ENGINES:
+        return {**cell, "verdict": "skip", "reasons": ["post-load SQL models need a SQL destination"]}
+    sched_id = ""
+    project_id = ""
+    store = get_transform_store()
+    try:
+        src.create_source(src_table, pk=True)
+        src.insert(src_table, [Engine.row(i, 1) for i in range(1, ROWS + 1)])
+        for t in (dst_table, rollup, current, bad):
+            dst.drop(t)
+
+        dest_conn_id = conn_ids[f"{dst.name}:destination"]
+        amount_sum = ("SUM(CAST(amount AS REAL))" if dst.name == "sqlite"
+                      else "SUM(CAST(amount AS DECIMAL(20,3)))")
+        project = TransformProject(
+            name=f"sched-proof transforms {tag}",
+            destination_connector_id=dest_conn_id,
+            trigger_tables=[dst_table],
+            workspace_id=WORKSPACE,
+            models=[
+                TransformModel(
+                    name=rollup, materialization="table",
+                    sql=f"SELECT COUNT(*) AS n, SUM(id) AS sum_id, {amount_sum} AS sum_amount "
+                        f"FROM {{{{ source('{dst_table}') }}}}",
+                ),
+                TransformModel(
+                    name=current, materialization="incremental", unique_key="id",
+                    incremental_strategy="merge",
+                    sql=f"SELECT id, name, amount, updated_seq FROM {{{{ source('{dst_table}') }}}}",
+                    tests=[DataTest(test_type="unique", column="id"),
+                           DataTest(test_type="not_null", column="name")],
+                ),
+                TransformModel(
+                    name=bad, materialization="view",
+                    sql=f"SELECT id, updated_seq FROM {{{{ ref('{current}') }}}}",
+                    # Every row shares updated_seq=1 after beat 1 → this test MUST fail
+                    # and must be reported on the job; a green run here is a defect.
+                    tests=[DataTest(test_type="unique", column="updated_seq")],
+                ),
+            ],
+        )
+        project.validate()
+        project = store.save(project)
+        project_id = project.id
+        cell["project_id"] = project_id
+
+        sched = create_schedule({
+            "name": f"sched-proof transform {src.name}→{dst.name} {tag}",
+            "source_connector_id": conn_ids[f"{src.name}:source"], "source_table": src_table,
+            "dest_connector_id": dest_conn_id, "dest_table": dst_table,
+            "interval": "hourly", "enabled": True, "sync_mode": mode,
+            "validation_mode": "strict", "schema_policy": "manual_review",
+            "mappings": _mapping_rows(src.name, dst.name, pk=True),
+            "cursor_column": "updated_seq" if mode in CURSOR_SEMANTICS_FOR_MODE else "",
+            "cursor_semantics": CURSOR_SEMANTICS_FOR_MODE.get(mode, ""),
+            "primary_key": "id", "workspace_id": WORKSPACE, "max_retries": 0,
+        })
+        sched_id = sched.id
+        cell["schedule_id"] = sched_id
+
+        def _beat(label: str) -> tuple[dict[str, Any], dict[str, Any]]:
+            _force_due(sched_id)
+            r = _beat_and_wait(sched_id)
+            s = r.get("schedule")
+            job = _job(s.last_job_id) if s and s.last_job_id else {}
+            summary = _run_summary(s, job)
+            summary["timeout"] = bool(r.get("timeout"))
+            tx = (job.get("destination_summary") or {}).get("transformations") or {}
+            summary["transformations"] = {
+                "ran": tx.get("ran"), "status": tx.get("status"), "message": str(tx.get("message") or "")[:300],
+                "models": [{"name": m.get("name"), "status": m.get("status"), "rows": m.get("rows_affected"),
+                            "error": str(m.get("error") or "")[:200],
+                            "tests": [(t.get("test_type"), t.get("column"), bool(t.get("passed")), t.get("failing_rows"))
+                                      for t in (m.get("tests") or [])]}
+                           for p in (tx.get("projects") or []) for m in (p.get("models") or [])],
+            }
+            cell[label] = summary
+            return summary, tx
+
+        def _check(label: str, summary: dict[str, Any], tx: dict[str, Any]) -> list[str]:
+            reasons: list[str] = []
+            if summary["timeout"]:
+                return [f"{label} did not finish within {RUN_TIMEOUT_S}s"]
+            if summary["status"] != "completed":
+                return [f"{label} status={summary['status']}: {summary['error'] or summary['approval']}"]
+            if summary.get("gate8_passed") is not True:
+                reasons.append(f"{label} gate8_passed={summary.get('gate8_passed')}: {summary.get('gate8_message')}")
+            if not tx.get("ran"):
+                return reasons + [f"{label}: post-load transform project did not run ({tx.get('message')!r})"]
+            landed = dst.totals(dst_table)
+            cell[f"{label}_landed"] = landed
+            # Rollup (table, full rebuild) must equal the landed table right now.
+            rows = dst.query(f"SELECT n, sum_id, sum_amount FROM {dst.t(rollup)}")
+            got = {"count": int(rows[0][0]), "sum_id": int(rows[0][1]),
+                   "sum_amount": str(Decimal(str(rows[0][2] or 0)).quantize(Decimal("0.001")))}
+            cell[f"{label}_rollup"] = got
+            if len(rows) != 1 or got != landed:
+                reasons.append(f"{label}: rollup {got} != landed {landed}")
+            # Incremental merge model must mirror the landed table by key (idempotent).
+            cur = dst.totals(current)
+            cell[f"{label}_current"] = cur
+            if cur != landed:
+                reasons.append(f"{label}: incremental-merge model {cur} != landed {landed}")
+            dup = dst.query(f"SELECT COUNT(*) FROM (SELECT id FROM {dst.t(current)} GROUP BY id HAVING COUNT(*) > 1) d")
+            if int(dup[0][0]) != 0:
+                reasons.append(f"{label}: incremental-merge model has {dup[0][0]} duplicated keys")
+            # The deliberately failing test must be reported, never a green run.
+            models = {m["name"]: m for m in summary["transformations"]["models"]}
+            bad_tests = [t for t in models.get(bad, {}).get("tests", []) if t[0] == "unique"]
+            if tx.get("status") not in {"partial", "failed"} or not bad_tests or bad_tests[0][2] is not False:
+                reasons.append(f"{label}: failing data test not reported (project status={tx.get('status')}, "
+                               f"test={bad_tests})")
+            if models.get(rollup, {}).get("status") != "success" or models.get(current, {}).get("status") != "success":
+                reasons.append(f"{label}: model statuses {[(k, v.get('status')) for k, v in models.items()]}")
+            return reasons
+
+        t0 = time.time()
+        s1, tx1 = _beat("run1")
+        s1["seconds"] = round(time.time() - t0, 1)
+        reasons = _check("run1", s1, tx1)
+        if reasons and (s1["timeout"] or s1["status"] != "completed" or not tx1.get("ran")):
+            cell.update(verdict="fail", reasons=reasons)
+            return cell
+
+        seq2 = 2
+        src.insert(src_table, [Engine.row(i, seq2) for i in range(ROWS + 1, ROWS + NEW_ROWS + 1)])
+        src.update(src_table, list(range(1, UPDATED_ROWS + 1)), seq2)
+        cell["source_after_mutation"] = src.totals(src_table)
+
+        t0 = time.time()
+        s2, tx2 = _beat("run2")
+        s2["seconds"] = round(time.time() - t0, 1)
+        reasons += _check("run2", s2, tx2)
+        final = get_schedule(sched_id)
+        cell["run_history_len"] = len(final.run_history) if final else 0
+        if cell["run_history_len"] < 2:
+            reasons.append(f"run_history has {cell['run_history_len']} entries, expected 2")
+        cell.update(verdict="pass" if not reasons else "fail", reasons=reasons)
+        return cell
+    except Exception as exc:  # noqa: BLE001 - recorded as cell failure
+        cell.update(verdict="fail", reasons=[f"harness exception: {exc!r}"],
+                    traceback=traceback.format_exc()[-1500:])
+        return cell
+    finally:
+        if os.environ.get("SCHED_KEEP") != "1":
+            if sched_id:
+                with contextlib.suppress(Exception):
+                    delete_schedule(sched_id)
+            if project_id:
+                with contextlib.suppress(Exception):
+                    store.delete(project_id)
+            with contextlib.suppress(Exception):
+                src.drop(src_table)
+            for t in (rollup, current, bad):
+                with contextlib.suppress(Exception):
+                    dst.drop(t)
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -872,8 +1047,12 @@ def main() -> int:
             ops.append(run_overlap_cell(engines["postgresql"], engines["mysql"], conn_ids))
             ops.append(run_failure_retry_cell(engines["postgresql"], engines["mysql"], conn_ids))
             ops.append(run_workspace_isolation_cell(engines["postgresql"], engines["mysql"], conn_ids))
+        if os.environ.get("SCHED_TRANSFORM", "1") == "1" and "postgresql" in engines:
+            for dname in ("postgresql", "mysql", "sqlite"):
+                if dname in engines and dname in dests_wanted:
+                    ops.append(run_transform_cell(engines["postgresql"], engines[dname], conn_ids))
         for op in ops:
-            print(f"[ops] {op.get('scenario')} {op['verdict']} {op.get('reasons') or ''}", flush=True)
+            print(f"[ops] {op.get('scenario')} {op.get('dest')} {op['verdict']} {op.get('reasons') or ''}", flush=True)
     finally:
         if os.environ.get("SCHED_KEEP") != "1":
             for cid in conn_ids.values():
