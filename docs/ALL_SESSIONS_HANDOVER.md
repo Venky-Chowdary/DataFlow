@@ -227,10 +227,23 @@ so a job-shell `records_processed=0` cannot green-light a from-zero replay.
 `_finalize_run` parks `committed_rows_cannot_be_replayed`; Run now is 409
 on that park. Live PG append dest `COUNT(*)=3` after the refused retry.
 
+G19 hard-block reachability is closed on this tree
+(`cursor/g19-reachability-1673`, PR #190): Map no longer forces a Migration
+Risk Contract against a live dest carrier that overwrite is about to drop.
+That contract was the only Map exit, and it demoted G19 to a warning — so
+the operator never saw the red gate. Overwrite recreate now lets Approve
+reach Validate unsigned; G19 blocks; Execute stays locked; dest INTEGER is
+not recreated as NUMERIC. Append / CRM overwrite still require the
+contract. Measured 2026-09-09: 21 passed in
+`test_g19_preflight_reachability.py` + `test_dest_schema_replacement.py` +
+`test_studio_pg_g19_overwrite.py` (live dest `integer`, `COUNT(*)=1`);
+`apps/web` 953 passed; `tsc` + vite clean. Does **not** close a full
+browser walk of Transfer Studio, Track A 100K, or a contracted Execute.
+
 Still unmeasured for a client: the Evidence Chain / Operations / Contracts /
-Proofs pages, workspace roles, G19 reachability, and the Mongo and MinIO
-routes. Quarantine/replay is already closed (D37/D40/D41/D42). This is
-**not** a deployment-ready product.
+Proofs pages, workspace roles, and the Mongo and MinIO routes.
+Quarantine/replay is already closed (D37/D40/D41/D42). This is **not** a
+deployment-ready product.
 
 ---
 

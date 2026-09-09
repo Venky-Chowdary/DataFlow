@@ -392,6 +392,16 @@ def run_plan_preflight(
             plan_limit,
         )
 
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    dest_recreated = is_overwrite_sync(
+        policies.get("sync_mode", "full_refresh_overwrite")
+    ) and dest_schema_is_recreated_on_overwrite(dest_db_type)
+    destination_live_column_types = (
+        dict(live_target_schema) if dest_recreated and live_target_schema else None
+    )
+
     pf = run_file_preflight(
         columns=shaped_image.columns,
         column_types=shaped_image.column_types,
@@ -413,6 +423,7 @@ def run_plan_preflight(
         date_locale=policies.get("date_locale", ""),
         number_locale=policies.get("number_locale", ""),
         destination_column_types=live_target_schema,
+        destination_live_column_types=destination_live_column_types,
         destination_column_nullability=dest_meta.get("column_nullability") or {},
         destination_column_defaults=dest_meta.get("column_defaults") or {},
         destination_identity_columns=dest_meta.get("identity_columns") or [],

@@ -329,6 +329,22 @@ async def run_preflight(body: PreflightRequest):
         dest_column_types = body.destination_column_types or {}
     # table_exists True + empty live → keep {} (fail-closed Validate probe)
 
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+    from services.sync_cursor import is_overwrite_sync
+
+    dest_db_for_recreate = (
+        dest_meta.get("db_type") or body.dest_type or "postgresql"
+    ).lower()
+    dest_recreated = is_overwrite_sync(body.sync_mode) and dest_schema_is_recreated_on_overwrite(
+        dest_db_for_recreate
+    )
+    # G19 is the one gate that must see the doomed live carrier. Execute already
+    # passes this separately after clearing destination_column_types; Validate
+    # must do the same so a later G3/G6 hygiene clear cannot hide the replacement.
+    destination_live_column_types = (
+        dict(dest_column_types) if dest_recreated and dest_column_types else None
+    )
+
     from services.primary_key import extract_contract_primary_key_columns
 
     # Full composite — never truncate to first column (source probe + G9 SSOT).
@@ -385,6 +401,7 @@ async def run_preflight(body: PreflightRequest):
             estimated_bytes=body.estimated_bytes,
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
             destination_column_types=dest_column_types,
+            destination_live_column_types=destination_live_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
             destination_column_defaults=dest_meta.get("column_defaults") or {},
             destination_identity_columns=dest_meta.get("identity_columns") or [],

@@ -930,6 +930,17 @@ def _run_preflight(
         # then block the run, which is worse than refusing up front.
         # Never invent can_create=True when privilege probe omitted the flag.
         can_create = dest_probe.get("can_create_table")
+        from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+        from services.sync_cursor import is_overwrite_sync
+
+        dest_recreated = is_overwrite_sync(mode) and dest_schema_is_recreated_on_overwrite(
+            dest_db_type
+        )
+        dest_types = dest_probe.get("column_types") or {}
+        destination_live_column_types = (
+            dict(dest_types) if dest_recreated and dest_types else None
+        )
+
         result = run_file_preflight(
             columns=columns,
             column_types=column_types,
@@ -941,7 +952,8 @@ def _run_preflight(
             sync_mode=mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
-            destination_column_types=dest_probe.get("column_types") or {},
+            destination_column_types=dest_types,
+            destination_live_column_types=destination_live_column_types,
             destination_column_nullability=dest_probe.get("column_nullability") or {},
             destination_column_defaults=dest_probe.get("column_defaults") or {},
             destination_identity_columns=dest_probe.get("identity_columns") or [],

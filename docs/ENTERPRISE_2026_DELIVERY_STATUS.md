@@ -282,10 +282,11 @@ work that would change it is UI-driven measurement, not more features.
 1. Should `FIELD_REDUCTION_STRICT` default **on** for regulated tenants?
    (Recommendation: not until an operator has driven a real migration through
    the new Map control.)
-2. Should Map let a narrowing route reach Validate **unsigned**, so G19's red
-   block is reachable in the UI? Today Map's lossy review holds first, and the
-   only control that releases it is `Sign Risk Contract` — which turns G19 into
-   an amber warning. The hard gate therefore never appears to an operator.
+2. **Resolved (overwrite recreate only).** Map now lets an unsigned
+   dest-exists overwrite reach Validate when the live carrier will be dropped
+   and recreated. G19 is the hard block; a signed continue-policy contract
+   still demotes it to a warning. Append / upsert / CDC / CRM overwrite still
+   hold on Map's lossy review — those dest types are the write carrier.
 3. Should G19 warning cards carry an "Open Map to fix the carrier" action?
 4. Which vertical is first (healthcare / financial services / public sector)?
    It changes the order of N2, N4 and N5.
