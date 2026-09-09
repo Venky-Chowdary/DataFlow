@@ -29,6 +29,80 @@ from services.value_serializer import json_default
 logger = logging.getLogger(__name__)
 
 
+def _catalog_type_head(token: str) -> str:
+    """Bare temporal/family token for comparing lattice vs catalog spellings."""
+    raw = (token or "").strip().upper()
+    if not raw:
+        return ""
+    raw = re.sub(r"\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\)", "", raw)
+    if "WITHOUT TIME ZONE" in raw:
+        return "TIMESTAMP_NTZ"
+    if "WITH LOCAL TIME ZONE" in raw:
+        return "TIMESTAMP_LTZ"
+    if "WITH TIME ZONE" in raw:
+        return "TIMESTAMPTZ"
+    return raw.split()[0]
+
+
+def attach_declared_catalog_type(
+    col: dict[str, Any],
+    physical: str = "",
+    *,
+    dest_db: str = "",
+) -> dict[str, Any]:
+    """Keep the destination catalog's DDL beside the logical lattice.
+
+    Destination probes restore ``declared_type`` when ``logical_translated``
+    (``src.transfer.adapters_introspect._columns_schema_meta``). BigQuery already
+    stamps both; SQL engines that map ``datetime(6)`` → ``TIMESTAMP_NTZ(6)`` did
+    not, so ``POST /map`` returned a type MySQL does not spell while the UI
+    printed ``DATETIME(6)``.
+
+    ``tinyint(1)`` → ``BOOLEAN`` is not a temporal lattice alias and must not
+    flip dest Map to ``TINYINT(1)``.
+    """
+    logical = str(col.get("inferred_type") or "").strip()
+    phys = (physical or "").strip()
+    legalized = ""
+    if dest_db and logical:
+        from services.type_system import materialize_dest_ddl
+
+        legalized = str(materialize_dest_ddl(dest_db, logical) or "").strip()
+    declared = legalized or phys
+    if not declared:
+        return col
+    log_h = _catalog_type_head(logical)
+    decl_h = _catalog_type_head(declared)
+    if not (log_h and decl_h and log_h != decl_h):
+        return col
+    temporal = log_h.startswith("TIMESTAMP") or decl_h.startswith("TIMESTAMP") or decl_h in {
+        "DATETIME",
+        "DATETIME2",
+        "DATETIMEOFFSET",
+        "SMALLDATETIME",
+        "DATE",
+        "TIME",
+    }
+    if not temporal:
+        return col
+    col["declared_type"] = declared
+    col["native_type"] = declared
+    col["logical_translated"] = True
+    return col
+
+
+def _mysql_catalog_physical(dtype: str) -> str:
+    """INFORMATION_SCHEMA COLUMN_TYPE as Map/CREATE spelling (``DATETIME(6)``)."""
+    raw = (dtype or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    if low.startswith("enum(") or low.startswith("set("):
+        kind, _, rest = raw.partition("(")
+        return f"{kind.upper()}({rest}"
+    return raw.upper()
+
+
 def _bson_decimal_type():
     try:
         from bson.decimal128 import Decimal128
@@ -963,19 +1037,22 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                     num_prec = row[4] if len(row) > 4 else None
                     num_scale = row[5] if len(row) > 5 else None
                     dt_prec = row[6] if len(row) > 6 else None
-                    columns.append(
-                        {
-                            "name": name,
-                            "inferred_type": _sf_to_logical(
-                                dtype,
-                                character_maximum_length=char_len,
-                                numeric_precision=num_prec,
-                                numeric_scale=num_scale,
-                                datetime_precision=dt_prec,
-                            ),
-                            "nullable": nullable == "YES",
-                        }
+                    col_sf: dict[str, Any] = {
+                        "name": name,
+                        "inferred_type": _sf_to_logical(
+                            dtype,
+                            character_maximum_length=char_len,
+                            numeric_precision=num_prec,
+                            numeric_scale=num_scale,
+                            datetime_precision=dt_prec,
+                        ),
+                        "nullable": nullable == "YES",
+                        "data_type": str(dtype or ""),
+                    }
+                    attach_declared_catalog_type(
+                        col_sf, str(dtype or ""), dest_db="snowflake"
                     )
+                    columns.append(col_sf)
             unique_meta: dict[str, Any]
             if target_table and columns:
                 desc_pk = [str(c) for c in (getattr(cur, "_dataflow_desc_pk", None) or []) if c]
@@ -1187,7 +1264,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     if collation:
                         logical = f"{logical} COLLATE {collation}"
                     default = row[6] if len(row) > 6 else None
-                    columns.append({
+                    col_my: dict[str, Any] = {
                         "name": name,
                         "inferred_type": logical,
                         "nullable": nullable == "YES",
@@ -1205,7 +1282,14 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         ),
                         "collation": collation,
                         "charset": charset,
-                    })
+                        "data_type": str(dtype or ""),
+                    }
+                    attach_declared_catalog_type(
+                        col_my,
+                        _mysql_catalog_physical(str(dtype or "")),
+                        dest_db="mysql",
+                    )
+                    columns.append(col_my)
                 if columns:
                     columns = _refine_columns_by_samples(
                         conn, columns, target, db_name, quote_char="`"
@@ -1760,6 +1844,9 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         # Property 6 — surface defaults for create-new carry (exclude sequence nextval).
         if default_expr and "nextval(" not in str(default_expr).lower():
             col_pg["default"] = str(default_expr)
+        attach_declared_catalog_type(
+            col_pg, str(dtype or ""), dest_db="postgresql"
+        )
         columns.append(col_pg)
     apply_identity_probe("postgresql", cur, schema, table, columns)
     _measure_unconstrained_decimals(cur, schema, table, columns)
@@ -2587,21 +2674,23 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         logical = f"{logical} GENERATED ALWAYS"
                     else:
                         logical = f"{logical} GENERATED BY DEFAULT"
-                columns.append(
-                    {
-                        "name": name,
-                        "inferred_type": logical,
-                        "nullable": str(nullable).upper() == "Y",
-                        "default": (
-                            str(data_default).strip()
-                            if data_default is not None
-                            and str(data_default).strip() not in ("", "NULL")
-                            else None
-                        ),
-                        "is_identity": str(identity_col or "").upper() == "YES",
-                        "data_type": dtype,
-                    }
+                col_ora: dict[str, Any] = {
+                    "name": name,
+                    "inferred_type": logical,
+                    "nullable": str(nullable).upper() == "Y",
+                    "default": (
+                        str(data_default).strip()
+                        if data_default is not None
+                        and str(data_default).strip() not in ("", "NULL")
+                        else None
+                    ),
+                    "is_identity": str(identity_col or "").upper() == "YES",
+                    "data_type": dtype,
+                }
+                attach_declared_catalog_type(
+                    col_ora, str(dtype or ""), dest_db="oracle"
                 )
+                columns.append(col_ora)
             if columns:
                 apply_identity_probe("oracle", conn, owner, resolved_table, columns)
             unique_meta = (
@@ -2814,20 +2903,22 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
 
                     if normalize_logical_type(logical) in {"string", "text"}:
                         logical = f"{logical} COLLATE {coll}"
-                columns.append(
-                    {
-                        "name": name,
-                        "inferred_type": logical,
-                        "nullable": str(nullable).upper() == "YES",
-                        "default": (
-                            str(column_default)
-                            if column_default is not None
-                            else None
-                        ),
-                        "data_type": dtype,
-                        "collation": coll,
-                    }
+                col_mssql: dict[str, Any] = {
+                    "name": name,
+                    "inferred_type": logical,
+                    "nullable": str(nullable).upper() == "YES",
+                    "default": (
+                        str(column_default)
+                        if column_default is not None
+                        else None
+                    ),
+                    "data_type": dtype,
+                    "collation": coll,
+                }
+                attach_declared_catalog_type(
+                    col_mssql, str(dtype or ""), dest_db="sqlserver"
                 )
+                columns.append(col_mssql)
             # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
             # SQL Server source looked like a plain BIGINT key and the
             # destination was created without a generator — the client's first

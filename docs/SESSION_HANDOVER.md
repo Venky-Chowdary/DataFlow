@@ -434,9 +434,14 @@ material, and host routing in a real browser vhost (verified at service level on
    authenticated workspace.~~ **Closed on `cursor/qa-lead-followup-1673`:** signed-in
    `#/help/<slug>` stays in the workspace and renders that article (not `#/docs`
    walkthrough, not MarketingSite).
-6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
-   the UI shows `DATETIME(6)`; a separate physical/native type through
-   introspection was proposed and not yet decided.
+6. ~~**Map API vs UI type spelling.**~~ **Closed (PR `cursor/map-physical-type-spelling-1673`).**
+   Destination probes already restored BigQuery catalog DDL via `declared_type`
+   + `logical_translated`. MySQL/PG/SQL Server/Oracle/Snowflake now stamp the
+   same pair, so dest Map/API ship `DATETIME(6)` / `TIMESTAMP(6)` / `DATETIME2(6)`
+   instead of lattice `TIMESTAMP_NTZ(6)`. `tinyint(1)` → `BOOLEAN` is unchanged.
+   Proof: `tests/test_schema_introspect_specialty.py`,
+   `test_mapping_pipeline_existing_mysql_datetime_is_physical_not_lattice`.
+   The UI `destPhysicalTypeLabel` fallback remains for leftover lattice stamps.
 7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL ([#179](https://github.com/Venky-Chowdary/DataFlow/pull/179)).**
    Studio Transform `round_number` places=0 → Map Type `INTEGER` into existing
    dest INT → Validate APPROVE (no `schema_drift`) → Execute appended 3 rows.

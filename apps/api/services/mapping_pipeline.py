@@ -18,6 +18,7 @@ from services.transform_engine import (
 from services.decision_kernel import (
     create_new_mapping_target_type,
     ddl_type,
+    materialize_dest_ddl,
     normalize_logical_type,
     refuse_create_new_numeric_collapse,
 )
@@ -28,6 +29,48 @@ logger = logging.getLogger("datawrap.mapping")
 CONFIDENCE_FLOOR = 0.72
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
 _UNTYPED_VARCHAR_CONF_CAP = 0.78
+
+# Lattice temporal aliases Map must not ship as dest ``target_type`` when a
+# dialect spells a different catalog DDL (MySQL DATETIME(6), SQL Server
+# DATETIME2(6)). VARCHAR COLLATE / INT4 are not in this set on purpose.
+_LATTICE_TEMPORAL_MARKERS = (
+    "TIMESTAMP_NTZ",
+    "TIMESTAMPTZ",
+    "TIMESTAMP_TZ",
+    "TIMESTAMP_LTZ",
+    "TIMESTAMP_WITH_TIME_ZONE",
+    "TIMESTAMP_WITHOUT_TIME_ZONE",
+)
+
+
+def _legalize_existing_timestamp_target_type(dest_db: str, tgt_type: str) -> str:
+    """Existing dest: lattice temporal aliases become catalog DDL.
+
+    Destination introspect already restores BigQuery ``DATETIME`` via
+    ``declared_type`` + ``logical_translated``. Match-existing Map must do the
+    same when Studio still hands the pipeline a lattice ``TIMESTAMP_NTZ(6)``
+    inferred type — otherwise ``stamp_additive_mapping_types`` rebinds
+    ``target_type`` to the lattice live carrier and the API disagrees with UI.
+    """
+    token = str(tgt_type or "").strip()
+    if not dest_db or not token:
+        return token
+    compact = token.upper().replace(" ", "_")
+    if not any(marker in compact for marker in _LATTICE_TEMPORAL_MARKERS):
+        return token
+    physical = materialize_dest_ddl(dest_db, token)
+    return str(physical).strip() if physical else token
+
+
+def _dest_schema_physical_type(schema_row: dict, dest_db: str) -> str:
+    """Catalog DDL for a dest column: declared/native first, then legalized lattice."""
+    raw = str(
+        schema_row.get("declared_type")
+        or schema_row.get("native_type")
+        or schema_row.get("inferred_type")
+        or ""
+    ).strip()
+    return _legalize_existing_timestamp_target_type(dest_db, raw)
 
 
 # When the destination schema is generic or unknown, create-new columns should
@@ -593,7 +636,9 @@ def run_mapping_pipeline(
         {}
         if destination_table_exists is False
         else {
-            str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
+            str(s.get("name") or ""): _dest_schema_physical_type(
+                s, destination_db_type
+            )
             for s in (target_schemas or [])
         }
     )
@@ -815,7 +860,9 @@ def run_mapping_pipeline(
             or schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         )
         src_type = ddl_carrier_type(declared_src_type)
-        tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        tgt_type = _dest_schema_physical_type(
+            target_by_name.get(m["target"], {}), destination_db_type
+        )
         # Provenance, not just a value: a stamp read out of the destination
         # catalog records what exists today, while an operator stamp records an
         # approved ceiling. Writers must be able to tell them apart — otherwise
@@ -914,7 +961,14 @@ def run_mapping_pipeline(
                 else:
                     tgt_type = src_type
         else:
-            tgt_type = ddl_carrier_type(str(tgt_type))
+            tgt_type = _legalize_existing_timestamp_target_type(
+                destination_db_type, ddl_carrier_type(str(tgt_type))
+            )
+            tgt_name = str(m.get("target") or "").strip()
+            if tgt_name and tgt_type:
+                # stamp_additive rebinds from live dest types; keep that map
+                # on the same physical spelling so target_type is not lattice.
+                declared_target_types[tgt_name] = str(tgt_type)
             # Create-new already stamped bare DECIMAL/FLOAT — upgrade from samples.
             if (
                 strategy in {"identity_passthrough", "create_compatible_new"}
@@ -1056,6 +1110,15 @@ def run_mapping_pipeline(
                 "source_type": _reported_source_carrier(declared_src_type, src_type),
                 "target_type": tgt_type or "",
                 **(
+                    {
+                        "dest_native_type": materialize_dest_ddl(
+                            destination_db_type, tgt_type
+                        )
+                    }
+                    if destination_db_type and tgt_type
+                    else {}
+                ),
+                **(
                     {"target_type_origin": ORIGIN_CATALOG}
                     if catalog_stamp
                     else {"target_type_origin": ORIGIN_SAMPLED}
@@ -1155,7 +1218,8 @@ def run_mapping_pipeline(
 
     column_type_map = {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])}
     dest_type_map = dict(declared_target_types) or {
-        s["name"]: s.get("inferred_type", "VARCHAR") for s in (target_schemas or [])
+        s["name"]: _dest_schema_physical_type(s, destination_db_type)
+        for s in (target_schemas or [])
     }
     enriched_mappings = attach_transforms_to_mappings(
         enriched_mappings,
@@ -1198,11 +1262,14 @@ def run_mapping_pipeline(
             for s in (source_schemas or [])
             if s.get("name")
         }
-        live_types = {
-            str(s.get("name") or ""): str(s.get("inferred_type") or "")
-            for s in (introspected_target_schemas or [])
-            if s.get("name") and str(s.get("inferred_type") or "").strip()
-        }
+        live_types: dict[str, str] = {}
+        for s in (introspected_target_schemas or []):
+            name = str(s.get("name") or "")
+            if not name:
+                continue
+            physical = _dest_schema_physical_type(s, destination_db_type)
+            if physical:
+                live_types[name] = physical
         enriched_mappings, _ = stamp_additive_mapping_types(
             enriched_mappings,
             dest_db=destination_db_type or "",
