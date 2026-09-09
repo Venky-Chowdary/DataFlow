@@ -401,9 +401,16 @@ material, and host routing in a real browser vhost (verified at service level on
    `DATETIME(6)` target still needs a UTC-normalize contract; Redis JSON text
    keeps the offset. Unit proof this session: **30 passed**. Live PG→MySQL /
    Redis e2e cells were not re-run here (MySQL/Redis not listening).
-2. **Test isolation.** `tests/test_pilot_llm_wave41.py::test_hybrid_footnote_on_auth_failure`
-   passes alone and in its own file, fails only in whole-suite order — provider
-   state leaks between tests.
+2. ~~**Test isolation / hybrid footnote.**~~ **Closed (PR `cursor/pilot-hybrid-footnote-1673`).**
+   The suite-order leak was real (`_AUTH_FAILED_PROVIDERS` + `pick_narration_provider`),
+   but the test also failed **alone**: `_llm_unavailable_footnote` only fires on
+   `method == "greeting"`, and `chat()` returned greetings before `_with_llm_footnote`,
+   so the note was dead. Workspace answers must never get it. Greeting now wraps
+   `_with_llm_footnote`; the test autouses `clear_auth_failures()`, stubs
+   `pick_narration_provider → (None, "")`, greets with `"hello"`, and asserts
+   `"show my jobs"` stays unfootnoted. Proof: `tests/test_pilot_llm_wave41.py`
+   + `test_pilot_history_wave40.py` + `test_pilot_local_primary_wave43.py` +
+   `test_pilot_hybrid_wave39.py` — **21 passed**.
 3. **Scheduler shutdown logging.** ~~Every suite run ends with
    `ValueError: I/O operation on closed file` from
    `services/transfer_scheduler.py:61`.~~ **Closed:** `atexit` calls
