@@ -71,6 +71,40 @@ def test_pk_join_count_sql():
     assert "d.`id` = s.`id`" in sql
 
 
+def test_result_with_upsert_proof_stamps_key_census_inserts_and_updates():
+    """D33: MERGE pre-count + join count become dest-engine inserts/updates.
+
+    Writer ON DUPLICATE / ON CONFLICT rowcount cannot give that split.
+    """
+    from services.copy_fast_path import FastPathResult
+    from services.copy_upsert import _result_with_upsert_proof
+    from services.row_conservation import CENSUS_KEY, KeyCensus
+
+    proven = _result_with_upsert_proof(
+        FastPathResult(
+            rows_copied=4,
+            source_rows=4,
+            source_checksum="src",
+            target_rows=4,
+            target_checksum="dst",
+            source_snapshot={},
+        ),
+        join_count=4,
+        dest_count=5,
+        staging_table="_df_stg_items",
+        dest_table="items",
+        dest_preexisting=3,
+    )
+    census = KeyCensus.from_mapping((proven.source_snapshot or {}).get(CENSUS_KEY))
+    assert census is not None
+    assert census.unique_batch_keys == 4
+    assert census.dest_preexisting == 3
+    assert census.inserts == 1
+    assert census.updates == 3
+    assert census.deletes == 0
+    assert census.expected_delta == 1
+
+
 def test_fast_path_unavailable_records_decline_reason():
     sink: list[str] = []
     token, _ = begin_copy_decline_capture(sink)
@@ -190,6 +224,13 @@ def test_pg_mysql_copy_upsert_updates_occupied_dest():
         assert result.source_rows == 4
         assert result.target_rows == 4
         assert result.source_snapshot["dest_count"] == 4
+        from services.row_conservation import CENSUS_KEY, KeyCensus
+
+        census = KeyCensus.from_mapping((result.source_snapshot or {}).get(CENSUS_KEY))
+        assert census is not None, result.source_snapshot
+        assert census.inserts == 1
+        assert census.updates == 3
+        assert census.deletes == 0
         with my_conn.cursor() as cur:
             cur.execute(f"SELECT name FROM `{dst}` WHERE id = 'a'")
             assert cur.fetchone()[0] == "ONE"
@@ -273,6 +314,13 @@ def test_pg_pg_copy_upsert_updates_occupied_dest():
         assert result.proof_scope == UPSERT_PROOF_SCOPE
         assert result.source_rows == 3
         assert result.source_snapshot["dest_count"] == 3
+        from services.row_conservation import CENSUS_KEY, KeyCensus
+
+        census = KeyCensus.from_mapping((result.source_snapshot or {}).get(CENSUS_KEY))
+        assert census is not None, result.source_snapshot
+        assert census.inserts == 1
+        assert census.updates == 2
+        assert census.deletes == 0
         with conn.cursor() as cur:
             cur.execute(f'SELECT name FROM "{dst}" WHERE id = %s', ("a",))
             assert cur.fetchone()[0] == "ONE"
@@ -281,4 +329,136 @@ def test_pg_pg_copy_upsert_updates_occupied_dest():
     finally:
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{src}", "{dst}", "{staging_table_name(dst)}"')
+        conn.close()
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")
+def test_pg_execute_tracked_copy_upsert_ledger_inserts_updates():
+    """D33: execute_tracked COPY MERGE stamps keyed census onto the ledger.
+
+    Dest held 3 keys; batch is 3 updates + 1 insert. COUNT(*) grows by 1;
+    writer ack is 4. Inserts/updates/deletes must not stay None.
+    """
+    os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+    os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    psycopg2 = pytest.importorskip("psycopg2")
+    from services.migration_certificate import row_accounting
+    from services.row_conservation import CENSUS_KEY
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    suffix = uuid.uuid4().hex[:8]
+    src = f"d33_src_{suffix}"
+    dst = f"d33_dst_{suffix}"
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+            "approved": True,
+            "confidence": 0.99,
+        },
+        {
+            "source": "label",
+            "target": "label",
+            "source_type": "TEXT",
+            "target_type": "TEXT",
+            "approved": True,
+            "confidence": 0.99,
+        },
+    ]
+    src_ep = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        host="127.0.0.1",
+        port=5432,
+        database="dataflow",
+        username="dataflow",
+        password="dataflow",
+        schema="public",
+        table=src,
+    )
+    dst_ep = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        host="127.0.0.1",
+        port=5432,
+        database="dataflow",
+        username="dataflow",
+        password="dataflow",
+        schema="public",
+        table=dst,
+    )
+    conn = psycopg2.connect(
+        host="127.0.0.1", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{src}", public."{dst}"')
+            cur.execute(
+                f'CREATE TABLE public."{src}" (id BIGINT PRIMARY KEY, label TEXT NOT NULL)'
+            )
+            cur.execute(
+                f"INSERT INTO public.\"{src}\" (id, label) VALUES (1,'a'),(2,'b'),(3,'c')"
+            )
+        seed = TransferRequest(
+            source=src_ep,
+            destination=dst_ep,
+            mappings=maps,
+            sync_mode="full_refresh_overwrite",
+            validation_mode="warn",
+            skip_preflight=True,
+        )
+        seeded = UniversalTransferEngine().execute_tracked(seed, uuid.uuid4().hex[:24])
+        assert seeded.success, seeded.error
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE public.\"{src}\" SET label = 'A' WHERE id = 1")
+            cur.execute(f"INSERT INTO public.\"{src}\" (id, label) VALUES (4,'d')")
+        result = UniversalTransferEngine().execute_tracked(
+            TransferRequest(
+                source=src_ep,
+                destination=dst_ep,
+                mappings=maps,
+                stream_contracts=[
+                    {"name": src, "selected": True, "sync_mode": "upsert", "primary_key": "id"}
+                ],
+                sync_mode="upsert",
+                validation_mode="warn",
+                skip_preflight=True,
+            ),
+            uuid.uuid4().hex[:24],
+        )
+        assert result.success, result.error
+        summary = result.destination_summary or {}
+        assert summary.get("copy_fast_path") == "used", summary
+        census = summary.get(CENSUS_KEY) or {}
+        assert census.get("inserts") == 1, census
+        assert census.get("updates") == 3, census
+        assert census.get("deletes") == 0, census
+        stamped = result.row_accounting or {}
+        assert stamped.get("inserts") == 1, stamped
+        assert stamped.get("updates") == 3, stamped
+        assert stamped.get("deletes") == 0, stamped
+        assert stamped.get("conservation_kind") == "keyed", stamped
+        assert stamped.get("balanced") is True, stamped
+        job = {
+            "records_processed": result.records_transferred,
+            "sync_mode": "upsert",
+            "reconciliation": result.reconciliation or {},
+            "destination_summary": summary,
+        }
+        ledger = row_accounting(job)
+        assert ledger["inserts"] == 1, ledger
+        assert ledger["updates"] == 3, ledger
+        assert ledger["deletes"] == 0, ledger
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM public."{dst}"')
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT label FROM public."{dst}" WHERE id = 1')
+            assert cur.fetchone()[0] == "A"
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{src}", public."{dst}"')
         conn.close()

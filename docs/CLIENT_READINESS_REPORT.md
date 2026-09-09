@@ -437,8 +437,9 @@ connector, SFTP, and a real IdP for SSO/SAML. Locally emulated stand-ins
 (MinIO, Azurite, fake-GCS, the BigQuery emulator, DynamoDB Local, Iceberg REST,
 Redpanda, Qdrant, Weaviate) prove the route's code path, not the vendor's.
 
-**Open defects:** D41 and D42 (above), D33 (an
-engine-side keyed upsert reports no insert/update/delete census), D34 (`kafka-python` absent, 47 matrix cells unmeasured), D35
+**Open defects:** D41 and D42 are closed (register §8 / §8a). ~~D33~~ is
+closed (COPY MERGE + row-path keyed census; register §6). Remaining are
+environment: D34 (`kafka-python` absent, 47 matrix cells unmeasured), D35
 (Qdrant host resolution in the matrix fixtures, 24 cells unmeasured), plus the
 never-measured rows carried forward in §5.
 
@@ -450,6 +451,6 @@ rather than a tile count.
 
 What would close it, in order: get the browser harness working and drive the UI
 sweep above; install `kafka-python` and fix the Qdrant fixture host so those 71
-cells report a real verdict; close D33; then provision one hosted warehouse
-account and one IdP so the two remaining evidence categories stop being
-theoretical.
+cells report a real verdict (do not change product semantics to silence them);
+then provision one hosted warehouse account and one IdP so the two remaining
+evidence categories stop being theoretical.
