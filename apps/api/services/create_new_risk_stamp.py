@@ -71,6 +71,7 @@ def apply_create_new_risk_stamps(
     )
     from services.type_system import (
         assess_create_new_type_risk,
+        ddl_type,
         reinvent_would_drop_dest_instant_carrier,
     )
 
@@ -109,10 +110,12 @@ def apply_create_new_risk_stamps(
             if reinvent_would_drop_dest_instant_carrier(
                 stamped, physical_from_stamp, dest_db=db
             ):
-                # The stamp is already the destination's own physical carrier;
+                # The stamp is already the destination's own instant carrier;
                 # re-invent read it as a dialect-less source token and dropped
                 # the instant it declares (MySQL TIMESTAMP(6) → DATETIME(6)).
-                physical_from_stamp = stamped
+                # Catalog TIMESTAMPTZ(6) on MySQL is that same carrier — legalize
+                # to the physical spelling Map and CREATE emit (TIMESTAMP(6)).
+                physical_from_stamp = ddl_type(db, "TIMESTAMPTZ") or stamped
             stamp_l = _nlt(stamped)
             src_phys_l = _nlt(physical_from_src or src)
             if physical_from_src and stamp_l == "float" and _nlt(src) == "float":

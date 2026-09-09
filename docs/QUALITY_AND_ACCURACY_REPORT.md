@@ -26,9 +26,11 @@ worktree and seven fail there identically, so they are not from that wave:
   MariaDB build without `utf8mb4_0900_ai_ci`; this host's MariaDB has it. The
   test states a host fact, not a product fact.
 * Three `typed_fidelity_transfer_matrix_e2e` cases — `ts_utc TIMESTAMPTZ →
-  DATETIME(6)` is refused as a fidelity collapse on the PostgreSQL→MySQL and
-  →Redis typed routes. **This one is a real product defect**, still open: an
-  instant landing in an instant carrier should not need a Risk Contract.
+  DATETIME(6)` was refused as a fidelity collapse on the PostgreSQL→MySQL and
+  →Redis typed routes. **Unit/execute-path closed:** MySQL `TIMESTAMP(6)` (and
+  catalog `TIMESTAMPTZ(6)`) and Redis RFC 3339 text no longer demand a Risk
+  Contract; explicit `DATETIME(6)` still does. Live cells are unproven on hosts
+  without MySQL `:3306` / Redis `:6379` — a skip is not a pass.
 * `test_pilot_llm_wave41::test_hybrid_footnote_on_auth_failure` passes on its own
   and in its own file; it only fails inside the whole-suite order, so provider
   state leaks between tests. Open as a test-isolation defect.

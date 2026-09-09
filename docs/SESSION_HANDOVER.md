@@ -383,44 +383,48 @@ material, and host routing in a real browser vhost (verified at service level on
 
 ## 5. Open defects (found, reproduced, not yet fixed)
 
-1. **`TIMESTAMPTZ → DATETIME(6)` refused as a fidelity collapse.** Three
-   `tests/test_typed_fidelity_transfer_matrix_e2e.py` cases fail (PostgreSQL→
-   MySQL typed, into an existing MySQL `TIMESTAMP(6)` column, PostgreSQL→Redis).
-   An instant landing in an instant carrier should not need a Risk Contract.
-   Verified pre-existing on the parent commit; this is the next fix to make.
-2. **Test isolation.** `tests/test_pilot_llm_wave41.py::test_hybrid_footnote_on_auth_failure`
+**Closed this leftover (unit / execute-path, not live e2e):** PostgreSQL
+`TIMESTAMPTZ` into MySQL `TIMESTAMP(6)` (including catalog `TIMESTAMPTZ(6)` from
+live `timestamp(6)`) and Redis RFC 3339 text no longer demand a Risk Contract.
+Explicit MySQL `DATETIME(6)` still does. Proof:
+`tests/test_instant_carrier_not_a_contract.py`,
+`tests/test_timezone_policy_pg_mysql.py`. The three
+`typed_fidelity_transfer_matrix_e2e` cells still need MySQL `:3306` and Redis
+`:6379` — this host has neither, so do not claim those live cells green.
+
+1. **Test isolation.** `tests/test_pilot_llm_wave41.py::test_hybrid_footnote_on_auth_failure`
    passes alone and in its own file, fails only in whole-suite order — provider
    state leaks between tests.
-3. **Scheduler shutdown logging.** Every suite run ends with
+2. **Scheduler shutdown logging.** Every suite run ends with
    `ValueError: I/O operation on closed file` from
    `services/transfer_scheduler.py:61`. Harmless in tests, wrong in a service.
-4. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
+3. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
    assert a MariaDB build without `utf8mb4_0900_ai_ci`, and two PostgreSQL cases
    need the `vector` extension. They should skip on capability, not fail.
-5. **Pilot citations open the public docs shell.** Clicking a citation opens the
+4. **Pilot citations open the public docs shell.** Clicking a citation opens the
    right Help article but with the marketing header, so the operator leaves the
    authenticated workspace. Awaiting the user's decision.
-6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
+5. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
    the UI shows `DATETIME(6)`; a separate physical/native type through
    introspection was proposed and not yet decided.
-7. **Case A is browser-unverified.** The four-layer fix at `3e3dd8a4` passes unit
+6. **Case A is browser-unverified.** The four-layer fix at `3e3dd8a4` passes unit
    and API tests, but the last browser run (before it) showed Validate still
    blocking on `schema_drift`, so nothing yet proves the decimal→integer route
    reaches Execute in the real UI. Treat it as unproven until an independent SQL
    re-read shows whole-number values, the expected row count, and **rounding
    rather than truncation** (the fixture is chosen so the two differ: `SUM = 66`,
    not 65).
-8. **A file-export destination is not approvable at all** — Map says
+7. **A file-export destination is not approvable at all** — Map says
    "Destination schema not loaded", so the export retarget path is unit-tested
    only. Awaiting a decision on whether file export is meant to be live.
-9. **Tenant delete and BYOK rotate have no UI surface** (API only). Awaiting a
+8. **Tenant delete and BYOK rotate have no UI surface** (API only). Awaiting a
    decision on whether they should be operator-reachable.
-10. **`round_number` collapse through the profiler.** A literal
+9. **`round_number` collapse through the profiler.** A literal
     `1.50000000 → NUMBER(9,2)` case is unreachable through the UI because the CSV
     profiler collapses the padded value to `DECIMAL(7,4)`, so a `(9,2)`
     destination is held earlier by the narrowing Risk-Contract gate. Awaiting a
     decision on whether the profiler should preserve declared scale.
-11. **Environment failures that are not product defects** — do not "fix" these by
+10. **Environment failures that are not product defects** — do not "fix" these by
     changing production semantics: PyIceberg reads a Windows path `C:\...` as URI
     scheme `c` (7 `test_row_conservation.py` failures on this box), and the local
     MySQL fixture refuses `root@172.17.0.1`
