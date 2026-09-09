@@ -7113,10 +7113,12 @@ export function TransferPage({
                       <strong>Existing table detected</strong>
                       {targetCollection.trim() ? <> — <code>{targetCollection.trim()}</code></> : null}
                       . This is not create-new. The object already exists
-                      (even if a prior run wrote 0 rows). Full append inserts into
-                      {" "}<strong>live</strong> column types and does not ALTER them.
-                      To start a new table, type a name that does not exist.
-                      Open Advanced to switch overwrite or incremental.
+                      (even if a prior run wrote 0 rows).{" "}
+                      {syncModeHonestyLine(syncMode, destTableExists, destType)}
+                      {" "}To start a new table, type a name that does not exist.
+                      {syncMode === "full_refresh_overwrite"
+                        ? " Open Advanced to switch append or incremental."
+                        : " Open Advanced to switch overwrite or incremental."}
                       {destColumns.length > 0 ? (
                         <> · {destColumns.length} live columns loaded.</>
                       ) : (
