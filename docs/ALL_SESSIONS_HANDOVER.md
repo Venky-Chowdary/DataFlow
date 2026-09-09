@@ -212,8 +212,11 @@ contract was the only Map exit, and it demoted G19 to a warning — so the
 operator never saw the red gate. Overwrite recreate now lets Approve reach
 Validate unsigned; G19 blocks; Execute stays locked; dest INTEGER is not
 recreated as NUMERIC. Append / CRM overwrite still require the contract.
-Does **not** close a browser walk of Transfer Studio, Track A 100K, or a
-contracted Execute.
+Measured 2026-09-09: 21 passed in
+`test_g19_preflight_reachability.py` + `test_dest_schema_replacement.py` +
+`test_studio_pg_g19_overwrite.py` (live dest `integer`, `COUNT(*)=1`);
+`apps/web` 953 passed; `tsc` + vite clean. Does **not** close a full
+browser walk of Transfer Studio, Track A 100K, or a contracted Execute.
 
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs

@@ -99,11 +99,9 @@ def test_signed_continue_contract_demotes_g19_to_warn() -> None:
         execution_policy="CAST_AND_CONTINUE",
         table="ledger",
     ).to_dict()
-    pf = run_file_preflight(
+    kwargs = {
         **_BASE,
-        destination_column_types={},
-        destination_live_column_types={"amt_dec": "INTEGER"},
-        mappings=[
+        "mappings": [
             {
                 "source": "amt_dec",
                 "target": "amt_dec",
@@ -111,7 +109,10 @@ def test_signed_continue_contract_demotes_g19_to_warn() -> None:
                 "risk_contract": contract,
             }
         ],
-    )
+        "destination_column_types": {},
+        "destination_live_column_types": {"amt_dec": "INTEGER"},
+    }
+    pf = run_file_preflight(**kwargs)
     gate = _by_id(pf)[GATE]
     assert gate["status"] == "warn", gate
     assert gate["details"].get("blocks_execute") is False
