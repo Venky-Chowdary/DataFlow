@@ -950,6 +950,9 @@ describe("enterprise wedge proof surfaces", () => {
 
   it("Settings API keys own one Generate control; tenant placeholders are not a bank", () => {
     const settings = readFileSync(join(webRoot, "pages/SettingsPage.tsx"), "utf8");
+    assert.match(settings, /data-testid="settings-appearance"/);
+    assert.match(settings, /setTheme/);
+    assert.doesNotMatch(settings, /df2-theme-toggle-v2/);
     const tenant = readFileSync(join(webRoot, "pages/settings/TenantSettings.tsx"), "utf8");
     const generateHits = settings.match(/\{apiKeyGenerating \? "Generating…" : "Generate key"\}/g) || [];
     assert.equal(generateHits.length, 1, "empty-state Generate key duplicates the toolbar");

@@ -8,7 +8,7 @@
 
 /* Tokens owned by tokens.css — do not redefine --df-* here. */
 html {
-  color-scheme: light;
+  color-scheme: inherit;
 }
 
 html, body, #root {

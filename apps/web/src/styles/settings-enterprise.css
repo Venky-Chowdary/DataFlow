@@ -50,9 +50,9 @@
   flex-direction: column;
   gap: 4px;
   padding: 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line, var(--df-border));
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
 }
 
@@ -80,26 +80,26 @@
 .df2-settings-nav button .df2-settings-nav-label {
   font-size: var(--df-fs-md);
   font-weight: var(--df-fw-semibold);
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-settings-nav button .df2-settings-nav-desc {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   line-height: 1.35;
 }
 
 .df2-settings-nav button.active {
-  background: #f0fdfa;
-  border-color: #99f6e4;
+  background: var(--df-brand-muted);
+  border-color: var(--df-border-brand);
 }
 
 .df2-settings-nav button.active .df2-settings-nav-label {
-  color: #0f766e;
+  color: var(--df-brand-strong);
 }
 
 .df2-settings-nav button:hover:not(.active) {
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-settings-panel {
@@ -109,10 +109,15 @@
   min-width: 0;
 }
 
+[data-testid="settings-appearance"] .df2-filter-tabs {
+  width: max-content;
+  max-width: 100%;
+}
+
 .df2-settings-section {
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line, var(--df-border));
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   overflow: visible;
 }
 
@@ -129,13 +134,13 @@
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-settings-section-head p {
   margin: 4px 0 0;
   font-size: 13px;
-  color: #64748b;
+  color: var(--df-text-muted);
 }
 
 .df2-settings-section-actions {

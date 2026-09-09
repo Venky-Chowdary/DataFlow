@@ -35,7 +35,8 @@ describe('control density ladder', () => {
       assert.match(TOKENS, new RegExp(`${name.replace(/-/g, '\\-')}:`));
     }
     assert.match(TOKENS, /\[data-theme="dark"\]/);
-    assert.doesNotMatch(TOKENS, /\.df2-tabs-v2|\.df2-segment-refresh/);
+    assert.match(TOKENS, /html\[data-theme="dark"\]:has\(\.df2-app\)/);
+    assert.doesNotMatch(TOKENS, /\.df2-tabs-v2|\.df2-segment-refresh|\.df2-theme-dark\.css/);
   });
 
   it('does not shrink Studio tabs below the control ladder', () => {
@@ -86,6 +87,12 @@ describe('control density ladder', () => {
       CONSISTENCY,
       /\.df2-app \.df2-input[\s\S]*?min-height:\s*40px/,
     );
+  });
+
+  it('does not add a dark sibling stylesheet', () => {
+    assert.doesNotMatch(TOKENS, /\.df2-tabs-dark|\.df2-theme-refresh/);
+    assert.match(ENTERPRISE, /\.df2-app \.df2-sidebar/);
+    assert.match(ENTERPRISE, /background:\s*var\(--df-surface\)/);
   });
 
   it('platform tabs and segments read the shared track tokens', () => {

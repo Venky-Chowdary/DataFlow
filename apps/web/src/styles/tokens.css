@@ -572,10 +572,13 @@ body:has(.df2-app) #root {
 }
 
 /* Dark theme — remap primitives only. Component rules keep reading --df-*.
-   Opt-in via `data-theme="dark"` on <html> (or `.df2-theme-dark`). Do not
-   add a parallel dark stylesheet; that is how overlap broke the shell. */
-[data-theme="dark"],
-.df2-theme-dark {
+   Opt-in via `data-theme="dark"` on <html>. Scoped with :has(.df2-app) so
+   marketing/login do not inherit workspace ink. Do not add a parallel dark
+   stylesheet; that is how overlap broke the shell. */
+html[data-theme="dark"]:has(.df2-app),
+html[data-theme="dark"] .df2-app,
+html.df2-theme-dark:has(.df2-app),
+.df2-app.df2-theme-dark {
   color-scheme: dark;
   --df-bg-canvas: #0c1219;
   --df-bg-subtle: #121a24;
@@ -589,9 +592,13 @@ body:has(.df2-app) #root {
   --df-text-secondary: #9aa8b8;
   --df-text-tertiary: #6b7a8c;
   --df-text-muted: #8a97a8;
+  --df-brand-strong: #5eead4;
+  --df-brand-hover: #2dd4bf;
   --df-brand-muted: rgba(13, 148, 136, 0.16);
   --df-brand-soft: rgba(20, 184, 166, 0.22);
   --df-brand-subtle: rgba(13, 148, 136, 0.12);
+  --df-brand-gradient-soft: linear-gradient(180deg, rgba(13, 148, 136, 0.12) 0%, transparent 48%);
+  --df-accent-muted: rgba(13, 148, 136, 0.12);
   --df-success-bg: rgba(5, 150, 105, 0.14);
   --df-warning-bg: rgba(217, 119, 6, 0.14);
   --df-danger-bg: rgba(220, 38, 38, 0.14);

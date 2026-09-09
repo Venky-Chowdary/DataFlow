@@ -12816,3 +12816,44 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-dest-procedure > .df2-field > .df2-filter-tabs .df2-tab {
   flex: 1 1 0;
 }
+
+/* Workspace chrome follows surface tokens so light/dark remaps without a
+   sibling sheet. Existing rules stay; this final lock beats leftover #fff. */
+.df2-app,
+.df2-app .df2-main,
+.df2-app .df2-content,
+.df2-app .df2-content-inner,
+.df2-app .df2-page {
+  background: var(--df-bg-canvas);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-sidebar,
+.df2-app .df2-sidebar-brand,
+.df2-app .df2-sidebar-foot,
+.df2-app .df2-topbar,
+.df2-app .df2-settings-nav,
+.df2-app .df2-settings-section,
+.df2-app .df2-settings-panel {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-input,
+.df2-app .df2-select,
+.df2-app select.df2-input,
+.df2-app select.df2-select {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-nav-item {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-nav-item.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
