@@ -14,6 +14,7 @@ import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
+import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
 import { useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 
@@ -466,9 +467,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       setChainReport(report);
       toast({
         title: report.verified ? "Chain verified" : "Chain verification failed",
-        message: report.verified
-          ? `${report.checked} records re-walked — none altered or missing.`
-          : `${report.findings.length} record(s) do not hold up.`,
+        message: chainVerdictToast(report),
         tone: report.verified ? "success" : "error",
       });
     } catch (err) {
@@ -1089,7 +1088,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>Audit logs</h2>
-                    <p>Workspace-scoped events. Export downloads the server log for this workspace — not a SOC 2 or HIPAA letter.</p>
+                    <p>
+                      Workspace-scoped events. Export downloads this workspace&apos;s sample — not a SOC 2 or HIPAA letter.
+                      Verify walks the platform HMAC chain; findings named here are this workspace&apos;s records.
+                    </p>
                   </div>
                   <div className="df2-settings-section-actions">
                     <button
@@ -1123,11 +1125,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       className={`df2-chain-verdict ${chainReport.verified ? "is-ok" : "is-broken"}`}
                       role="status"
                     >
-                      <strong>
-                        {chainReport.verified
-                          ? `Chain intact — ${chainReport.checked} records re-walked`
-                          : `Chain verification failed — ${chainReport.findings.length} record(s)`}
-                      </strong>
+                      <strong>{chainVerdictTitle(chainReport)}</strong>
                       {chainReport.findings.length > 0 && (
                         <ul>
                           {chainReport.findings.slice(0, 10).map((f) => (

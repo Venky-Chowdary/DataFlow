@@ -21,8 +21,11 @@ reports each record that fails, by index and event id:
 | `fork` | Two records claim one predecessor — concurrent writer or replayed segment; history is no longer a single line. |
 | `unexplained_prefix` | The oldest record points at an absent predecessor and no signed retention checkpoint accounts for it. |
 
-Verification is deliberately **not** workspace-scoped: the chain links every
-record, so a filtered read would show gaps that are only filtering.
+The **walk** is deliberately not workspace-filtered: the chain links every
+record, so skipping another tenant's rows would invent broken links. When
+`X-Workspace-Id` is set, findings that name another workspace's records are
+**withheld after the walk**. `verified` stays the global verdict. Isolation on
+and no header is a 400 (same as audit export).
 
 Surface: **Settings → Audit Logs → Verify chain**.
 
