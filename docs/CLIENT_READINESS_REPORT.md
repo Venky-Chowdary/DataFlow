@@ -378,9 +378,11 @@ Map and drives the DDL (D26).
 
 **Implemented but not measured:** D39's
 tie-break under two writes in one clock tick (no natural tie could be forced);
-D31's locale money behaviour at this tip; job cancellation; a schedule driven end
+D31's locale money behaviour at this tip; a schedule driven end
 to end by an operator; the Operations, Contracts and Proofs pages; workspace
-roles and member removal. These are **untested**, not passing.
+roles and member removal. These are **untested**, not passing. Job cancel is
+a measured status fence (PR #187): final status stays `cancelled`, not
+rewritten to `completed`. COPY is still not interruptible mid-wire.
 
 **One thing a client will see immediately:** the Verify chain screen reads
 `Chain verification failed — 36 record(s)`. Every one of those findings is on a

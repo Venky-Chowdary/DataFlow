@@ -12,6 +12,7 @@ from __future__ import annotations
 import socket
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -172,12 +173,13 @@ def test_studio_pg_cancel_final_status_is_cancelled(tmp_path, monkeypatch):
         job_id = seen_job.get("id") or ""
         assert job_id, "writing heartbeat did not name a job"
 
+        import importlib
+
         from fastapi.testclient import TestClient
         from src.main import app
 
-        monkeypatch.setattr(
-            "src.routers.connectors_router.get_mongodb_service", lambda: mongo
-        )
+        cancel_mod = importlib.import_module("src.routers.connectors_router")
+        monkeypatch.setattr(cancel_mod, "get_mongodb_service", lambda: mongo)
         monkeypatch.setattr(
             "src.middleware.auth_middleware._auth_service.auth_required",
             lambda: False,
@@ -194,6 +196,14 @@ def test_studio_pg_cancel_final_status_is_cancelled(tmp_path, monkeypatch):
         released.set()
         worker.join(timeout=90)
         assert not worker.is_alive(), "transfer thread still running after cancel"
+        # Pool worker may still be in COPY / late status writes. Settle while
+        # isolated stores still exist so dest COUNT is post-attempt, not mid-wire.
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            time.sleep(0.4)
+            latest = mongo.get_job(job_id) or {}
+            if str(latest.get("status") or "") != "cancelled":
+                break
 
         final = mongo.get_job(job_id) or {}
         status = str(final.get("status") or "").lower()

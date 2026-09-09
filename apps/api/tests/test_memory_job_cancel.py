@@ -69,9 +69,10 @@ def test_cancel_api_does_not_500_on_memory_store(monkeypatch) -> None:
             "progress_pct": 40,
         }
     )
-    monkeypatch.setattr(
-        "src.routers.connectors_router.get_mongodb_service", lambda: mongo
-    )
+    import importlib
+
+    cancel_mod = importlib.import_module("src.routers.connectors_router")
+    monkeypatch.setattr(cancel_mod, "get_mongodb_service", lambda: mongo)
     monkeypatch.setattr(
         "src.middleware.auth_middleware._auth_service.auth_required",
         lambda: False,
