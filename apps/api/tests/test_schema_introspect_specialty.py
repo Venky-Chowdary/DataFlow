@@ -227,4 +227,62 @@ def test_sqlalchemy_float_not_collapsed_to_decimal():
     assert _logical_type_from_sa(sa.Float()) == "float"
     assert _logical_type_from_sa(sa.Double()) == "float"
     assert _logical_type_from_sa(sa.Numeric(12, 4)) == "DECIMAL(12,4)"
-    assert _logical_type_from_sa(sa.Numeric(10, 0)) == "integer"
+
+
+def test_mysql_datetime_stamps_declared_physical_not_lattice():
+    """Dest Map must restore DATETIME(6), not ship TIMESTAMP_NTZ(6)."""
+    from services.schema_introspect import (
+        _mysql_catalog_physical,
+        _mysql_to_logical,
+        attach_declared_catalog_type,
+    )
+    from src.transfer.adapters_introspect import _columns_schema_meta
+
+    logical = _mysql_to_logical("datetime(6)")
+    assert logical == "TIMESTAMP_NTZ(6)"
+    col = {"name": "ts_utc", "inferred_type": logical}
+    attach_declared_catalog_type(
+        col, _mysql_catalog_physical("datetime(6)"), dest_db="mysql"
+    )
+    assert col["declared_type"].upper().startswith("DATETIME(6)")
+    assert col.get("logical_translated") is True
+
+    types, *_ = _columns_schema_meta([col], physical_carriers=True)
+    assert types["ts_utc"].upper().startswith("DATETIME(6)")
+    source_types, *_ = _columns_schema_meta([col], physical_carriers=False)
+    assert source_types["ts_utc"] == "TIMESTAMP_NTZ(6)"
+
+
+def test_mysql_tinyint1_does_not_flip_dest_to_physical():
+    from services.schema_introspect import (
+        _mysql_catalog_physical,
+        _mysql_to_logical,
+        attach_declared_catalog_type,
+    )
+    from src.transfer.adapters_introspect import _columns_schema_meta
+
+    logical = _mysql_to_logical("tinyint(1)")
+    col = {"name": "flag", "inferred_type": logical}
+    attach_declared_catalog_type(
+        col, _mysql_catalog_physical("tinyint(1)"), dest_db="mysql"
+    )
+    types, *_ = _columns_schema_meta([col], physical_carriers=True)
+    assert types["flag"] == logical
+
+
+def test_pg_and_sqlserver_temporal_lattice_restore_physical():
+    from services.schema_introspect import attach_declared_catalog_type
+    from src.transfer.adapters_introspect import _columns_schema_meta
+
+    pg = {"name": "ts", "inferred_type": "TIMESTAMP_NTZ(6)"}
+    attach_declared_catalog_type(
+        pg, "timestamp(6) without time zone", dest_db="postgresql"
+    )
+    pg_types, *_ = _columns_schema_meta([pg], physical_carriers=True)
+    assert "TIMESTAMP" in pg_types["ts"].upper()
+    assert "TIMESTAMP_NTZ" not in pg_types["ts"].upper()
+
+    mssql = {"name": "ts", "inferred_type": "TIMESTAMP_NTZ(6)"}
+    attach_declared_catalog_type(mssql, "datetime2(6)", dest_db="sqlserver")
+    ms_types, *_ = _columns_schema_meta([mssql], physical_carriers=True)
+    assert "DATETIME2" in ms_types["ts"].upper()

@@ -396,31 +396,53 @@ material, and host routing in a real browser vhost (verified at service level on
    `tests/test_typed_fidelity_transfer_matrix_e2e.py` cases fail (PostgreSQL→
    MySQL typed, into an existing MySQL `TIMESTAMP(6)` column, PostgreSQL→Redis).
    An instant landing in an instant carrier should not need a Risk Contract.~~
-   **Algorithm closed** (`test_instant_carrier_not_a_contract.py`,
-   `timezone_policy.py`): create-new MySQL stamps `TIMESTAMP(6)`; an explicit
-   `DATETIME(6)` target still needs a UTC-normalize contract; Redis JSON text
-   keeps the offset. Unit proof this session: **30 passed**. Live PG→MySQL /
-   Redis e2e cells were not re-run here (MySQL/Redis not listening).
-2. **Test isolation.** `tests/test_pilot_llm_wave41.py::test_hybrid_footnote_on_auth_failure`
-   passes alone and in its own file, fails only in whole-suite order — provider
-   state leaks between tests.
+   **Closed (PR `cursor/timestamptz-instant-carrier-1673`).** PostgreSQL
+   `TIMESTAMPTZ` into MySQL `TIMESTAMP(6)` (including catalog `TIMESTAMPTZ(6)`
+   from live `timestamp(6)`) and Redis RFC 3339 text no longer demand a Risk
+   Contract. Explicit MySQL `DATETIME(6)` still does. Proof:
+   `tests/test_instant_carrier_not_a_contract.py`,
+   `tests/test_timezone_policy_pg_mysql.py`. Live PG→MySQL / Redis e2e cells
+   were not re-run here (MySQL `:3306` / Redis `:6379` not listening) — a skip
+   is not a pass.
+2. ~~**Test isolation / hybrid footnote.**~~ **Closed (PR `cursor/pilot-hybrid-footnote-1673`).**
+   The suite-order leak was real (`_AUTH_FAILED_PROVIDERS` + `pick_narration_provider`),
+   but the test also failed **alone**: `_llm_unavailable_footnote` only fires on
+   `method == "greeting"`, and `chat()` returned greetings before `_with_llm_footnote`,
+   so the note was dead. Workspace answers must never get it. Greeting now wraps
+   `_with_llm_footnote`; the test autouses `clear_auth_failures()`, stubs
+   `pick_narration_provider → (None, "")`, greets with `"hello"`, and asserts
+   `"show my jobs"` stays unfootnoted. Proof: `tests/test_pilot_llm_wave41.py`
+   + `test_pilot_history_wave40.py` + `test_pilot_local_primary_wave43.py` +
+   `test_pilot_hybrid_wave39.py` — **21 passed**.
 3. **Scheduler shutdown logging.** ~~Every suite run ends with
    `ValueError: I/O operation on closed file` from
    `services/transfer_scheduler.py:61`.~~ **Closed:** `atexit` calls
    `shutdown(wait=False, log=False)` so the interpreter-exit path does not
    write to a closed logging stream.
-4. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
-   assert a MariaDB build without `utf8mb4_0900_ai_ci`, and two PostgreSQL cases
-   need the `vector` extension. They should skip on capability, not fail.
+4. ~~**Host-fact tests.**~~ **Closed (PR `cursor/host-fact-skip-1673`).**
+   `property8_unicode_form` already continued past missing `utf8mb4_0900_ai_ci`
+   / `utf8mb4_uca1400_ai_ci`; it now lists collations through
+   `tests/host_facts.listed_mysql_collations` and **skips** if bin/general_ci/
+   unicode_ci are absent (host inventory, not a product fail).
+   `property8_json_polarity` never asserted 0900 — that pairing was a misgroup.
+   Live pgvector writes (`test_pgvector_writer`, pgvector→pgvector COPY, universal
+   / emulator matrix dest) call `require_pgvector()` instead of failing on
+   `vector.control`. The writer names the same host miss so a live route does
+   not look like a transfer-algorithm defect.
 5. **Pilot citations open the public docs shell.** ~~Clicking a citation opens the
    right Help article but with the marketing header, so the operator leaves the
    authenticated workspace.~~ **Closed on `cursor/qa-lead-followup-1673`:** signed-in
    `#/help/<slug>` stays in the workspace and renders that article (not `#/docs`
    walkthrough, not MarketingSite).
-6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
-   the UI shows `DATETIME(6)`; a separate physical/native type through
-   introspection was proposed and not yet decided.
-7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL (this PR).**
+6. ~~**Map API vs UI type spelling.**~~ **Closed (PR `cursor/map-physical-type-spelling-1673`).**
+   Destination probes already restored BigQuery catalog DDL via `declared_type`
+   + `logical_translated`. MySQL/PG/SQL Server/Oracle/Snowflake now stamp the
+   same pair, so dest Map/API ship `DATETIME(6)` / `TIMESTAMP(6)` / `DATETIME2(6)`
+   instead of lattice `TIMESTAMP_NTZ(6)`. `tinyint(1)` → `BOOLEAN` is unchanged.
+   Proof: `tests/test_schema_introspect_specialty.py`,
+   `test_mapping_pipeline_existing_mysql_datetime_is_physical_not_lattice`.
+   The UI `destPhysicalTypeLabel` fallback remains for leftover lattice stamps.
+7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL ([#179](https://github.com/Venky-Chowdary/DataFlow/pull/179)).**
    Studio Transform `round_number` places=0 → Map Type `INTEGER` into existing
    dest INT → Validate APPROVE (no `schema_drift`) → Execute appended 3 rows.
    Independent SQL re-read of `public.case_a_browser_dst`: values `[23, 21, 22]`,
@@ -433,12 +455,12 @@ material, and host routing in a real browser vhost (verified at service level on
    only. Awaiting a decision on whether file export is meant to be live.
 9. **Tenant delete and BYOK rotate have no UI surface** (API only). Awaiting a
    decision on whether they should be operator-reachable.
-10. **`round_number` collapse through the profiler.** A literal
+9. **`round_number` collapse through the profiler.** A literal
     `1.50000000 → NUMBER(9,2)` case is unreachable through the UI because the CSV
     profiler collapses the padded value to `DECIMAL(7,4)`, so a `(9,2)`
     destination is held earlier by the narrowing Risk-Contract gate. Awaiting a
     decision on whether the profiler should preserve declared scale.
-11. **Environment failures that are not product defects** — do not "fix" these by
+10. **Environment failures that are not product defects** — do not "fix" these by
     changing production semantics: PyIceberg reads a Windows path `C:\...` as URI
     scheme `c` (7 `test_row_conservation.py` failures on this box), and the local
     MySQL fixture refuses `root@172.17.0.1`

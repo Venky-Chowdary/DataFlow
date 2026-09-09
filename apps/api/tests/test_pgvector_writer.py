@@ -2,27 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-
-def _pgvector_available() -> bool:
-    try:
-        import psycopg2
-
-        conn = psycopg2.connect(
-            host="localhost", port=5432, database="dataflow", user="dataflow", password="dataflow"
-        )
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM pg_extension WHERE extname='vector';")
-        found = cur.fetchone() is not None
-        cur.close()
-        conn.close()
-        return found
-    except Exception:
-        return False
-
-
-PGVECTOR_AVAILABLE = _pgvector_available()
+from tests.host_facts import require_pgvector
 
 
 def test_chunk_text_basic():
@@ -60,8 +40,8 @@ def test_vectorize_records_with_precomputed_embedding():
     assert rows[0]["embedding"] == [0.1, 0.2, 0.3]
 
 
-@pytest.mark.skipif(not PGVECTOR_AVAILABLE, reason="pgvector extension not available")
 def test_pgvector_writer_inserts_rows():
+    require_pgvector()
     from connectors.pgvector_writer import write_mapped_rows
 
     table_name = "test_pgvector_writer"

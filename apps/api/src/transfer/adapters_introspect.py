@@ -61,7 +61,9 @@ def _columns_schema_meta(
             or col.get("decimal_capacity_measured")
             or col.get("logical_translated")
         ):
-            declared = str(col.get("declared_type") or "").strip()
+            declared = str(
+                col.get("declared_type") or col.get("native_type") or ""
+            ).strip()
             if declared:
                 types[key] = declared
         if "nullable" in col:

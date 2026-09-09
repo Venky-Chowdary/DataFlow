@@ -3800,10 +3800,19 @@ def is_dest_instant_carrier_spelling(stamped: str, *, dest_db: str = "") -> bool
     bare = _bare_type_token(stamped)
     if not bare:
         return False
-    return any(
+    if any(
         bare == _bare_type_token(ddl_type(db, logical))
         for logical in ("TIMESTAMPTZ", "TIMESTAMP_TZ")
-    )
+    ):
+        return True
+    # MySQL introspect maps live TIMESTAMP(p) → TIMESTAMPTZ(p). That catalog
+    # spelling is the same physical instant (UTC store, session time_zone on
+    # read), not a foreign PostgreSQL token to rematerialize as DATETIME(6).
+    # SQL Server still rejects TIMESTAMPTZ here — its physical stamp is
+    # DATETIMEOFFSET, and a source TIMESTAMPTZ must keep being reinvented.
+    if db == "mysql" and bare.startswith("TIMESTAMPTZ"):
+        return datetime_timezone_polarity(stamped, dest_db=db) in {"tz", "ltz"}
+    return False
 
 
 def reinvent_would_drop_dest_instant_carrier(

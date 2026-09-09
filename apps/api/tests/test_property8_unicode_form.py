@@ -33,6 +33,7 @@ from services.unicode_form import (
 )
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
+from tests.host_facts import listed_mysql_collations
 
 
 def _run(req: TransferRequest):
@@ -197,17 +198,23 @@ def test_mariadb_collation_unique_nfc_nfd_and_sharp_s():
     )
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COLLATION_NAME FROM information_schema.COLLATIONS "
-                "WHERE COLLATION_NAME IN ("
-                "'utf8mb4_bin','utf8mb4_general_ci',"
-                "'utf8mb4_unicode_ci','utf8mb4_unicode_520_ci',"
-                "'utf8mb4_0900_ai_ci','utf8mb4_uca1400_ai_ci')"
+            present = listed_mysql_collations(
+                cur,
+                (
+                    "utf8mb4_bin",
+                    "utf8mb4_general_ci",
+                    "utf8mb4_unicode_ci",
+                    "utf8mb4_unicode_520_ci",
+                    "utf8mb4_0900_ai_ci",
+                    "utf8mb4_uca1400_ai_ci",
+                ),
             )
-            present = {str(r[0]) for r in cur.fetchall()}
-            assert "utf8mb4_bin" in present
-            assert "utf8mb4_general_ci" in present
-            assert "utf8mb4_unicode_ci" in present
+            required = {"utf8mb4_bin", "utf8mb4_general_ci", "utf8mb4_unicode_ci"}
+            missing_required = sorted(required - present)
+            if missing_required:
+                pytest.skip(
+                    "MariaDB missing required collations: " + ", ".join(missing_required)
+                )
 
             bin_nfc = _mysql_unique_probe(
                 cur, f"p8_form_bin_{suffix}", "utf8mb4_bin", NFC_CAFE, NFD_CAFE

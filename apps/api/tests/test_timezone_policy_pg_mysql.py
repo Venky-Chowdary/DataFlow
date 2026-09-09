@@ -18,6 +18,7 @@ from services.timezone_policy import (
     MYSQL_TIMESTAMP_MIN,
     POLICY_NATIVE_INSTANT,
     POLICY_OFFSET_PRESERVED,
+    POLICY_OFFSET_TEXT,
     POLICY_UTC_INVENT,
     POLICY_UTC_NORMALIZED,
     POLICY_WALL_CLOCK_LOCAL,
@@ -93,6 +94,25 @@ def test_policy_is_identical_for_validate_and_execute_call_shapes() -> None:
     b = resolve_timezone_policy("TIMESTAMPTZ", "TIMESTAMP(6)", dest_db="mariadb")
     assert a is not None and b is not None
     assert a.as_dict() == b.as_dict()
+
+
+def test_pg_timestamptz_into_redis_text_is_not_a_contract() -> None:
+    """Redis has one carrier — RFC 3339 text — so the wire is the instant."""
+    policy = resolve_timezone_policy("TIMESTAMPTZ", "string", dest_db="redis")
+    assert policy is not None
+    assert policy.policy == POLICY_OFFSET_TEXT
+    assert policy.instant_preserved is True
+    assert policy.offset_label_preserved is True
+    assert policy.requires_contract is False
+    assert policy.remediation == ""
+
+
+def test_pg_timestamptz_into_postgres_text_still_needs_a_contract() -> None:
+    policy = resolve_timezone_policy("TIMESTAMPTZ", "TEXT", dest_db="postgresql")
+    assert policy is not None
+    assert policy.policy == POLICY_OFFSET_TEXT
+    assert policy.requires_contract is True
+    assert policy.remediation
 
 
 # --- bind semantics ---------------------------------------------------------

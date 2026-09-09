@@ -611,3 +611,61 @@ def test_interval_ym_bq_and_postgis_geography_create_new_not_self_lossy():
     geo = create_new_mapping_target_type("GEOGRAPHY(POINT,4326)", "postgresql")
     assert "POINT" in geo.upper()
     assert "GEOMETRY," not in geo.upper().replace(" ", "")
+
+
+def test_mapping_pipeline_existing_mysql_datetime_is_physical_not_lattice():
+    """POST /map match-existing must return DATETIME(6), not TIMESTAMP_NTZ(6)."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["ts_utc"],
+        target_columns=["ts_utc"],
+        source_schemas=[
+            {
+                "name": "ts_utc",
+                "inferred_type": "TIMESTAMPTZ",
+                "samples": ["2024-12-31T23:59:59+00:00"],
+            }
+        ],
+        target_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMP_NTZ(6)", "samples": []}
+        ],
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        use_llm=False,
+    )
+    row = result["mappings"][0]
+    tgt = str(row.get("target_type") or "")
+    assert "DATETIME" in tgt.upper(), row
+    assert "TIMESTAMP_NTZ" not in tgt.upper(), row
+    native = str(row.get("dest_native_type") or "")
+    assert "DATETIME" in native.upper(), row
+    proof_row = (result.get("mapping_proof") or {}).get("mappings") or []
+    if proof_row:
+        proof_tgt = str(proof_row[0].get("target_type") or "")
+        proof_native = str(proof_row[0].get("dest_native_type") or "")
+        assert "TIMESTAMP_NTZ" not in proof_tgt.upper()
+        assert "DATETIME" in (proof_native or proof_tgt).upper()
+
+
+def test_mapping_pipeline_existing_pg_timestamptz_keeps_native_spelling():
+    """Lattice legalize must not rewrite dest-native TIMESTAMPTZ on PostgreSQL."""
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["ts_utc"],
+        target_columns=["ts_utc"],
+        source_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMPTZ", "samples": []}
+        ],
+        target_schemas=[
+            {"name": "ts_utc", "inferred_type": "TIMESTAMPTZ", "samples": []}
+        ],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+        use_llm=False,
+    )
+    tgt = str(result["mappings"][0].get("target_type") or "")
+    compact = tgt.upper().replace(" ", "_")
+    assert "TIMESTAMPTZ" in compact or "WITH_TIME_ZONE" in compact, tgt
+    assert "TIMESTAMP_NTZ" not in compact

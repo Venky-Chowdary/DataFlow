@@ -312,25 +312,9 @@ def _build_db_endpoint(
         )
     if driver == "pgvector":
         # Require the Postgres vector extension; homebrew PG without pgvector must skip.
-        try:
-            import psycopg2
+        from tests.host_facts import require_pgvector
 
-            conn = psycopg2.connect(
-                host="127.0.0.1",
-                port=5432,
-                dbname="dataflow",
-                user="dataflow",
-                password="dataflow",
-                connect_timeout=2,
-            )
-            conn.autocommit = True
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            finally:
-                conn.close()
-        except Exception as exc:
-            pytest.skip(f"pgvector extension unavailable: {exc}")
+        require_pgvector()
     if driver == "generic_sql":
         # Exercise the generic_sql catalog id with a local SQLite file — DuckDB
         # remains certified when its DBAPI is installed; matrix routes must not
