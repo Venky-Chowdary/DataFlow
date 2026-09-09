@@ -168,7 +168,7 @@ Found by driving the running application, page by page, not by reading it.
 | # | Item | Kind | What is known |
 |---|------|------|---------------|
 | ~~D40~~ | **Closed and browser-proved** — see §8. | closed | PR [#171](https://github.com/Venky-Chowdary/DataFlow/pull/171) |
-| D33 | An engine-side keyed upsert reports no row-accounting census: `inserts` / `updates` / `deletes` are `None` in the destination summary, so the ledger cannot say how the destination population changed even though its cardinality is proved. | open defect | Surfaced by `tests/test_stream_append_precount.py` and the `target_rows_before` failures; the writer knows the pre-count and the join count and can derive it. |
+| ~~D33~~ | **Closed.** An engine-side keyed upsert now publishes dest-engine `inserts` / `updates` / `deletes` on `keyed_census` and the conservation ledger. COPY MERGE (`merge_staging_into_dest` preexisting ⋈ + join count) stamps `KeyCensus` in `copy_upsert._result_with_upsert_proof`; the stream path lifts it onto `destination_summary`; row-path upserts use `observe_keyed_batch` / `prepare_keyed_upsert`. The earlier `test_stream_append_precount` failures were `target_rows_before` (closed §8c), not this census. | closed | SQLite `test_sqlite_upsert_updates_do_not_change_dest_count` (inserts=1, updates=3, dest COUNT 4). Live PG COPY `execute_tracked`: dest held 3, batch 4, `copy_fast_path=used`, census inserts=1 / updates=3 / deletes=0, ledger balanced, independent `COUNT(*)=4` and label `A`. Unit: `test_result_with_upsert_proof_stamps_key_census_inserts_and_updates`. |
 | D34 | `kafka-python` is not installed in this environment, so every `*_to_database_kafka` cell of the live matrix errors instead of skipping. | environment / dependency | 47 matrix cells; the routes are unmeasured, not proven broken. |
 | D35 | The local Qdrant is reachable from Windows on 6333 but the matrix cells fail with `HTTPConnectionError`, i.e. the suite resolves a different host/port than the forwarded one. | environment / fixture | 24 matrix cells unmeasured for the same reason. |
 | — | Browser re-proof of D26 (carrier round trip) and D31 (EU-locale money), and the whole of §5's untested-surface row. | not measured | The native browser tool failed to initialise on four consecutive attempts in this sweep, so no UI evidence was produced. Recorded as untested, not as passing. |
@@ -178,7 +178,7 @@ Found by driving the running application, page by page, not by reading it.
 A 115-file reconciliation/transfer collection run against the live fleet reports
 `210 failed, 2240 passed, 296 skipped`. Classified: **131** are SaaS
 connectors refusing a write by design or having no sandbox credentials, **71**
-are the Kafka/Qdrant matrix cells above (D34/D35), **3** are D33, **1** is a
+are the Kafka/Qdrant matrix cells above (D34/D35), **0** are D33 (closed — census on COPY MERGE and the row path), **1** is a
 streaming reconcile-sample case, and the remainder are SQL Server ODBC/TLS,
 Oracle credentials, Windows file-lock teardown and SQLAlchemy fixture problems.
 Starting the fuller engine fleet *raised* the failure count on purpose: cells

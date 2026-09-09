@@ -341,8 +341,9 @@ What this sweep did **not** prove, and what a client must therefore be told:
    fixed; SQLite text-boolean identity COPY declines to the row path. 580
    passed / 0 failed / 8 skipped on the 69-file changed-test selection with
    PG/MySQL/Mongo/Redis live. Source-only SaaS seeding (54) closed in register §8e
-   (`a3dc9da9`, harness only). Still open: MariaDB
-   upsert, RI properties, `_Table.c` stubs, vector Gate-8.
+   (`a3dc9da9`, harness only). RI / `_Table.c` / vector Gate-8 suites pass
+   on this box (28 passed / 1 skipped — MariaDB `:3306` down). D33 census
+   is closed (register §6). D34/D35 stay environment.
    **CDC cursor wave (register §8d, `bfc565dd`):** the CDC cursor poll never
    advanced past page one (watermark reused as `cursor_after`, offset ignored
    by keyset readers) — every multi-page poll re-read the same rows (OOM at
@@ -587,6 +588,8 @@ Pilot briefing uses `count_jobs` + request workspace.
    tree — a cell that passed on a track branch is not proof on the integration
    branch.
 3. §4 defects from this sequence, N2–N5, yaml/fwf live + 100K, YAML dest
-   export, DST, and certificate governance ops are closed. Next is the
-   never-measured items in §2 / §6 (MySQL twins, Track A matrix, SFTP Excel,
-   fleet). Fixed-width dest export is still refused.
+   export, DST, and certificate governance ops are closed. **D33** (keyed
+   upsert insert/update/delete census) is closed on this tree — see
+   `docs/OPEN_DEFECT_REGISTER.md` §6. Next is the never-measured items in
+   §2 / §6 (MySQL twins, Track A 100K, SFTP Excel, fleet). D34/D35 stay
+   environment. Fixed-width dest export is still refused.
