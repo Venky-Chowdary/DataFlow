@@ -135,7 +135,7 @@ three read paths), [#66](https://github.com/Venky-Chowdary/DataFlow/pull/66)
 (ledger term), [#71](https://github.com/Venky-Chowdary/DataFlow/pull/71) (naming,
 UI, transformed-image Validate — **open**).
 
-#### The four-layer "Case A" fix (head `3e3dd8a4`, browser-unverified)
+#### The four-layer "Case A" fix (head `3e3dd8a4`, browser-proven on PostgreSQL)
 
 A DECIMAL source column rounded to whole numbers for an existing `INT`/`int4`
 destination was blocked with no operator remedy. Four layers each held a piece:
@@ -166,6 +166,15 @@ destination was blocked with no operator remedy. Four layers each held a piece:
 Also: a row refused by the operator's own Refuse policy stopped the sample short
 of a balance and the panel called that "a defect, do not approve". Only an
 imbalance with **no** refusal is an accounting defect now.
+
+**PostgreSQL browser proof (this leftover):** Studio `#/transfer`, connector
+Case A Postgres, source `case_a_browser_src` (`NUMERIC(12,1)` 22.6/21.4/22.0) →
+existing dest `case_a_browser_dst` (`INT`, append). Transform preview 23/21/22;
+Map Type `INTEGER` into existing INTEGER, Continue enabled, no Risk Contract;
+Validate APPROVE, gates judged the transformed rows (recipe `2fbf528e208b430b`);
+Execute appended 3 (dest 0→3). Independent SQL: `[23, 21, 22]`, `SUM=66`.
+Live API cell: `tests/test_case_a_plan_preflight_live.py` (2 passed). MySQL
+browser not claimed.
 
 ### Scheduling, RBAC, tenants, file reads
 
@@ -411,13 +420,14 @@ material, and host routing in a real browser vhost (verified at service level on
 6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
    the UI shows `DATETIME(6)`; a separate physical/native type through
    introspection was proposed and not yet decided.
-7. **Case A is browser-unverified.** The four-layer fix at `3e3dd8a4` passes unit
-   and API tests, but the last browser run (before it) showed Validate still
-   blocking on `schema_drift`, so nothing yet proves the decimal→integer route
-   reaches Execute in the real UI. Treat it as unproven until an independent SQL
-   re-read shows whole-number values, the expected row count, and **rounding
-   rather than truncation** (the fixture is chosen so the two differ: `SUM = 66`,
-   not 65).
+7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL (this PR).**
+   Studio Transform `round_number` places=0 → Map Type `INTEGER` into existing
+   dest INT → Validate APPROVE (no `schema_drift`) → Execute appended 3 rows.
+   Independent SQL re-read of `public.case_a_browser_dst`: values `[23, 21, 22]`,
+   `COUNT=3`, `SUM=66` (round-half-up), not truncated `65`. Live plan-preflight
+   cell `test_case_a_plan_preflight_live.py` (2 passed). **MySQL browser is not
+   claimed** (no `:3306` on the proof box). Unshaped `DECIMAL → INT` still
+   refuses in unit tests; that control was not re-driven in this browser run.
 8. **A file-export destination is not approvable at all** — Map says
    "Destination schema not loaded", so the export retarget path is unit-tested
    only. Awaiting a decision on whether file export is meant to be live.
@@ -485,8 +495,8 @@ material, and host routing in a real browser vhost (verified at service level on
 7. Documentation refreshed with current screenshots; the requested ~1 minute
    explainer per section.
 8. Rotate the GitHub token that was pasted into chat.
-9. Case A (§5.7) proven in the browser on MySQL **and** PostgreSQL with an
-   independent destination re-read, and B–H re-run after it.
+9. Case A (§5.7) PostgreSQL browser + SQL re-read is closed (this PR). MySQL
+   browser + B–H re-run after it are still open.
 10. The three matrices in §6 (connector family, type family, sync mode) run as
     named matrices with pass/fail/skip counts, not as a spot check.
 11. SAML/SSO proven against a real IdP.
