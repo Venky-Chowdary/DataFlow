@@ -50,6 +50,33 @@ describe('control density ladder', () => {
     assert.match(STUDIO, /\.df2-dest-mode-toggle\s*\{[^}]*background:\s*var\(--df-seg-track\)/s);
   });
 
+  it('dest fields next to Mode share the control-height token (no 34px leftover)', () => {
+    assert.match(
+      STUDIO,
+      /\.df2-dest-connector-search\s*\{[^}]*height:\s*var\(--df-control-height\)/s,
+    );
+    assert.match(
+      STUDIO,
+      /\.df2-dest-advanced-btn[\s\S]*?height:\s*var\(--df-control-height\)/,
+    );
+    assert.match(
+      STUDIO,
+      /\.df2-dest-type-filter select\s*\{[^}]*height:\s*var\(--df-control-height\)/s,
+    );
+    assert.match(
+      STUDIO,
+      /\.df2-dest-engine-select\s*\{[^}]*height:\s*var\(--df-control-height\)/s,
+    );
+    assert.doesNotMatch(
+      STUDIO,
+      /\.df2-dest-connector-search[^{]*\{[^}]*height:\s*34px/,
+    );
+    assert.doesNotMatch(
+      STUDIO,
+      /\.df2-dest-engine-select[^{]*\{[^}]*height:\s*34px/,
+    );
+  });
+
   it('inputs use the control-height token, not a 40px literal', () => {
     assert.match(
       CONSISTENCY,
