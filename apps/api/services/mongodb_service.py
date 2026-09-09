@@ -15,14 +15,8 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services.job_status import TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.runtime_estimate import append_throughput_mark
-
-#: Statuses a job never leaves on its own. Progress writes that arrive after a
-#: job reaches one of these are stale by definition and must be dropped, not
-#: applied — otherwise a late write resurrects a cancelled or failed job.
-TERMINAL_JOB_STATUSES = frozenset(
-    {"completed", "completed_with_quarantine", "failed", "cancelled"}
-)
 
 
 logger = logging.getLogger(__name__)
@@ -456,6 +450,9 @@ class MongoDBService:
         if not key:
             return False
 
+        # Pop fence flags before they leak onto the job document.
+        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
+
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
 
@@ -465,6 +462,7 @@ class MongoDBService:
                 key,
                 {
                     "status": 1,
+                    "cancel_requested": 1,
                     "phases": 1,
                     "records_processed": 1,
                     "rejected_rows": 1,
@@ -486,23 +484,23 @@ class MongoDBService:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
 
-        # Terminal statuses are final. A worker's next per-chunk progress write
-        # used to happily reset `status` from "cancelled" back to "running",
-        # so a cancel that landed between the worker's status read and its
-        # status write was erased — the UI flipped back to Running and the
-        # operator had to race the loop. `allow_terminal_exit=True` is the one
-        # documented way out, used by resume.
-        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
-        if (
-            previous_status in TERMINAL_JOB_STATUSES
-            and status not in TERMINAL_JOB_STATUSES
-            and not allow_terminal_exit
-        ):
+        # One owner: services.job_status.refuse_job_status_write.
+        # Sticky terminal + cancel_requested so a late COPY `completed` cannot
+        # rewrite Cancel. `allow_terminal_exit=True` is resume's documented exit.
+        from services.job_status import refuse_job_status_write
+
+        refuse_reason = refuse_job_status_write(
+            previous_status=previous_status,
+            next_status=status,
+            cancel_requested=bool((prev_doc or {}).get("cancel_requested")),
+            allow_terminal_exit=allow_terminal_exit,
+        )
+        if refuse_reason:
             logging.getLogger(__name__).info(
-                "Ignoring %s update for job %s: already terminal (%s)",
+                "Ignoring %s update for job %s: %s",
                 status,
                 job_id,
-                previous_status,
+                refuse_reason,
             )
             return False
 
@@ -1224,7 +1222,24 @@ class MemoryMongoDBService:
             rec = self._jobs.get(job_id)
             if not rec:
                 return False
+        allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
         previous_status = rec.get("status")
+        from services.job_status import refuse_job_status_write
+
+        refuse_reason = refuse_job_status_write(
+            previous_status=previous_status,
+            next_status=status,
+            cancel_requested=bool(rec.get("cancel_requested")),
+            allow_terminal_exit=allow_terminal_exit,
+        )
+        if refuse_reason:
+            logging.getLogger(__name__).info(
+                "Ignoring %s update for job %s: %s",
+                status,
+                job_id,
+                refuse_reason,
+            )
+            return False
         fence = kwargs.pop("lease_fence", None)
         if fence is None:
             try:
@@ -1350,6 +1365,32 @@ class MemoryMongoDBService:
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return True
+
+    def request_job_cancel(self, job_id: str) -> bool:
+        """Record a durable cancellation request — same contract as MongoDBService."""
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec["cancel_requested"] = True
+        rec["cancel_requested_at"] = datetime.now(timezone.utc)
+        rec["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def clear_job_cancel(self, job_id: str) -> bool:
+        """Clear a cancellation request so a resumed job can run again."""
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        rec.pop("cancel_requested", None)
+        rec.pop("cancel_requested_at", None)
+        rec["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        rec = self._jobs.get(job_id)
+        if not rec:
+            return False
+        return bool(rec.get("cancel_requested")) or rec.get("status") == "cancelled"
 
     def update_job_fields(self, job_id: str, fields: dict) -> bool:
         """Patch job metadata without changing status (e.g. rename)."""

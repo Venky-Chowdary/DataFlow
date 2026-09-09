@@ -915,6 +915,14 @@ describe("operator surface geometry and honest empty export", () => {
 });
 
 describe("enterprise wedge proof surfaces", () => {
+  it("Theater Cancel posts to /jobs/{id}/cancel and only while running", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(theater, /await cancelJob\(jobId\)/);
+    assert.match(theater, /\{isRunning && onCancel && \(/);
+    assert.match(api, /connectors\/jobs\/\$\{jobId\}\/cancel/);
+  });
+
   it("completed Theater keeps the job id so Gate-8 is not a transient card", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
