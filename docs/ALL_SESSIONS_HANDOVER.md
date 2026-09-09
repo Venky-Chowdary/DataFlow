@@ -240,8 +240,14 @@ contract. Measured 2026-09-09: 21 passed in
 `apps/web` 953 passed; `tsc` + vite clean. Does **not** close a full
 browser walk of Transfer Studio, Track A 100K, or a contracted Execute.
 
+Last-admin Remove / demote is closed on this tree
+(`cursor/last-admin-remove-1673`, PR #191): Settings Team used to offer
+Remove and a role change on the only admin, then toast the API refusal.
+The control now uses the same predicate as ``team_store._assert_not_last_admin``.
+Does **not** close Evidence / Operations / Contracts / Proofs or Mongo.
+
 Still unmeasured for a client: the Evidence Chain / Operations / Contracts /
-Proofs pages, workspace roles, and the Mongo and MinIO routes.
+Proofs pages, remaining workspace-role QA, and the Mongo and MinIO routes.
 Quarantine/replay is already closed (D37/D40/D41/D42). This is **not** a
 deployment-ready product.
 

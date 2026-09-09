@@ -960,6 +960,10 @@ describe("enterprise wedge proof surfaces", () => {
     assert.doesNotMatch(tenant, /10\.0\.0\.0\/8/);
     assert.match(tenant, /placeholder="Legal entity name"/);
     assert.match(tenant, /placeholder="transfers\.example\.com"/);
+    const team = readFileSync(join(webRoot, "pages/settings/TeamSettings.tsx"), "utf8");
+    assert.match(team, /isLastWorkspaceAdmin\(members, m\.email\)/);
+    assert.match(team, /LAST_ADMIN_PROTECTED/);
+    assert.match(team, /disabled=\{removingEmail === m\.email \|\| !membership\.allowed \|\| lastAdmin\}/);
   });
 
   it("Theater shows dest COUNT, Validate run_id, and run lineage", () => {
