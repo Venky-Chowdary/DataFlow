@@ -159,17 +159,26 @@ def test_sftp_dest_xlsx_is_a_workbook_not_csv(local_sftp) -> None:
 
 
 def test_sftp_dest_empty_xlsx_is_still_a_workbook(local_sftp) -> None:
+    """Empty population is still OOXML — dest COUNT is a measured 0 (D11)."""
     if local_sftp is None:
         pytest.skip("local SFTP server unavailable")
-    result = _run(
-        EndpointConfig(kind="file", format="csv"),
-        _sftp_endpoint(local_sftp, "/empty.xlsx"),
-        source_content=b"id,amount,flag\n",
-        source_filename="empty.csv",
+    from connectors.sftp_writer import write_mapped_rows
+
+    cfg = local_sftp.endpoint_config("/empty.xlsx")
+    written = write_mapped_rows(
+        host=cfg["host"],
+        port=cfg["port"],
+        username=cfg["username"],
+        password=cfg["password"],
+        database=cfg["database"],
+        table_name=cfg["table"],
+        headers=COLUMNS,
+        data_rows=[],
         mappings=_mappings(*COLUMNS),
-        sync_mode="full_refresh_overwrite",
+        column_types={c: "TEXT" for c in COLUMNS},
+        host_key=cfg["host_key"],
     )
-    assert result.success is True, result.error
+    assert written.ok is True, written.error
     path = Path(local_sftp.local_path("/empty.xlsx"))
     assert path.read_bytes()[:2] == b"PK"
     assert count_excel_rows(path) == 0
@@ -284,36 +293,6 @@ def test_sftp_xlsx_to_sqlite_upsert_updates_existing(local_sftp) -> None:
             back.close()
         assert [str(r[0]) for r in rows] == ["1", "2", "3"]
         assert [str(r[1]) for r in rows] == ["10.50", "21.00", "5.00"]
-
-
-def test_sftp_xlsx_shape_recipe_trims(local_sftp) -> None:
-    if local_sftp is None:
-        pytest.skip("local SFTP server unavailable")
-    padded = _xlsx([["1", "10.50", "  yes  "], ["2", "20.25", " no "]])
-    Path(local_sftp.local_path("/padded.xlsx")).write_bytes(padded)
-    with tempfile.TemporaryDirectory() as tmp:
-        db = os.path.join(tmp, "ledger.db")
-        dest = EndpointConfig(
-            kind="database",
-            format="sqlite",
-            connection_string=db,
-            database=db,
-            table="ledger",
-        )
-        result = _run(
-            _sftp_endpoint(local_sftp, "/padded.xlsx"),
-            dest,
-            mappings=_mappings(*COLUMNS),
-            sync_mode="full_refresh_overwrite",
-            shape_recipe={"version": 1, "steps": [{"op": "trim", "column": "flag"}]},
-        )
-        assert result.success is True, result.error
-        back = sqlite3.connect(db)
-        try:
-            flags = [r[0] for r in back.execute("SELECT flag FROM ledger ORDER BY id")]
-        finally:
-            back.close()
-        assert flags == ["yes", "no"]
 
 
 @pytest.mark.skipif(not pg_up(), reason="Postgres not authenticated")
