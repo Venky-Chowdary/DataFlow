@@ -155,6 +155,7 @@ def _enforce_decision_artifact(
     source_column_types: dict | None = None,
     source_kind: str = "",
     source_format: str = "",
+    source_connector_id: str = "",
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -227,6 +228,7 @@ def _enforce_decision_artifact(
         dest_fingerprint=dest_fp,
         source_fingerprint=src_fp,
         source_db=source_format,
+        source_connector_id=source_connector_id,
         destination_table_exists=destination_table_exists,
         dest_column_names=dest_names,
         source_column_names=source_names,

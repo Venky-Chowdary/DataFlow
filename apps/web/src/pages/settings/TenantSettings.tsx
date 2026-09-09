@@ -232,11 +232,11 @@ export function TenantSettings() {
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-name">Tenant name</label>
-              <input id="tenant-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Wells Fargo" />
+              <input id="tenant-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Legal entity name" />
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-domain">Custom domain</label>
-              <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="dataflow.wellsfargo.com" />
+              <input id="tenant-domain" className="df2-input" value={customDomain} onChange={(e) => setCustomDomain(e.target.value)} placeholder="transfers.example.com" />
             </div>
             <div className="df2-settings-field">
               <label htmlFor="tenant-region">Data region</label>
@@ -273,7 +273,7 @@ export function TenantSettings() {
               rows={4}
               value={ipAllowlist}
               onChange={(e) => setIpAllowlist(e.target.value)}
-              placeholder="10.0.0.0/8&#10;192.168.1.50"
+              placeholder={"one CIDR or IPv4 per line\n203.0.113.0/24"}
             />
             <p className="df2-settings-hint">Evaluated only when Host resolves this tenant via custom domain. The default app host never applies the list.</p>
           </div>

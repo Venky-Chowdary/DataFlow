@@ -521,6 +521,7 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
         return False
     mode = str(getattr(sched, "sync_mode", "") or "").strip() or "full_refresh_overwrite"
     source_engine = ""
+    source_connector_id = str(getattr(sched, "source_connector_id", "") or "").strip().lower()
     try:
         from services.connector_store import get_connector
 
@@ -533,18 +534,28 @@ def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
             source_engine = str(data.get("type") or data.get("format") or "").strip().lower()
     except Exception:
         source_engine = ""
-    art = build_artifact_from_mappings(
-        maps,
-        dest_db=engine,
-        source_db=source_engine,
-        dest_fingerprint="",
-        sync_mode=mode,
-        route_id=f"validate:{engine or 'unknown'}",
-        tenant_id="anonymous",
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
-    return art.content_hash.lower() == approved.lower()
+    source_fp = str(getattr(sched, "source_schema_fingerprint", "") or "").strip()
+    source_dbs = [source_engine]
+    if source_connector_id and source_connector_id not in source_dbs:
+        source_dbs.append(source_connector_id)
+    if "" not in source_dbs:
+        source_dbs.append("")
+    for src_db in source_dbs:
+        art = build_artifact_from_mappings(
+            maps,
+            dest_db=engine,
+            source_db=src_db,
+            source_fingerprint=source_fp,
+            dest_fingerprint="",
+            sync_mode=mode,
+            route_id=f"validate:{engine or 'unknown'}",
+            tenant_id="anonymous",
+            artifact_id="da_inline",
+            created_at="1970-01-01T00:00:00+00:00",
+        )
+        if art.content_hash.lower() == approved.lower():
+            return True
+    return False
 
 
 def release_create_new_dest_exists_false_refuse(

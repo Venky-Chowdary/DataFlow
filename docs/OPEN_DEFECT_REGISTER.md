@@ -88,16 +88,21 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
 8. ~~`fixed_width` and `yaml` as live file drivers~~ **Closed as sources
    ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)) and as 100K
    Postgres sources ([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)).
-   YAML **dest export** is closed (this PR): `dump_yaml_records` writes a
+   YAML **dest export** is closed: `dump_yaml_records` writes a
    sequence of flat mappings with every scalar double-quoted (YAML 1.1 cannot
    coerce `yes`/`NO`/`007`), empty population is `[]`, dest COUNT is
-   `iter_yaml_dicts` on disk. Fixed-width dest export is still refused (needs
-   a declared layout). SFTP daily Excel is closed: ingest loads the spill
-   handle (not the `.tmp` suffix), dest `.xlsx` is a real workbook,
-   existing-table overwrite / append / upsert proved on the in-process
-   SFTP server. Hashed trim, incremental append, and a file-backed
-   2-minute cron replay are measured. Mongo schedule store and 100K MySQL
-   twins were not run (`mysql_up()` false). YAML dest 100K was not measured.
+   `iter_yaml_dicts` on disk. Fixed-width **dest export** is closed:
+   `dump_fixed_width_records` writes `#layout:` plus right-padded records
+   (operator `extra.fixed_width_layout` or CHAR(n)/VARCHAR(n) on every
+   column). Overflow refuses — never silent truncate. Empty population is
+   still a layout header so COUNT is a measured 0. Dest COUNT is
+   `iter_fixed_width_dicts` on disk. Layout is still required. SFTP daily
+   Excel is closed: ingest loads the spill handle, dest `.xlsx` is a real
+   workbook, existing-table overwrite / append / upsert plus hashed trim,
+   incremental append, and a file-backed 2-minute cron replay are measured.
+   Mongo schedule store and 100K MySQL twins were not run (`mysql_up()`
+   false). YAML dest 100K, FWF dest 100K, and 100K SFTP Excel were not
+   measured.
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
 10. CDC is **at-least-once** everywhere except the named crash-injection routes.
@@ -141,9 +146,11 @@ destination re-read on a `mysql` connection the transfer engine never touched.
 
 | # | Item | Kind | What is known |
 |---|------|------|---------------|
-| — | The Gate-8 card on a **completed** Theater. | not measured | `JobTheater` renders it only on `isComplete && job.reconciliation`, and `handleJobComplete()` clears `activeJobId` immediately, so the state is transient by construction: a 250 ms polling observer caught the Theater host live before the surface swapped to the terminal dashboard. Either the surface stops being cleared, or it is documented as unreachable — it must not be left as an unverified surface. |
+| ~~—~~ | **Closed.** The Gate-8 card on a **completed** Theater. `JobTheater` only renders it on `isComplete && job.reconciliation`, and `handleJobComplete()` used to clear `activeJobId` immediately, so the surface was transient by construction. Theater now stays mounted on terminal status; the operator leaves via Validate / Map / New transfer. Route-bar live follows the write, not a still-mounted completed job. Result dashboard stays hidden while Theater owns the id — one Gate-8 card. | `apps/web/src/lib/theaterMount.ts`, `apps/web/src/pages/TransferPage.tsx` | browser 2026-09-09 on Transfer Studio: job `4ep0E5sx-5xb4`, CSV 3 rows → Postgres `theater_g8_keep`, `.df2-theater-v3` still visible after >4s (height 812), `.df2-result-host` absent, Gate-8 "Append delta verified — whole-table checksums not comparable" dest 0→3, independent `psql` `COUNT(*)=3`, toast "Gate-8 proof stays on Job Theater."; 941 `apps/web` tests; `tsc` + vite clean |
 | — | Em-dash rendering for a missing control-total SUM. | not measured | No natural case arises on a SQL→SQL route: `control_totals.py` nulls a sum only when the SUM query itself fails. Unit-covered, not browser-proven. |
-| — | Schedules, retries, overlap and DST; job cancellation; quarantine and replay; the Evidence Chain, Operations, Contracts and Proofs pages; workspace roles and member removal; G19 hard-block reachability; Mongo and MinIO routes. | not measured | Untouched by this wave. |
+| ~~—~~ | **Closed (CTA + one PG→PG beat, not the whole scheduler matrix).** Completed Theater offered Schedule on a file source, then toasted `Database source required`. `canPersistStudioSchedule` is the one owner: Schedule is shown only for a saved connector source and a saved database dest. Browser 2026-09-09: file Theater footer `Back / Validate / New transfer` (no Schedule); PG→PG Theater footer includes Schedule; persist created `Local Postgres theater-g8 → theater_g8_sched` with 3 mappings. Live overwrite beat dest `COUNT(*)=3` twice. | `apps/web/src/lib/theaterMount.ts`, `apps/web/src/pages/TransferPage.tsx`, `tests/test_studio_pg_schedule_beat.py` | `test_studio_pg_overwrite_schedule_beat_dest_count` passed 3.25s; `canPersistStudioSchedule` 3/3; chrome contract; independent `psql` dest counts 3. |
+| ~~—~~ | **Closed.** Studio Validate hashed Decision Artifact `source_db` as the saved connector UUID, so dest-exists hold could not rematch after the first write and Run now parked `Decision Artifact content_hash mismatch` with the copy that already said dest-existing is not a plan change. Hold now also tries the connector id; Validate stamps the source engine. Run now releases the same create-new dest-exists park the cadence already released. A real Map edit still refuses. | `services/preflight_service.py`, `services/decision_kernel/execute_gate.py`, `services/schedule_approvals.py`, `services/schedule_runner.py` | `test_create_new_stamp_holds_when_validate_hashed_connector_uuid` plus the existing dest-exists / map-edit / NOT NULL cases (15 passed in `test_decision_kernel_execute_gate.py`); live parked schedule `9e940e77-…` rematches. |
+| — | Schedule retries, overlap and DST; job cancellation; quarantine and replay; the Evidence Chain, Operations, Contracts and Proofs pages; workspace roles and member removal; G19 hard-block reachability; Mongo and MinIO routes. | not measured | One PG→PG overwrite beat is not the 100K scheduler matrix. |
 
 ## 6. Handover sweep (2026-09-07, branch `devin/1788705057.72211-handover-gate-fixes`)
 

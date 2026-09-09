@@ -13,10 +13,12 @@ Postgres [#137], scheduler DST + workspace ownership [#138], governance
 ops on the certificate [#139], and YAML dest export (this PR) are merged
 or in flight. 100K dest COUNT=99,991, DLQ=9. YAML dest export writes a
 quoted sequence of mappings; independent dest COUNT is `iter_yaml_dicts`.
-Fixed-width dest export is still refused. SFTP daily Excel ingest/dest
-is closed (spill handle + real `.xlsx` dest; existing-table overwrite /
-append / upsert). MySQL twins were not run. Next: remaining matrix cells
-and local fleet / 10k–1M throughput. See
+Fixed-width dest export writes `#layout:` plus right-padded records;
+independent dest COUNT is `iter_fixed_width_dicts`. Layout is required;
+overflow refuses. SFTP daily Excel ingest/dest is closed (spill handle +
+real `.xlsx` dest; overwrite / append / upsert). 100K FWF dest and 100K
+SFTP Excel were not measured. MySQL twins were not run. Next: remaining
+matrix cells and local fleet / 10k–1M throughput. See
 `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 
 This document is written so the next engineer can continue without re-deriving
@@ -499,9 +501,14 @@ material, and host routing in a real browser vhost (verified at service level on
   (and proof pack) lists each declared mask / hash / redact column. Live
   sqlite→sqlite: 2 rows, `ssn` mask_pii, `email` hash_pii, `name` redact;
   independent `COUNT(*) = 2`, originals absent, certificate lists all three.
-* ~~YAML dest export refused.~~ **Closed (this PR).** `dump_yaml_records` writes
+* ~~YAML dest export refused.~~ **Closed.** `dump_yaml_records` writes
   a sequence of flat mappings with quoted scalars; dest COUNT is
-  `iter_yaml_dicts` on disk. Fixed-width dest export is still refused.
+  `iter_yaml_dicts` on disk.
+* ~~Fixed-width dest export refused.~~ **Closed.** `dump_fixed_width_records`
+  writes `#layout:` plus right-padded records from a declared layout or
+  CHAR(n)/VARCHAR(n) dest stamps. Overflow refuses. Empty population is
+  still a layout header. Dest COUNT is `iter_fixed_width_dicts` on disk.
+  100K FWF dest was not measured.
 * SAML / single sign-on against a real IdP.
 * 1M / 10M-row phase timing for this branch (the only measured throughput figure
   is the earlier `docs/THROUGHPUT_1M_EVIDENCE.md` append).
