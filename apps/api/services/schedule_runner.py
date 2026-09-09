@@ -242,6 +242,14 @@ def _endpoint_from_connector(conn: dict, table: str):
     connector_id = str(conn.get("_id") or conn.get("id") or "")
     from services.dialect_profiles import schema_from_cfg
 
+    extra = dict(conn.get("extra") or {}) if isinstance(conn.get("extra"), dict) else {}
+    # SFTP host-key trust lives on the saved connector. Dropping it here
+    # made a scheduled beat open an unpinned transport while Studio Test
+    # had just verified against the pin.
+    from connectors.sftp_common import host_key_settings
+
+    extra.update({k: v for k, v in host_key_settings({**extra, **conn}).items() if v})
+
     return EndpointConfig(
         kind="database",
         format=conn.get("type", ""),
@@ -256,6 +264,8 @@ def _endpoint_from_connector(conn: dict, table: str):
         password=conn.get("password", ""),
         connection_string=conn.get("connection_string", ""),
         warehouse=conn.get("warehouse", ""),
+        private_key=str(conn.get("private_key") or ""),
+        extra=extra,
     )
 
 

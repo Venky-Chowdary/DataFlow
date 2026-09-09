@@ -88,9 +88,9 @@ def parse_sftp_config(
     """Merge explicit fields with an sftp:// URI."""
     cfg = SFTPConfig()
     cfg.private_key_passphrase = (private_key_passphrase or "").strip()
-    # Saved connectors do not carry host-key trust yet, so the environment is
-    # the reachable control for it; an inline value still wins when a caller
-    # (endpoint extra, request field) supplies one.
+    # Saved connectors persist host-key trust on ``extra`` (and the
+    # schedule runner lifts it onto the endpoint). The environment remains
+    # the fallback when a caller supplies none; an inline value still wins.
     cfg.host_key = (host_key or os.getenv("DATAFLOW_SFTP_HOST_KEY", "")).strip()
     cfg.known_hosts = (known_hosts or os.getenv("DATAFLOW_SFTP_KNOWN_HOSTS", "")).strip()
     cfg.host_key_policy = (

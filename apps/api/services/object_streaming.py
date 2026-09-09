@@ -916,8 +916,15 @@ def stream_spilled_file_to_database(
     validation_mode: str = "strict",
     source_filter: dict[str, Any] | None = None,
     skip_preflight: bool = False,
+    shape_runner: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
-    """Stream a spilled object file to a database destination without loading it."""
+    """Stream a spilled object file to a database destination without loading it.
+
+    ``shape_runner`` is the same approved recipe the SQL reader applies on
+    each page. Object-store sources spill to a file and then use the file
+    reader; dropping the runner here made SFTP/S3 Excel (and CSV) silently
+    skip Transform while a local file upload honoured it.
+    """
     try:
         from src.transfer.file_stream import stream_file_to_database
     except ImportError:  # pragma: no cover
@@ -939,4 +946,5 @@ def stream_spilled_file_to_database(
         validation_mode=validation_mode,
         source_filter=source_filter,
         skip_preflight=skip_preflight,
+        shape_runner=shape_runner,
     )
