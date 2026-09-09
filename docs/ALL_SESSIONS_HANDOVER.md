@@ -265,10 +265,16 @@ Evidence Chain Verify no longer names another workspace's event ids (D45,
 platform-wide. Findings that name another workspace's records are
 withheld after the walk; `verified` remains the global verdict.
 
+Overview DLQ count is this workspace's queue (D46,
+`cursor/dlq-workspace-scope-1673`, PR #195), not the platform dump.
+Events already carried `workspace_id`; `GET /ops/dlq` ignored
+`X-Workspace-Id`. `_dlq_query` / `_event_in_dlq_scope` now filter Mongo
+and JSONL. Isolation on + no header is 400.
+
 Still unmeasured for a client: Evidence Chain UX beyond scoped findings,
-Operations / Proofs pages, Contracts page UX, remaining workspace-role QA,
-and the Mongo and MinIO routes. Quarantine/replay is already closed
-(D37/D40/D41/D42). This is **not** a deployment-ready product.
+Operations / Proofs beyond DLQ isolation, Contracts page UX, remaining
+workspace-role QA, and the Mongo and MinIO routes. Quarantine/replay is
+already closed (D37/D40/D41/D42). This is **not** a deployment-ready product.
 
 ---
 

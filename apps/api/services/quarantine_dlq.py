@@ -378,21 +378,40 @@ def quarantine_details_from_dlq(
     return out
 
 
-def _dlq_query(*, job_id: str | None = None) -> dict[str, Any]:
+def _dlq_query(*, job_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+    """Mongo filter for DLQ reads. Workspace is exact — unscoped rows stay out."""
     query: dict[str, Any] = {}
     if job_id:
         query["job_id"] = job_id
+    ws = (workspace_id or "").strip()
+    if ws:
+        query["workspace_id"] = ws
     return query
 
 
-def count_dlq_events(*, job_id: str | None = None) -> int:
-    """Whole-queue DLQ count — never the length of a paged ``list_dlq_events`` window.
+def _event_in_dlq_scope(
+    ev: dict[str, Any],
+    *,
+    job_id: str | None = None,
+    workspace_id: str | None = None,
+) -> bool:
+    if job_id and ev.get("job_id") != job_id:
+        return False
+    ws = (workspace_id or "").strip()
+    if ws and str(ev.get("workspace_id") or "") != ws:
+        return False
+    return True
+
+
+def count_dlq_events(*, job_id: str | None = None, workspace_id: str | None = None) -> int:
+    """DLQ count — never the length of a paged ``list_dlq_events`` window.
 
     Overview used ``len(events)`` with ``limit=50``, so a 200-event queue read as
-    "50 DLQ events". Count the store; the page remains a preview.
+    "50 DLQ events". Count the store; the page remains a preview. When
+    ``workspace_id`` is set this is that workspace's queue, not the platform.
     """
     coll = _dlq_coll()
-    query = _dlq_query(job_id=job_id)
+    query = _dlq_query(job_id=job_id, workspace_id=workspace_id)
     if coll is not None:
         try:
             return int(coll.count_documents(query))
@@ -414,19 +433,22 @@ def count_dlq_events(*, job_id: str | None = None) -> int:
         ev = load_dlq_event(line)
         if ev is None:
             continue
-        if job_id and ev.get("job_id") != job_id:
+        if not _event_in_dlq_scope(ev, job_id=job_id, workspace_id=workspace_id):
             continue
         n += 1
     return n
 
 
-def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+def list_dlq_events(
+    *,
+    job_id: str | None = None,
+    workspace_id: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
     coll = _dlq_coll()
     if coll is not None:
         try:
-            query: dict[str, Any] = {}
-            if job_id:
-                query["job_id"] = job_id
+            query = _dlq_query(job_id=job_id, workspace_id=workspace_id)
             docs = list(coll.find(query).sort("ts", -1).limit(max(1, int(limit))))
             out: list[dict[str, Any]] = []
             for d in docs:
@@ -452,7 +474,7 @@ def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict
         ev = load_dlq_event(line)
         if ev is None:
             continue
-        if job_id and ev.get("job_id") != job_id:
+        if not _event_in_dlq_scope(ev, job_id=job_id, workspace_id=workspace_id):
             continue
         events.append(ev)
         if len(events) >= limit:
