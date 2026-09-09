@@ -27,3 +27,22 @@ export function showStudioResultDashboard(input: {
 }): boolean {
   return input.hasResult && !input.theaterJobId;
 }
+
+/**
+ * Studio Schedule persists a Validate-approved mapping onto a saved
+ * source→dest connector pair. File sources and inline dests cannot
+ * replay unattended — do not offer a control that toasts-refuses.
+ */
+export function canPersistStudioSchedule(input: {
+  isConnectorSource: boolean;
+  sourceConnectorId?: string | null;
+  destKindMode: string;
+  destConnectorId?: string | null;
+}): boolean {
+  return Boolean(
+    input.isConnectorSource
+    && String(input.sourceConnectorId || "").trim()
+    && input.destKindMode === "database"
+    && String(input.destConnectorId || "").trim(),
+  );
+}

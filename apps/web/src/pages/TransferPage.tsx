@@ -202,6 +202,7 @@ import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import {
+  canPersistStudioSchedule,
   keepTheaterMountedOnStatus,
   routeBarLiveWhileWriting,
   showStudioResultDashboard,
@@ -5492,6 +5493,12 @@ export function TransferPage({
         : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
+  const studioSchedulePersistable = canPersistStudioSchedule({
+    isConnectorSource,
+    sourceConnectorId,
+    destKindMode,
+    destConnectorId: connectorId,
+  });
   const currentDestRouteKey = destRouteKey({
     destKindMode,
     destType,
@@ -7737,7 +7744,7 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
-              onSchedule={() => void handleScheduleRoute()}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);
                 setTransferring(true);
@@ -7815,7 +7822,7 @@ export function TransferPage({
                 });
               }}
               onNewTransfer={resetTransferStudio}
-              onSchedule={() => void handleScheduleRoute()}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onOpenValidate={() => setStep(STEP_VALIDATE)}
               onOpenChildJob={(childId) => {
                 setActiveJobId(childId);
@@ -7905,9 +7912,11 @@ export function TransferPage({
                   Resume
                 </button>
               )}
-              <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
-                <DtIcon name="activity" size={14} /> Schedule
-              </button>
+              {studioSchedulePersistable && (
+                <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
+                  <DtIcon name="activity" size={14} /> Schedule
+                </button>
+              )}
               <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>
                 New transfer
               </button>

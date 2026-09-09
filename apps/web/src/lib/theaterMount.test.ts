@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  canPersistStudioSchedule,
   keepTheaterMountedOnStatus,
   routeBarLiveWhileWriting,
   showStudioResultDashboard,
@@ -46,6 +47,53 @@ describe("showStudioResultDashboard", () => {
     );
     assert.equal(
       showStudioResultDashboard({ hasResult: false, theaterJobId: null }),
+      false,
+    );
+  });
+});
+
+describe("canPersistStudioSchedule", () => {
+  it("requires saved connectors on both ends of a database dest", () => {
+    assert.equal(
+      canPersistStudioSchedule({
+        isConnectorSource: true,
+        sourceConnectorId: "src-1",
+        destKindMode: "database",
+        destConnectorId: "dst-1",
+      }),
+      true,
+    );
+  });
+
+  it("refuses a file source even when dest is a saved connector", () => {
+    assert.equal(
+      canPersistStudioSchedule({
+        isConnectorSource: false,
+        sourceConnectorId: "",
+        destKindMode: "database",
+        destConnectorId: "dst-1",
+      }),
+      false,
+    );
+  });
+
+  it("refuses file-export dest and an unsaved dest connector", () => {
+    assert.equal(
+      canPersistStudioSchedule({
+        isConnectorSource: true,
+        sourceConnectorId: "src-1",
+        destKindMode: "file_export",
+        destConnectorId: "dst-1",
+      }),
+      false,
+    );
+    assert.equal(
+      canPersistStudioSchedule({
+        isConnectorSource: true,
+        sourceConnectorId: "src-1",
+        destKindMode: "database",
+        destConnectorId: "",
+      }),
       false,
     );
   });

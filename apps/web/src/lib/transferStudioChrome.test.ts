@@ -933,7 +933,9 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /<Gate8ProofCard/);
     assert.match(theater, /onSchedule/);
     assert.match(theater, /Schedule/);
-    assert.match(page, /onSchedule=\{\(\) => void handleScheduleRoute\(\)\}/);
+    assert.match(page, /canPersistStudioSchedule/);
+    assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
+    assert.match(page, /studioSchedulePersistable && \(/);
     assert.match(app, /Gate-8 proof stays on Job Theater/);
   });
 
