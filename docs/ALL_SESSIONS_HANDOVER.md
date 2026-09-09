@@ -167,15 +167,38 @@ the exported pack (**D23**); and the MySQL COPY fast paths raised the absence of
 `os.mkfifo` out of the fast path instead of declining it, so the row-writer
 fallback never ran and the destination was created empty (**D24**).
 
-Still open, and a client has to be told: a freshly exported proof pack fails the
-product's own **verify** control (`content_sha256` / HMAC / chain-anchor,
-**D25**); a destination-type override is lost on a Map → Validate → Map round
-trip (**D26**); and the Gate-8 card on a *completed* Theater is unproven because
-the active job is cleared the moment the run finishes, so that surface is
-transient by construction. Schedules/retries/overlap/DST, cancellation,
+D25 (signed proof-pack verify) and D26 (Map dest-type override lost on a
+round-trip) closed in register §6 — do not treat this paragraph as open.
+
+The Gate-8 card on a *completed* Theater is now a settled surface
+(`cursor/theater-complete-gate8-1673`, PR #184): `handleJobComplete` keeps
+`activeJobId`, so Theater stays mounted and Gate-8 renders in place. Browser
+2026-09-09: CSV 3 rows → Postgres `theater_g8_keep`, independent `psql`
+`COUNT(*)=3`, Theater still mounted after >4s, result dashboard absent, toast
+"Gate-8 proof stays on Job Theater.", verdict "Append delta verified —
+whole-table checksums not comparable" (create-new append-delta honesty, not
+full checksum). `apps/web` `npm test` 941 passed; `npm run build` clean.
+
+Studio Schedule is no longer a lying CTA (`cursor/studio-schedule-beat-1673`,
+PR #186): Theater / result footer offer Schedule only when
+`canPersistStudioSchedule` is true (saved connector source + saved database
+dest). File-source Theater (CSV 3 → `theater_g8_file_nosched`) has no Schedule
+button. Saved PG→PG Theater (`theater_g8_keep` → `theater_g8_sched`) shows
+Schedule and persisted pipeline `9e940e77-c633-4037-ad00-325a797f0f51`
+(3 mappings). Live overwrite beat
+`tests/test_studio_pg_schedule_beat.py` independent dest `COUNT(*)=3` on beat 1
+and beat 2 (`skip_preflight` stays False).
+
+A first Run now after create-new Validate parked on
+`Decision Artifact content_hash mismatch` because Validate hashed `source_db`
+as the saved connector UUID. Dest-exists hold now rematches that stamp;
+Validate going forward hashes the source engine. Live parked stamp rematches
+(`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
+retries / 100K / cancellation.
+
+Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes were
-untouched by this wave and remain unmeasured.
+pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
 
 ---
 

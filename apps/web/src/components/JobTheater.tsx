@@ -68,6 +68,8 @@ interface JobTheaterProps {
   onBackToValidate?: () => void;
   /** Return to Map to adjust columns after a stop. */
   onBackToMap?: () => void;
+  /** Persist the Validate-approved contract onto a schedule (completed Theater). */
+  onSchedule?: () => void;
   /** Resume from last checkpoint without leaving Transfer Studio. */
   onResumed?: (jobId: string) => void;
   /** Open another job (e.g. CDC lease holder) in Jobs / Theater. */
@@ -165,6 +167,7 @@ export function JobTheater({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onSchedule,
   onResumed,
   onOpenJob,
 }: JobTheaterProps) {
@@ -399,6 +402,7 @@ export function JobTheater({
       onNewTransfer={onNewTransfer}
       onBackToValidate={onBackToValidate}
       onBackToMap={onBackToMap}
+      onSchedule={onSchedule}
       onOpenJob={onOpenJob}
     />
   );
@@ -422,6 +426,7 @@ interface JobTheaterViewProps {
   onNewTransfer?: () => void;
   onBackToValidate?: () => void;
   onBackToMap?: () => void;
+  onSchedule?: () => void;
   onOpenJob?: (jobId: string) => void;
 }
 
@@ -444,6 +449,7 @@ export function JobTheaterView({
   onNewTransfer,
   onBackToValidate,
   onBackToMap,
+  onSchedule,
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
@@ -1898,6 +1904,11 @@ export function JobTheaterView({
           {(isComplete || isQuarantine) && onBackToValidate && (
             <button type="button" className="df2-btn" onClick={onBackToValidate}>
               <DtIcon name="gate" size={16} /> Validate
+            </button>
+          )}
+          {(isComplete || isQuarantine) && onSchedule && (
+            <button type="button" className="df2-btn" onClick={onSchedule}>
+              <DtIcon name="activity" size={16} /> Schedule
             </button>
           )}
           {(isComplete || isCancelled || isFailed || isQuarantine) && onNewTransfer && (

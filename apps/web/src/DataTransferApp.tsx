@@ -765,7 +765,7 @@ function AppShell({
                     onTransferComplete={() => {
                       loadJobs();
                       void loadSchedules();
-                      toast({ title: "Transfer complete", message: "View progress in Job Theater.", tone: "success" });
+                      toast({ title: "Transfer complete", message: "Gate-8 proof stays on Job Theater.", tone: "success" });
                     }}
                   />
                 </PageErrorBoundary>

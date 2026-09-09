@@ -201,6 +201,12 @@ import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
+import {
+  canPersistStudioSchedule,
+  keepTheaterMountedOnStatus,
+  routeBarLiveWhileWriting,
+  showStudioResultDashboard,
+} from "../lib/theaterMount";
 import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
@@ -5199,7 +5205,7 @@ export function TransferPage({
         setRunStartupProgress(100);
         setStep(STEP_RUN);
         // Local export has no server job — skip onTransferComplete (that toast
-        // says "View progress in Job Theater" and would double with this one).
+        // says "Gate-8 proof stays on Job Theater" and would double with this one).
         toast({
           title: "Exported locally",
           message: `${localResult.records_transferred?.toLocaleString() ?? 0} rows saved — start the API for governed Job Theater proof.`,
@@ -5221,7 +5227,12 @@ export function TransferPage({
   };
 
   const handleJobComplete = (job: JobProgress) => {
-    setActiveJobId(null);
+    // Keep Theater mounted so Gate-8 stays on the operator path.
+    // Leave via leaveTheaterToValidate / leaveTheaterToMap / onNewTransfer.
+    if (!keepTheaterMountedOnStatus(job.status)) {
+      setActiveJobId(null);
+    }
+    setTransferring(false);
     const success = isJobSuccess(job.status);
     const ds = (job.destination_summary ?? {}) as NonNullable<TransferResult["destination_summary"]>;
     const rps = job.records_per_second ?? ds.records_per_second;
@@ -5285,7 +5296,7 @@ export function TransferPage({
     if (success) onTransferComplete();
   };
 
-  /** Keep Job Theater mounted on fail/cancel so recovery CTAs remain visible. */
+  /** Explicit leave only — completed Gate-8 and fail/cancel recovery stay on Theater. */
   const leaveTheaterToValidate = useCallback(() => {
     setActiveJobId(null);
     setTransferring(false);
@@ -5482,6 +5493,12 @@ export function TransferPage({
         : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
+  const studioSchedulePersistable = canPersistStudioSchedule({
+    isConnectorSource,
+    sourceConnectorId,
+    destKindMode,
+    destConnectorId: connectorId,
+  });
   const currentDestRouteKey = destRouteKey({
     destKindMode,
     destType,
@@ -5997,7 +6014,7 @@ export function TransferPage({
               : destType || ""
           }
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-          live={Boolean(activeJobId) || transferring}
+          live={routeBarLiveWhileWriting(transferring)}
         />
         </div>
       </header>
@@ -7727,6 +7744,7 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);
                 setTransferring(true);
@@ -7737,7 +7755,10 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_RUN && result && !activeJobId && runResultDescribesCurrentPlan && (
+      {step === STEP_RUN && result && showStudioResultDashboard({
+        hasResult: true,
+        theaterJobId: activeJobId,
+      }) && runResultDescribesCurrentPlan && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
           <div className="df2-card-body df2-result-body">
             <TransferResultDashboard
@@ -7801,7 +7822,7 @@ export function TransferPage({
                 });
               }}
               onNewTransfer={resetTransferStudio}
-              onSchedule={() => void handleScheduleRoute()}
+              onSchedule={studioSchedulePersistable ? () => void handleScheduleRoute() : undefined}
               onOpenValidate={() => setStep(STEP_VALIDATE)}
               onOpenChildJob={(childId) => {
                 setActiveJobId(childId);
@@ -7891,9 +7912,11 @@ export function TransferPage({
                   Resume
                 </button>
               )}
-              <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
-                <DtIcon name="activity" size={14} /> Schedule
-              </button>
+              {studioSchedulePersistable && (
+                <button type="button" className="df2-btn" onClick={() => void handleScheduleRoute()}>
+                  <DtIcon name="activity" size={14} /> Schedule
+                </button>
+              )}
               <button type="button" className="df2-btn df2-btn-primary" onClick={resetTransferStudio}>
                 New transfer
               </button>

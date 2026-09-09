@@ -171,6 +171,7 @@ def create_new_validate_holds_after_dest_exists(
     live_dest_fingerprint: str,
     source_fingerprint: str = "",
     source_db: str = "",
+    source_connector_id: str = "",
     sync_mode: str = "",
     error_policy: str = "quarantine",
     destination_table_exists: bool | None = None,
@@ -207,6 +208,11 @@ def create_new_validate_holds_after_dest_exists(
         if rid and rid not in routes:
             routes.append(rid)
     source_dbs = [src_engine]
+    connector_id = (source_connector_id or "").strip().lower()
+    if connector_id and connector_id not in source_dbs:
+        # A prior Validate bug hashed source_db as the saved connector UUID.
+        # Dest-exists hold must still rematch those stamps.
+        source_dbs.append(connector_id)
     if "" not in source_dbs:
         source_dbs.append("")
     matched = False
@@ -301,6 +307,7 @@ def enforce_decision_artifact(
     dest_fingerprint: str = "",
     source_fingerprint: str = "",
     source_db: str = "",
+    source_connector_id: str = "",
     destination_table_exists: bool | None = None,
     dest_column_names: list[str] | None = None,
     source_column_names: list[str] | None = None,
@@ -329,6 +336,7 @@ def enforce_decision_artifact(
             live_dest_fingerprint=dest_fingerprint,
             source_fingerprint=source_fingerprint,
             source_db=source_db,
+            source_connector_id=source_connector_id,
             sync_mode=sync_mode,
             error_policy=error_policy,
             destination_table_exists=destination_table_exists,

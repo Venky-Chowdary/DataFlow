@@ -915,6 +915,44 @@ describe("operator surface geometry and honest empty export", () => {
 });
 
 describe("enterprise wedge proof surfaces", () => {
+  it("completed Theater keeps the job id so Gate-8 is not a transient card", () => {
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    assert.match(page, /keepTheaterMountedOnStatus/);
+    assert.match(page, /routeBarLiveWhileWriting\(transferring\)/);
+    assert.match(page, /showStudioResultDashboard/);
+    const completeFn = page.match(
+      /const handleJobComplete = \(job: JobProgress\) => \{([\s\S]*?)^\s*\/\*\* Explicit leave only/m,
+    );
+    assert.ok(completeFn, "handleJobComplete body not found");
+    assert.match(completeFn[1], /if \(!keepTheaterMountedOnStatus\(job\.status\)\)/);
+    assert.match(completeFn[1], /setTransferring\(false\)/);
+    assert.doesNotMatch(completeFn[1], /setActiveJobId\(null\);\s*const success/);
+    assert.match(theater, /isComplete && job\.reconciliation/);
+    assert.match(theater, /<Gate8ProofCard/);
+    assert.match(theater, /onSchedule/);
+    assert.match(theater, /Schedule/);
+    assert.match(page, /canPersistStudioSchedule/);
+    assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
+    assert.match(page, /studioSchedulePersistable && \(/);
+    assert.match(app, /Gate-8 proof stays on Job Theater/);
+  });
+
+  it("Settings API keys own one Generate control; tenant placeholders are not a bank", () => {
+    const settings = readFileSync(join(webRoot, "pages/SettingsPage.tsx"), "utf8");
+    const tenant = readFileSync(join(webRoot, "pages/settings/TenantSettings.tsx"), "utf8");
+    const generateHits = settings.match(/\{apiKeyGenerating \? "Generating…" : "Generate key"\}/g) || [];
+    assert.equal(generateHits.length, 1, "empty-state Generate key duplicates the toolbar");
+    assert.match(settings, /Use the toolbar above/);
+    assert.doesNotMatch(settings, /EmptyState[\s\S]{0,400}Generate key/);
+    assert.doesNotMatch(tenant, /Wells Fargo/);
+    assert.doesNotMatch(tenant, /wellsfargo\.com/);
+    assert.doesNotMatch(tenant, /10\.0\.0\.0\/8/);
+    assert.match(tenant, /placeholder="Legal entity name"/);
+    assert.match(tenant, /placeholder="transfers\.example\.com"/);
+  });
+
   it("Theater shows dest COUNT, Validate run_id, and run lineage", () => {
     const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
     const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
