@@ -1178,6 +1178,14 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
         return None
     if not sched.enabled and not manual:
         return None
+    # Cadence already releases create-new dest-exists parks before the beat.
+    # Run now must do the same or the first unattended fire stays parked.
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    release_create_new_dest_exists_false_refuse(
+        workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+    )
+    sched = get_schedule(schedule_id) or sched
 
     # Concurrency guard: refuse to start when this schedule (or another schedule
     # for the same source→dest connector pair) already has a live run in flight.

@@ -411,6 +411,62 @@ def test_create_new_stamp_refuses_dest_only_not_null():
     assert art is None
 
 
+def test_create_new_stamp_holds_when_validate_hashed_connector_uuid():
+    """Named fixture: create-new Validate hashed source_db as the connector UUID.
+
+    Dest appearing after the first write must still hold. A real Map edit refuses.
+    """
+    from services.schema_fingerprint import fingerprint_schema, live_source_schema_fingerprint
+
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+            "create_new": True,
+        },
+        {
+            "source": "region",
+            "target": "region",
+            "source_type": "TEXT",
+            "target_type": "TEXT",
+            "create_new": True,
+        },
+    ]
+    src_types = {"id": "BIGINT", "region": "TEXT"}
+    src_fp = live_source_schema_fingerprint(src_types, authoritative=True)
+    connector_id = "a6a2c56a-88fb-4658-94d6-15e03ea10f21"
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="postgresql",
+        source_db=connector_id,
+        source_fingerprint=src_fp,
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:postgresql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    dest_types = {"id": "bigint", "region": "text"}
+    live = fingerprint_schema(list(dest_types), dest_types)
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="postgresql",
+        source_db="postgresql",
+        source_connector_id=connector_id,
+        source_fingerprint=src_fp,
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=list(dest_types),
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is None
+    assert art is not None
+
+
 def test_live_source_schema_fingerprint_does_not_invent_map_columns():
     from services.schema_fingerprint import live_source_schema_fingerprint
 

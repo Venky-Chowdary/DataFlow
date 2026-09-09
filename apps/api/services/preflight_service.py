@@ -1570,7 +1570,7 @@ def run_file_preflight(
         )
 
         dest_for_ddl = (destination_db_type or "").strip().lower()
-        src_for_cap = (source_connector_id or "").strip().lower()
+        src_engine = (source_format or "").strip().lower()
         from services.schema_fingerprint import (
             live_dest_schema_fingerprint,
             live_source_schema_fingerprint,
@@ -1589,7 +1589,7 @@ def run_file_preflight(
         decision_art = build_artifact_from_mappings(
             list(mappings or []),
             dest_db=dest_for_ddl,
-            source_db=src_for_cap,
+            source_db=src_engine,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
             source_fingerprint=src_fp,
             dest_fingerprint=dest_fp,
