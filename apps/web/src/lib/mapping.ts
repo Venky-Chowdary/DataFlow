@@ -138,6 +138,12 @@ export interface EditableMapping {
   /** True when the type path itself narrows (independent of transform). */
   typeNarrowing?: boolean;
   /**
+   * Overwrite recreate: the live dest carrier will be dropped. G19 names a
+   * narrowing replacement at Validate. Signing a Risk Contract here would
+   * demote that hard block to a warning, so Map must not require one.
+   */
+  liveCarrierDoomed?: boolean;
+  /**
    * Create-new precision / width / TZ risks stamped by the mapping pipeline
    * (`assess_create_new_type_risk`). Visible before Validate/write — never invent
    * green when the engine stamped a risk.
@@ -782,6 +788,15 @@ export function engineStampedRiskChip(m: EditableMapping): {
     };
   }
   const fidelity = (m.fidelity || "").toLowerCase();
+  if (isDoomedLiveCarrierNarrowing(m)) {
+    return {
+      label: "replaced on overwrite",
+      detail:
+        m.fidelityReason
+        || `${m.inferredType || "source"} replaces declared ${m.destType || "destination"} on recreate — Validate (G19) names it`,
+      severity: "warn",
+    };
+  }
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {
       label: fidelity === "lossy_cast" ? "lossy" : fidelity === "mutate" ? "mutate" : "cast",
@@ -954,6 +969,18 @@ export function markMappingDestUnread(m: EditableMapping): EditableMapping {
   };
 }
 
+/**
+ * Live dest INTEGER vs source DECIMAL on a recreate is not a write-path
+ * narrowing — the column is dropped. G19 is the hard gate. A signed contract
+ * here would demote that block, so Map must not require one for this pair.
+ */
+export function isDoomedLiveCarrierNarrowing(m: EditableMapping): boolean {
+  if (!m.liveCarrierDoomed || m.existsInDestination !== true) return false;
+  if (m.typeNarrowing) return true;
+  if ((m.fidelity || "").toLowerCase() === "lossy_cast") return true;
+  return declaredCarrierFidelityRisk(m.inferredType, m.destType);
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
@@ -962,14 +989,20 @@ export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
   if (isSafeNormalizeMapping(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
+  const doomedReplacement = isDoomedLiveCarrierNarrowing(m);
   // cast = type path holds but unparseable values quarantine — never silent Ready.
-  if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast" || m.typeNarrowing) {
+  // Doomed-carrier lossy_cast / typeNarrowing is G19's question, not Map's.
+  if (
+    (!doomedReplacement && (fidelity === "lossy_cast" || m.typeNarrowing))
+    || fidelity === "mutate"
+    || fidelity === "cast"
+  ) {
     return true;
   }
   if (hasCreateNewTypeRisk(m)) return true;
   // Dest-type edits clear engine fidelity — recompute from carriers so Approve
   // cannot look green until Accept risk (Map→Validate SSOT).
-  if (declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
+  if (!doomedReplacement && declaredCarrierFidelityRisk(m.inferredType, m.destType)) return true;
   if (isSpecialtyLogicalType(m.inferredType) || isSpecialtyLogicalType(m.destType)) return true;
   if (m.transform === "identity_specialty") return true;
   if (

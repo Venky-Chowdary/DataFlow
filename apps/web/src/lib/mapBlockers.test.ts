@@ -89,6 +89,30 @@ describe("lossy existing-destination mapping is not a dead end", () => {
   });
 });
 
+describe("overwrite recreate does not require a Risk Contract for a doomed carrier", () => {
+  it("lets Approve reach Validate so G19 can hard-block unsigned", () => {
+    const m = { ...lossyExistingDest(), liveCarrierDoomed: true };
+    assert.equal(mappingRequiresRiskAck(m), false);
+    const blocker = mappingBlocker(m, THRESHOLD);
+    assert.ok(blocker);
+    assert.equal(blocker.code, "approval_required");
+    const approved = {
+      ...m,
+      approved: true,
+      requiresReview: false,
+    };
+    assert.equal(isMappingReady(approved, THRESHOLD), true);
+    assert.equal(mappingBlocker(approved, THRESHOLD), null);
+  });
+
+  it("still requires a Risk Contract on append into the live INTEGER", () => {
+    const m = lossyExistingDest();
+    assert.equal(m.liveCarrierDoomed, undefined);
+    assert.equal(mappingRequiresRiskAck(m), true);
+    assert.equal(mappingBlocker(m, THRESHOLD)?.code, "risk_ack_required");
+  });
+});
+
 describe("an ALTER request on an existing physical column stays truthful", () => {
   it("does not change the physical type and cannot be signed away", () => {
     const requested = applyDestTypeChange(lossyExistingDest(), "DECIMAL(10,4)");

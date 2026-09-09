@@ -166,6 +166,10 @@ import {
   type MappingTransform,
 } from "../lib/mapping";
 import {
+  liveCarrierIsDoomedOnThisRun,
+  stampLiveCarrierDoomed,
+} from "../lib/destSchemaRecreate";
+import {
   carryOperatorDecisions,
   holdOutRowsAndContinue,
 } from "../lib/mappingDecisions";
@@ -509,6 +513,14 @@ export function TransferPage({
   const [runStartupPhase, setRunStartupPhase] = useState<string>(RUN_LAUNCH_STAGES[0]);
 
   const confidenceThreshold = confidenceThresholdForMode(validationMode);
+  useEffect(() => {
+    const doomed = liveCarrierIsDoomedOnThisRun({
+      syncMode,
+      destDbType: destType,
+      destTableExists,
+    });
+    setColumnMappings((prev) => stampLiveCarrierDoomed(prev, doomed));
+  }, [syncMode, destType, destTableExists]);
   const mappingReviewCount = columnMappings.filter((m) =>
     needsMappingReview(m, confidenceThreshold),
   ).length;
@@ -7213,7 +7225,7 @@ export function TransferPage({
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
               </p>
               <p className="df2-label-hint">
-                {syncModeHonestyLine(syncMode, destTableExists)}
+                {syncModeHonestyLine(syncMode, destTableExists, destType)}
               </p>
               <p className="df2-label-hint">
                 {schemaPolicyHonestyLine(schemaPolicy)}
@@ -7941,7 +7953,7 @@ export function TransferPage({
         dateLocales={DATE_LOCALES}
         numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
-        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists)}
+        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists, destType)}
         schemaHonestyLine={schemaPolicyHonestyLine(schemaPolicy)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}

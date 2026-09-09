@@ -469,7 +469,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /Existing table detected/);
     assert.match(page, /This is not create-new/);
     assert.match(page, /empty leftover|even if a prior run wrote 0 rows/);
-    assert.match(page, /syncModeHonestyLine\(syncMode, destTableExists\)/);
+    assert.match(page, /syncModeHonestyLine\(syncMode, destTableExists, destType\)/);
     assert.match(constants, /does not CREATE a new table and does not ALTER/);
     assert.match(dash, /populationRowsScanned/);
     assert.match(dash, /populationExact \? "population" : "scanned"/);

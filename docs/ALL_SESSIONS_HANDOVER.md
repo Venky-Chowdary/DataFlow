@@ -205,9 +205,19 @@ Validate going forward hashes the source engine. Live parked stamp rematches
 (`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
 retries / 100K / cancellation.
 
+G19 hard-block reachability is closed on this tree
+(`cursor/g19-reachability-1673`): Map no longer forces a Migration Risk
+Contract against a live dest carrier that overwrite is about to drop. That
+contract was the only Map exit, and it demoted G19 to a warning — so the
+operator never saw the red gate. Overwrite recreate now lets Approve reach
+Validate unsigned; G19 blocks; Execute stays locked; dest INTEGER is not
+recreated as NUMERIC. Append / CRM overwrite still require the contract.
+Does **not** close a browser walk of Transfer Studio, Track A 100K, or a
+contracted Execute.
+
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+pages, workspace roles, and the Mongo and MinIO routes.
 
 ---
 

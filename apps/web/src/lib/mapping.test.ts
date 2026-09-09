@@ -190,6 +190,25 @@ describe("fail-closed Map approve", () => {
     assert.equal(editable[0].requiresReview, true);
   });
 
+  it("approveMappingHonestly allows Approve when overwrite will drop the live carrier", () => {
+    const next = approveMappingsHonestly([
+      {
+        source: "amount",
+        target: "amount",
+        confidence: 0.99,
+        approved: false,
+        fidelity: "lossy_cast",
+        typeNarrowing: true,
+        inferredType: "DECIMAL(20,9)",
+        destType: "INTEGER",
+        existsInDestination: true,
+        liveCarrierDoomed: true,
+      },
+    ]);
+    assert.equal(next[0].approved, true);
+    assert.equal(next[0].requiresReview, false);
+  });
+
   it("approveMappingHonestly refuses lossy_cast even when operator Approve-all runs", () => {
     const next = approveMappingsHonestly([
       {

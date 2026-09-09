@@ -118,6 +118,19 @@ describe("syncModeHonestyLine", () => {
     assert.match(line, /CREATE TABLE/i);
     assert.match(line, /create-new/i);
   });
+
+  it("names PG dest-exists overwrite as drop-and-recreate and points at G19", () => {
+    const line = syncModeHonestyLine("full_refresh_overwrite", true, "postgresql");
+    assert.match(line, /recreates/i);
+    assert.match(line, /G19/);
+    assert.doesNotMatch(line, /Does not by itself ALTER/);
+  });
+
+  it("keeps CRM overwrite as in-place — no silent recreate claim", () => {
+    const line = syncModeHonestyLine("full_refresh_overwrite", true, "salesforce");
+    assert.match(line, /Does not by itself ALTER/);
+    assert.doesNotMatch(line, /G19/);
+  });
 });
 
 describe("schemaPolicyHonestyLine", () => {

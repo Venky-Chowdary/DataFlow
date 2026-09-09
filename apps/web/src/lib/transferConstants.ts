@@ -3,6 +3,8 @@
  * Keep IDs aligned with apps/api/services/preflight_service.py allowed sets.
  */
 
+import { destSchemaIsRecreatedOnOverwrite } from "./destSchemaRecreate";
+
 /** Must match apps/api/services/coercion_probe.py PREFLIGHT_SAMPLE_LIMIT (Validate≡Execute). */
 export const PREFLIGHT_SAMPLE_LIMIT = 500;
 
@@ -224,6 +226,7 @@ export const NUMBER_LOCALES: { id: NumberLocaleId; label: string; detail: string
 export function syncModeHonestyLine(
   mode: string,
   destTableExists: boolean | null,
+  destDbType?: string | null,
 ): string {
   if (mode === "full_refresh_append") {
     if (destTableExists === true) {
@@ -246,6 +249,14 @@ export function syncModeHonestyLine(
   }
   if (mode === "full_refresh_overwrite") {
     if (destTableExists === true) {
+      if (destSchemaIsRecreatedOnOverwrite(destDbType)) {
+        return (
+          "Drops and recreates the existing table from the source shape. "
+          + "Destroys current rows and the declared carriers. "
+          + "Validate names a replacement that would overflow a declared carrier (G19) "
+          + "and blocks Execute until you remap or sign a Migration Risk Contract."
+        );
+      }
       return (
         "Replaces rows in the existing table. Destroys current data. "
         + "Does not by itself ALTER live column widths — widen in the warehouse or map to a new column."
