@@ -490,8 +490,9 @@ material, and host routing in a real browser vhost (verified at service level on
 * ~~SFTP daily-Excel ingestion into an existing table under each sync mode.~~
   **Closed.** Ingest loads OOXML from the spill handle (cache is `.tmp`).
   Dest `.xlsx` is a real workbook, never CSV. Existing-table overwrite /
-  append / upsert proved on the in-process SFTP server. The 2-minute
-  schedule replay was not measured (Mongo down).
+  append / upsert, hashed trim, incremental append, and a file-backed
+  2-minute cron replay are measured. Mongo schedule store remains
+  unproven.
 * ~~Governance operations (mask / hash / redact) recorded in the audit certificate
   — designed, not built.~~ **Closed ([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)).**
   Execute stamps `governance_operations` on the job; the signed certificate

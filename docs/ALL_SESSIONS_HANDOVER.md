@@ -157,8 +157,11 @@ the PR that carries it):
   (cache is `.tmp`; openpyxl must not key format off that suffix). Dest
   `.xlsx` writes a real workbook, never `out.xlsx.csv`. Existing-table
   overwrite / append / upsert proved against the in-process SFTP server.
-  The 2-minute schedule replay was not measured (Mongo down). 100K was
-  not measured.
+  Hashed trim recipe lands without padding (spill path now carries
+  ``shape_runner``). Incremental append (id cursor) proved delta then
+  noop. File-backed ``*/2 * * * *`` cron replayed the same recipe across
+  two due beats (Mongo schedule store still unproven). 100K was not
+  measured.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
 
 **Found by driving the app before handover (2026-09-06,
@@ -599,6 +602,7 @@ Pilot briefing uses `count_jobs` + request workspace.
    `docs/OPEN_DEFECT_REGISTER.md` §6. Next is the never-measured items in
    §2 / §6 (MySQL twins, Track A 100K, fleet). D34/D35 stay environment.
    SFTP daily Excel ingest/dest is closed (spill-handle load + real
-   `.xlsx` dest; existing-table overwrite / append / upsert). The
-   2-minute Excel schedule remains unmeasured. Fixed-width dest export
+   `.xlsx` dest; existing-table overwrite / append / upsert; hashed trim;
+   incremental append; file-backed 2-minute cron replay). Mongo schedule
+   store and 100K SFTP Excel remain unmeasured. Fixed-width dest export
    is still refused.

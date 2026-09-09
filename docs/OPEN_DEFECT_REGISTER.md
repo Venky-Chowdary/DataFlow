@@ -95,7 +95,8 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
    a declared layout). SFTP daily Excel is closed: ingest loads the spill
    handle (not the `.tmp` suffix), dest `.xlsx` is a real workbook,
    existing-table overwrite / append / upsert proved on the in-process
-   SFTP server. The 2-minute schedule replay was not measured. 100K MySQL
+   SFTP server. Hashed trim, incremental append, and a file-backed
+   2-minute cron replay are measured. Mongo schedule store and 100K MySQL
    twins were not run (`mysql_up()` false). YAML dest 100K was not measured.
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
