@@ -98,6 +98,20 @@ def test_studio_pg_append_retry_refuses_and_dest_count_stays_three(tmp_path, mon
     ensure_memory_job_store_if_mongo_down()
     _isolate_stores(tmp_path, monkeypatch)
 
+    # Earlier tests may stub get_transfer_engine with a job-shell dummy.
+    import src.transfer.background as bg
+    import src.transfer.engine as engine_mod
+    from src.transfer.engine import UniversalTransferEngine
+
+    def _live_engine():
+        current = getattr(engine_mod, "_engine", None)
+        if current is None or not hasattr(current, "execute_tracked"):
+            engine_mod._engine = UniversalTransferEngine()
+        return engine_mod._engine
+
+    monkeypatch.setattr(engine_mod, "get_transfer_engine", _live_engine)
+    monkeypatch.setattr(bg, "get_transfer_engine", _live_engine)
+
     tag = uuid.uuid4().hex[:8]
     src_table = f"studio_retry_src_{tag}"
     dest_table = f"studio_retry_dst_{tag}"
