@@ -206,8 +206,10 @@ Validate going forward hashes the source engine. Live parked stamp rematches
 retries / 100K / cancellation.
 
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
-quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+quarantine and replay, Evidence Chain UX beyond scoped findings, Operations /
+Proofs beyond freshness isolation, Contracts page UX, workspace roles, G19
+reachability, and the Mongo and MinIO routes.
+Overview CDC freshness is this workspace's SLO (D47), not the process-wide scrape.
 
 ---
 
@@ -312,8 +314,8 @@ What this sweep did **not** prove, and what a client must therefore be told:
    Replay path, because no route through the UI reaches a payload-bearing
    write-time rejection; D39's tie-break, because no two post-fix audit writes
    shared a timestamp; and D31 at this tip. Still untested: job cancellation, an
-   operator-driven schedule, Operations / Contracts / Proofs, workspace roles and
-   member removal.
+   operator-driven schedule, Operations / Contracts / Proofs beyond freshness
+   isolation, workspace roles and member removal.
 2. **D40 is closed, and it closed D37's positive half with it** (PR
    [#171](https://github.com/Venky-Chowdary/DataFlow/pull/171), register §7).
    The dead end had two causes: Map graded carrier *domains* while the engine

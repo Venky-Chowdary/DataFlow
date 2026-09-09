@@ -1156,6 +1156,25 @@ def _apply_change_batch(
     return rows_written, last_checksum, dest_summary, deleted
 
 
+def _stamp_cdc_poll(
+    *,
+    job_id: str = "",
+    stream: str = "",
+    workspace_id: str = "",
+    schedule_id: str = "",
+    **kwargs: Any,
+) -> None:
+    from services.ops_metrics import record_cdc_poll
+
+    record_cdc_poll(
+        job_id=str(job_id or ""),
+        stream=str(stream or ""),
+        workspace_id=str(workspace_id or ""),
+        schedule_id=str(schedule_id or ""),
+        **kwargs,
+    )
+
+
 def run_cdc_database_transfer(
     source: Any,
     destination: Any,
@@ -1172,6 +1191,8 @@ def run_cdc_database_transfer(
     validation_mode: str = "strict",
     limit: int = 0,
     delivery_guarantee: str = "at_least_once",
+    workspace_id: str = "",
+    schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer from a database source to a database destination.
 
@@ -1196,6 +1217,8 @@ def run_cdc_database_transfer(
             validation_mode=validation_mode,
             limit=limit,
             delivery_guarantee=delivery_guarantee,
+            workspace_id=workspace_id,
+            schedule_id=schedule_id,
         )
     return _run_cdc_single_stream(
         source,
@@ -1212,6 +1235,8 @@ def run_cdc_database_transfer(
         validation_mode=validation_mode,
         limit=limit,
         delivery_guarantee=delivery_guarantee,
+        workspace_id=workspace_id,
+        schedule_id=schedule_id,
     )
 
 
@@ -1232,6 +1257,8 @@ def _run_cdc_multi_stream(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    workspace_id: str = "",
+    schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run CDC for each selected stream.
 
@@ -2000,6 +2027,8 @@ def _run_cdc_multi_stream_sequential(
                     validation_mode=validation_mode,
                     limit=limit,
                     delivery_guarantee=delivery_guarantee,
+                    workspace_id=workspace_id,
+                    schedule_id=schedule_id,
                 )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
@@ -2077,6 +2106,8 @@ def _run_cdc_single_stream(
     validation_mode: str = "strict",
     limit: int = 0,
     delivery_guarantee: str = "at_least_once",
+    workspace_id: str = "",
+    schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer for a single stream contract."""
     # Driver type is used for generic read/write; CDC source kind uses the
@@ -2317,9 +2348,13 @@ def _run_cdc_single_stream(
                 f"captured. {capture_downgrade['cdc_capture_downgrade_remedy']}",
             ]
             try:
-                from services.ops_metrics import record_cdc_poll
-
-                record_cdc_poll(used_query_fallback=True)
+                _stamp_cdc_poll(
+                    used_query_fallback=True,
+                    job_id=job_id,
+                    stream=table_name,
+                    workspace_id=workspace_id,
+                    schedule_id=schedule_id,
+                )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     elif src_type in {"sqlserver", "mssql"}:
@@ -2386,9 +2421,13 @@ def _run_cdc_single_stream(
                     f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
                 ]
                 try:
-                    from services.ops_metrics import record_cdc_poll
-
-                    record_cdc_poll(used_query_fallback=True)
+                    _stamp_cdc_poll(
+                    used_query_fallback=True,
+                    job_id=job_id,
+                    stream=table_name,
+                    workspace_id=workspace_id,
+                    schedule_id=schedule_id,
+                )
                 except Exception as exc:
                     logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     elif src_type == "oracle":
@@ -2457,9 +2496,13 @@ def _run_cdc_single_stream(
                     f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
                 ]
                 try:
-                    from services.ops_metrics import record_cdc_poll
-
-                    record_cdc_poll(used_query_fallback=True)
+                    _stamp_cdc_poll(
+                    used_query_fallback=True,
+                    job_id=job_id,
+                    stream=table_name,
+                    workspace_id=workspace_id,
+                    schedule_id=schedule_id,
+                )
                 except Exception as exc:
                     logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     else:
@@ -2635,14 +2678,14 @@ def _run_cdc_single_stream(
         total_chunks = max(total_chunks, chunk_idx)
         lag_fields = _cdc_lag_fields(cdc)
         try:
-            from services.ops_metrics import record_cdc_poll
-
-            record_cdc_poll(
+            _stamp_cdc_poll(
                 lag_seconds=lag_fields.get("cdc_lag_seconds"),
                 lag_bytes=lag_fields.get("replication_lag_bytes"),
                 lag_basis=lag_fields.get("cdc_lag_basis"),
-                job_id=str(job_id or ""),
-                stream=str(table_name or ""),
+                job_id=job_id,
+                stream=table_name,
+                workspace_id=workspace_id,
+                schedule_id=schedule_id,
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

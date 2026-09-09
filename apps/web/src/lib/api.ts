@@ -2226,10 +2226,12 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     lag_seconds?: number | null;
     lag_bytes?: number | null;
   }>;
+  workspace_id?: string | null;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
     job_id: string;
+    workspace_id?: string | null;
     lag_seconds: number | null;
     lag_bytes?: number | null;
     lag_basis?: string | null;

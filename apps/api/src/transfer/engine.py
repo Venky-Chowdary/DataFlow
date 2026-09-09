@@ -4287,6 +4287,8 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     delivery_guarantee=getattr(request, "delivery_guarantee", None)
                     or "at_least_once",
+                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
+                    schedule_id=str(getattr(request, "schedule_id", "") or ""),
                 )
             elif multi_non_cdc:
                 rows_written, ddl_log, dest_summary, _ = (
