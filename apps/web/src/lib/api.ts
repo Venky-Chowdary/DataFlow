@@ -3573,7 +3573,8 @@ export interface QueryExportResult {
   error?: string;
 }
 
-export async function executeQuery(payload: {
+/** Shared Run + Export fields. Bind params must travel on both. */
+export type QueryPlaygroundRequest = {
   connector_id: string;
   query: string;
   database?: string;
@@ -3584,7 +3585,9 @@ export async function executeQuery(payload: {
    * on the server — they are never interpolated into the SQL text.
    */
   params?: Record<string, unknown>;
-}): Promise<QueryResult> {
+};
+
+export async function executeQuery(payload: QueryPlaygroundRequest): Promise<QueryResult> {
   const res = await apiFetch(`${API_BASE}/query/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3601,19 +3604,16 @@ export async function executeQuery(payload: {
   return res.json();
 }
 
-export async function exportQuery(payload: {
-  connector_id: string;
-  query: string;
-  database?: string;
-  collection?: string;
-  limit?: number;
-  format: string;
-  output_path?: string;
-  destination_connector_id?: string;
-  destination?: string;
-  sync_mode?: string;
-  conflict_columns?: string[];
-}): Promise<QueryExportResult> {
+export async function exportQuery(
+  payload: QueryPlaygroundRequest & {
+    format: string;
+    output_path?: string;
+    destination_connector_id?: string;
+    destination?: string;
+    sync_mode?: string;
+    conflict_columns?: string[];
+  },
+): Promise<QueryExportResult> {
   const res = await apiFetch(`${API_BASE}/query/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

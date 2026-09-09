@@ -16,6 +16,7 @@ import {
   loadHistory,
   loadLayout,
   loadTabs,
+  playgroundQueryBody,
   pushHistory,
   querySchemaErrorCopy,
   connectorMissingFromWorkspace,
@@ -48,6 +49,35 @@ const store = new MemoryStorage();
 (globalThis as unknown as { localStorage: MemoryStorage }).localStorage = store;
 
 beforeEach(() => store.clear());
+
+describe("playgroundQueryBody", () => {
+  it("puts the same bind params on the body Run and Export both send", () => {
+    const run = playgroundQueryBody({
+      connectorId: "c1",
+      query: "SELECT * FROM users WHERE name = :who",
+      database: "app",
+      collection: "",
+      limit: 500,
+      params: { who: "bob" },
+    });
+    const exported = { ...run, format: "csv" };
+    assert.equal(run.connector_id, "c1");
+    assert.deepEqual(run.params, { who: "bob" });
+    assert.deepEqual(exported.params, run.params);
+    assert.equal(exported.query, run.query);
+    assert.equal(exported.limit, 500);
+    assert.equal(exported.database, "app");
+    assert.equal(JSON.parse(JSON.stringify(exported)).collection, undefined);
+  });
+
+  it("sends an empty params object when none were filled — never drops the key", () => {
+    const body = playgroundQueryBody({
+      connectorId: "c1",
+      query: "SELECT 1",
+    });
+    assert.deepEqual(body.params, {});
+  });
+});
 
 describe("redactParams", () => {
   it("drops credential-shaped parameter names", () => {

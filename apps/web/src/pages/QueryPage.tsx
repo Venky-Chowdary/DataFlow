@@ -40,6 +40,7 @@ import {
   loadHistory,
   loadLayout,
   loadTabs,
+  playgroundQueryBody,
   pushHistory,
   querySchemaErrorCopy,
   retitleTab,
@@ -284,16 +285,16 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       setExportResult(null);
       const startedAt = Date.now();
       try {
-        const data = await executeQuery({
-          connector_id: active.connectorId,
-          query: text.trim(),
-          database: active.database,
-          collection: active.collection,
-          limit: active.limit,
-          // Values stay bound server-side; the console never builds SQL text
-          // out of operator input.
-          params: paramsForRequest,
-        });
+        const data = await executeQuery(
+          playgroundQueryBody({
+            connectorId: active.connectorId,
+            query: text.trim(),
+            database: active.database,
+            collection: active.collection,
+            limit: active.limit,
+            params: paramsForRequest,
+          }),
+        );
         if (isCurrent()) {
           setResult(data);
           setLastRunText(text.trim());
@@ -376,11 +377,14 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
     setExportLoading(true);
     try {
       const data = await exportQuery({
-        connector_id: active.connectorId,
-        query: text,
-        database: active.database,
-        collection: active.collection,
-        limit: active.limit,
+        ...playgroundQueryBody({
+          connectorId: active.connectorId,
+          query: text,
+          database: active.database,
+          collection: active.collection,
+          limit: active.limit,
+          params: paramsForRequest,
+        }),
         format: exportFormat,
         output_path: outputPath,
         destination_connector_id: destConnectorId || undefined,

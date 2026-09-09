@@ -204,6 +204,7 @@ as the saved connector UUID. Dest-exists hold now rematches that stamp;
 Validate going forward hashes the source engine. Live parked stamp rematches
 (`create_new_stamp_matches_schedule` True). Does **not** close 100K.
 
+
 Job cancel is a control-plane fence, not a mid-wire interrupt
 (`cursor/job-cancel-fence-1673`, PR #187): `MemoryMongoDBService` now owns
 `request_job_cancel` / `clear_job_cancel` / `is_cancel_requested` (the cancel
@@ -253,6 +254,11 @@ record. List already filtered; a UUID was enough to flip another
 workspace's schema agreement, and GitOps apply would overwrite it.
 `_scoped_contract` + `bind_contract_workspace` 404 on mismatch and refuse
 a foreign import id. Does **not** close Contracts page UX.
+
+Query Export bind params are closed (D44, `cursor/query-export-binds-1673`,
+PR #193): Run and Export now share one `playgroundQueryBody`. Export used
+to omit `:name` binds, so a filtered run of one row dumped the unfiltered
+table or failed closed.
 
 Still unmeasured for a client: Evidence Chain / Operations / Proofs pages,
 Contracts page UX, remaining workspace-role QA, and the Mongo and MinIO

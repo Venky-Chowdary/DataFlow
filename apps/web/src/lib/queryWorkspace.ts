@@ -347,3 +347,36 @@ export function querySchemaErrorCopy(raw: string): string {
   }
   return raw;
 }
+
+/** Shared execute/export body — bind params travel on both paths. */
+export type PlaygroundQueryBody = {
+  connector_id: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+  params: Record<string, string>;
+};
+
+/**
+ * One payload for Run and Export. Export used to omit ``params``, so a
+ * ``:name`` filter that returned one row on Run exported every row (or
+ * failed) because the server never received the binds.
+ */
+export function playgroundQueryBody(args: {
+  connectorId: string;
+  query: string;
+  database?: string;
+  collection?: string;
+  limit?: number;
+  params?: Record<string, string>;
+}): PlaygroundQueryBody {
+  return {
+    connector_id: args.connectorId,
+    query: args.query,
+    database: args.database || undefined,
+    collection: args.collection || undefined,
+    limit: args.limit,
+    params: { ...(args.params ?? {}) },
+  };
+}
