@@ -232,3 +232,51 @@ def test_run_completion_leaves_a_chained_record_without_a_pack_export(file_chain
     assert sealed[0]["details"]["records_transferred"] == 5
     assert sealed[0]["details"]["gate8_coverage"] == "full_checksum"
     assert chain.verify_chain()["verified"] is True
+
+
+def test_workspace_verify_withholds_foreign_event_ids(file_chain):
+    """Walk stays global; Settings must not list another workspace's event id."""
+    mine = audit.append_audit_event(
+        action="job.run", resource="/jobs/mine", actor="a@ok.com", workspace_id="ws-a"
+    )
+    theirs = audit.append_audit_event(
+        action="job.delete", resource="/jobs/theirs", actor="mallory@evil.com", workspace_id="ws-b"
+    )
+    events = _lines(file_chain)
+    # Tamper the foreign record — platform chain is broken.
+    events[1]["actor"] = "someone-else"
+    _rewrite(file_chain, events)
+
+    platform = chain.verify_chain()
+    assert platform["verified"] is False
+    assert platform["scope"] == "platform"
+    assert any(f["event_id"] == theirs["id"] for f in platform["findings"])
+
+    scoped = chain.verify_chain(workspace_id="ws-a")
+    assert scoped["verified"] is False
+    assert scoped["checked"] == 2
+    assert scoped["scope"] == "workspace"
+    assert scoped["workspace_id"] == "ws-a"
+    assert scoped["withheld_findings"] >= 1
+    ids = [f.get("event_id") for f in scoped["findings"]]
+    assert theirs["id"] not in ids
+    assert "mallory@evil.com" not in json.dumps(scoped)
+    assert "someone-else" not in json.dumps(scoped["findings"])
+    assert "other workspaces are withheld" in scoped["honesty"]
+
+
+def test_workspace_verify_still_names_this_workspace_tamper(file_chain):
+    mine = audit.append_audit_event(
+        action="job.run", resource="/jobs/mine", actor="a@ok.com", workspace_id="ws-a"
+    )
+    audit.append_audit_event(
+        action="job.run", resource="/jobs/theirs", actor="b@ok.com", workspace_id="ws-b"
+    )
+    events = _lines(file_chain)
+    events[0]["actor"] = "nobody"
+    _rewrite(file_chain, events)
+
+    scoped = chain.verify_chain(workspace_id="ws-a")
+    assert scoped["verified"] is False
+    assert any(f["event_id"] == mine["id"] for f in scoped["findings"])
+    assert scoped["withheld_findings"] == 0

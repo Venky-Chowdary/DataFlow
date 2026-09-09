@@ -45,6 +45,32 @@ def test_verify_reports_an_intact_chain(client):
     assert "does not prove the recorded facts are true" in body["honesty"]
 
 
+def test_verify_http_withholds_foreign_findings_when_header_set(client):
+    audit.append_audit_event(
+        action="job.run", resource="/jobs/a", actor="a@ok.com", workspace_id="ws-a"
+    )
+    theirs = audit.append_audit_event(
+        action="job.delete", resource="/jobs/b", actor="mallory", workspace_id="ws-b"
+    )
+    path = audit.STORE_PATH
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    # Tamper workspace B's record.
+    path.write_text(lines[0] + "\n" + lines[1].replace('"mallory"', '"nobody"') + "\n", encoding="utf-8")
+
+    platform = client.get("/api/v1/audit/verify")
+    assert platform.status_code == 200
+    assert any(f["event_id"] == theirs["id"] for f in platform.json()["findings"])
+
+    scoped = client.get("/api/v1/audit/verify", headers={"X-Workspace-Id": "ws-a"})
+    assert scoped.status_code == 200
+    body = scoped.json()
+    assert body["verified"] is False
+    assert body["scope"] == "workspace"
+    assert all(f.get("event_id") != theirs["id"] for f in body["findings"])
+    assert theirs["id"] not in scoped.text
+    assert body["withheld_findings"] >= 1
+
+
 def test_verify_names_the_record_that_was_edited(client):
     audit.append_audit_event(action="job.run", resource="/jobs", actor="a@b.c")
     audit.append_audit_event(action="job.delete", resource="/jobs", actor="mallory")

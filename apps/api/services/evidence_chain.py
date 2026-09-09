@@ -213,8 +213,13 @@ def read_chain(*, limit: int = MAX_VERIFY_EVENTS) -> list[dict[str, Any]]:
     return events
 
 
-def verify_chain(*, limit: int = MAX_VERIFY_EVENTS) -> dict[str, Any]:
+def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> dict[str, Any]:
     """Re-walk the stored chain and name every record that does not hold up.
+
+    The walk is always platform-wide — the HMAC line links every record, so a
+    workspace-filtered read would invent broken links. When ``workspace_id`` is
+    set, findings that name another workspace's records are withheld after the
+    walk. ``verified`` stays the global verdict.
 
     Findings, in the order they are checked per record:
 
@@ -238,18 +243,22 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS) -> dict[str, Any]:
     findings: list[ChainFinding] = []
     truncations = list_truncations()
     if not events:
-        return {
-            "verified": True,
-            "checked": 0,
-            "chain_head": None,
-            "findings": [],
-            "retention_checkpoints": truncations,
-            "walked_limit": limit,
-            "honesty": (
-                "No audit records to verify. An empty store proves nothing about "
-                "history."
-            ),
-        }
+        return present_verify_report(
+            {
+                "verified": True,
+                "checked": 0,
+                "chain_head": None,
+                "findings": [],
+                "retention_checkpoints": truncations,
+                "walked_limit": limit,
+                "honesty": (
+                    "No audit records to verify. An empty store proves nothing about "
+                    "history."
+                ),
+            },
+            [],
+            workspace_id,
+        )
 
     from services.audit_log import _hmac_event_hash, _platform_hmac_secret
 
@@ -332,21 +341,84 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS) -> dict[str, Any]:
                 seen_prev[str(claimed_prev)] = index
         prev_hash = stored_hash or prev_hash
 
-    return {
-        "verified": not findings,
-        "checked": len(events),
-        "chain_head": str(events[-1].get("event_hash") or "") or None,
-        "findings": [f.as_dict() for f in findings],
-        "retention_checkpoints": truncations,
-        "walked_limit": limit,
-        "honesty": (
-            "Verification covers the records still in the store: it proves they "
-            "were not edited or removed since a holder of the platform secret "
-            "wrote them. It does not prove the recorded facts are true, nor that "
-            "records were never discarded together with their checkpoint. Only an "
-            "external WORM / timestamp anchor narrows that."
-        ),
-    }
+    return present_verify_report(
+        {
+            "verified": not findings,
+            "checked": len(events),
+            "chain_head": str(events[-1].get("event_hash") or "") or None,
+            "findings": [f.as_dict() for f in findings],
+            "retention_checkpoints": truncations,
+            "walked_limit": limit,
+            "honesty": (
+                "Verification covers the records still in the store: it proves they "
+                "were not edited or removed since a holder of the platform secret "
+                "wrote them. It does not prove the recorded facts are true, nor that "
+                "records were never discarded together with their checkpoint. Only an "
+                "external WORM / timestamp anchor narrows that."
+            ),
+        },
+        events,
+        workspace_id,
+    )
+
+
+def present_verify_report(
+    report: dict[str, Any],
+    events: list[dict[str, Any]],
+    workspace_id: str = "",
+) -> dict[str, Any]:
+    """Keep the HMAC walk global; name only the caller's workspace findings.
+
+    Settings → Audit Logs is workspace-scoped. A UUID in a finding is enough
+    to disclose another tenant's event. Redact after the walk — never skip
+    records during it.
+    """
+    ws = (workspace_id or "").strip()
+    out = dict(report)
+    out["workspace_id"] = ws or None
+    out["scope"] = "workspace" if ws else "platform"
+    out.setdefault("withheld_findings", 0)
+    if not ws:
+        return out
+
+    isolation = False
+    try:
+        from services.team_store import require_workspace_isolation
+
+        isolation = require_workspace_isolation()
+    except Exception:
+        isolation = False
+
+    visible: list[dict[str, Any]] = []
+    withheld = 0
+    for finding in list(out.get("findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        ews = _finding_event_workspace(events, finding)
+        if ews == ws or (not ews and not isolation):
+            visible.append(finding)
+        else:
+            withheld += 1
+    out["findings"] = visible
+    out["withheld_findings"] = withheld
+    extra = (
+        f" The HMAC chain is platform-wide: {out.get('checked') or 0} records "
+        f"were walked. This report names only records in this workspace."
+    )
+    if withheld:
+        extra += f" {withheld} finding(s) in other workspaces are withheld."
+    out["honesty"] = str(out.get("honesty") or "") + extra
+    return out
+
+
+def _finding_event_workspace(events: list[dict[str, Any]], finding: dict[str, Any]) -> str:
+    try:
+        idx = int(finding.get("index") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if 0 <= idx < len(events):
+        return str(events[idx].get("workspace_id") or "").strip()
+    return ""
 
 
 def _prefix_explained(claimed_prev: str, truncations: list[dict[str, Any]]) -> bool:

@@ -3176,6 +3176,9 @@ export type AuditChainVerification = {
   findings: AuditChainFinding[];
   retention_checkpoints: Array<{ removed_count: number; at: string }>;
   honesty: string;
+  withheld_findings?: number;
+  workspace_id?: string | null;
+  scope?: "workspace" | "platform";
 };
 
 /** Re-walk the hash chain server-side and report any record that fails. */

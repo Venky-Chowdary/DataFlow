@@ -260,10 +260,15 @@ PR #193): Run and Export now share one `playgroundQueryBody`. Export used
 to omit `:name` binds, so a filtered run of one row dumped the unfiltered
 table or failed closed.
 
-Still unmeasured for a client: Evidence Chain / Operations / Proofs pages,
-Contracts page UX, remaining workspace-role QA, and the Mongo and MinIO
-routes. Quarantine/replay is already closed (D37/D40/D41/D42). This is
-**not** a deployment-ready product.
+Evidence Chain Verify no longer names another workspace's event ids (D45,
+`cursor/verify-chain-scope-1673`, PR #194); the HMAC walk stays
+platform-wide. Findings that name another workspace's records are
+withheld after the walk; `verified` remains the global verdict.
+
+Still unmeasured for a client: Evidence Chain UX beyond scoped findings,
+Operations / Proofs pages, Contracts page UX, remaining workspace-role QA,
+and the Mongo and MinIO routes. Quarantine/replay is already closed
+(D37/D40/D41/D42). This is **not** a deployment-ready product.
 
 ---
 

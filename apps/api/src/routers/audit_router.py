@@ -163,17 +163,27 @@ async def get_audit_tip():
 
 @router.get("/verify")
 async def verify_audit_chain(
+    request: Request,
     limit: int = Query(5000, ge=1, le=20000, description="Records to walk, oldest first"),
 ):
-    """Re-walk the evidence chain and name every record that does not hold up.
+    """Re-walk the evidence chain. The walk is platform-wide (HMAC links every
+    record). Findings named in the response are this workspace's when
+    ``X-Workspace-Id`` is set — another tenant's event ids are withheld.
 
-    Unscoped by workspace on purpose: the chain links every record, so a
-    workspace filter would show gaps that are only filtering. Retention is
-    reported as retention, not as a broken chain.
+    Isolation on and no header is a 400, same as audit export: an unscoped
+    verify would list every workspace's broken event ids.
     """
     from services.evidence_chain import verify_chain
+    from services.team_store import require_workspace_isolation
 
-    return verify_chain(limit=limit)
+    workspace_id, _tenant_id = _scope(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for chain verification. "
+            "The walk is platform-wide; findings named here are this workspace.",
+        )
+    return verify_chain(limit=limit, workspace_id=workspace_id)
 
 
 @router.post("/verify-pack")
