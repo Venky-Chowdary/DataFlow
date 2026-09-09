@@ -451,6 +451,9 @@ body:has(.df2-app) #root {
   font-family: var(--df-font-sans);
   font-size: var(--df-fs-md);
   color: var(--df-text-primary);
+  /* Re-bind so density overrides to --df-control-height on this node
+     retune tabs. A :root `var()` computes once and would inherit 36px. */
+  --df-tab-height: var(--df-control-height);
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */

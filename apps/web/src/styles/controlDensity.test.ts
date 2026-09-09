@@ -18,9 +18,10 @@ const ENTERPRISE = readFileSync(join(STYLES, 'enterprise-ui.css'), 'utf8');
 
 describe('control density ladder', () => {
   it('aliases --df-tab-height to --df-control-height (one rung)', () => {
-    const root = TOKENS.slice(TOKENS.indexOf(':root'), TOKENS.indexOf('.df2-app'));
-    assert.match(root, /--df-tab-height:\s*var\(--df-control-height\)/);
-    assert.doesNotMatch(root, /--df-tab-height:\s*\d+px/);
+    assert.match(TOKENS, /\.df2-app\s*\{[^}]*--df-tab-height:\s*var\(--df-control-height\)/s);
+    const firstRoot = TOKENS.slice(TOKENS.indexOf(':root'), TOKENS.indexOf('.df2-app'));
+    assert.match(firstRoot, /--df-tab-height:\s*var\(--df-control-height\)/);
+    assert.doesNotMatch(firstRoot, /--df-tab-height:\s*\d+px/);
   });
 
   it('declares segment surface tokens once (theme remaps, no sibling sheet)', () => {
