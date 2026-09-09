@@ -400,9 +400,14 @@ material, and host routing in a real browser vhost (verified at service level on
 5. **Pilot citations open the public docs shell.** Clicking a citation opens the
    right Help article but with the marketing header, so the operator leaves the
    authenticated workspace. Awaiting the user's decision.
-6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
-   the UI shows `DATETIME(6)`; a separate physical/native type through
-   introspection was proposed and not yet decided.
+6. **Map API vs UI type spelling — closed (physical `declared_type` on dest introspect).**
+   Destination probes already restored BigQuery catalog DDL via `declared_type`
+   + `logical_translated`. MySQL/PG/SQL Server/Oracle/Snowflake now stamp the
+   same pair, so dest Map/API ship `DATETIME(6)` / `TIMESTAMP(6)` / `DATETIME2(6)`
+   instead of lattice `TIMESTAMP_NTZ(6)`. `tinyint(1)` → `BOOLEAN` is unchanged.
+   Proof: `tests/test_schema_introspect_specialty.py`,
+   `test_mapping_pipeline_existing_mysql_datetime_is_physical_not_lattice`.
+   The UI `destPhysicalTypeLabel` fallback remains for leftover lattice stamps.
 7. **Case A is browser-unverified.** The four-layer fix at `3e3dd8a4` passes unit
    and API tests, but the last browser run (before it) showed Validate still
    blocking on `schema_drift`, so nothing yet proves the decimal→integer route

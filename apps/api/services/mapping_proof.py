@@ -9,7 +9,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.decision_kernel import ddl_type, is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import (
+    ddl_type,
+    is_lossy_coercion,
+    materialize_dest_ddl,
+    normalize_logical_type,
+)
 
 # Transforms that mutate string content (fidelity risk even when intentional).
 _MUTATING_TRANSFORMS = frozenset({
@@ -1082,7 +1087,7 @@ def build_mapping_proof(
             "source_type": m.get("source_type") or "VARCHAR",
             "target_type": display_tgt,
             "dest_native_type": (
-                ddl_type(destination_db_type, display_tgt)
+                materialize_dest_ddl(destination_db_type, display_tgt)
                 if destination_db_type and display_tgt
                 else None
             ),
