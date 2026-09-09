@@ -108,3 +108,31 @@ def test_a_missing_connector_parks_on_one_finding(monkeypatch) -> None:
     # The operator is told which side to fix, not just that a beat failed.
     assert "connector is missing" in str(parked["message"])
     assert "Re-select" in str(parked["message"])
+
+
+def test_append_replay_blocked_only_for_committed_row_park() -> None:
+    class _S:
+        approval_request = {
+            "status": "open",
+            "evidence": {"park_reason": "committed_rows_cannot_be_replayed"},
+        }
+
+    msg = runner._append_replay_blocked(_S())
+    assert msg is not None
+    assert "duplicate" in msg.lower()
+
+    class _Other:
+        approval_request = {
+            "status": "open",
+            "evidence": {"park_reason": "deterministic_refusal"},
+        }
+
+    assert runner._append_replay_blocked(_Other()) is None
+
+    class _Resolved:
+        approval_request = {
+            "status": "approved",
+            "evidence": {"park_reason": "committed_rows_cannot_be_replayed"},
+        }
+
+    assert runner._append_replay_blocked(_Resolved()) is None

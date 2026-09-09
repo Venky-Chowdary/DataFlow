@@ -223,27 +223,58 @@ def assert_retry_from_start_allowed(
     return decision
 
 
+_JOB_COMMITTED_KEYS = ("records_processed", "rows_written")
+_SUMMARY_COMMITTED_KEYS = ("rows_written", "records_written", "records_transferred")
+
+
 def committed_rows_of(job: dict | None) -> tuple[int, bool]:
     """``(rows committed, whether that number is knowable)`` for a job document.
 
     A missing job document or an unreadable counter is *unknown*, never zero:
     treating it as zero is what turns a refused duplicate into a silent one.
+
+    ``records_processed`` is seeded to ``0`` on every job shell. The first
+    readable key used to win, so a post-write failure that never updated the
+    heartbeat looked like a clean zero and a from-zero append retried. Take
+    the max of every knowable this-attempt counter, including dest summary
+    and checkpoint. Do **not** read ``dest_count`` — that is table population,
+    not this attempt.
     """
     if not isinstance(job, dict):
         return 0, False
-    for key in ("records_processed", "rows_written"):
-        if key in job:
-            try:
-                return int(job.get(key) or 0), True
-            except (TypeError, ValueError):
-                return 0, False
-    cp = job.get("checkpoint")
-    if isinstance(cp, dict):
+
+    known = False
+    best = 0
+    unreadable = False
+
+    def _consider(raw: object) -> None:
+        nonlocal known, best, unreadable
+        if raw is None:
+            return
         try:
-            return int(cp.get("rows_processed") or 0), True
+            n = int(raw)
         except (TypeError, ValueError):
-            return 0, False
-    return 0, False
+            unreadable = True
+            return
+        known = True
+        if n > best:
+            best = n
+
+    for key in _JOB_COMMITTED_KEYS:
+        if key in job:
+            _consider(job.get(key))
+    dest = job.get("destination_summary")
+    if isinstance(dest, dict):
+        for key in _SUMMARY_COMMITTED_KEYS:
+            if key in dest:
+                _consider(dest.get(key))
+    cp = job.get("checkpoint")
+    if isinstance(cp, dict) and "rows_processed" in cp:
+        _consider(cp.get("rows_processed"))
+
+    if not known:
+        return 0, False
+    return best, True
 
 
 def assert_resume_allowed(

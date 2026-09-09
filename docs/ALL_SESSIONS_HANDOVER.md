@@ -202,7 +202,7 @@ A first Run now after create-new Validate parked on
 `Decision Artifact content_hash mismatch` because Validate hashed `source_db`
 as the saved connector UUID. Dest-exists hold now rematches that stamp;
 Validate going forward hashes the source engine. Live parked stamp rematches
-(`create_new_stamp_matches_schedule` True). Does **not** close retries / 100K.
+(`create_new_stamp_matches_schedule` True). Does **not** close 100K.
 
 Job cancel is a control-plane fence, not a mid-wire interrupt
 (`cursor/job-cancel-fence-1673`, PR #187): `MemoryMongoDBService` now owns
@@ -218,13 +218,19 @@ Schedule overlap is a dest-object write lock
 share a destination table (different sources) cannot run together.
 Live PG: beat B is 409 `already_running` while beat A is writing;
 independent dest `COUNT(*)=3`, not 6. DST unit cells already closed
-([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Retry
-duplicate-guard is unit-proved, not live dest COUNT.
+([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)).
 
-Still unmeasured for a client: schedule retries (live dest COUNT), the
-Evidence Chain / Operations / Contracts / Proofs pages, workspace roles,
-G19 reachability, and the Mongo and MinIO routes. Quarantine/replay is
-already closed (D37/D40/D41/D42). This is **not** a deployment-ready product.
+Schedule retry is dest-COUNT closed on append
+(`cursor/schedule-retry-dest-1673`, PR #189): `committed_rows_of` takes the
+max of this-attempt counters, including `destination_summary.rows_written`,
+so a job-shell `records_processed=0` cannot green-light a from-zero replay.
+`_finalize_run` parks `committed_rows_cannot_be_replayed`; Run now is 409
+on that park. Live PG append dest `COUNT(*)=3` after the refused retry.
+
+Still unmeasured for a client: the Evidence Chain / Operations / Contracts /
+Proofs pages, workspace roles, G19 reachability, and the Mongo and MinIO
+routes. Quarantine/replay is already closed (D37/D40/D41/D42). This is
+**not** a deployment-ready product.
 
 ---
 
