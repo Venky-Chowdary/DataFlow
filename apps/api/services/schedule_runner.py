@@ -1197,14 +1197,14 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     )
     sched = get_schedule(schedule_id) or sched
 
-    # Concurrency guard: refuse to start when this schedule (or another schedule
-    # for the same source→dest connector pair) already has a live run in flight.
+    # Concurrency guard: refuse to start when this schedule, another writer
+    # on the same dest object, or the same source→dest pair is already live.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
         logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
         if manual:
             raise ScheduleStartError(
-                "A run is already in progress for this schedule or the same "
-                "source→destination pair.",
+                "A run is already in progress for this schedule, the same "
+                "destination table, or the same source→destination pair.",
                 http_status=409,
                 code="already_running",
             )

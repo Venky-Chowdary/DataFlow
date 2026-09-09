@@ -1069,9 +1069,9 @@ def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineS
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
-    Acts as a concurrency guard: returns ``None`` if this schedule (or another
-    schedule for the same source→dest connector pair) already has a live,
-    non-stale run in flight.
+    Acts as a concurrency guard: returns ``None`` if this schedule, another
+    schedule writing the same destination object, or another schedule for the
+    same source→dest connector pair already has a live, non-stale run.
     """
     with _CLAIM_LOCK:
         schedules = _load_all()
@@ -1081,7 +1081,11 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 continue
             if s.running and not _is_running_stale(s):
                 return None
-            if connector_pair_busy(s.source_connector_id, s.dest_connector_id, exclude_id=s.id):
+            if dest_object_busy(
+                s.dest_connector_id, s.dest_table, exclude_id=s.id
+            ) or connector_pair_busy(
+                s.source_connector_id, s.dest_connector_id, exclude_id=s.id
+            ):
                 return None
             claimed = _claim_running_mongo(schedule_id, instance, now)
             if claimed is not None:
@@ -1239,6 +1243,37 @@ def record_run_history(schedule_id: str, run_entry: dict[str, Any]) -> PipelineS
         _save_all(schedules)
         return updated
     return None
+
+
+def _norm_dest_object(dest_connector_id: str, dest_table: str) -> tuple[str, str] | None:
+    dest_c = (dest_connector_id or "").strip()
+    dest_t = (dest_table or "").strip().lower()
+    if not dest_c or not dest_t:
+        return None
+    return dest_c, dest_t
+
+
+def dest_object_busy(
+    dest_connector_id: str, dest_table: str, exclude_id: str = ""
+) -> bool:
+    """True if another non-stale schedule is writing the same dest object.
+
+    Connector-pair lock is not enough: two sources can share a destination
+    table and both append. The destination object (dest connector + table)
+    is the write lock — one writer at a time, dest COUNT cannot double.
+    """
+    needle = _norm_dest_object(dest_connector_id, dest_table)
+    if needle is None:
+        return False
+    for s in _load_all():
+        if s.id == exclude_id:
+            continue
+        other = _norm_dest_object(s.dest_connector_id, s.dest_table)
+        if other != needle:
+            continue
+        if s.running and not _is_running_stale(s):
+            return True
+    return False
 
 
 def connector_pair_busy(source_connector_id: str, dest_connector_id: str, exclude_id: str = "") -> bool:

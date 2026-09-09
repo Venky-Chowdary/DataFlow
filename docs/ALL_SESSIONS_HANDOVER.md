@@ -202,8 +202,7 @@ A first Run now after create-new Validate parked on
 `Decision Artifact content_hash mismatch` because Validate hashed `source_db`
 as the saved connector UUID. Dest-exists hold now rematches that stamp;
 Validate going forward hashes the source engine. Live parked stamp rematches
-(`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
-retries / 100K.
+(`create_new_stamp_matches_schedule` True). Does **not** close retries / 100K.
 
 Job cancel is a control-plane fence, not a mid-wire interrupt
 (`cursor/job-cancel-fence-1673`, PR #187): `MemoryMongoDBService` now owns
@@ -214,10 +213,18 @@ the one owner that refuses `cancelled` → `completed` and
 cancel API 200, final status `cancelled`. COPY may still land rows after
 Cancel. CDC remains at-least-once upsert.
 
-Still unmeasured for a client: schedule retries/overlap/DST, the Evidence
-Chain / Operations / Contracts / Proofs pages, workspace roles, G19
-reachability, and the Mongo and MinIO routes. Quarantine/replay is already
-closed (D37/D40/D41/D42).
+Schedule overlap is a dest-object write lock
+(`cursor/schedule-overlap-dest-1673`, PR #188): two append schedules that
+share a destination table (different sources) cannot run together.
+Live PG: beat B is 409 `already_running` while beat A is writing;
+independent dest `COUNT(*)=3`, not 6. DST unit cells already closed
+([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Retry
+duplicate-guard is unit-proved, not live dest COUNT.
+
+Still unmeasured for a client: schedule retries (live dest COUNT), the
+Evidence Chain / Operations / Contracts / Proofs pages, workspace roles,
+G19 reachability, and the Mongo and MinIO routes. Quarantine/replay is
+already closed (D37/D40/D41/D42). This is **not** a deployment-ready product.
 
 ---
 
