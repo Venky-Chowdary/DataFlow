@@ -770,11 +770,11 @@ Four traps that each invalidated a run:
   design (gated by non-rendering), not a missing-control defect. For an admin it starts `disabled` purely
   because of the `!newWorkspaceName.trim()` guard - type a name and re-read `disabled` before calling it
   over-gated. This distinction is easy to misreport in both directions.
-- **TenantSettings placeholders look exactly like real data.** `Wells Fargo`,
-  `dataflow.wellsfargo.com`, `security@example.com` and `10.0.0.0/8 / 192.168.1.50` are `placeholder=`
-  attributes, and `us-east-1` / `8` are client-side `useState` defaults for an unfilled create-tenant
-  form. A screenshot of Enterprise after a 403 therefore *looks* like invented server data but is not.
-  Always compare the DOM `value` against the `placeholder` attribute before reporting fabricated data.
+- **TenantSettings placeholders must stay instructional, not a bank.** Fields use
+  `Legal entity name`, `transfers.example.com`, `security@example.com`, and
+  `one CIDR or IPv4 per line` / `203.0.113.0/24`. `us-east-1` / `8` are client-side
+  `useState` defaults for an unfilled create-tenant form. Always compare the DOM
+  `value` against the `placeholder` attribute before reporting fabricated data.
 
 **Admin membership regression (the risk when write controls get gated):** driving Team through the real UI
 should yield `POST .../members 200`, `PATCH .../members/{email} 200` on the row `<select>`, and

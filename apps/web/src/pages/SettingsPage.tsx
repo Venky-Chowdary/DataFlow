@@ -1045,18 +1045,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       compact
                       icon="key"
                       title="No API keys yet"
-                      description="Generate a production key to authenticate programmatic transfers and MCP calls."
-                      action={
-                        <button
-                          type="button"
-                          className="df2-btn df2-btn-primary df2-btn-sm"
-                          disabled={apiKeyGenerating || !workspaceManage.allowed}
-                          title={workspaceManage.reason || undefined}
-                          onClick={() => void generateApiKey()}
-                        >
-                          {apiKeyGenerating ? "Generating…" : "Generate key"}
-                        </button>
-                      }
+                      description="Use the toolbar above to authenticate programmatic transfers and MCP calls."
                     />
                   ) : (
                     <div className="df2-api-key-list" role="list" aria-label="Workspace API keys">

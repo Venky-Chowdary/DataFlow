@@ -7737,6 +7737,7 @@ export function TransferPage({
               onNewTransfer={resetTransferStudio}
               onBackToValidate={leaveTheaterToValidate}
               onBackToMap={leaveTheaterToMap}
+              onSchedule={() => void handleScheduleRoute()}
               onResumed={(nextId) => {
                 setActiveJobId(nextId);
                 setTransferring(true);
