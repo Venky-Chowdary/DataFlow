@@ -248,9 +248,12 @@ workspace-ownership cells re-measured
 ([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Governance ops
 (mask/hash/redact) are stamped on the signed certificate
 ([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)). YAML dest
-export writes a quoted sequence of mappings (this PR). MySQL twins were
-not run; fixed-width dest export is still refused. YAML dest 100K was not
-measured.
+export writes a quoted sequence of mappings. Fixed-width dest export is
+the inverse of ingest: ``#layout:`` plus right-padded records, overflow
+refused (never silent truncate), empty population is still a layout
+header so COUNT is a measured 0. Dest COUNT is ``iter_fixed_width_dicts``
+on disk. MySQL twins were not run. YAML dest 100K and FWF dest 100K were
+not measured. Layout is still required — widths are never guessed.
 
 ---
 
@@ -615,4 +618,6 @@ Pilot briefing uses `count_jobs` + request workspace.
    upsert insert/update/delete census) is closed on this tree — see
    `docs/OPEN_DEFECT_REGISTER.md` §6. Next is the never-measured items in
    §2 / §6 (MySQL twins, Track A 100K, SFTP Excel, fleet). D34/D35 stay
-   environment. Fixed-width dest export is still refused.
+   environment. Fixed-width dest export is closed (declared layout or
+   CHAR(n)/VARCHAR(n) on every column; overflow refuses). 100K FWF dest
+   remains unmeasured.
