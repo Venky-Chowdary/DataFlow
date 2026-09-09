@@ -310,6 +310,42 @@ def test_execute_binds_named_parameters(test_client, tmp_path, monkeypatch):
     assert data["rows"][0]["name"] == "bob"
 
 
+def test_export_binds_the_same_named_parameters_as_execute(test_client, tmp_path, monkeypatch):
+    """Export used to omit binds — Run of ``:who=bob`` then Export dumped every row."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Export Params SQLite", _sqlite_db(tmp_path))
+    query = "SELECT * FROM users WHERE name = :who"
+    params = {"who": "bob"}
+
+    executed = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": query,
+        "params": params,
+    })
+    assert executed.status_code == 200, executed.text
+    assert executed.json()["row_count"] == 1
+
+    exported = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": query,
+        "params": params,
+        "format": "csv",
+    })
+    assert exported.status_code == 200, exported.text
+    data = exported.json()
+    assert data["success"] is True, data
+    assert data["row_count"] == 1
+
+    unbound = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": query,
+        "format": "csv",
+    })
+    # A missing bind must fail closed — never dump the unfiltered table.
+    assert unbound.status_code == 400, unbound.text
+    assert "who" in unbound.text.lower() or "bind" in unbound.text.lower() or "parameter" in unbound.text.lower()
+
+
 def test_execute_bound_parameter_cannot_inject_sql(test_client, tmp_path, monkeypatch):
     """A parameter value containing SQL stays a value, and the table survives."""
     _isolated_store(monkeypatch, tmp_path)
