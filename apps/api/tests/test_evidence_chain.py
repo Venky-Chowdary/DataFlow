@@ -263,7 +263,6 @@ def test_workspace_verify_withholds_foreign_event_ids(file_chain):
     assert "mallory@evil.com" not in json.dumps(scoped)
     assert "someone-else" not in json.dumps(scoped["findings"])
     assert "other workspaces are withheld" in scoped["honesty"]
-    assert mine["id"] not in [f.get("event_id") for f in scoped["findings"]] or True
 
 
 def test_workspace_verify_still_names_this_workspace_tamper(file_chain):
