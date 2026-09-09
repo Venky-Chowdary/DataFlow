@@ -358,6 +358,24 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
     }
 
 
+def bind_contract_workspace(contract: Any, workspace_id: str, *, existing: Any = None) -> None:
+    """Stamp the caller's workspace and refuse overwriting another tenant's agreement.
+
+    Same boundary as PipelineSchedule apply: a UUID in a pasted YAML is not
+    enough to flip or replace another workspace's signed schema agreement.
+    """
+    bound = (workspace_id or "").strip()
+    if existing is not None:
+        existing_meta = getattr(existing, "metadata", None) or {}
+        existing_ws = str(existing_meta.get("workspace_id") or "").strip()
+        if bound and existing_ws and existing_ws != bound:
+            raise ValueError("Contract belongs to another workspace")
+    if bound:
+        meta = dict(getattr(contract, "metadata", None) or {})
+        meta["workspace_id"] = bound
+        contract.metadata = meta
+
+
 def apply_manifest(
     payload: dict[str, Any] | list[Any] | str,
     *,
@@ -444,6 +462,7 @@ def apply_manifest(
                 # Imported contracts stay draft until explicitly signed.
                 contract.status = ContractStatus.DRAFT
                 existing = store.get_contract(contract.id) if contract.id else None
+                bind_contract_workspace(contract, workspace_id, existing=existing)
                 store.save_contract(contract)
                 results.append({
                     "kind": kind,

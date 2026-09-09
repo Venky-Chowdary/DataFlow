@@ -246,10 +246,18 @@ Remove and a role change on the only admin, then toast the API refusal.
 The control now uses the same predicate as ``team_store._assert_not_last_admin``.
 Does **not** close Evidence / Operations / Contracts / Proofs or Mongo.
 
-Still unmeasured for a client: the Evidence Chain / Operations / Contracts /
-Proofs pages, remaining workspace-role QA, and the Mongo and MinIO routes.
-Quarantine/replay is already closed (D37/D40/D41/D42). This is **not** a
-deployment-ready product.
+Contract lifecycle isolation is closed (D43,
+`cursor/operator-pages-1673`, PR #192): id-addressed sign / deprecate /
+export / breaker / test / import now require the same workspace as the
+record. List already filtered; a UUID was enough to flip another
+workspace's schema agreement, and GitOps apply would overwrite it.
+`_scoped_contract` + `bind_contract_workspace` 404 on mismatch and refuse
+a foreign import id. Does **not** close Contracts page UX.
+
+Still unmeasured for a client: Evidence Chain / Operations / Proofs pages,
+Contracts page UX, remaining workspace-role QA, and the Mongo and MinIO
+routes. Quarantine/replay is already closed (D37/D40/D41/D42). This is
+**not** a deployment-ready product.
 
 ---
 
