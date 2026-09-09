@@ -2249,7 +2249,7 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
 
 export async function fetchOpsDlq(limit = 50): Promise<{
   events: Array<Record<string, unknown>>;
-  /** Whole-queue size — never the page length. */
+  /** This workspace's queue size — never the page length, never the platform. */
   count: number;
   total?: number;
   returned?: number;

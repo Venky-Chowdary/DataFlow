@@ -36,18 +36,30 @@ async def get_metrics_json():
 
 @router.get("/dlq")
 async def get_dlq(
+    request: Request,
     job_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ):
     """Quarantine dead-letter queue events (newest first).
 
-    ``count`` / ``total`` are the whole-queue size. ``returned`` is the page
-    length. Overview must not treat the page cap as the workspace total.
+    ``count`` / ``total`` are this workspace's queue when ``X-Workspace-Id``
+    is set — never the platform dump, never the page length. ``returned`` is
+    the page. Isolation on and no header is a 400 (same as audit export).
     """
+    from services.audit_log import workspace_id_from_request
     from services.quarantine_dlq import count_dlq_events, list_dlq_events
+    from services.team_store import require_workspace_isolation
 
-    events = list_dlq_events(job_id=job_id, limit=limit)
-    total = count_dlq_events(job_id=job_id)
+    workspace_id = workspace_id_from_request(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for DLQ. "
+            "This count is a workspace sample, not a platform dump.",
+        )
+
+    events = list_dlq_events(job_id=job_id, workspace_id=workspace_id or None, limit=limit)
+    total = count_dlq_events(job_id=job_id, workspace_id=workspace_id or None)
     by_action: dict[str, int] = {}
     for ev in events:
         action = str(ev.get("action") or "unknown")
@@ -58,6 +70,7 @@ async def get_dlq(
         "total": total,
         "returned": len(events),
         "limit": limit,
+        "workspace_id": workspace_id or None,
         "by_action": by_action,
         "open_rows": sum(int(ev.get("rows") or 0) for ev in events if "fail" in str(ev.get("action") or "")),
     }
