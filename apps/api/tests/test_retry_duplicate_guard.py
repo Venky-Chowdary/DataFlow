@@ -90,6 +90,24 @@ def test_committed_rows_of_reports_unknown_rather_than_zero():
     assert committed_rows_of({"checkpoint": {"rows_processed": 7}}) == (7, True)
 
 
+def test_committed_rows_of_dest_summary_beats_seeded_zero():
+    """Job shells seed records_processed=0. Dest write evidence must win."""
+    assert committed_rows_of({"records_processed": 0}) == (0, True)
+    assert committed_rows_of(
+        {
+            "records_processed": 0,
+            "destination_summary": {"rows_written": 3},
+        }
+    ) == (3, True)
+    assert committed_rows_of(
+        {
+            "records_processed": 1,
+            "destination_summary": {"rows_written": 8},
+            "checkpoint": {"rows_processed": 4},
+        }
+    ) == (8, True)
+
+
 def test_scheduler_does_not_retry_a_cancelled_run():
     assert _should_retry("cancelled", attempt=0, max_retries=3) is False
     assert _retry_decision("cancelled", 0, 3)["reason"]

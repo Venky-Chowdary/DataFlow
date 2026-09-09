@@ -898,6 +898,25 @@ def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) ->
     return ""
 
 
+def _append_replay_blocked(sched: Any) -> str | None:
+    """Why a from-zero start would duplicate committed append rows, or None.
+
+    Cadence already skips an open finding. Run now must not silently replay
+    the same from-zero append the retry contract just refused.
+    """
+    req = getattr(sched, "approval_request", None) or {}
+    if not isinstance(req, dict) or str(req.get("status") or "").strip().lower() != "open":
+        return None
+    ev = req.get("evidence") if isinstance(req.get("evidence"), dict) else {}
+    if str(ev.get("park_reason") or "") != "committed_rows_cannot_be_replayed":
+        return None
+    return (
+        "This schedule already committed rows on an append. "
+        "Retry from start would duplicate them — resume from the last "
+        "committed checkpoint, or resolve the finding first."
+    )
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -1196,6 +1215,17 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
         workspace_id=str(getattr(sched, "workspace_id", "") or ""),
     )
     sched = get_schedule(schedule_id) or sched
+
+    blocked = _append_replay_blocked(sched)
+    if blocked:
+        logger.info("Schedule %s skipped — append replay would duplicate", schedule_id)
+        if manual:
+            raise ScheduleStartError(
+                blocked,
+                http_status=409,
+                code="committed_rows_cannot_be_replayed",
+            )
+        return None
 
     # Concurrency guard: refuse to start when this schedule (or another schedule
     # for the same source→dest connector pair) already has a live run in flight.
