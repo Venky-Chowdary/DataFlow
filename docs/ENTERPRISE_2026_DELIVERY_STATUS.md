@@ -297,6 +297,7 @@ work that would change it is UI-driven measurement, not more features.
 ## 7. How to continue
 
 1. Remaining connector-matrix cells, SFTP Excel sync modes.
-2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K was not measured.
-   Fixed-width dest export is still refused.
+2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K and FWF dest
+   100K were not measured. Fixed-width dest export is closed (declared
+   layout or CHAR(n)/VARCHAR(n); overflow refuses).
 3. Local fleet / 10k–1M throughput work.

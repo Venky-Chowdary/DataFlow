@@ -27,15 +27,23 @@ __all__ = [
     "FixedWidthError",
     "FixedWidthLayout",
     "count_fixed_width_records",
+    "dump_fixed_width_records",
     "iter_fixed_width_dicts",
+    "layout_from_char_carriers",
     "layout_from_payload",
     "layout_header_line",
     "parse_layout_header",
+    "resolve_dest_export_layout",
     "resolve_fixed_width_layout",
 ]
 
 LAYOUT_HEADER_PREFIX = "#layout:"
 _HEADER_PAIR = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(\d+)$")
+# Declared CHAR/VARCHAR/NCHAR widths only — never TEXT / VARCHAR(MAX) / CLOB.
+_CHAR_WIDTH = re.compile(
+    r"^(?:N)?(?:VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
+    re.IGNORECASE,
+)
 
 FixedWidthLayout = tuple[tuple[str, int], ...]
 
@@ -273,3 +281,110 @@ def count_fixed_width_records(
         return None
     except Exception:
         return None
+
+
+def layout_from_char_carriers(
+    columns: Sequence[str],
+    types: Mapping[str, str] | None,
+) -> FixedWidthLayout:
+    """Build a layout from CHAR(n) / VARCHAR(n) dest stamps.
+
+    Every export column must carry a bounded character width. TEXT, CLOB,
+    VARCHAR(MAX), and numeric stamps are not a layout — guessing from the
+    longest cell would silently truncate a later row.
+    """
+    names = [str(c).strip() for c in columns if str(c).strip()]
+    if not names:
+        return ()
+    type_map = {str(k): str(v or "").strip() for k, v in dict(types or {}).items()}
+    out: list[tuple[str, int]] = []
+    for name in names:
+        raw = type_map.get(name, "")
+        match = _CHAR_WIDTH.match(raw.replace(" ", ""))
+        if match is None:
+            return ()
+        width = int(match.group(1))
+        if width < 1:
+            return ()
+        out.append((name, width))
+    return tuple(out)
+
+
+def resolve_dest_export_layout(
+    *,
+    declared: object = None,
+    columns: Sequence[str] = (),
+    dest_types: Mapping[str, str] | None = None,
+) -> FixedWidthLayout:
+    """Dest export layout: operator extra first, then CHAR(n) dest stamps.
+
+    A mismatch between an explicit layout and the export column set fails
+    closed. Same names in a different order are reordered to the export
+    column list so Map's target order is the file order.
+    """
+    from_extra = layout_from_payload(declared) if declared not in (None, "", (), []) else ()
+    col_names = [str(c).strip() for c in columns if str(c).strip()]
+    if from_extra:
+        extra_names = [name for name, _width in from_extra]
+        if col_names and set(extra_names) != set(col_names):
+            raise FixedWidthError(
+                f"fixed-width dest layout columns {extra_names} do not match "
+                f"export columns {col_names}"
+            )
+        if col_names and extra_names != col_names:
+            widths = {name: width for name, width in from_extra}
+            return tuple((name, widths[name]) for name in col_names)
+        return from_extra
+    inferred = layout_from_char_carriers(col_names, dest_types)
+    if inferred:
+        return inferred
+    raise FixedWidthError(
+        "Fixed-width dest export needs a declared layout — set destination "
+        "extra.fixed_width_layout, or map every column to CHAR(n)/VARCHAR(n)"
+    )
+
+
+def _export_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        raise FixedWidthError(
+            "Fixed-width dest export refuses nested cell values; flatten before write"
+        )
+    return str(value)
+
+
+def dump_fixed_width_records(
+    records: list[dict[str, Any]],
+    layout: Sequence[tuple[str, int]] | None = None,
+    *,
+    encoding: str = "utf-8",
+    include_header: bool = True,
+) -> bytes:
+    """Write ``#layout:`` plus right-padded records — inverse of ingest.
+
+    Empty population is still a layout header so dest COUNT is a measured
+    zero, never JSON bytes under a ``.fwf`` name (D11). A cell wider than
+    its declared width is refused — silent truncate is data loss.
+    """
+    resolved = layout_from_payload(layout) if layout not in (None, "", (), []) else ()
+    if not resolved:
+        raise FixedWidthError(
+            "Fixed-width dest export needs a declared layout — set destination "
+            "extra.fixed_width_layout, or map every column to CHAR(n)/VARCHAR(n)"
+        )
+    lines: list[str] = []
+    if include_header:
+        lines.append(layout_header_line(resolved))
+    for rec in records:
+        parts: list[str] = []
+        for name, width in resolved:
+            text = _export_cell_text(rec.get(name))
+            if len(text) > width:
+                raise FixedWidthError(
+                    f"column {name!r} value is {len(text)} characters; "
+                    f"layout width is {width} — refuse silent truncate"
+                )
+            parts.append(text.ljust(width))
+        lines.append("".join(parts))
+    return ("\n".join(lines) + "\n").encode(encoding)

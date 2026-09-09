@@ -2133,7 +2133,7 @@ def write_destination_file(
     column_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
 ) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, TSV, YAML, or a container format."""
+    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format."""
     import sys
     from pathlib import Path
 
@@ -2287,7 +2287,9 @@ def write_destination_file(
     # JSON bytes under an ``.avro`` name that no Avro reader can open. An empty
     # population is still that container, not an empty JSON array.
     container = fmt in _CONTAINER_EXPORT_FORMATS
-    if fmt not in {"json", "jsonl", "yaml"} and (container or (can_convert(src_fmt, fmt) and grid)):
+    if fmt not in {"json", "jsonl", "yaml", "fixed_width", "fwf"} and (
+        container or (can_convert(src_fmt, fmt) and grid)
+    ):
         content, mime = convert_rows(
             export_columns,
             grid,
@@ -2383,8 +2385,32 @@ def write_destination_file(
         content = dump_yaml_records(yaml_rows, export_columns)
         filename = "export.yaml"
         export_mime = "application/yaml"
+    elif fmt in {"fixed_width", "fwf"}:
+        from services.fixed_width_layout import (
+            dump_fixed_width_records,
+            resolve_dest_export_layout,
+        )
+
+        extra = endpoint.extra if isinstance(endpoint.extra, dict) else {}
+        write_opts = extra.get("write_options") if isinstance(extra.get("write_options"), dict) else {}
+        declared = extra.get("fixed_width_layout")
+        if declared in (None, "", (), []):
+            declared = write_opts.get("fixed_width_layout")
+        layout = resolve_dest_export_layout(
+            declared=declared,
+            columns=export_columns,
+            dest_types=export_dest_types,
+        )
+        fwf_rows = [
+            {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+            for r in export_records
+        ]
+        content = dump_fixed_width_records(fwf_rows, layout)
+        filename = "export.fwf"
+        export_mime = "text/plain"
+        fmt = "fixed_width"
     else:
-        if fmt not in {"json", "csv", "tsv", "jsonl", "yaml"}:
+        if fmt not in {"json", "csv", "tsv", "jsonl", "yaml", "fixed_width"}:
             raise ValueError(
                 f"File export format '{fmt}' is not supported — refusing to "
                 "write JSON bytes under that name"

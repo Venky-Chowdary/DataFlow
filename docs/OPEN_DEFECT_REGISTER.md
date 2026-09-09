@@ -88,12 +88,17 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
 8. ~~`fixed_width` and `yaml` as live file drivers~~ **Closed as sources
    ([#136](https://github.com/Venky-Chowdary/DataFlow/pull/136)) and as 100K
    Postgres sources ([#137](https://github.com/Venky-Chowdary/DataFlow/pull/137)).
-   YAML **dest export** is closed (this PR): `dump_yaml_records` writes a
+   YAML **dest export** is closed: `dump_yaml_records` writes a
    sequence of flat mappings with every scalar double-quoted (YAML 1.1 cannot
    coerce `yes`/`NO`/`007`), empty population is `[]`, dest COUNT is
-   `iter_yaml_dicts` on disk. Fixed-width dest export is still refused (needs
-   a declared layout). 100K MySQL twins were not run (`mysql_up()` false).
-   YAML dest 100K was not measured.
+   `iter_yaml_dicts` on disk. Fixed-width **dest export** is closed:
+   `dump_fixed_width_records` writes `#layout:` plus right-padded records
+   (operator `extra.fixed_width_layout` or CHAR(n)/VARCHAR(n) on every
+   column). Overflow refuses — never silent truncate. Empty population is
+   still a layout header so COUNT is a measured 0. Dest COUNT is
+   `iter_fixed_width_dicts` on disk. Layout is still required. 100K MySQL
+   twins were not run (`mysql_up()` false). YAML dest 100K and FWF dest
+   100K were not measured.
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
 10. CDC is **at-least-once** everywhere except the named crash-injection routes.

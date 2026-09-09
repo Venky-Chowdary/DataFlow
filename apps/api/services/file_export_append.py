@@ -17,15 +17,19 @@ from typing import Any
 
 # Line-delimited exports: one record per line, at most one header line.
 APPENDABLE_EXPORT_FORMATS: frozenset[str] = frozenset(
-    {"csv", "tsv", "jsonl", "ndjson"}
+    {"csv", "tsv", "jsonl", "ndjson", "fixed_width", "fwf"}
 )
 
-_HEADERED_FORMATS: frozenset[str] = frozenset({"csv", "tsv"})
+_HEADERED_FORMATS: frozenset[str] = frozenset({"csv", "tsv", "fixed_width"})
 
 
 def normalize_export_format(fmt: str) -> str:
     f = (fmt or "").strip().lower().lstrip(".")
-    return "jsonl" if f == "ndjson" else f
+    if f == "ndjson":
+        return "jsonl"
+    if f == "fwf":
+        return "fixed_width"
+    return f
 
 
 def export_append_refusal(fmt: str, path: str) -> str:

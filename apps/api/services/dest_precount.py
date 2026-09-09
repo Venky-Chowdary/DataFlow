@@ -286,9 +286,11 @@ _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
 _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
-    "yaml",
+    "yaml", "fixed_width",
 })
-_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml", "avro", "yaml"})
+_STREAMING_COUNT_KINDS = frozenset(
+    {"csv", "tsv", "json", "jsonl", "xml", "avro", "yaml", "fixed_width"}
+)
 _BYTE_IMAGE_KINDS = frozenset({"parquet", "orc", "excel"})
 
 
@@ -4447,6 +4449,11 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
 
         yield from iter_yaml_dicts(source)
         return
+    if kind == "fixed_width":
+        from services.fixed_width_layout import iter_fixed_width_dicts
+
+        yield from iter_fixed_width_dicts(source)
+        return
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
 
@@ -4912,6 +4919,8 @@ def _infer_artifact_format(path: Path, fmt: str | None) -> str:
         return "xml"
     if name.endswith(".yaml") or name.endswith(".yml"):
         return "yaml"
+    if name.endswith(".fwf"):
+        return "fixed_width"
     return ""
 
 
@@ -5061,6 +5070,11 @@ def _count_streaming_kind(kind: str, source: Any) -> int | None:
         from services.yaml_tabular import count_yaml_records
 
         n = count_yaml_records(source)
+        return None if n is None else int(n)
+    if kind == "fixed_width":
+        from services.fixed_width_layout import count_fixed_width_records
+
+        n = count_fixed_width_records(source)
         return None if n is None else int(n)
     return None
 

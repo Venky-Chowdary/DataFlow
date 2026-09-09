@@ -13,7 +13,7 @@ LIVE_TABULAR_SOURCE_FORMATS = [
 ]
 LIVE_DOCUMENT_SOURCE_FORMATS = ["pdf", "docx", "html"]
 LIVE_SOURCE_FORMATS = LIVE_TABULAR_SOURCE_FORMATS + LIVE_DOCUMENT_SOURCE_FORMATS
-LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml", "yaml"]
+LIVE_DEST_FILE_FORMATS = ["csv", "json", "jsonl", "tsv", "excel", "parquet", "ndjson", "avro", "orc", "xml", "yaml", "fixed_width"]
 
 # Live drivers are discovered at import time; object stores and warehouses count
 # as database destinations, while the listed file formats are file targets.
@@ -174,8 +174,10 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "yaml", "database", "postgresql"),
     ("file", "yaml", "file_export", "yaml"),
     ("file", "csv", "file_export", "yaml"),
+    ("file", "csv", "file_export", "fixed_width"),
     ("file", "fixed_width", "database", "sqlite"),
     ("file", "fixed_width", "database", "postgresql"),
+    ("file", "fixed_width", "file_export", "fixed_width"),
     # Database sources
     ("database", "sqlite", "database", "sqlite"),
     ("database", "sqlite", "database", "postgresql"),
@@ -184,6 +186,7 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "sqlite", "file_export", "csv"),
     ("database", "sqlite", "file_export", "json"),
     ("database", "sqlite", "file_export", "yaml"),
+    ("database", "sqlite", "file_export", "fixed_width"),
     ("database", "postgresql", "database", "sqlite"),
     ("database", "postgresql", "database", "postgresql"),
     ("database", "postgresql", "database", "mongodb"),
