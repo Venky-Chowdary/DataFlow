@@ -271,10 +271,18 @@ Events already carried `workspace_id`; `GET /ops/dlq` ignored
 `X-Workspace-Id`. `_dlq_query` / `_event_in_dlq_scope` now filter Mongo
 and JSONL. Isolation on + no header is 400.
 
+Overview CDC freshness is this workspace's SLO (D47,
+`cursor/freshness-workspace-scope-1673`, PR #196), not the process-wide
+scrape. `record_cdc_poll` stamps workspace; `freshness_summary` withholds
+foreign and unproven samples; a scoped read never inherits the
+process-wide lag gauge. Isolation on + no header is 400. Prometheus
+`/metrics` stays process-wide.
+
 Still unmeasured for a client: Evidence Chain UX beyond scoped findings,
-Operations / Proofs beyond DLQ isolation, Contracts page UX, remaining
-workspace-role QA, and the Mongo and MinIO routes. Quarantine/replay is
-already closed (D37/D40/D41/D42). This is **not** a deployment-ready product.
+Operations / Proofs beyond DLQ and freshness isolation, Contracts page UX,
+remaining workspace-role QA, and the Mongo and MinIO routes.
+Quarantine/replay is already closed (D37/D40/D41/D42). This is **not** a
+deployment-ready product.
 
 ---
 

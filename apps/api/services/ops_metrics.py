@@ -41,6 +41,10 @@ _labeled_counters: dict[str, dict[str, float]] = {
     "dataflow_pipeline_cdc_polls_total": {},
 }
 _pipeline_heartbeat: dict[str, float] = {}
+# Label keys stay Prometheus-shaped (schedule/stream/job). Workspace is a
+# parallel stamp so Overview / Pipelines can withhold another tenant's lag
+# without rewriting the scrape series.
+_pipeline_workspace: dict[str, str] = {}
 
 
 def _inc(name: str, amount: float = 1.0) -> None:
@@ -119,17 +123,21 @@ def record_cdc_poll(
     schedule_id: str = "",
     stream: str = "",
     job_id: str = "",
+    workspace_id: str = "",
 ) -> None:
     _inc("dataflow_cdc_polls_total")
     if used_query_fallback:
         _inc("dataflow_cdc_fallback_query_total")
     key = _label_key(schedule_id=schedule_id, stream=stream, job_id=job_id)
+    ws = (workspace_id or "").strip()
     with _lock:
         _labeled_counters.setdefault("dataflow_pipeline_cdc_polls_total", {})
         _labeled_counters["dataflow_pipeline_cdc_polls_total"][key] = (
             float(_labeled_counters["dataflow_pipeline_cdc_polls_total"].get(key, 0.0)) + 1.0
         )
         _pipeline_heartbeat[key] = time.time()
+        if ws:
+            _pipeline_workspace[key] = ws
         # Only stamp second-lag gauge when proven (not heartbeat invent).
         if lag_seconds is not None and lag_seconds >= 0:
             _gauges["dataflow_cdc_lag_seconds"] = float(lag_seconds)
@@ -169,16 +177,60 @@ def snapshot() -> dict[str, Any]:
         }
 
 
+def _workspace_of_pipeline(key: str, parts: dict[str, str]) -> str:
+    """Proven workspace for a labeled CDC sample, or empty if unproven.
+
+    Stamp from ``record_cdc_poll`` wins. An unstamped (legacy in-process)
+    sample may still belong to this workspace when the schedule or job says
+    so; unknown ownership stays empty so a scoped read withholds it.
+    """
+    stamped = (_pipeline_workspace.get(key) or "").strip()
+    if stamped:
+        return stamped
+    sid = (parts.get("schedule_id") or "").strip()
+    if sid and sid != "_":
+        try:
+            from services.schedule_store import get_schedule
+
+            sched = get_schedule(sid)
+            if sched is not None:
+                return str(getattr(sched, "workspace_id", "") or "").strip()
+        except Exception:
+            pass
+    jid = (parts.get("job_id") or "").strip()
+    if jid and jid != "_":
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            job = get_mongodb_service().get_job(jid)
+            if isinstance(job, dict):
+                return str(job.get("workspace_id") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _pipeline_in_freshness_scope(key: str, parts: dict[str, str], workspace_id: str) -> bool:
+    ws = (workspace_id or "").strip()
+    if not ws:
+        return True
+    return _workspace_of_pipeline(key, parts) == ws
+
+
 def freshness_summary(
     *,
     max_lag_warn_seconds: float = 60.0,
     max_lag_critical_seconds: float | None = None,
     heartbeat_stale_seconds: float = 300.0,
+    workspace_id: str = "",
 ) -> dict[str, Any]:
     """UI-friendly freshness view: worst lag, per-pipeline rows, SLO alerts.
 
     Heartbeat age proves liveness only — never catch-up. WAL/binlog byte lag
     and proven commit-timestamp lag drive SLO (see ``cdc_lag_honesty``).
+
+    ``workspace_id`` scopes alerts / stale_count / worst lag to that
+    workspace. Empty keeps the process-wide scrape (Prometheus / unscoped GET).
     """
     from services.cdc_lag_honesty import (
         BYTE_CRITICAL,
@@ -201,8 +253,11 @@ def freshness_summary(
     keys |= set(snap.get("pipeline_lag_seconds") or {})
     keys |= set(snap.get("pipeline_lag_bytes") or {})
 
+    scope_ws = (workspace_id or "").strip()
     for key in keys:
         parts = dict(p.split("=", 1) for p in key.split(",") if "=" in p)
+        if not _pipeline_in_freshness_scope(key, parts, scope_ws):
+            continue
         lag_raw = (snap.get("pipeline_lag_seconds") or {}).get(key)
         bytes_raw = (snap.get("pipeline_lag_bytes") or {}).get(key)
         lag_f = float(lag_raw) if lag_raw is not None else None
@@ -244,6 +299,7 @@ def freshness_summary(
             "schedule_id": parts.get("schedule_id", "_"),
             "stream": parts.get("stream", "_"),
             "job_id": parts.get("job_id", "_"),
+            "workspace_id": _workspace_of_pipeline(key, parts) or None,
             "lag_seconds": lag_f,
             "lag_bytes": byte_f,
             "lag_basis": obs.get("cdc_lag_basis") if lag_f is None else (
@@ -266,7 +322,8 @@ def freshness_summary(
 
     pipelines.sort(key=_sort_key)
     global_lag = (snap.get("gauges") or {}).get("dataflow_cdc_lag_seconds")
-    if worst is None and global_lag is not None and float(global_lag) > 0:
+    # Process-wide gauge is another workspace's lag when this read is scoped.
+    if worst is None and not scope_ws and global_lag is not None and float(global_lag) > 0:
         worst = float(global_lag)
 
     alerts: list[dict[str, Any]] = []
@@ -359,6 +416,7 @@ def freshness_summary(
         "slo_status": slo_status,
         "alerts": alerts[:50],
         "pipelines": pipelines[:100],
+        "workspace_id": scope_ws or None,
         "counters": snap.get("counters") or {},
         "gauges": snap.get("gauges") or {},
         "scraped_at": snap.get("scraped_at"),

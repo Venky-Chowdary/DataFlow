@@ -12,17 +12,34 @@ router = APIRouter(prefix="/ops", tags=["Ops"])
 
 @router.get("/freshness")
 async def get_freshness(
+    request: Request,
     warn_seconds: float = Query(60.0, ge=1.0, le=86400.0),
     critical_seconds: float | None = Query(None, ge=1.0, le=86400.0),
     heartbeat_stale_seconds: float = Query(300.0, ge=30.0, le=86400.0),
 ):
-    """Pipeline CDC lag / heartbeat summary for Overview and Pipelines."""
+    """Pipeline CDC lag / heartbeat summary for Overview and Pipelines.
+
+    ``stale_count`` / ``alerts`` / ``worst_lag_seconds`` are this workspace
+    when ``X-Workspace-Id`` is set — never another tenant's CDC lag. Isolation
+    on and no header is a 400 (same as audit export).
+    """
+    from services.audit_log import workspace_id_from_request
     from services.ops_metrics import freshness_summary
+    from services.team_store import require_workspace_isolation
+
+    workspace_id = workspace_id_from_request(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for freshness. "
+            "This SLO is a workspace sample, not a platform dump.",
+        )
 
     return freshness_summary(
         max_lag_warn_seconds=warn_seconds,
         max_lag_critical_seconds=critical_seconds,
         heartbeat_stale_seconds=heartbeat_stale_seconds,
+        workspace_id=workspace_id or "",
     )
 
 
