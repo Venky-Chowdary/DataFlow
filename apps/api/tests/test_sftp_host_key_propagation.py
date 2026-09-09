@@ -171,3 +171,10 @@ def test_saved_connector_persists_sftp_trust(tmp_path, monkeypatch):
     assert endpoint.extra["known_hosts"] == _TRUST["known_hosts"]
     assert endpoint.extra["host_key_policy"] == _TRUST["host_key_policy"]
     assert endpoint.table == "daily.xlsx"
+
+    from services.connector_probe import probe_cfg_from_saved
+
+    probe = probe_cfg_from_saved(loaded)
+    assert probe["host_key"] == _TRUST["host_key"]
+    assert probe["known_hosts"] == _TRUST["known_hosts"]
+    assert probe["host_key_policy"] == _TRUST["host_key_policy"]

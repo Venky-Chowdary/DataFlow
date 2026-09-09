@@ -23,7 +23,12 @@ def read_object(
     limit: int = 500,
     known_total_rows: int | None = None,
 ) -> ReadBatch:
-    sftp_cfg = parse_sftp_config(**cfg)
+    merged = dict(cfg)
+    if bucket:
+        merged["database"] = bucket
+    if key:
+        merged["table"] = key
+    sftp_cfg = parse_sftp_config(**merged)
     if not sftp_cfg.host:
         raise ValueError("SFTP host is required")
     if not sftp_cfg.path:
@@ -33,7 +38,10 @@ def read_object(
             raise ValueError("SFTP remote path is required (connection_string, database, or table)")
 
     directory, filename = split_remote_path(sftp_cfg.path)
-    remote_name = filename or sftp_cfg.path
+    # Uniqueness / dest-sample pass the schedule table as ``key``. A saved
+    # connector only stores the directory, so parse without ``table`` left
+    # path="/" and the spill was parsed as UTF-8 text — OOXML failed closed.
+    remote_name = filename or key or sftp_cfg.path
 
     cache_key = f"sftp:{sftp_cfg.host}:{sftp_cfg.port}:{sftp_cfg.path}"
     # SFTP has no ETag in the common path — force refresh to avoid stale spill TTL.

@@ -82,6 +82,18 @@ def test_engine_count_token_is_read_as_cardinality_not_a_digest():
         )
         is None
     )
+    assert (
+        _engine_count_proof_only(
+            {
+                "proof_scope": (
+                    "staging_count_equals_filtered_source_and_"
+                    "dest_count_equals_before_plus_staging"
+                ),
+                "checksum": "dest_count:2",
+            }
+        )
+        == 2
+    )
 
 
 def test_keyed_upsert_join_token_is_read_as_cardinality_too():

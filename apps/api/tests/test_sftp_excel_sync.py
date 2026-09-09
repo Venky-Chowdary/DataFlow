@@ -351,7 +351,7 @@ def _sqlite_dest(db: str, table: str = "ledger") -> EndpointConfig:
 
 def _seed_ledger(db: str) -> None:
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE ledger (id TEXT, amount TEXT, flag TEXT)")
+    conn.execute("CREATE TABLE ledger (id TEXT PRIMARY KEY, amount TEXT, flag TEXT)")
     conn.execute("INSERT INTO ledger VALUES ('0', '0.00', 'seed')")
     conn.commit()
     conn.close()
@@ -536,6 +536,7 @@ def test_sftp_xlsx_two_minute_schedule_replays_trim(
             "timezone": "UTC",
             "sync_mode": "full_refresh_overwrite",
             "validation_mode": "strict",
+            "primary_key": "id",
             "mappings": _mappings(*COLUMNS),
             "shape_recipe": dict(TRIM_RECIPE),
             "approved_shape_recipe_hash": recipe_hash,

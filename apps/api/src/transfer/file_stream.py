@@ -945,6 +945,53 @@ def should_stream_file(
         return False
 
 
+def _stash_file_reconcile_sample(
+    dest_summary: dict[str, Any],
+    sample_rows: list[dict],
+    *,
+    source_filter: dict[str, Any] | None,
+    incremental: bool,
+    cursor_key: str,
+    cursor_source_col: str,
+    watermark: str | None,
+    cursor_pk_source: str,
+    pk_target_cols: list[str],
+) -> None:
+    """Stash a bounded sample so append/incremental Gate-8 can key-align.
+
+    Incremental COPY returns count tokens, not a value digest. Without this
+    stash Gate-8 refuses a correct load as ``no reconcile_sample``. The row
+    path and the COPY fast path must share this helper.
+    """
+    if dest_summary.get("reconcile_sample") or not sample_rows:
+        return
+    from services.sync_cursor import records_after_watermark
+
+    filtered_sample = sample_rows
+    if source_filter:
+        filtered_sample = apply_row_filter(sample_rows, source_filter)
+    if incremental and cursor_key:
+        filtered_sample = records_after_watermark(
+            list(filtered_sample or []),
+            cursor_source_col,
+            watermark,
+            primary_key=cursor_pk_source,
+        )[0]
+    dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
+    if (
+        len(pk_target_cols) == 1
+        and not dest_summary.get("written_ids")
+        and filtered_sample
+    ):
+        from connectors.writer_common import written_ids_from_mapped_rows
+
+        dest_summary["written_ids"] = written_ids_from_mapped_rows(
+            list(filtered_sample),
+            list(filtered_sample[0].keys()) if filtered_sample else [],
+            pk_target_cols,
+        )
+
+
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -1335,6 +1382,21 @@ def stream_file_to_database(
                     },
                 )
                 dest_summary["watermark"] = wm
+            # Incremental COPY returns count tokens, not a value digest. Gate-8
+            # for append/incremental then requires a key-aligned sample. The
+            # row path already stashes one; the fast path used to return
+            # without it and refuse a correct load.
+            _stash_file_reconcile_sample(
+                dest_summary,
+                sample_rows,
+                source_filter=source_filter,
+                incremental=True,
+                cursor_key=cursor_key,
+                cursor_source_col=cursor_source_col,
+                watermark=watermark,
+                cursor_pk_source=cursor_pk_source,
+                pk_target_cols=[pk_for_copy] if pk_for_copy else [],
+            )
         return rows_copied, copy_ddl, dest_summary, columns
 
     if incremental and cursor_source_col:
@@ -2012,38 +2074,17 @@ def stream_file_to_database(
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)
         dest_summary["primary_key_columns"] = list(pk_target_cols)
-    # Stash a bounded source sample so append/upsert Gate-8 reconciliation can
-    # perform key-aligned read-back verification instead of failing closed.
-    if sample_rows:
-        filtered_sample = sample_rows
-        if source_filter:
-            filtered_sample = apply_row_filter(sample_rows, source_filter)
-        if incremental and cursor_key:
-            # Reconcile against the delta this run carried. The rest of the file
-            # is at rest from an earlier run: read-back on those keys proves
-            # nothing about this write and drops Gate-8 to a whole-table digest,
-            # which is not comparable for a write into a non-empty destination.
-            filtered_sample = records_after_watermark(
-                list(filtered_sample or []),
-                cursor_source_col,
-                watermark,
-                primary_key=cursor_pk_source,
-            )[0]
-        dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
-        # Batch PK ids for keyed Gate-8 (full-table digests are not comparable
-        # for upsert/append into a non-empty sink).
-        if (
-            len(pk_target_cols) == 1
-            and not dest_summary.get("written_ids")
-            and filtered_sample
-        ):
-            from connectors.writer_common import written_ids_from_mapped_rows
-
-            dest_summary["written_ids"] = written_ids_from_mapped_rows(
-                list(filtered_sample),
-                list(filtered_sample[0].keys()) if filtered_sample else [],
-                pk_target_cols,
-            )
+    _stash_file_reconcile_sample(
+        dest_summary,
+        sample_rows,
+        source_filter=source_filter,
+        incremental=incremental,
+        cursor_key=cursor_key,
+        cursor_source_col=cursor_source_col,
+        watermark=watermark,
+        cursor_pk_source=cursor_pk_source,
+        pk_target_cols=list(pk_target_cols or []),
+    )
     # Reader-side population for Gate-8. Never invent from written + held_out —
     # that circularly balances short reads and hides silent under-delivery. On a
     # resumed run ``source_rows_seen`` counts only the tail after the checkpoint,

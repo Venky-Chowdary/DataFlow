@@ -962,6 +962,9 @@ _COUNT_PROOF_TOKEN = re.compile(r"^(?:dest_count|pk_join_count):(\d+)$")
 _COUNT_PROOF_SCOPES = (
     "dest_count_equals_source_snapshot",
     "dest_pk_join_equals_staging",
+    # File incremental COPY: dest_after = dest_before + staging. Same token
+    # as a full COPY — comparing it to a hex dest digest is hash-vs-count.
+    "dest_count_equals_before_plus_staging",
 )
 
 
