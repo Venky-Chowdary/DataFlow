@@ -297,8 +297,9 @@ def _excel_preview(
     content: bytes | str | os.PathLike,
     preview_rows: int = 100,
     read_options: ReadOptions | None = None,
+    declared_name: str | None = None,
 ) -> tuple[list[str], list[list[str]], int]:
-    require_xlsx(content if _is_path(content) else None)
+    require_xlsx(declared_name or (content if _is_path(content) else None))
     return parse_excel_preview(content, preview_rows=preview_rows, options=read_options)
 
 
@@ -306,15 +307,18 @@ def _excel_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
     read_options: ReadOptions | None = None,
+    declared_name: str | None = None,
 ):
-    require_xlsx(content if _is_path(content) else None)
+    require_xlsx(declared_name or (content if _is_path(content) else None))
     return iter_excel_batches(content, chunk_size, options=read_options)
 
 
 def _excel_count(
-    content: bytes | str | os.PathLike, read_options: ReadOptions | None = None
+    content: bytes | str | os.PathLike,
+    read_options: ReadOptions | None = None,
+    declared_name: str | None = None,
 ) -> int:
-    require_xlsx(content if _is_path(content) else None)
+    require_xlsx(declared_name or (content if _is_path(content) else None))
     return count_excel_rows(content, options=read_options)
 
 
@@ -431,7 +435,10 @@ def peek_file_source(
 
     if file_type == "excel":
         headers, rows, total = _excel_preview(
-            content, preview_rows=100, read_options=read_options
+            content,
+            preview_rows=100,
+            read_options=read_options,
+            declared_name=filename,
         )
         if not headers:
             raise ValueError("Excel file has no header row")
@@ -747,11 +754,14 @@ def _batch_iterator_for_type(
     content: bytes | str | os.PathLike,
     batch_size: int,
     read_options: ReadOptions | None = None,
+    declared_name: str | None = None,
 ):
     """Return a fresh batch iterator for the given file type.
 
     Used to re-scan a file from the beginning (e.g. on resume) without mutating
     the primary streaming iterator.  Accepts either ``bytes`` or an on-disk path.
+    ``declared_name`` is the operator/remote filename — object-store spill is
+    ``.tmp``, so Excel must refuse ``.xls`` from this name, not the cache suffix.
     """
     if file_type in ("csv", "tsv"):
         return _iter_csv_batches(content, batch_size, read_options=read_options)
@@ -760,7 +770,12 @@ def _batch_iterator_for_type(
     if file_type == "jsonl" or file_type == "ndjson":
         return _iter_jsonl_batches(content, batch_size)
     if file_type == "excel":
-        return _excel_batches(content, batch_size, read_options=read_options)
+        return _excel_batches(
+            content,
+            batch_size,
+            read_options=read_options,
+            declared_name=declared_name,
+        )
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
@@ -901,7 +916,9 @@ def iter_source_rows(
 
     raw_bytes = content if isinstance(content, bytes) else b""
     file_type = FileParser.detect_file_type(filename, raw_bytes or None)
-    for batch in _batch_iterator_for_type(file_type, content, batch_size, read_options):
+    for batch in _batch_iterator_for_type(
+        file_type, content, batch_size, read_options, declared_name=filename
+    ):
         for row in batch:
             if isinstance(row, dict):
                 yield row
@@ -1051,7 +1068,9 @@ def stream_file_to_database(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    batch_iter = _batch_iterator_for_type(file_type, content, batch_size, read_options)
+    batch_iter = _batch_iterator_for_type(
+        file_type, content, batch_size, read_options, declared_name=filename
+    )
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     target_cols, logical_types = resolve_target_columns(
@@ -1889,7 +1908,9 @@ def stream_file_to_database(
     # If the job resumed, we must re-scan the whole file so the fingerprint
     # covers all source rows, not only the ones processed after the checkpoint.
     if resumed and fp_accumulator.total < total_rows:
-        full_iter = _batch_iterator_for_type(file_type, content, batch_size, read_options)
+        full_iter = _batch_iterator_for_type(
+            file_type, content, batch_size, read_options, declared_name=filename
+        )
         # Match the main write path (source_filter applied at read time): count and
         # fingerprint the FILTERED population, or a filtered resume overstates the
         # source count and mis-hashes the checksum against the filtered load.

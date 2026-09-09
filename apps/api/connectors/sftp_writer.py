@@ -9,7 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from connectors.object_store_common import resolve_object_store_write_dest_types
+from connectors.object_store_common import (
+    resolve_object_store_export_format,
+    resolve_object_store_write_dest_types,
+)
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
@@ -112,7 +115,7 @@ def write_mapped_rows(
     on_checkpoint: Any | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
-    """Upload mapped rows as a CSV/JSON/Parquet file to an SFTP server.
+    """Upload mapped rows as a CSV/JSON/Parquet/Excel file to an SFTP server.
 
     Map+quarantine+serialize uses the shared object-store bundle algorithm.
     Accepted mapped_rows are not retained. Still at-least-once.
@@ -169,20 +172,36 @@ def write_mapped_rows(
         )
     policy = transform_error_policy(_kwargs.get("error_policy"))
     directory, filename = split_remote_path(cfg.path)
-    ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
-    if ext in ("csv", "jsonl", "json", "tsv", "parquet"):
-        fmt = ext
-    else:
-        fmt = "csv"
-        if not filename.endswith(".csv"):
-            filename = f"{filename.rstrip('/')}.csv"
+    fmt = resolve_object_store_export_format(filename)
+    if fmt is None:
+        if "." not in (filename or ""):
+            fmt = "csv"
+            filename = f"{filename.rstrip('/')}.csv" if filename else "export.csv"
             cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
+        else:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name or cfg.path,
+                target_schema=cfg.host or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"SFTP dest {filename!r} is not a supported export format — "
+                    "refusing to write CSV bytes under that name. Use .csv, .tsv, "
+                    ".json, .jsonl, .parquet, or .xlsx."
+                ),
+            )
     extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     spill_max = resolve_spill_max(extra)
     _, stream_chunk = resolve_multipart_limits(extra)
     if extra.get("sftp_stream_chunk"):
         stream_chunk = max(1, int(extra["sftp_stream_chunk"]))
-    serialize_key = filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}"
+    serialize_key = (
+        filename
+        if resolve_object_store_export_format(filename) == fmt
+        else ("export.xlsx" if fmt == "excel" else f"export.{fmt}")
+    )
     try:
         mat = materialize_object_store_export(
             key=serialize_key,

@@ -152,7 +152,13 @@ the PR that carries it):
   proof pack) renders it. Live sqlite→sqlite 2-row proof in
   `tests/test_governance_ops_certificate.py`.
 - The connector-family matrix never completed (Track A halted at 122 of 225).
-- SFTP daily Excel sync modes started, not finished.
+- ~~SFTP daily Excel sync modes started, not finished.~~ **Closed.**
+  SFTP `.xlsx` ingest reads the OOXML ZIP magic from the spill handle
+  (cache is `.tmp`; openpyxl must not key format off that suffix). Dest
+  `.xlsx` writes a real workbook, never `out.xlsx.csv`. Existing-table
+  overwrite / append / upsert proved against the in-process SFTP server.
+  The 2-minute schedule replay was not measured (Mongo down). 100K was
+  not measured.
 - SAML/SSO round-trip — needs a real IdP, unprovable here.
 
 **Found by driving the app before handover (2026-09-06,
@@ -591,5 +597,8 @@ Pilot briefing uses `count_jobs` + request workspace.
    export, DST, and certificate governance ops are closed. **D33** (keyed
    upsert insert/update/delete census) is closed on this tree — see
    `docs/OPEN_DEFECT_REGISTER.md` §6. Next is the never-measured items in
-   §2 / §6 (MySQL twins, Track A 100K, SFTP Excel, fleet). D34/D35 stay
-   environment. Fixed-width dest export is still refused.
+   §2 / §6 (MySQL twins, Track A 100K, fleet). D34/D35 stay environment.
+   SFTP daily Excel ingest/dest is closed (spill-handle load + real
+   `.xlsx` dest; existing-table overwrite / append / upsert). The
+   2-minute Excel schedule remains unmeasured. Fixed-width dest export
+   is still refused.

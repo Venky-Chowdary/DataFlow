@@ -209,7 +209,13 @@ def _records_to_matrix(records: list[dict[str, Any]], columns: list[str]) -> lis
     return [[cell_to_string(record.get(c)) for c in columns] for record in records]
 
 
-def _collect_records(path: Path, file_type: str, offset: int, limit: int) -> list[dict[str, Any]]:
+def _collect_records(
+    path: Path,
+    file_type: str,
+    offset: int,
+    limit: int,
+    declared_name: str = "",
+) -> list[dict[str, Any]]:
     """Stream rows from the spilled file until ``limit`` are collected."""
     try:
         from src.transfer.file_stream import _batch_iterator_for_type
@@ -219,7 +225,9 @@ def _collect_records(path: Path, file_type: str, offset: int, limit: int) -> lis
     records: list[dict[str, Any]] = []
     batch_size = max(limit, 1000)
     skipped = 0
-    for batch in _batch_iterator_for_type(file_type, path, batch_size):
+    for batch in _batch_iterator_for_type(
+        file_type, path, batch_size, declared_name=declared_name or None
+    ):
         for record in batch:
             if skipped < offset:
                 skipped += 1
@@ -255,7 +263,9 @@ def read_rows_from_spill(
         if offset == 0 and limit <= len(sample):
             records = sample[:limit]
         else:
-            records = _collect_records(path, file_type, offset, limit)
+            records = _collect_records(
+                path, file_type, offset, limit, declared_name=filename
+            )
         rows = _records_to_matrix(records, headers)
         return headers, rows, known_total if known_total is not None else total
 

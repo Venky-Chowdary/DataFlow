@@ -92,8 +92,11 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
    sequence of flat mappings with every scalar double-quoted (YAML 1.1 cannot
    coerce `yes`/`NO`/`007`), empty population is `[]`, dest COUNT is
    `iter_yaml_dicts` on disk. Fixed-width dest export is still refused (needs
-   a declared layout). 100K MySQL twins were not run (`mysql_up()` false).
-   YAML dest 100K was not measured.
+   a declared layout). SFTP daily Excel is closed: ingest loads the spill
+   handle (not the `.tmp` suffix), dest `.xlsx` is a real workbook,
+   existing-table overwrite / append / upsert proved on the in-process
+   SFTP server. The 2-minute schedule replay was not measured. 100K MySQL
+   twins were not run (`mysql_up()` false). YAML dest 100K was not measured.
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
 10. CDC is **at-least-once** everywhere except the named crash-injection routes.

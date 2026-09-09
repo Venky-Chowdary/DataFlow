@@ -237,6 +237,7 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     # population uniqueness scan and a Gate-8 read-back, each proven against a
     # real SFTP server in ``test_sftp_live_transfer.py``.
     ("file", "csv", "database", "sftp"),
+    ("file", "excel", "database", "sftp"),
     ("database", "postgresql", "database", "sftp"),
     ("database", "sftp", "database", "postgresql"),
     # Unlocked enterprise / object / vector destinations.

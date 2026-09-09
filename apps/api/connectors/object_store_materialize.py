@@ -118,13 +118,20 @@ class ObjectStoreEncoder:
         self._pq_writer: Any = None
         self._arrow_schema: Any = None
         self._arrow_types: list[Any] | None = None
+        self._xlsx_wb: Any = None
+        self._xlsx_ws: Any = None
         self._closed = False
         self._aborted = False
         self.content_type = self._content_type_for_key()
 
+    def _is_xlsx(self) -> bool:
+        return self.key_l.endswith(".xlsx") or self.key_l.endswith(".xlsm")
+
     def _content_type_for_key(self) -> str:
         if self.key_l.endswith(".parquet"):
             return "application/vnd.apache.parquet"
+        if self._is_xlsx():
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         if self.key_l.endswith(".csv"):
             return "text/csv"
         if self.key_l.endswith(".tsv"):
@@ -140,6 +147,8 @@ class ObjectStoreEncoder:
             return
         if self.key_l.endswith(".parquet"):
             self._append_parquet(mapped_rows)
+        elif self._is_xlsx():
+            self._append_xlsx(mapped_rows)
         elif self.key_l.endswith(".csv") or self.key_l.endswith(".tsv"):
             self._append_delimited(mapped_rows)
         elif self.key_l.endswith(".jsonl"):
@@ -246,6 +255,27 @@ class ObjectStoreEncoder:
         batch = pa.RecordBatch.from_pydict(columns, schema=self._arrow_schema)
         self._pq_writer.write_batch(batch)
 
+    def _ensure_xlsx(self) -> None:
+        if self._xlsx_ws is not None:
+            return
+        from openpyxl import Workbook
+
+        self._xlsx_wb = Workbook(write_only=True)
+        self._xlsx_ws = self._xlsx_wb.create_sheet()
+        self._xlsx_ws.append(list(self.target_cols))
+        self._header_written = True
+
+    def _append_xlsx(self, mapped_rows: Sequence[tuple]) -> None:
+        from connectors.writer_common import iter_mapped_delimited_records
+
+        self._ensure_xlsx()
+        for record in iter_mapped_delimited_records(
+            list(mapped_rows), self.target_cols, self.dest_types
+        ):
+            self._xlsx_ws.append(
+                [cell_to_string(record.get(c)) for c in self.target_cols]
+            )
+
     def finish(self):
         """Write format trailer and return a rewindable ``ObjectStoreExport``."""
         from connectors.object_store_common import ObjectStoreExport
@@ -261,6 +291,11 @@ class ObjectStoreEncoder:
                 else:
                     self._pq_writer.close()
                     self._pq_writer = None
+            elif self._is_xlsx():
+                self._ensure_xlsx()
+                self._xlsx_wb.save(self._spool)
+                self._xlsx_wb = None
+                self._xlsx_ws = None
             elif self.key_l.endswith(".csv") or self.key_l.endswith(".tsv"):
                 if not self._header_written:
                     self._ensure_csv()
@@ -312,6 +347,8 @@ class ObjectStoreEncoder:
         self._closed = True
         writer = self._pq_writer
         self._pq_writer = None
+        self._xlsx_wb = None
+        self._xlsx_ws = None
         if writer is not None:
             try:
                 writer.close()
