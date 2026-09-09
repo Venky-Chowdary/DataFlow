@@ -416,9 +416,16 @@ material, and host routing in a real browser vhost (verified at service level on
    `services/transfer_scheduler.py:61`.~~ **Closed:** `atexit` calls
    `shutdown(wait=False, log=False)` so the interpreter-exit path does not
    write to a closed logging stream.
-4. **Host-fact tests.** `property8_unicode_form` / `property8_json_polarity`
-   assert a MariaDB build without `utf8mb4_0900_ai_ci`, and two PostgreSQL cases
-   need the `vector` extension. They should skip on capability, not fail.
+4. ~~**Host-fact tests.**~~ **Closed (PR `cursor/host-fact-skip-1673`).**
+   `property8_unicode_form` already continued past missing `utf8mb4_0900_ai_ci`
+   / `utf8mb4_uca1400_ai_ci`; it now lists collations through
+   `tests/host_facts.listed_mysql_collations` and **skips** if bin/general_ci/
+   unicode_ci are absent (host inventory, not a product fail).
+   `property8_json_polarity` never asserted 0900 — that pairing was a misgroup.
+   Live pgvector writes (`test_pgvector_writer`, pgvector→pgvector COPY, universal
+   / emulator matrix dest) call `require_pgvector()` instead of failing on
+   `vector.control`. The writer names the same host miss so a live route does
+   not look like a transfer-algorithm defect.
 5. **Pilot citations open the public docs shell.** ~~Clicking a citation opens the
    right Help article but with the marketing header, so the operator leaves the
    authenticated workspace.~~ **Closed on `cursor/qa-lead-followup-1673`:** signed-in

@@ -19,12 +19,14 @@ Branch: `feature/Venkat-Analysis`. Backend runs use
 The eight failures in the last run were re-run on the parent commit in a clean
 worktree and seven fail there identically, so they are not from that wave:
 
-* `pgvector` destination and `edge_types_csv_to_postgresql` — this host's
-  PostgreSQL 16 has no `vector` extension installed
-  (`Could not open extension control file .../vector.control`).
-* `property8_unicode_form` / `property8_json_polarity` — the assertions encode a
-  MariaDB build without `utf8mb4_0900_ai_ci`; this host's MariaDB has it. The
-  test states a host fact, not a product fact.
+* ~~`pgvector` destination and `edge_types_csv_to_postgresql`~~ **Closed for
+  pgvector host-fact skips.** Live pgvector writes skip via
+  `tests.host_facts.require_pgvector()` when `vector.control` is missing; the
+  writer names that miss. `edge_types_csv_to_postgresql` does not CREATE
+  EXTENSION vector (CSV→PostgreSQL); re-run it independently if it still fails.
+* ~~`property8_unicode_form` / `property8_json_polarity`~~ **Closed.** Unicode
+  form lists collations through `listed_mysql_collations` and skips/continues
+  on missing 0900/1400. JSON polarity never asserted 0900.
 * Three `typed_fidelity_transfer_matrix_e2e` cases — `ts_utc TIMESTAMPTZ →
   DATETIME(6)` is refused as a fidelity collapse on the PostgreSQL→MySQL and
   →Redis typed routes. **This one is a real product defect**, still open: an

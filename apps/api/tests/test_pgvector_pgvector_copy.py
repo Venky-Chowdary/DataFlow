@@ -31,6 +31,9 @@ def _pg_or_skip():
             pass
     except OSError:
         pytest.skip("PostgreSQL 5432 not reachable")
+    from tests.host_facts import require_pgvector
+
+    require_pgvector()
 
 
 def _pgvector_cfg(table: str) -> dict:
