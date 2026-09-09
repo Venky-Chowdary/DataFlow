@@ -258,6 +258,37 @@ def test_concurrency_guard_same_schedule(temp_store):
     assert store.mark_schedule_running(a.id, "inst-1") is None
 
 
+def test_concurrency_guard_same_dest_table_different_source(temp_store):
+    """Two sources writing one dest table must not overlap — pair lock is not enough."""
+    a = _make(store, name="a", source_connector_id="src-a", dest_table="shared_dest")
+    b = _make(store, name="b", source_connector_id="src-b", dest_table="shared_dest")
+    assert a.dest_connector_id == b.dest_connector_id
+    assert a.source_connector_id != b.source_connector_id
+    assert store.dest_object_busy("dst", "shared_dest") is False
+    assert store.mark_schedule_running(a.id, "inst-1") is not None
+    assert store.dest_object_busy("dst", "shared_dest", exclude_id=a.id) is True
+    assert store.mark_schedule_running(b.id, "inst-2") is None
+    store.clear_schedule_running(a.id)
+    assert store.mark_schedule_running(b.id, "inst-2") is not None
+
+
+def test_concurrency_guard_allows_same_dest_connector_different_tables(temp_store):
+    a = _make(
+        store,
+        name="a",
+        source_connector_id="src-a",
+        dest_table="orders",
+    )
+    b = _make(
+        store,
+        name="b",
+        source_connector_id="src-b",
+        dest_table="customers",
+    )
+    assert store.mark_schedule_running(a.id, "inst-1") is not None
+    assert store.mark_schedule_running(b.id, "inst-2") is not None
+
+
 # --------------------------------------------------------------------------- #
 # Runner: incremental/CDC request construction                                #
 # --------------------------------------------------------------------------- #
