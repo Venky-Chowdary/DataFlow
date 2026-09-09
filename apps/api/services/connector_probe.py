@@ -24,7 +24,12 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         def get(key: str, default: Any = "") -> Any:
             return getattr(conn, key, default)
 
-    return {
+    extra = get("extra") if isinstance(get("extra"), dict) else {}
+    raw = conn if isinstance(conn, dict) else {"extra": extra}
+    from connectors.sftp_common import host_key_settings
+
+    trust = {k: v for k, v in host_key_settings({**extra, **raw}).items() if v}
+    cfg = {
         "host": get("host") or "",
         "port": int(get("port") or 0),
         "database": get("database") or "",
@@ -45,6 +50,10 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "auth_source": get("auth_source") or "",
         "type": get("type") or "",
     }
+    if extra:
+        cfg["extra"] = dict(extra)
+    cfg.update(trust)
+    return cfg
 
 
 def probe_saved_connector(
@@ -129,8 +138,13 @@ def endpoint_from_saved_connector(
         db_type=db_type,
         override_acknowledged=override_acknowledged,
     )
+    extra = dict(cfg.get("extra") or {}) if isinstance(cfg.get("extra"), dict) else {}
+    extra["destination_identity"] = identity.as_dict()
+    from connectors.sftp_common import host_key_settings
+
+    extra.update({k: v for k, v in host_key_settings(cfg).items() if v})
     return EndpointConfig(
-        extra={"destination_identity": identity.as_dict()},
+        extra=extra,
         kind="database",
         format=db_type,
         connector_id=connector_id,

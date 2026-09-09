@@ -296,8 +296,11 @@ work that would change it is UI-driven measurement, not more features.
 
 ## 7. How to continue
 
-1. Remaining connector-matrix cells, SFTP Excel sync modes.
-2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K and FWF dest
-   100K were not measured. Fixed-width dest export is closed (declared
-   layout or CHAR(n)/VARCHAR(n); overflow refuses).
+1. Remaining connector-matrix cells.
+2. MySQL yaml/fwf 100K twins were not run; YAML dest 100K, FWF dest 100K,
+   and 100K SFTP Excel were not measured. Fixed-width dest export is closed
+   (declared layout or CHAR(n)/VARCHAR(n); overflow refuses). SFTP daily
+   Excel ingest/dest is closed (real workbook; overwrite / append / upsert;
+   hashed trim; incremental append; file-backed 2-minute cron replay).
+   Mongo schedule store remains unmeasured.
 3. Local fleet / 10k–1M throughput work.

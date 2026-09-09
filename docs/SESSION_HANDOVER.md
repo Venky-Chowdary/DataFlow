@@ -15,9 +15,11 @@ or in flight. 100K dest COUNT=99,991, DLQ=9. YAML dest export writes a
 quoted sequence of mappings; independent dest COUNT is `iter_yaml_dicts`.
 Fixed-width dest export writes `#layout:` plus right-padded records;
 independent dest COUNT is `iter_fixed_width_dicts`. Layout is required;
-overflow refuses. 100K FWF dest was not measured. MySQL twins were not
-run. Next: remaining matrix cells, SFTP Excel, and local fleet /
-10k–1M throughput. See `docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
+overflow refuses. SFTP daily Excel ingest/dest is closed (spill handle +
+real `.xlsx` dest; overwrite / append / upsert). 100K FWF dest and 100K
+SFTP Excel were not measured. MySQL twins were not run. Next: remaining
+matrix cells and local fleet / 10k–1M throughput. See
+`docs/ENTERPRISE_2026_DELIVERY_STATUS.md`.
 
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from
@@ -487,8 +489,12 @@ material, and host routing in a real browser vhost (verified at service level on
 * Documentation screenshots and the per-section explainer videos.
 * The connector-family matrix, the type-family matrix and the sync-mode matrix
   (append / overwrite-full-refresh / upsert-sync) across the 40 connectors.
-* SFTP daily-Excel ingestion into an existing table under each sync mode, with a
-  2-minute schedule replaying the same Transform recipe.
+* ~~SFTP daily-Excel ingestion into an existing table under each sync mode.~~
+  **Closed.** Ingest loads OOXML from the spill handle (cache is `.tmp`).
+  Dest `.xlsx` is a real workbook, never CSV. Existing-table overwrite /
+  append / upsert, hashed trim, incremental append, and a file-backed
+  2-minute cron replay are measured. Mongo schedule store remains
+  unproven.
 * ~~Governance operations (mask / hash / redact) recorded in the audit certificate
   — designed, not built.~~ **Closed ([#139](https://github.com/Venky-Chowdary/DataFlow/pull/139)).**
   Execute stamps `governance_operations` on the job; the signed certificate

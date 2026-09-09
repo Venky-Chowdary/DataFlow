@@ -124,6 +124,11 @@ def _load_workbook(content: bytes | Any):
     Dest gzip Excel spools a decompressed image (workbook formats are not
     sequential). ``load_workbook`` already accepts a file-like; wrapping
     that image in a second ``BytesIO`` would be a third copy.
+
+    Object-store / SFTP spill names the cache ``.tmp``. openpyxl keys the
+    format off that suffix and refuses a real OOXML workbook. A path is
+    opened as a handle so ZIP magic decides, not the cache name. A genuine
+    ``.xls`` path is still refused.
     """
     try:
         from openpyxl import load_workbook
@@ -131,20 +136,38 @@ def _load_workbook(content: bytes | Any):
         raise ValueError(
             "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
+    closer = None
     if isinstance(content, (bytes, bytearray)):
         stream: Any = BytesIO(content)
     elif isinstance(content, (str, os.PathLike)):
-        # An on-disk image streams from the filesystem; wrapping it in bytes
-        # first would defeat the spill that put it on disk.
-        require_xlsx(content)
-        stream = content
+        path = os.fspath(content)
+        require_xlsx(path)
+        handle = open(path, "rb")
+        closer = handle.close
+        stream = handle
     else:
         stream = content
         try:
             stream.seek(0)
         except Exception as exc:
             raise ValueError("Excel workbook source is not seekable") from exc
-    return load_workbook(stream, read_only=True, data_only=True)
+    try:
+        workbook = load_workbook(stream, read_only=True, data_only=True)
+    except Exception:
+        if closer is not None:
+            closer()
+        raise
+    if closer is not None:
+        original_close = workbook.close
+
+        def _close_with_handle() -> None:
+            try:
+                original_close()
+            finally:
+                closer()
+
+        workbook.close = _close_with_handle  # type: ignore[method-assign]
+    return workbook
 
 
 def parse_excel_preview(

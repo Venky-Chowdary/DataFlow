@@ -1318,6 +1318,7 @@ def _stream_database_transfer_impl(
             validation_mode=validation_mode,
             source_filter=source_filter,
             skip_preflight=skip_preflight,
+            shape_runner=shape_runner,
         )
 
     # Property 3 — one MVCC/transaction snapshot for the whole full-refresh read

@@ -26,6 +26,7 @@ __all__ = [
     "purge_object_store_parts",
     "read_object_from_store",
     "resolve_object_store_write_dest_types",
+    "resolve_object_store_export_format",
     "ObjectStoreExport",
     "serialize_object_store_body",
     "serialize_object_store_export",
@@ -34,8 +35,33 @@ __all__ = [
     "_object_version_token",
 ]
 
-OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet")
-_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet)$", re.IGNORECASE)
+OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet", ".xlsx")
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet|xlsx)$", re.IGNORECASE)
+
+# Suffix → encoder format. Unknown suffixes refuse — never CSV under another name.
+_OBJECT_STORE_EXPORT_FORMATS: dict[str, str] = {
+    "csv": "csv",
+    "tsv": "tsv",
+    "json": "json",
+    "jsonl": "jsonl",
+    "ndjson": "jsonl",
+    "parquet": "parquet",
+    "xlsx": "excel",
+    "xlsm": "excel",
+}
+
+
+def resolve_object_store_export_format(filename: str) -> str | None:
+    """Encoder format for an object-store dest key, or ``None`` if unknown.
+
+    A missing suffix is not a format. Callers that want a default CSV must
+    say so — silently rewriting ``daily.xlsx`` to ``daily.xlsx.csv`` is D11.
+    """
+    name = (filename or "").rsplit("/", 1)[-1].strip().lower()
+    if "." not in name:
+        return None
+    ext = name.rsplit(".", 1)[-1]
+    return _OBJECT_STORE_EXPORT_FORMATS.get(ext)
 
 
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:

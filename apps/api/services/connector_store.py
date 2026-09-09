@@ -15,7 +15,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from services.platform_config import data_dir
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
@@ -117,6 +117,11 @@ class SavedConnector:
     path_style: bool = False
     auth_source: str = ""
     workspace_id: str = ""
+    #: Connector-specific options that are not first-class columns. SFTP
+    #: host-key trust (``host_key`` / ``known_hosts`` / ``host_key_policy``)
+    #: lives here so a scheduled beat opens the same pinned transport Studio
+    #: Test verified.
+    extra: dict[str, Any] = field(default_factory=dict)
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
     last_used_at: str | None = None
@@ -158,6 +163,7 @@ class SavedConnector:
             path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
             workspace_id=data.get("workspace_id", ""),
+            extra=connector_extra_from_payload(data),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
             last_used_at=data.get("last_used_at"),
@@ -168,6 +174,25 @@ class SavedConnector:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_SFTP_TRUST_KEYS = ("host_key", "known_hosts", "host_key_policy")
+
+
+def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Persist operator extras, lifting SFTP trust off the payload root.
+
+    Studio / the API may send ``host_key`` next to host/port rather than
+    nested under ``extra``. A schedule that later rebuilds the endpoint
+    must still see the pin.
+    """
+    payload = data or {}
+    extra = dict(payload.get("extra") or {}) if isinstance(payload.get("extra"), dict) else {}
+    for key in _SFTP_TRUST_KEYS:
+        value = payload.get(key)
+        if value not in (None, ""):
+            extra[key] = value
+    return extra
 
 
 def _resolve_backend() -> str:
@@ -428,6 +453,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         path_style=bool(data.get("path_style", False)),
         auth_source=data.get("auth_source", ""),
         workspace_id=data.get("workspace_id", ""),
+        extra=connector_extra_from_payload(data),
     )
 
     # Connector names are unique per workspace/role/type. A same-named create

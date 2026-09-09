@@ -136,3 +136,45 @@ def test_verify_target_lifts_trust_from_the_destination_config():
             fallback_checksum="",
         )
     assert {k: mocked.call_args.kwargs[k] for k in _TRUST} == _TRUST
+
+
+def test_saved_connector_persists_sftp_trust(tmp_path, monkeypatch):
+    from services import connector_store
+    from services.schedule_runner import _endpoint_from_connector
+
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+    monkeypatch.setattr(connector_store, "STORE_PATH", tmp_path / "connectors.json")
+    monkeypatch.setattr(connector_store, "_backend_choice", "file")
+
+    conn = connector_store.create_connector(
+        {
+            "name": "sftp-pin",
+            "type": "sftp",
+            "role": "source",
+            "host": "sftp.example",
+            "port": 22,
+            "username": "u",
+            "password": "p",
+            "database": "/",
+            **_TRUST,
+        }
+    )
+    loaded = connector_store.get_connector(conn.id)
+    assert loaded is not None
+    assert loaded.extra["host_key"] == _TRUST["host_key"]
+    assert loaded.extra["known_hosts"] == _TRUST["known_hosts"]
+    assert loaded.extra["host_key_policy"] == _TRUST["host_key_policy"]
+
+    endpoint = _endpoint_from_connector(loaded.to_dict(), "daily.xlsx")
+    assert endpoint.extra["host_key"] == _TRUST["host_key"]
+    assert endpoint.extra["known_hosts"] == _TRUST["known_hosts"]
+    assert endpoint.extra["host_key_policy"] == _TRUST["host_key_policy"]
+    assert endpoint.table == "daily.xlsx"
+
+    from services.connector_probe import probe_cfg_from_saved
+
+    probe = probe_cfg_from_saved(loaded)
+    assert probe["host_key"] == _TRUST["host_key"]
+    assert probe["known_hosts"] == _TRUST["known_hosts"]
+    assert probe["host_key_policy"] == _TRUST["host_key_policy"]

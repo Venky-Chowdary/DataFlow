@@ -96,9 +96,13 @@ This sequence is closed. §2 / §3 items are not defects and are not counted gre
    (operator `extra.fixed_width_layout` or CHAR(n)/VARCHAR(n) on every
    column). Overflow refuses — never silent truncate. Empty population is
    still a layout header so COUNT is a measured 0. Dest COUNT is
-   `iter_fixed_width_dicts` on disk. Layout is still required. 100K MySQL
-   twins were not run (`mysql_up()` false). YAML dest 100K and FWF dest
-   100K were not measured.
+   `iter_fixed_width_dicts` on disk. Layout is still required. SFTP daily
+   Excel is closed: ingest loads the spill handle, dest `.xlsx` is a real
+   workbook, existing-table overwrite / append / upsert plus hashed trim,
+   incremental append, and a file-backed 2-minute cron replay are measured.
+   Mongo schedule store and 100K MySQL twins were not run (`mysql_up()`
+   false). YAML dest 100K, FWF dest 100K, and 100K SFTP Excel were not
+   measured.
 9. Real SMTP / Slack / Teams delivery; MCP from a real client; chatbot/RAG
    against a live key; real host routing per client domain; SSO/IdP; KMS/BYOK.
 10. CDC is **at-least-once** everywhere except the named crash-injection routes.
