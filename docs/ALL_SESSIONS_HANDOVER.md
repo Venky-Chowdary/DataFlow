@@ -208,6 +208,7 @@ retries / 100K / cancellation.
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
 pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+Query Export bind params are closed (D44) — Run and Export now share one body.
 
 ---
 
