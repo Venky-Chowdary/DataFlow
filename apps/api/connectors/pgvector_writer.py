@@ -79,12 +79,45 @@ def _pgvector_live_embedding_dim(
     return dim if dim > 0 else None
 
 
+def pgvector_extension_unavailable_reason(exc: BaseException) -> str | None:
+    """Named operator error when the host has no usable ``vector`` type.
+
+    A listening :5432 is not proof pgvector is installed. Tests skip on
+    capability; a live write must not dump a raw ``vector.control`` traceback
+    as if the transfer algorithm failed.
+    """
+    text = str(exc).lower()
+    host_miss = "vector.control" in text or (
+        "vector" in text
+        and (
+            "is not available" in text
+            or 'type "vector" does not exist' in text
+            or "type 'vector' does not exist" in text
+            or "permission denied to create extension" in text
+        )
+    )
+    if not host_miss:
+        return None
+    return (
+        "PostgreSQL has no usable pgvector extension on this host "
+        "(vector.control missing, or the role cannot CREATE EXTENSION vector). "
+        "Install pgvector or pick a different destination. "
+        "A listening :5432 is not proof the vector type exists."
+    )
+
+
 def _exec_schema_table(cur: Any, schema: str, table_name: str, dimension: int) -> None:
     from psycopg2 import sql
 
     schema_id = sql.Identifier(schema)
     table_id = sql.Identifier(table_name)
-    cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    try:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    except Exception as exc:
+        named = pgvector_extension_unavailable_reason(exc)
+        if named:
+            raise RuntimeError(named) from exc
+        raise
     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema_id))
     # Literal double braces in SQL so psycopg2.sql does not treat '{}' as a format placeholder.
     cur.execute(
@@ -618,6 +651,7 @@ def write_mapped_rows(
                 conn.rollback()
         except Exception:
             pass
+        named = pgvector_extension_unavailable_reason(exc)
         return WriteResult(
             ok=False,
             # Only report durable rows — uncommitted inserts are not written.
@@ -626,7 +660,7 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=(inserted + 999) // 1000 if committed else 0,
-            error=str(exc),
+            error=named or str(exc),
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
         )
