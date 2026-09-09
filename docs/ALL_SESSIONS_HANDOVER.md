@@ -203,11 +203,21 @@ A first Run now after create-new Validate parked on
 as the saved connector UUID. Dest-exists hold now rematches that stamp;
 Validate going forward hashes the source engine. Live parked stamp rematches
 (`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
-retries / 100K / cancellation.
+retries / 100K.
 
-Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
-quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+Job cancel is a control-plane fence, not a mid-wire interrupt
+(`cursor/job-cancel-fence-1673`, PR #187): `MemoryMongoDBService` now owns
+`request_job_cancel` / `clear_job_cancel` / `is_cancel_requested` (the cancel
+API was AttributeError → 500 on this host), and `refuse_job_status_write` is
+the one owner that refuses `cancelled` → `completed` and
+`cancel_requested` → `completed` on both stores. Live PG→PG 800-row overwrite:
+cancel API 200, final status `cancelled`. COPY may still land rows after
+Cancel. CDC remains at-least-once upsert.
+
+Still unmeasured for a client: schedule retries/overlap/DST, the Evidence
+Chain / Operations / Contracts / Proofs pages, workspace roles, G19
+reachability, and the Mongo and MinIO routes. Quarantine/replay is already
+closed (D37/D40/D41/D42).
 
 ---
 
@@ -311,9 +321,10 @@ What this sweep did **not** prove, and what a client must therefore be told:
    trip and drives the DDL). Three things it could **not** prove: D37's *enabled*
    Replay path, because no route through the UI reaches a payload-bearing
    write-time rejection; D39's tie-break, because no two post-fix audit writes
-   shared a timestamp; and D31 at this tip. Still untested: job cancellation, an
+   shared a timestamp; and D31 at this tip. Still untested: an
    operator-driven schedule, Operations / Contracts / Proofs, workspace roles and
-   member removal.
+   member removal. Job cancellation is a status fence (PR #187) — not COPY
+   interruptible mid-wire.
 2. **D40 is closed, and it closed D37's positive half with it** (PR
    [#171](https://github.com/Venky-Chowdary/DataFlow/pull/171), register §7).
    The dead end had two causes: Map graded carrier *domains* while the engine

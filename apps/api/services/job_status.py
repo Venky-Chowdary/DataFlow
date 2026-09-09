@@ -17,6 +17,39 @@ COMPLETED_STATUSES = frozenset({COMPLETED, COMPLETED_WITH_QUARANTINE})
 # Statuses that mean "the job will not change again".
 TERMINAL_STATUSES = frozenset({COMPLETED, COMPLETED_WITH_QUARANTINE, "failed", "cancelled"})
 
+# A cancel request must not be rewritten to success or live progress. ``failed``
+# is still allowed (the run actually broke). ``cancelled`` is the requested terminal.
+CANCEL_BLOCKS_STATUSES = frozenset(
+    {"running", "pending", COMPLETED, COMPLETED_WITH_QUARANTINE}
+)
+
+
+def refuse_job_status_write(
+    *,
+    previous_status: str | None,
+    next_status: str,
+    cancel_requested: bool = False,
+    allow_terminal_exit: bool = False,
+) -> str | None:
+    """Return why a status write must be dropped, or None to allow it.
+
+    Terminal statuses are sticky: ``cancelled`` must not become ``completed``
+    when a fast COPY finishes after the operator clicked Cancel. Resume is
+    the documented exit (``allow_terminal_exit=True``).
+
+    Does not claim the wire is interruptible — only that the control-plane
+    status cannot be rewritten to success after cancel.
+    """
+    if allow_terminal_exit:
+        return None
+    prev = (previous_status or "").strip()
+    nxt = (next_status or "").strip()
+    if prev in TERMINAL_STATUSES and nxt != prev:
+        return f"already terminal ({prev})"
+    if cancel_requested and nxt in CANCEL_BLOCKS_STATUSES:
+        return "cancel_requested blocks success/progress rewrite"
+    return None
+
 
 def terminal_status_for(rejected_rows: int = 0, coerced_null_rows: int = 0) -> str:
     """Pick the success terminal status based on data-integrity accounting."""
