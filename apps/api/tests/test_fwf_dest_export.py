@@ -89,7 +89,7 @@ def test_empty_population_is_layout_header_not_json() -> None:
 def test_dump_refuses_overflow_instead_of_truncate() -> None:
     with pytest.raises(FixedWidthError, match="silent truncate"):
         dump_fixed_width_records(
-            [{"id": "too-wide", "amount": "1", "flag": "x"}],
+            [{"id": "overflows", "amount": "1", "flag": "x"}],
             LAYOUT,
         )
 
