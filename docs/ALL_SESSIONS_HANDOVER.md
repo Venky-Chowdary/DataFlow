@@ -206,8 +206,9 @@ Validate going forward hashes the source engine. Live parked stamp rematches
 retries / 100K / cancellation.
 
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
-quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+quarantine and replay, the Evidence Chain / Operations / Proofs pages,
+Contracts page UX (lifecycle tenant isolation closed — D43), workspace roles,
+G19 reachability, and the Mongo and MinIO routes.
 
 ---
 
