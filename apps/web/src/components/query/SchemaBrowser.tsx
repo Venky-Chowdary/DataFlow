@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { typeTone } from "../../lib/queryResults";
 import type { SchemaObject } from "../../lib/sqlIntel";
+import { uniqueListKey } from "../../lib/uiUtils";
 import { DtIcon } from "../DtIcon";
 
 /**
@@ -95,8 +96,8 @@ export function SchemaBrowser({
         </p>
       )}
 
-      {warnings.map((w) => (
-        <p key={w} className="df2-qw-schema-warn">
+      {warnings.map((w, i) => (
+        <p key={uniqueListKey(w, i, "warn")} className="df2-qw-schema-warn">
           <DtIcon name="warning" size={12} /> {w}
         </p>
       ))}

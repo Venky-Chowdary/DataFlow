@@ -39,17 +39,25 @@ async def get_dlq(
     job_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ):
-    """Quarantine dead-letter queue events (newest first)."""
-    from services.quarantine_dlq import list_dlq_events
+    """Quarantine dead-letter queue events (newest first).
+
+    ``count`` / ``total`` are the whole-queue size. ``returned`` is the page
+    length. Overview must not treat the page cap as the workspace total.
+    """
+    from services.quarantine_dlq import count_dlq_events, list_dlq_events
 
     events = list_dlq_events(job_id=job_id, limit=limit)
+    total = count_dlq_events(job_id=job_id)
     by_action: dict[str, int] = {}
     for ev in events:
         action = str(ev.get("action") or "unknown")
         by_action[action] = by_action.get(action, 0) + 1
     return {
         "events": events,
-        "count": len(events),
+        "count": total,
+        "total": total,
+        "returned": len(events),
+        "limit": limit,
         "by_action": by_action,
         "open_rows": sum(int(ev.get("rows") or 0) for ev in events if "fail" in str(ev.get("action") or "")),
     }

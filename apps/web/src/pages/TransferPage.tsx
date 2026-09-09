@@ -252,6 +252,7 @@ import {
   findColumn,
   formatFileSize,
   sealRemediationApproval,
+  studioSourceLabel,
 } from "./transfer/studioHelpers";
 
 type SyncMode = SyncModeId;
@@ -2115,6 +2116,10 @@ export function TransferPage({
 
   useEffect(() => {
     autoSelectedSourceConnector.current = false;
+    if (sourceKind !== "file") {
+      setFile(null);
+      setParsed(null);
+    }
   }, [sourceKind]);
 
   useEffect(() => {
@@ -2151,6 +2156,8 @@ export function TransferPage({
     appliedSeedTokenRef.current = seedSourceConnector.token;
     autoSelectedSourceConnector.current = true;
     setSourceConnectorId(seeded.id);
+    setFile(null);
+    setParsed(null);
     setStep(STEP_SOURCE);
   }, [seedSourceConnector, connectors]);
 
@@ -2246,6 +2253,8 @@ export function TransferPage({
       if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
       else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
       setSourceConnectorId(seededSource.id);
+      setFile(null);
+      setParsed(null);
     }
     if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
     if (seedStudioIntent.destConnectorId) {
@@ -5613,11 +5622,12 @@ export function TransferPage({
     : destType
       ? `${destType}${targetCollection ? ` · ${targetCollection}` : ""}`
       : "Choose destination";
-  const sourceLabel = sourceKind === "file"
-    ? (file?.name ?? "Choose source")
-    : sourceKind === "cloud"
-      ? (cloudPath.trim() || sourceConnector?.name || "Cloud source")
-      : (sourceConnector?.name ?? "Database source");
+  const sourceLabel = studioSourceLabel({
+    sourceKind,
+    fileName: file?.name,
+    cloudPath,
+    sourceConnectorName: sourceConnector?.name,
+  });
   const destLabelShort = destSelected && (destKindMode === "file_export" || Boolean(destType))
     ? (selectedDestConnector
       ? `${selectedDestConnector.name}${targetCollection ? ` · ${targetCollection}` : ""}`
@@ -7241,8 +7251,8 @@ export function TransferPage({
               </p>
               {transferPlan.auto_create.length > 0 && (
                 <ul className="df2-plan-callout-list">
-                  {transferPlan.auto_create.slice(0, 3).map((item) => (
-                    <li key={item}>{item}</li>
+                  {transferPlan.auto_create.slice(0, 3).map((item, i) => (
+                    <li key={`${item}-${i}`}>{item}</li>
                   ))}
                   {transferPlan.auto_create.length > 3 && (
                     <li className="df2-plan-callout-more">+{transferPlan.auto_create.length - 3} more steps</li>
@@ -7708,7 +7718,7 @@ export function TransferPage({
           <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
-              sourceLabel={file?.name || sourceConnector?.name}
+              sourceLabel={sourceLabel}
               destLabel={`${targetDb}.${targetCollection}`}
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}

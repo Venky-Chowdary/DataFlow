@@ -560,9 +560,8 @@ connector same-name replacement, Snowflake T-SQL paste UX, all scheduler/CDC/Mon
 items in register §8h–§8n.
 
 **Left open (do not claim):**
-- P1-3 Overview vs Jobs count reconciliation; P1-4 stale source label in the run
-  panel; P1-5 Settings org-name vs workspace (unconfirmed); P2-1..5 (register §8o).
-- Browser re-run of the exact PG→MySQL scheduled deduped route on `bb13fd55`
+- P1-5 is **by-design** (org profile vs Team workspace name) — both are labeled on Settings → General; do not merge them.
+- Browser re-run of the exact PG→MySQL scheduled deduped route on this head
   (Run now → second beat → history) — not yet done.
 - Sweep coverage gaps: Connectors CRUD, Contracts end-to-end, Jobs Retry/Replay,
   schedule pause/resume/history, Transforms incremental + data test, CSV→PG
@@ -572,6 +571,12 @@ items in register §8h–§8n.
   change (40 quarantine/DLQ/accounting/conservation files, live PG/MySQL):
   470 passed / 0 failed / 8 skipped on `fb46e18d`.
 - Hosted clouds: emulator-measured only (register §8m); CDC at-least-once.
+
+Follow-up on `cursor/qa-lead-followup-1673`: closed sweep P1-3, P1-4, P2-1..P2-5
+(register §8o). Overview DLQ count is whole-queue; Studio source chrome uses one
+label; signed-in `#/help` stays in-app Docs; Pilot citations open the cited
+article (not `#/docs` walkthrough, not marketing); Query tabs are workspace-scoped;
+Pilot briefing uses `count_jobs` + request workspace.
 
 ## 7. Continuing this work
 

@@ -11,6 +11,7 @@ import {
 } from "./pilotConfirm";
 import { extractPilotResultId } from "./pilotChatStore";
 import type { ActiveDataContext, Screen } from "./types";
+import { getActiveWorkspaceId } from "./workspace";
 
 /** Shared screen labels for Pilot page + rail action chips. */
 export const PILOT_SCREEN_LABELS: Record<string, string> = {
@@ -125,6 +126,7 @@ export function buildPilotDataContext(
     blockers: activeData?.blockers,
     pilot_session_id: opts.sessionId,
     last_result_id: opts.lastResultId,
+    workspace_id: activeData?.workspace_id || getActiveWorkspaceId() || undefined,
   };
 }
 

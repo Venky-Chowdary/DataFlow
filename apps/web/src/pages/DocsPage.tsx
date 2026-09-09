@@ -8,6 +8,9 @@ import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { fetchCatalogStats } from "../lib/api";
+import { isHelpDocRoute, type HelpDocId } from "../lib/helpDocs";
+import { hashForPublicRoute, type PublicRoute } from "../lib/publicNavigation";
+import { DocArticlePage, DocsPortal } from "./marketing/DocsPortal";
 
 interface CatalogStats {
   total: number;
@@ -432,7 +435,37 @@ function UseCase({ title, body }: { title: string; body: string }) {
   );
 }
 
-export function DocsPage() {
+/** Signed-in `#/help` / `#/help/<slug>` — same articles as marketing, app chrome not MarketingSite. */
+function WorkspaceHelp({
+  article,
+  onOpenTransfer,
+}: {
+  article: HelpDocId | "help";
+  onOpenTransfer?: () => void;
+}) {
+  const navigateHelp = (route: PublicRoute) => {
+    if (route === "help" || isHelpDocRoute(route)) {
+      window.location.hash = hashForPublicRoute(route);
+    }
+  };
+  const onGetStarted = () => onOpenTransfer?.();
+  return (
+    <div className="df2-workspace-docs">
+      {article === "help" ? (
+        <DocsPortal onNavigate={navigateHelp} onGetStarted={onGetStarted} />
+      ) : (
+        <DocArticlePage
+          docId={article}
+          onNavigate={navigateHelp}
+          onGetStarted={onGetStarted}
+          hideMarketingCta
+        />
+      )}
+    </div>
+  );
+}
+
+function DocsWalkthrough() {
   const [stats, setStats] = useState<CatalogStats | null>(null);
   const [statsError, setStatsError] = useState(false);
   const [activeSection, setActiveSection] = useState<string>(DOC_SECTIONS[0].id);
@@ -697,4 +730,18 @@ export function DocsPage() {
       </PageFrame>
     </PageShell>
   );
+}
+
+/** Help nav (`#/docs`) is the walkthrough. Pilot citations (`#/help/<slug>`) reuse the article SSOT. */
+export function DocsPage({
+  helpArticle = null,
+  onOpenTransfer,
+}: {
+  helpArticle?: HelpDocId | "help" | null;
+  onOpenTransfer?: () => void;
+}) {
+  if (helpArticle) {
+    return <WorkspaceHelp article={helpArticle} onOpenTransfer={onOpenTransfer} />;
+  }
+  return <DocsWalkthrough />;
 }

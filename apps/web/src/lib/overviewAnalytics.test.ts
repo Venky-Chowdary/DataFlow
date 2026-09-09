@@ -9,6 +9,7 @@ import {
   buildOverviewJobStats,
   buildStatusDistributionFromHistory,
   buildThroughputSeries,
+  overviewRecentMigrationsState,
 } from "./overviewAnalytics.js";
 
 function job(partial: Record<string, unknown>) {
@@ -140,5 +141,26 @@ describe("Overview job stats use whole-history counts, not the page", () => {
     assert.equal(byKey.running, 19);
     assert.equal(byKey.failed, 27);
     assert.equal(Object.values(byKey).reduce((s, n) => s + n, 0), 90);
+  });
+});
+
+describe("Overview recent-migrations empty state", () => {
+  it("does not call a counted history an empty workspace", () => {
+    assert.equal(
+      overviewRecentMigrationsState({ listsLoading: false, total: 84, loaded: 0 }),
+      "window-empty",
+    );
+    assert.equal(
+      overviewRecentMigrationsState({ listsLoading: false, total: 0, loaded: 0 }),
+      "empty",
+    );
+    assert.equal(
+      overviewRecentMigrationsState({ listsLoading: true, total: 0, loaded: 0 }),
+      "loading",
+    );
+    assert.equal(
+      overviewRecentMigrationsState({ listsLoading: false, total: 84, loaded: 10 }),
+      "ready",
+    );
   });
 });

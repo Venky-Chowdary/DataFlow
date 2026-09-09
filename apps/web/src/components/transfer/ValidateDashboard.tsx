@@ -38,6 +38,7 @@ import {
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, dateLocaleValidateAction, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
+import { uniqueListKey } from "../../lib/uiUtils";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
   callableExtractNote,
@@ -502,8 +503,8 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
           </div>
           <p className="df2-vd-iso-group-note">ISO-8601 → destination TIMESTAMP bind</p>
           <div className="df2-vd-chip-row">
-            {isoNormalize.map((col) => (
-              <span key={`${col.source}-${col.target}`} className="df2-vd-chip is-static">{col.source}</span>
+            {isoNormalize.map((col, i) => (
+              <span key={uniqueListKey(`${col.source}-${col.target}`, i, "iso")} className="df2-vd-chip is-static">{col.source}</span>
             ))}
           </div>
           <button
@@ -2118,9 +2119,9 @@ export function ValidateDashboard({
                       target: c.target,
                       toType: c.toType,
                     }));
-                  return remapCols.map((col) => (
+                  return remapCols.map((col, i) => (
                     <Button
-                      key={`${col.source}-${col.target}`}
+                      key={uniqueListKey(`${col.source}-${col.target}`, i, "remap")}
                       size="sm"
                       variant={dashCta("remap_column")}
                       disabled={remediating || !onApplyAction}
@@ -3390,9 +3391,9 @@ export function ValidateDashboard({
                         Fix on Validate (remaps off incompatible typed columns)
                       </span>
                       <div className="df2-vd-fix-actions">
-                        {blockingCols.slice(0, 6).map((col) => (
+                        {blockingCols.slice(0, 6).map((col, i) => (
                           <Button
-                            key={`${col.source}-${col.target}`}
+                            key={uniqueListKey(`${col.source}-${col.target}`, i, "block-remap")}
                             size="sm"
                             variant={dashCta("remap_column")}
                             disabled={!onApplyAction || !col.suggested_target_type}

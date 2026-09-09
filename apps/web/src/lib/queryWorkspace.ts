@@ -13,6 +13,11 @@ const ACTIVE_KEY = "df2.query.activeTab.v1";
 const HISTORY_KEY = "df2.query.history.v1";
 const LAYOUT_KEY = "df2.query.layout.v1";
 
+function scopedKey(base: string, workspaceId?: string): string {
+  const ws = (workspaceId || "").trim();
+  return ws ? `${base}.${ws}` : base;
+}
+
 const MAX_TABS = 24;
 const MAX_HISTORY = 200;
 const MAX_QUERY_CHARS = 200_000;
@@ -159,22 +164,22 @@ export function retitleTab(tab: QueryTab): QueryTab {
   return { ...tab, title: deriveTabTitle(tab.query, "Untitled query") };
 }
 
-export function loadTabs(): { tabs: QueryTab[]; activeId: string } {
-  const stored = readJson<QueryTab[]>(TABS_KEY);
+export function loadTabs(workspaceId?: string): { tabs: QueryTab[]; activeId: string } {
+  const stored = readJson<QueryTab[]>(scopedKey(TABS_KEY, workspaceId));
   const tabs =
     Array.isArray(stored) && stored.length ? stored.map(sanitizeTab) : [createTab()];
-  const storedActive = localStorage.getItem(ACTIVE_KEY);
+  const storedActive = localStorage.getItem(scopedKey(ACTIVE_KEY, workspaceId));
   const activeId = tabs.some((t) => t.id === storedActive)
     ? (storedActive as string)
     : tabs[0].id;
   return { tabs, activeId };
 }
 
-export function saveTabs(tabs: QueryTab[], activeId: string) {
+export function saveTabs(tabs: QueryTab[], activeId: string, workspaceId?: string) {
   const cleaned = tabs.map(sanitizeTab).slice(0, MAX_TABS);
-  writeJson(TABS_KEY, cleaned.length ? cleaned : [createTab()]);
+  writeJson(scopedKey(TABS_KEY, workspaceId), cleaned.length ? cleaned : [createTab()]);
   try {
-    localStorage.setItem(ACTIVE_KEY, activeId);
+    localStorage.setItem(scopedKey(ACTIVE_KEY, workspaceId), activeId);
   } catch {
     /* ignore */
   }
@@ -223,8 +228,8 @@ export function duplicateTab(
 // History
 // ---------------------------------------------------------------------------
 
-export function loadHistory(): QueryHistoryEntry[] {
-  const stored = readJson<QueryHistoryEntry[]>(HISTORY_KEY);
+export function loadHistory(workspaceId?: string): QueryHistoryEntry[] {
+  const stored = readJson<QueryHistoryEntry[]>(scopedKey(HISTORY_KEY, workspaceId));
   if (!Array.isArray(stored)) return [];
   return stored.slice(0, MAX_HISTORY);
 }
@@ -250,13 +255,13 @@ export function pushHistory(
   return [full, ...deduped].slice(0, MAX_HISTORY);
 }
 
-export function saveHistory(history: QueryHistoryEntry[]) {
-  writeJson(HISTORY_KEY, history.slice(0, MAX_HISTORY));
+export function saveHistory(history: QueryHistoryEntry[], workspaceId?: string) {
+  writeJson(scopedKey(HISTORY_KEY, workspaceId), history.slice(0, MAX_HISTORY));
 }
 
-export function clearHistory() {
+export function clearHistory(workspaceId?: string) {
   try {
-    localStorage.removeItem(HISTORY_KEY);
+    localStorage.removeItem(scopedKey(HISTORY_KEY, workspaceId));
   } catch {
     /* ignore */
   }
@@ -323,4 +328,22 @@ export function formatRelativeTime(at: number, now = Date.now()): string {
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}d ago`;
   return new Date(at).toLocaleDateString();
+}
+
+/** True when a tab names a connector that is not in the current workspace list. */
+export function connectorMissingFromWorkspace(
+  connectorId: string | undefined,
+  connectors: { id: string }[],
+): boolean {
+  const id = (connectorId || "").trim();
+  if (!id || connectors.length === 0) return false;
+  return !connectors.some((c) => c.id === id);
+}
+
+/** Never surface a raw 404 as the Query empty-state. */
+export function querySchemaErrorCopy(raw: string): string {
+  if (/connector not found/i.test(raw)) {
+    return "This connector is not in the current workspace. Choose a saved connection above.";
+  }
+  return raw;
 }

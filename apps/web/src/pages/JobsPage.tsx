@@ -22,7 +22,7 @@ import {
   jobWindowNote,
   type JobHistory,
 } from "../lib/jobHistory";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
@@ -791,13 +791,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     }
                   />
                 ) : (
-                  filtered.map((job) => {
+                  filtered.map((job, index) => {
                     const route = jobRouteLabel(job);
                     const displayName = jobDisplayName(job, nameOverrides[job._id]);
                     const isLiveRow = job.status === "running" || job.status === "pending";
                     return (
                       <button
-                        key={job._id}
+                        key={uniqueListKey(job._id, index, "job")}
                         id={`job-item-${job._id}`}
                         type="button"
                         role="listitem"

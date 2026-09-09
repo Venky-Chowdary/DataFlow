@@ -371,6 +371,8 @@ interface DocArticlePageProps {
   docId: HelpDocId;
   onNavigate: (route: PublicRoute) => void;
   onGetStarted: () => void;
+  /** Signed-in workspace: hide the marketing Contact sales CTA. */
+  hideMarketingCta?: boolean;
 }
 
 function DocsAnnotatedFigure({ figure }: { figure: HelpDocFigure }) {
@@ -426,7 +428,7 @@ function DocsWorkflow({ steps }: { steps: HelpDocWorkflowStep[] }) {
   );
 }
 
-export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePageProps) {
+export function DocArticlePage({ docId, onNavigate, onGetStarted, hideMarketingCta = false }: DocArticlePageProps) {
   const doc = getHelpDoc(docId);
   const { prev, next } = helpDocNeighbors(docId);
   const hasWorkflow = doc.sections.some((s) => s.workflow && s.workflow.length > 0);
@@ -507,9 +509,11 @@ export function DocArticlePage({ docId, onNavigate, onGetStarted }: DocArticlePa
           <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>
             Try in Transfer Studio
           </button>
-          <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
-            Contact sales
-          </button>
+          {hideMarketingCta ? null : (
+            <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("contact")}>
+              Contact sales
+            </button>
+          )}
         </div>
       </footer>
     </DocsSpaceShell>

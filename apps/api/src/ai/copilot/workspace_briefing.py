@@ -21,7 +21,16 @@ def _safe_list(fn, default: list | None = None) -> list:
 def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
     """Read connectors, jobs, schedules, contracts. Never invent a green."""
     connectors = _load_connectors(workspace_id)
-    jobs = _load_jobs(workspace_id)
+    loaded_jobs = _load_jobs(workspace_id)
+    if isinstance(loaded_jobs, tuple):
+        jobs, job_counts = loaded_jobs
+    else:
+        jobs = list(loaded_jobs or [])
+        by_loaded: dict[str, int] = {}
+        for j in jobs:
+            key = str(j.get("status") or "unknown")
+            by_loaded[key] = by_loaded.get(key, 0) + 1
+        job_counts = {"total": len(jobs), "by_status": by_loaded}
     schedules = _load_schedules(workspace_id)
     contracts = _load_contracts(workspace_id)
 
@@ -53,9 +62,22 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         if str(c.get("status") or "").upper() not in {"SIGNED", "ACTIVE"}
     ]
 
+    job_total = int(job_counts.get("total") or 0) or len(jobs)
+    by_status = job_counts.get("by_status") or {}
+    jobs_failed_n = int(by_status.get("failed") or 0) if int(job_counts.get("total") or 0) else len(failed_jobs)
+    jobs_running_n = (
+        int(by_status.get("running") or 0) + int(by_status.get("pending") or 0)
+        if int(job_counts.get("total") or 0)
+        else len(running_jobs)
+    )
+    jobs_ok_n = (
+        int(by_status.get("completed") or 0)
+        + int(by_status.get("completed_with_quarantine") or 0)
+    ) or len(ok_jobs)
+
     attention: list[str] = []
-    if failed_jobs:
-        attention.append(f"{len(failed_jobs)} failed transfer job(s)")
+    if jobs_failed_n:
+        attention.append(f"{jobs_failed_n} failed transfer job(s)")
     if parked:
         attention.append(f"{len(parked)} pipeline(s) waiting on approval")
     if failed_connectors:
@@ -72,10 +94,10 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         "failed_connector_names": [
             str(c.get("name") or "") for c in failed_connectors[:6] if c.get("name")
         ],
-        "job_count": len(jobs),
-        "jobs_ok": len(ok_jobs),
-        "jobs_failed": len(failed_jobs),
-        "jobs_running": len(running_jobs),
+        "job_count": job_total,
+        "jobs_ok": jobs_ok_n,
+        "jobs_failed": jobs_failed_n,
+        "jobs_running": jobs_running_n,
         "latest_failed_job": _job_line(failed_jobs[0]) if failed_jobs else "",
         "schedule_count": len(schedules),
         "schedules_enabled": len(enabled),
@@ -85,7 +107,7 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         "contract_count": len(contracts),
         "contracts_unsigned": len(unsigned),
         "attention": attention,
-        "empty_workspace": not connectors and not jobs and not schedules,
+        "empty_workspace": not connectors and job_total == 0 and not schedules,
     }
 
 
@@ -106,7 +128,7 @@ def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
     try:
         from services import connector_store
 
-        rows = connector_store.list_connectors(workspace_id=workspace_id or None)
+        rows = connector_store.list_connectors(workspace_id=workspace_id)
         out = []
         for c in rows or []:
             if hasattr(c, "to_dict"):
@@ -124,12 +146,19 @@ def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
         return []
 
 
-def _load_jobs(workspace_id: str) -> list[dict[str, Any]]:
+def _load_jobs(workspace_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    empty_counts: dict[str, Any] = {"total": 0, "by_status": {}}
     try:
         from services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
-        rows = mongo.list_jobs(limit=25, workspace_id=workspace_id or None)
+        # Keep "" as this-workspace/legacy scope — never coerce to None (all workspaces).
+        scope = workspace_id
+        try:
+            counts = mongo.count_jobs(workspace_id=scope)
+        except Exception:
+            counts = empty_counts
+        rows = mongo.list_jobs(limit=25, workspace_id=scope)
         out = []
         for j in rows or []:
             if not isinstance(j, dict):
@@ -146,9 +175,15 @@ def _load_jobs(workspace_id: str) -> list[dict[str, Any]]:
                     },
                 }
             )
-        return out
+        if not int((counts or {}).get("total") or 0):
+            by_status: dict[str, int] = {}
+            for j in out:
+                key = str(j.get("status") or "unknown")
+                by_status[key] = by_status.get(key, 0) + 1
+            counts = {"total": len(out), "by_status": by_status}
+        return out, counts
     except Exception:
-        return []
+        return [], empty_counts
 
 
 def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:

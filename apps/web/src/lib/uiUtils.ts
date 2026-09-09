@@ -51,6 +51,16 @@ export function jobStatusBadgeClass(status: string): string {
   return "df2-badge df2-badge-muted";
 }
 
+/** Stable React list key when identities can collide or be missing. */
+export function uniqueListKey(
+  id: string | number | null | undefined,
+  index: number,
+  prefix = "row",
+): string {
+  const raw = String(id ?? "").trim();
+  return raw ? `${prefix}:${raw}:${index}` : `${prefix}:${index}`;
+}
+
 export function connectorHealthLabel(status: string, lastTestOk?: boolean): string {
   // Probe result wins — a green last_test_ok must never read as "Action needed"
   // just because a stale status string still says error.

@@ -651,6 +651,8 @@ export interface ActiveDataContext {
   validation_status?: "passed" | "blocked" | "running" | string;
   route?: string;
   blockers?: string[];
+  /** Active workspace — Pilot briefing must count this scope, not every tenant. */
+  workspace_id?: string;
   /** Pilot chat session id — scopes durable query result refs. */
   pilot_session_id?: string;
   /** Last sampled/query result_id for follow-up analyze/filter. */

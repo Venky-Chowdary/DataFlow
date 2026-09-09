@@ -931,6 +931,7 @@ export async function copilotChat(
       blockers: dataContext.blockers,
       pilot_session_id: dataContext.pilot_session_id,
       last_result_id: dataContext.last_result_id,
+      workspace_id: dataContext.workspace_id,
     };
   }
   let res: Response;
@@ -2248,7 +2249,11 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
 
 export async function fetchOpsDlq(limit = 50): Promise<{
   events: Array<Record<string, unknown>>;
+  /** Whole-queue size — never the page length. */
   count: number;
+  total?: number;
+  returned?: number;
+  limit?: number;
   by_action: Record<string, number>;
   open_rows: number;
 }> {
