@@ -326,3 +326,255 @@ def test_sftp_xlsx_to_existing_postgres_overwrite(local_sftp) -> None:
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.close()
+
+
+TRIM_RECIPE = {"version": 1, "steps": [{"op": "trim", "column": "flag"}]}
+PADDED = [["1", "10.50", "  yes  "], ["2", "20.25", " no "]]
+PADDED_DAY2 = [["1", "10.50", "  yes  "], ["2", "21.00", " no "], ["3", "5.00", " yes"]]
+
+
+def _trim_hash() -> str:
+    from services.shape_models import ShapeRecipe
+
+    return ShapeRecipe.parse(TRIM_RECIPE, source_columns=COLUMNS).recipe_hash
+
+
+def _sqlite_dest(db: str, table: str = "ledger") -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=db,
+        database=db,
+        table=table,
+    )
+
+
+def _seed_ledger(db: str) -> None:
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE ledger (id TEXT, amount TEXT, flag TEXT)")
+    conn.execute("INSERT INTO ledger VALUES ('0', '0.00', 'seed')")
+    conn.commit()
+    conn.close()
+
+
+def _ledger_rows(db: str) -> list[tuple]:
+    back = sqlite3.connect(db)
+    try:
+        return list(back.execute("SELECT id, amount, flag FROM ledger ORDER BY id"))
+    finally:
+        back.close()
+
+
+def test_sftp_xlsx_trim_recipe_lands_without_padding(local_sftp) -> None:
+    """Approved trim recipe is applied on the SFTP spill path, not dropped."""
+    if local_sftp is None:
+        pytest.skip("local SFTP server unavailable")
+    Path(local_sftp.local_path("/daily.xlsx")).write_bytes(_xlsx(PADDED))
+    recipe_hash = _trim_hash()
+    assert recipe_hash
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "ledger.db")
+        _seed_ledger(db)
+        result = _run(
+            _sftp_endpoint(local_sftp, "/daily.xlsx"),
+            _sqlite_dest(db),
+            mappings=_mappings(*COLUMNS),
+            sync_mode="full_refresh_overwrite",
+            shape_recipe=dict(TRIM_RECIPE),
+            approved_shape_recipe_hash=recipe_hash,
+        )
+        assert result.success is True, result.error
+        summary = result.destination_summary or {}
+        assert summary.get("shape_recipe_hash") == recipe_hash
+        rows = _ledger_rows(db)
+        assert [str(r[0]) for r in rows] == ["1", "2"]
+        assert [str(r[2]) for r in rows] == ["yes", "no"]
+
+
+def test_sftp_xlsx_incremental_append_delta_and_noop(local_sftp, monkeypatch, tmp_path) -> None:
+    if local_sftp is None:
+        pytest.skip("local SFTP server unavailable")
+    from services import sync_cursor
+
+    monkeypatch.setattr(sync_cursor, "STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: None)
+
+    Path(local_sftp.local_path("/daily.xlsx")).write_bytes(_xlsx(DAY1))
+    contracts = [
+        {
+            "name": "ledger",
+            "selected": True,
+            "sync_mode": "incremental_append",
+            "cursor_field": "id",
+            "primary_key": "id",
+        }
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        db = os.path.join(tmp, "ledger.db")
+        dest = _sqlite_dest(db)
+        first = _run(
+            _sftp_endpoint(local_sftp, "/daily.xlsx"),
+            dest,
+            mappings=_mappings(*COLUMNS),
+            sync_mode="incremental_append",
+            stream_contracts=contracts,
+        )
+        assert first.success is True, first.error
+        assert [str(r[0]) for r in _ledger_rows(db)] == ["1", "2"]
+
+        Path(local_sftp.local_path("/daily.xlsx")).write_bytes(_xlsx(DAY2))
+        second = _run(
+            _sftp_endpoint(local_sftp, "/daily.xlsx"),
+            dest,
+            mappings=_mappings(*COLUMNS),
+            sync_mode="incremental_append",
+            stream_contracts=contracts,
+        )
+        assert second.success is True, second.error
+        rows = _ledger_rows(db)
+        assert [str(r[0]) for r in rows] == ["1", "2", "3"]
+        # Incremental append does not rewrite id=2; only the new id lands.
+        assert [str(r[1]) for r in rows] == ["10.50", "20.25", "5.00"]
+
+        third = _run(
+            _sftp_endpoint(local_sftp, "/daily.xlsx"),
+            dest,
+            mappings=_mappings(*COLUMNS),
+            sync_mode="incremental_append",
+            stream_contracts=contracts,
+        )
+        assert third.success is True, third.error
+        assert len(_ledger_rows(db)) == 3
+
+
+def _isolate_schedule_stores(tmp_path, monkeypatch) -> None:
+    import services.connector_store as connector_store
+    import services.schedule_store as schedule_store
+
+    monkeypatch.setattr(schedule_store, "STORE_PATH", tmp_path / "schedules.json")
+    monkeypatch.setattr(schedule_store, "_mongo_backend", lambda: None)
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+    monkeypatch.setattr(connector_store, "STORE_PATH", tmp_path / "connectors.json")
+    monkeypatch.setattr(connector_store, "_backend_choice", "file")
+
+
+def _wait_schedule(schedule_id: str, *, timeout: float = 45.0):
+    import time
+
+    import services.schedule_store as schedule_store
+
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = schedule_store.get_schedule(schedule_id)
+        if (
+            last is not None
+            and not last.running
+            and last.last_status in ("completed", "failed", "needs_approval")
+        ):
+            return last
+        time.sleep(0.1)
+    raise AssertionError(
+        f"schedule {schedule_id} did not finish: "
+        f"running={getattr(last, 'running', None)} "
+        f"status={getattr(last, 'last_status', None)} "
+        f"error={((getattr(last, 'run_history', None) or [{}])[-1] or {}).get('error')}"
+    )
+
+
+def test_sftp_xlsx_two_minute_schedule_replays_trim(
+    local_sftp, monkeypatch, tmp_path
+) -> None:
+    """File-backed 2-minute cron + the same hashed trim recipe, two due beats."""
+    if local_sftp is None:
+        pytest.skip("local SFTP server unavailable")
+    _isolate_schedule_stores(tmp_path, monkeypatch)
+
+    import services.connector_store as connector_store
+    import services.schedule_runner as schedule_runner
+    import services.schedule_store as schedule_store
+    from datetime import datetime, timedelta, timezone
+
+    Path(local_sftp.local_path("/daily.xlsx")).write_bytes(_xlsx(PADDED))
+    db = str(tmp_path / "ledger.db")
+    _seed_ledger(db)
+    recipe_hash = _trim_hash()
+    cfg = local_sftp.endpoint_config("/daily.xlsx")
+    source = connector_store.create_connector(
+        {
+            "name": "sftp-daily-xlsx",
+            "type": "sftp",
+            "role": "source",
+            "host": cfg["host"],
+            "port": cfg["port"],
+            "username": cfg["username"],
+            "password": cfg["password"],
+            "database": cfg["database"],
+            "host_key": cfg["host_key"],
+        }
+    )
+    dest = connector_store.create_connector(
+        {
+            "name": "ledger-sqlite",
+            "type": "sqlite",
+            "role": "destination",
+            "connection_string": db,
+            "database": db,
+            "ssl": False,
+        }
+    )
+    sched = schedule_store.create_schedule(
+        {
+            "name": "sftp-excel-2min",
+            "source_connector_id": source.id,
+            "source_table": cfg["table"],
+            "dest_connector_id": dest.id,
+            "dest_table": "ledger",
+            "interval": "hourly",
+            "cron": "*/2 * * * *",
+            "timezone": "UTC",
+            "sync_mode": "full_refresh_overwrite",
+            "validation_mode": "strict",
+            "mappings": _mappings(*COLUMNS),
+            "shape_recipe": dict(TRIM_RECIPE),
+            "approved_shape_recipe_hash": recipe_hash,
+            "enabled": True,
+        }
+    )
+    assert sched.cron == "*/2 * * * *"
+    assert sched.approved_shape_recipe_hash == recipe_hash
+    nxt = datetime.fromisoformat(schedule_store.compute_next_run(
+        "hourly",
+        datetime(2026, 1, 1, 10, 1, tzinfo=timezone.utc),
+        cron="*/2 * * * *",
+        tz="UTC",
+    ))
+    assert nxt == datetime(2026, 1, 1, 10, 2, tzinfo=timezone.utc)
+
+    past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    schedule_store.update_schedule(sched.id, {"next_run_at": past})
+    started = schedule_runner._run_due_schedules()
+    assert started == 1
+    beat1 = _wait_schedule(sched.id)
+    assert beat1.last_status == "completed", (
+        (beat1.run_history or [{}])[-1].get("error") if beat1.run_history else beat1.last_status
+    )
+    rows1 = _ledger_rows(db)
+    assert [str(r[2]) for r in rows1] == ["yes", "no"]
+
+    Path(local_sftp.local_path("/daily.xlsx")).write_bytes(_xlsx(PADDED_DAY2))
+    schedule_store.update_schedule(sched.id, {"next_run_at": past, "running": False})
+    started = schedule_runner._run_due_schedules()
+    assert started == 1
+    beat2 = _wait_schedule(sched.id)
+    assert beat2.last_status == "completed", (
+        (beat2.run_history or [{}])[-1].get("error") if beat2.run_history else beat2.last_status
+    )
+    rows2 = _ledger_rows(db)
+    assert [str(r[0]) for r in rows2] == ["1", "2", "3"]
+    assert [str(r[1]) for r in rows2] == ["10.50", "21.00", "5.00"]
+    assert [str(r[2]) for r in rows2] == ["yes", "no", "yes"]
+    assert beat2.approved_shape_recipe_hash == recipe_hash
+    assert beat2.shape_recipe == TRIM_RECIPE
+    assert beat2.run_count >= 2
