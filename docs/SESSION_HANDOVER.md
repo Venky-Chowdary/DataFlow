@@ -396,11 +396,14 @@ material, and host routing in a real browser vhost (verified at service level on
    `tests/test_typed_fidelity_transfer_matrix_e2e.py` cases fail (PostgreSQL→
    MySQL typed, into an existing MySQL `TIMESTAMP(6)` column, PostgreSQL→Redis).
    An instant landing in an instant carrier should not need a Risk Contract.~~
-   **Algorithm closed** (`test_instant_carrier_not_a_contract.py`,
-   `timezone_policy.py`): create-new MySQL stamps `TIMESTAMP(6)`; an explicit
-   `DATETIME(6)` target still needs a UTC-normalize contract; Redis JSON text
-   keeps the offset. Unit proof this session: **30 passed**. Live PG→MySQL /
-   Redis e2e cells were not re-run here (MySQL/Redis not listening).
+   **Closed (PR `cursor/timestamptz-instant-carrier-1673`).** PostgreSQL
+   `TIMESTAMPTZ` into MySQL `TIMESTAMP(6)` (including catalog `TIMESTAMPTZ(6)`
+   from live `timestamp(6)`) and Redis RFC 3339 text no longer demand a Risk
+   Contract. Explicit MySQL `DATETIME(6)` still does. Proof:
+   `tests/test_instant_carrier_not_a_contract.py`,
+   `tests/test_timezone_policy_pg_mysql.py`. Live PG→MySQL / Redis e2e cells
+   were not re-run here (MySQL `:3306` / Redis `:6379` not listening) — a skip
+   is not a pass.
 2. ~~**Test isolation / hybrid footnote.**~~ **Closed (PR `cursor/pilot-hybrid-footnote-1673`).**
    The suite-order leak was real (`_AUTH_FAILED_PROVIDERS` + `pick_narration_provider`),
    but the test also failed **alone**: `_llm_unavailable_footnote` only fires on
@@ -434,7 +437,7 @@ material, and host routing in a real browser vhost (verified at service level on
 6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
    the UI shows `DATETIME(6)`; a separate physical/native type through
    introspection was proposed and not yet decided.
-7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL (this PR).**
+7. ~~**Case A is browser-unverified.**~~ **Closed on PostgreSQL ([#179](https://github.com/Venky-Chowdary/DataFlow/pull/179)).**
    Studio Transform `round_number` places=0 → Map Type `INTEGER` into existing
    dest INT → Validate APPROVE (no `schema_drift`) → Execute appended 3 rows.
    Independent SQL re-read of `public.case_a_browser_dst`: values `[23, 21, 22]`,
@@ -447,12 +450,12 @@ material, and host routing in a real browser vhost (verified at service level on
    only. Awaiting a decision on whether file export is meant to be live.
 9. **Tenant delete and BYOK rotate have no UI surface** (API only). Awaiting a
    decision on whether they should be operator-reachable.
-10. **`round_number` collapse through the profiler.** A literal
+9. **`round_number` collapse through the profiler.** A literal
     `1.50000000 → NUMBER(9,2)` case is unreachable through the UI because the CSV
     profiler collapses the padded value to `DECIMAL(7,4)`, so a `(9,2)`
     destination is held earlier by the narrowing Risk-Contract gate. Awaiting a
     decision on whether the profiler should preserve declared scale.
-11. **Environment failures that are not product defects** — do not "fix" these by
+10. **Environment failures that are not product defects** — do not "fix" these by
     changing production semantics: PyIceberg reads a Windows path `C:\...` as URI
     scheme `c` (7 `test_row_conservation.py` failures on this box), and the local
     MySQL fixture refuses `root@172.17.0.1`

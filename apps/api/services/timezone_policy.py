@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
 
+from services.keyspace_instant import INSTANT_TEXT_WIRE_ENGINES
+
 # Engines whose bare ``TIMESTAMP`` token stores an instant rather than a
 # wall-clock. MySQL/MariaDB/TiDB normalize to UTC on write; BigQuery,
 # Spanner and Databricks declare instant semantics natively.
@@ -199,19 +201,35 @@ def resolve_timezone_policy(
     aware = {"tz", "ltz"}
 
     if src in aware and tgt is None and _is_text_target(target_type):
+        # Redis (and any other proven JSON text-wire engine) has no temporal
+        # column type. Telling the operator to "map to a temporal carrier"
+        # names an exit that does not exist, and the RFC 3339 wire already
+        # keeps both the instant and the offset. Same dead-end as telling a
+        # Mongo operator to map to a wall-clock date.
+        text_wire = db in INSTANT_TEXT_WIRE_ENGINES
         return TimezoneTransferPolicy(
             policy=POLICY_OFFSET_TEXT,
             instant_preserved=True,
             offset_label_preserved=True,
-            requires_contract=True,
+            requires_contract=not text_wire,
             destination_reads_as="ISO-8601 string with offset",
             range_limit="none",
             note=(
-                "Instant and offset both survive as text, but the destination "
-                "column is no longer a temporal type — no engine-side date "
-                "arithmetic, ordering is lexical."
+                "This engine's JSON text wire writes RFC 3339 with the offset, "
+                "so the text is the instant — there is no other temporal "
+                "carrier to map to."
+                if text_wire
+                else (
+                    "Instant and offset both survive as text, but the destination "
+                    "column is no longer a temporal type — no engine-side date "
+                    "arithmetic, ordering is lexical."
+                )
             ),
-            remediation="Map to a temporal carrier to keep engine date semantics.",
+            remediation=(
+                ""
+                if text_wire
+                else "Map to a temporal carrier to keep engine date semantics."
+            ),
         )
     if tgt is None:
         return None

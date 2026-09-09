@@ -28,9 +28,11 @@ worktree and seven fail there identically, so they are not from that wave:
   form lists collations through `listed_mysql_collations` and skips/continues
   on missing 0900/1400. JSON polarity never asserted 0900.
 * Three `typed_fidelity_transfer_matrix_e2e` cases — `ts_utc TIMESTAMPTZ →
-  DATETIME(6)` is refused as a fidelity collapse on the PostgreSQL→MySQL and
-  →Redis typed routes. **This one is a real product defect**, still open: an
-  instant landing in an instant carrier should not need a Risk Contract.
+  DATETIME(6)` was refused as a fidelity collapse on the PostgreSQL→MySQL and
+  →Redis typed routes. **Unit/execute-path closed:** MySQL `TIMESTAMP(6)` (and
+  catalog `TIMESTAMPTZ(6)`) and Redis RFC 3339 text no longer demand a Risk
+  Contract; explicit `DATETIME(6)` still does. Live cells are unproven on hosts
+  without MySQL `:3306` / Redis `:6379` — a skip is not a pass.
 * ~~`test_pilot_llm_wave41::test_hybrid_footnote_on_auth_failure`~~ **Closed.**
   Greeting now wraps `_with_llm_footnote`; the test autouses `clear_auth_failures()`
   and stubs a dead narration provider. The footnote is greeting-only — workspace
