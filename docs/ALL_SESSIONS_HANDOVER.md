@@ -202,12 +202,22 @@ A first Run now after create-new Validate parked on
 `Decision Artifact content_hash mismatch` because Validate hashed `source_db`
 as the saved connector UUID. Dest-exists hold now rematches that stamp;
 Validate going forward hashes the source engine. Live parked stamp rematches
-(`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
-retries / 100K / cancellation.
+(`create_new_stamp_matches_schedule` True). Does **not** close retries / 100K.
 
-Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
-quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+Schedule overlap is a dest-object write lock
+(`cursor/schedule-overlap-dest-1673`, PR #188): two append schedules that
+share a destination table (different sources) cannot run together.
+Live PG: beat B is 409 `already_running` while beat A is writing;
+independent dest `COUNT(*)=3`, not 6. DST unit cells already closed
+([#138](https://github.com/Venky-Chowdary/DataFlow/pull/138)). Retry
+duplicate-guard is unit-proved, not live dest COUNT. Job cancel is a
+sibling PR ([#187](https://github.com/Venky-Chowdary/DataFlow/pull/187)),
+not this tree. Quarantine/replay is already closed (D37/D40/D41/D42).
+
+Still unmeasured for a client: schedule retries (live dest COUNT),
+cancellation on this tree, the Evidence Chain / Operations / Contracts /
+Proofs pages, workspace roles, G19 reachability, and the Mongo and MinIO
+routes. This is **not** a deployment-ready product.
 
 ---
 

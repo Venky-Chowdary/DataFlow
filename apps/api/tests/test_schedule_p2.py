@@ -266,7 +266,7 @@ def test_concurrency_guard_same_dest_table_different_source(temp_store):
     assert a.source_connector_id != b.source_connector_id
     assert store.dest_object_busy("dst", "shared_dest") is False
     assert store.mark_schedule_running(a.id, "inst-1") is not None
-    assert store.dest_object_busy("dst", "shared_dest", exclude_id=a.id) is True
+    assert store.dest_object_busy("dst", "shared_dest") is True
     assert store.mark_schedule_running(b.id, "inst-2") is None
     store.clear_schedule_running(a.id)
     assert store.mark_schedule_running(b.id, "inst-2") is not None
