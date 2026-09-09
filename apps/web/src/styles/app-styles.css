@@ -1200,9 +1200,11 @@ html:has(.df2-app) #root {
   background: transparent;
 }
 
-/* Tabs — one rung, shorter than an action button by design */
-.df2-app :is(.df2-tab, .df2-jobs-detail-tab, .df2-qw-tab-btn) {
-  min-height: var(--df-tab-height);
+/* Tabs sit inside a --df-control-height track; the track owns the rung.
+   Bare jobs-detail tabs (no track) keep the token height themselves. */
+.df2-app :is(.df2-tab, .df2-qw-tab-btn) {
+  min-height: 0;
+  box-sizing: border-box;
 }
 
 /* The Jobs detail tabs sized themselves from vertical padding, so they stood

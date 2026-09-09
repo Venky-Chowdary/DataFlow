@@ -2673,7 +2673,7 @@ th.df2-type-string .df2-type-badge {
   align-items: stretch;
   gap: 8px;
   min-width: 0;
-  min-height: var(--df-btn-height, 36px);
+  min-height: var(--df-control-height);
 }
 
 .df2-dest-mode-toggle {
@@ -2681,14 +2681,14 @@ th.df2-type-string .df2-type-badge {
   flex: 1 1 auto;
   min-width: 0;
   box-sizing: border-box;
-  height: var(--df-btn-height, 36px);
-  min-height: var(--df-btn-height, 36px);
-  max-height: var(--df-btn-height, 36px);
-  padding: 0;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #f8fafc;
-  gap: 2px;
+  height: var(--df-control-height);
+  min-height: var(--df-control-height);
+  max-height: var(--df-control-height);
+  padding: var(--df-seg-pad, 3px);
+  border: 1px solid var(--df-seg-border, var(--df-border));
+  border-radius: var(--df-seg-radius, var(--df-radius-md));
+  background: var(--df-seg-track);
+  gap: var(--df-seg-gap, 2px);
   align-items: stretch;
 }
 
@@ -2701,11 +2701,11 @@ th.df2-type-string .df2-type-badge {
   max-height: none;
   padding: 0 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: calc(var(--df-radius-md) - 2px);
   background: transparent;
-  color: #64748b;
-  font-size: 13px;
-  font-weight: 600;
+  color: var(--df-seg-ink);
+  font-size: var(--df-fs-tab);
+  font-weight: var(--df-fw-semibold);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -2713,13 +2713,13 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-dest-mode-btn:hover {
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-dest-mode-btn.active {
-  background: #fff;
-  color: #0f766e;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  background: var(--df-seg-active);
+  color: var(--df-seg-ink-active);
+  box-shadow: var(--df-shadow-xs);
 }
 
 .df2-dest-toolbar .df2-dest-advanced-btn,
@@ -10186,12 +10186,8 @@ button.df2-vd-assist-toggle:focus-visible {
   padding: 4px 8px 0 !important;
 }
 
-.df2-page-transfer-studio .df2-filter-tabs .df2-tab,
-.df2-page-transfer-studio .df2-tab {
-  padding: 4px 10px;
-  font-size: 12px;
-  min-height: 28px;
-}
+/* Studio tabs share the control ladder — do not shrink below --df-tab-height.
+   A 28px override here is what made Saved connections sit below Mode / Advanced. */
 
 /* ≤1280: Map intel aside hides; Source stays 50/50 until 1100 */
 @media (max-width: 1280px) {
@@ -10627,7 +10623,15 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-page-transfer-studio .df2-dest-picker > .df2-filter-tabs {
   flex-shrink: 0;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  height: var(--df-control-height);
+  min-height: var(--df-control-height);
+  max-height: var(--df-control-height);
+  margin-bottom: 8px;
+  padding: var(--df-seg-pad, 3px);
 }
 
 .df2-page-transfer-studio .df2-dest-engine-lead {
