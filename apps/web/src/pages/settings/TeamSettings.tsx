@@ -29,6 +29,7 @@ import {
 import { useVisibleRefresh } from "../../lib/visibleRefresh";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { isLastWorkspaceAdmin, LAST_ADMIN_PROTECTED } from "../../lib/workspaceAdmin";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Admin",
@@ -158,6 +159,10 @@ export function TeamSettings() {
     toast({ title: "No write permission", message: reason, tone: "warning" });
     return false;
   };
+  const refuseLastAdmin = () => {
+    toast({ title: "Last admin protected", message: LAST_ADMIN_PROTECTED, tone: "warning" });
+    return false;
+  };
   // Granting admin is the one membership change an editor may not make, and the
   // store refuses it — so the option says why instead of failing on submit.
   const canGrantAdmin = manage.allowed;
@@ -240,6 +245,7 @@ export function TeamSettings() {
 
   const remove = async (email: string) => {
     if (!membership.allowed) return void refuse(membership.reason);
+    if (isLastWorkspaceAdmin(members, email)) return void refuseLastAdmin();
     if (!activeWorkspace) return;
     const ok = await confirm({
       title: `Remove ${email}?`,
@@ -269,6 +275,9 @@ export function TeamSettings() {
   const changeRole = async (email: string, role: WorkspaceRole) => {
     if (!membership.allowed) return void refuse(membership.reason);
     if (role === "admin" && !canGrantAdmin) return void refuse(manage.reason);
+    if (role !== "admin" && isLastWorkspaceAdmin(members, email)) {
+      return void refuseLastAdmin();
+    }
     if (!activeWorkspace) return;
     setRoleChangeEmail(email);
     try {
@@ -534,7 +543,9 @@ export function TeamSettings() {
                     <span>Added</span>
                     <span>Actions</span>
                   </div>
-                  {members.map((m) => (
+                  {members.map((m) => {
+                    const lastAdmin = isLastWorkspaceAdmin(members, m.email);
+                    return (
                     <div className="df2-team-member-row" data-testid="team-member-row" key={m.email}>
                       <div className="df2-team-identity">
                         <span className="df2-team-avatar" aria-hidden>
@@ -549,8 +560,12 @@ export function TeamSettings() {
                         className="df2-select df2-team-role-select"
                         aria-label={`Role for ${m.email}`}
                         value={m.role}
-                        disabled={roleChangeEmail === m.email || !membership.allowed}
-                        title={membership.reason || undefined}
+                        disabled={roleChangeEmail === m.email || !membership.allowed || lastAdmin}
+                        title={
+                          lastAdmin
+                            ? LAST_ADMIN_PROTECTED
+                            : membership.reason || undefined
+                        }
                         onChange={(e) => void changeRole(m.email, e.target.value as WorkspaceRole)}
                       >
                         <option value="viewer">Viewer</option>
@@ -566,8 +581,12 @@ export function TeamSettings() {
                       <Button
                         variant="danger"
                         size="sm"
-                        disabled={removingEmail === m.email || !membership.allowed}
-                        title={membership.reason || undefined}
+                        disabled={removingEmail === m.email || !membership.allowed || lastAdmin}
+                        title={
+                          lastAdmin
+                            ? LAST_ADMIN_PROTECTED
+                            : membership.reason || undefined
+                        }
                         loading={removingEmail === m.email}
                         loadingLabel="Removing…"
                         onClick={() => void remove(m.email)}
@@ -575,7 +594,8 @@ export function TeamSettings() {
                         Remove
                       </Button>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

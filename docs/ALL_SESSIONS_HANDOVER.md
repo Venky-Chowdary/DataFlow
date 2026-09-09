@@ -205,9 +205,16 @@ Validate going forward hashes the source engine. Live parked stamp rematches
 (`create_new_stamp_matches_schedule` True). Does **not** close DST / overlap /
 retries / 100K / cancellation.
 
+Last-admin Remove / demote is closed on this tree
+(`cursor/last-admin-remove-1673`): Settings Team used to offer Remove and a
+role change on the only admin, then toast the API refusal. The control now
+uses the same predicate as ``team_store._assert_not_last_admin``. Does **not**
+close Evidence / Operations / Contracts / Proofs, G19, or Mongo.
+
 Still unmeasured for a client: schedule retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
+pages, remaining workspace-role QA, G19 reachability, and the Mongo and MinIO
+routes.
 
 ---
 
