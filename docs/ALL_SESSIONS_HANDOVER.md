@@ -167,15 +167,21 @@ the exported pack (**D23**); and the MySQL COPY fast paths raised the absence of
 `os.mkfifo` out of the fast path instead of declining it, so the row-writer
 fallback never ran and the destination was created empty (**D24**).
 
-Still open, and a client has to be told: a freshly exported proof pack fails the
-product's own **verify** control (`content_sha256` / HMAC / chain-anchor,
-**D25**); a destination-type override is lost on a Map → Validate → Map round
-trip (**D26**); and the Gate-8 card on a *completed* Theater is unproven because
-the active job is cleared the moment the run finishes, so that surface is
-transient by construction. Schedules/retries/overlap/DST, cancellation,
+D25 (signed proof-pack verify) and D26 (Map dest-type override lost on a
+round-trip) closed in register §6 — do not treat this paragraph as open.
+
+The Gate-8 card on a *completed* Theater is now a settled surface
+(`cursor/theater-complete-gate8-1673`, PR #184): `handleJobComplete` keeps
+`activeJobId`, so Theater stays mounted and Gate-8 renders in place. Browser
+2026-09-09: CSV 3 rows → Postgres `theater_g8_keep`, independent `psql`
+`COUNT(*)=3`, Theater still mounted after >4s, result dashboard absent, toast
+"Gate-8 proof stays on Job Theater.", verdict "Append delta verified —
+whole-table checksums not comparable" (create-new append-delta honesty, not
+full checksum). `apps/web` `npm test` 941 passed; `npm run build` clean.
+
+Still unmeasured for a client: schedules/retries/overlap/DST, cancellation,
 quarantine and replay, the Evidence Chain / Operations / Contracts / Proofs
-pages, workspace roles, G19 reachability, and the Mongo and MinIO routes were
-untouched by this wave and remain unmeasured.
+pages, workspace roles, G19 reachability, and the Mongo and MinIO routes.
 
 ---
 
