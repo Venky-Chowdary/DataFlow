@@ -104,6 +104,67 @@ def test_apply_manifest_binds_workspace_and_refuses_foreign_update(tmp_path, mon
     assert still.name == "theirs"
 
 
+def test_apply_manifest_binds_contract_workspace_and_refuses_foreign_update(tmp_path, monkeypatch):
+    """A pasted DataContract UUID is not enough to overwrite another tenant."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json"))
+    import services.contract_store as cs
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    from importlib import reload
+    from services.data_contract import ColumnRule, ContractStatus, DataContract
+
+    reload(pc)
+    reload(cs)
+    reload(gm)
+
+    store = cs.get_contract_store()
+    foreign = DataContract(
+        name="theirs-agreement",
+        columns=[ColumnRule(source_name="id", target_name="id", source_type="INTEGER", target_type="INTEGER")],
+        metadata={"workspace_id": "ws-b"},
+    )
+    store.save_contract(foreign)
+
+    result = gm.apply_manifest(
+        {
+            "kind": "DataContract",
+            "spec": {
+                "id": foreign.id,
+                "name": "hijack",
+                "columns": [
+                    {"source_name": "id", "target_name": "id", "source_type": "INTEGER", "target_type": "INTEGER"}
+                ],
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert result["failed"] == 1
+    still = store.get_contract(foreign.id)
+    assert still is not None
+    assert still.name == "theirs-agreement"
+    assert still.status == ContractStatus.DRAFT
+    assert (still.metadata or {}).get("workspace_id") == "ws-b"
+
+    created = gm.apply_manifest(
+        {
+            "kind": "DataContract",
+            "spec": {
+                "name": "ours-agreement",
+                "columns": [
+                    {"source_name": "id", "target_name": "id", "source_type": "INTEGER", "target_type": "INTEGER"}
+                ],
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert created["applied"] == 1
+    ours_id = created["results"][0]["id"]
+    ours = store.get_contract(ours_id)
+    assert ours is not None
+    assert (ours.metadata or {}).get("workspace_id") == "ws-a"
+
+
 def test_contract_artifact_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     from services.data_contract import DataContract

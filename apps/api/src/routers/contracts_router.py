@@ -93,6 +93,32 @@ def _contract_to_response(contract: DataContract) -> _ContractResponse:
     return _ContractResponse(**contract.to_dict())
 
 
+def _scoped_contract(
+    request: Request,
+    contract_id: str,
+    workspace_id: str,
+    *,
+    write: bool = False,
+) -> DataContract:
+    """Load a contract the caller may see in this workspace — or 404.
+
+    List already filters by ``X-Workspace-Id``. Id-addressed sign / deprecate /
+    export / breaker must use the same tenant boundary, or a UUID is enough to
+    flip another workspace's agreement.
+    """
+    if write:
+        resolve_write_workspace(request, workspace_id)
+    else:
+        resolve_read_workspace(request, workspace_id)
+    store = get_contract_store()
+    contract = store.get_contract(contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    meta = getattr(contract, "metadata", None) or {}
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
+    return contract
+
+
 @router.get("", response_model=_ContractListResponse)
 def list_contracts(
     request: Request,
@@ -204,24 +230,20 @@ def get_contract(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    resolve_read_workspace(request, workspace_id)
-    store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
-    meta = getattr(contract, "metadata", None) or {}
-    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
-    return _contract_to_response(contract)
+    return _contract_to_response(_scoped_contract(request, contract_id, workspace_id))
 
 
 @router.post("/{contract_id}/sign", response_model=_ContractResponse)
-def sign_contract(contract_id: str, body: _SignRequest):
+def sign_contract(
+    contract_id: str,
+    body: _SignRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     from datetime import datetime, timezone
 
+    contract = _scoped_contract(request, contract_id, workspace_id, write=True)
     store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
     prior = getattr(contract.status, "value", str(contract.status))
     meta = dict(getattr(contract, "metadata", None) or {})
     revisions = list(meta.get("revisions") or [])
@@ -259,13 +281,8 @@ def sign_contract(contract_id: str, body: _SignRequest):
 @router.get("/{contract_id}/history")
 def contract_history(contract_id: str, request: Request, workspace_id: str = Header(default="", alias="X-Workspace-Id")):
     """Return schema-agreement revision snapshots (not cryptographic signatures)."""
-    resolve_read_workspace(request, workspace_id)
-    store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = _scoped_contract(request, contract_id, workspace_id)
     meta = getattr(contract, "metadata", None) or {}
-    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
     revisions = list(meta.get("revisions") or [])
     return {
         "contract_id": contract_id,
@@ -280,29 +297,38 @@ def contract_history(contract_id: str, request: Request, workspace_id: str = Hea
 
 
 @router.post("/{contract_id}/deprecate", response_model=_ContractResponse)
-def deprecate_contract(contract_id: str):
+def deprecate_contract(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = _scoped_contract(request, contract_id, workspace_id, write=True)
     contract.status = ContractStatus.DEPRECATED
     store.save_contract(contract)
     return _contract_to_response(contract)
 
 
 @router.get("/{contract_id}/breaker", response_model=_BreakerResponse)
-def get_breaker(contract_id: str):
+def get_breaker(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    _scoped_contract(request, contract_id, workspace_id)
     store = get_contract_store()
     breaker = store.get_breaker(contract_id)
     return _BreakerResponse(**breaker.to_dict())
 
 
 @router.post("/{contract_id}/breaker/reset", response_model=_BreakerResponse)
-def reset_breaker(contract_id: str):
+def reset_breaker(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = _scoped_contract(request, contract_id, workspace_id, write=True)
     breaker = store.get_breaker(contract_id)
     breaker.state = BreakerState.CLOSED
     breaker.failure_count = 0
@@ -316,11 +342,12 @@ def reset_breaker(contract_id: str):
 
 
 @router.post("/test", response_model=_ContractTestResponse)
-def test_contract(body: _ContractTestRequest):
-    store = get_contract_store()
-    contract = store.get_contract(body.contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+def test_contract(
+    body: _ContractTestRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    contract = _scoped_contract(request, body.contract_id, workspace_id)
     from ..transfer.models import EndpointConfig, TransferRequest
 
     request = TransferRequest(
@@ -336,14 +363,16 @@ def test_contract(body: _ContractTestRequest):
 
 
 @router.get("/{contract_id}/export")
-def export_contract(contract_id: str, format: Literal["yaml", "json"] = "yaml"):
+def export_contract(
+    contract_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    format: Literal["yaml", "json"] = "yaml",
+):
     """Export a contract as ``dataflow-contract.yaml`` (kind + metadata + spec)."""
     from services.gitops_manifest import contract_artifact
 
-    store = get_contract_store()
-    contract = store.get_contract(contract_id)
-    if not contract:
-        raise HTTPException(status_code=404, detail="Contract not found")
+    contract = _scoped_contract(request, contract_id, workspace_id)
     artifact = contract_artifact(contract)
     if format == "yaml":
         return Response(
@@ -355,19 +384,27 @@ def export_contract(contract_id: str, format: Literal["yaml", "json"] = "yaml"):
 
 
 @router.post("/import", response_model=_ContractResponse)
-def import_contract(payload: dict[str, Any]):
+def import_contract(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Import a contract from YAML/JSON (raw or DataContract kind wrapper).
 
     Imported contracts are saved as DRAFT — sign before enforcing on schedules.
     """
-    from services.gitops_manifest import apply_manifest
+    from services.gitops_manifest import apply_manifest, bind_contract_workspace
+
+    ws = resolve_write_workspace(request, workspace_id)
 
     # Accept bare contract dicts and kind-wrapped artifacts.
     if payload.get("kind") == "DataContract" or payload.get("kind") == "DatawrapManifest":
-        result = apply_manifest(payload, dry_run=False)
+        result = apply_manifest(payload, dry_run=False, workspace_id=ws)
         rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
         if not rows:
             err = next((r.get("error") for r in (result.get("results") or []) if r.get("error")), None)
+            if err and "another workspace" in str(err).lower():
+                raise HTTPException(status_code=404, detail="Not found")
             raise HTTPException(status_code=422, detail=err or "Invalid contract payload")
         store = get_contract_store()
         contract = store.get_contract(str(rows[0].get("id") or ""))
@@ -380,6 +417,11 @@ def import_contract(payload: dict[str, Any]):
         contract = DataContract.from_dict(payload.get("spec") if isinstance(payload.get("spec"), dict) else payload)
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Invalid contract payload: {exc}") from exc
+    existing = store.get_contract(contract.id) if contract.id else None
+    try:
+        bind_contract_workspace(contract, ws, existing=existing)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Not found") from exc
     contract.status = ContractStatus.DRAFT
     store.save_contract(contract)
     return _contract_to_response(contract)
