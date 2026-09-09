@@ -761,7 +761,10 @@ class DataPilotAgent:
             greet = compose_greeting_response(ctx)
             if not greet.suggested_prompts:
                 greet.suggested_prompts = self._starter_prompts()[:4]
-            return greet
+            # Hybrid/cloud key-rejection is said once on hello — not after every
+            # workspace answer. The greeting return used to skip this wrapper,
+            # so the footnote was dead (method==greeting never reached it).
+            return _with_llm_footnote(greet, _resolve_pilot_engine())
 
         # Recap / thanks / next-step over the last spoken answer — do this before
         # tool routing so "summarize that" after a job list does not re-hit Mongo.
@@ -1927,7 +1930,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     pending_labels=pending_labels or None,
                 )
             if act == "greeting":
-                return compose_greeting_response(ctx)
+                return _with_llm_footnote(
+                    compose_greeting_response(ctx), _resolve_pilot_engine()
+                )
             if act == "briefing":
                 planned = [("brief_workspace", {})]
             elif act == "general":

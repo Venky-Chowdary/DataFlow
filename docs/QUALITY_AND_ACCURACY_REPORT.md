@@ -29,9 +29,10 @@ worktree and seven fail there identically, so they are not from that wave:
   DATETIME(6)` is refused as a fidelity collapse on the PostgreSQL→MySQL and
   →Redis typed routes. **This one is a real product defect**, still open: an
   instant landing in an instant carrier should not need a Risk Contract.
-* `test_pilot_llm_wave41::test_hybrid_footnote_on_auth_failure` passes on its own
-  and in its own file; it only fails inside the whole-suite order, so provider
-  state leaks between tests. Open as a test-isolation defect.
+* ~~`test_pilot_llm_wave41::test_hybrid_footnote_on_auth_failure`~~ **Closed.**
+  Greeting now wraps `_with_llm_footnote`; the test autouses `clear_auth_failures()`
+  and stubs a dead narration provider. The footnote is greeting-only — workspace
+  answers stay unfootnoted. 21 passed across wave 39/40/41/43.
 
 The two remaining failures at the second checkpoint were:
 
