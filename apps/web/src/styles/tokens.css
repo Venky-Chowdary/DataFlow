@@ -190,7 +190,7 @@
      surface picks one of them, and nothing hardcodes its own height:
        action        --df-btn-height / -sm / -lg
        field         --df-control-height / -sm
-       tab           --df-tab-height
+       tab / segment --df-tab-height  (== --df-control-height — same rung)
        icon-only     --df-icon-btn-size
        chip / pill   --df-chip-height
        inline action --df-inline-action-h (min hit target --df-min-target) */
@@ -200,7 +200,10 @@
   --df-control-height: 36px;
   --df-control-height-sm: 32px;
   --df-toolbar-h: var(--df-btn-height);
-  --df-tab-height: 34px;
+  /* Same rung as fields and default buttons so Mode / write / FilterTabs /
+     Advanced never sit on three different baselines. Density media only
+     retunes --df-control-height; this alias follows. */
+  --df-tab-height: var(--df-control-height);
   --df-icon-btn-size: 28px;
   --df-chip-height: 28px;
   --df-inline-action-h: 24px;
@@ -267,6 +270,20 @@
   --df-shadow-sm: 0 1px 3px rgba(17, 24, 39, 0.06), 0 1px 2px rgba(17, 24, 39, 0.04);
   --df-shadow-md: 0 4px 12px rgba(17, 24, 39, 0.08);
   --df-shadow-lg: 0 12px 32px rgba(17, 24, 39, 0.1);
+
+  /* Segment / FilterTabs / dest-mode — one track language. Dark theme remaps
+     these aliases (and the surface/ink primitives they read), never a second
+     `.df2-tab-dark` rule set. */
+  --df-seg-track: color-mix(in srgb, var(--df-bg-subtle) 82%, var(--df-surface));
+  --df-seg-active: var(--df-surface);
+  --df-seg-ink: var(--df-text-secondary);
+  --df-seg-ink-active: var(--df-brand-strong);
+  --df-seg-border: var(--df-border);
+  --df-seg-pad: 3px;
+  --df-seg-gap: 2px;
+  --df-seg-radius: var(--df-radius-md);
+
+  color-scheme: light;
 
   /* dt-* aliases */
   --dt-obsidian: var(--df-navy-900);
@@ -434,6 +451,9 @@ body:has(.df2-app) #root {
   font-family: var(--df-font-sans);
   font-size: var(--df-fs-md);
   color: var(--df-text-primary);
+  /* Re-bind so density overrides to --df-control-height on this node
+     retune tabs. A :root `var()` computes once and would inherit 36px. */
+  --df-tab-height: var(--df-control-height);
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
@@ -444,7 +464,6 @@ body:has(.df2-app) #root {
     --df-btn-height-lg: 36px;
     --df-control-height: 32px;
     --df-control-height-sm: 28px;
-    --df-tab-height: 32px;
     --df-icon-btn-size: 26px;
     --df-chip-height: 26px;
     --df-header-height: 52px;
@@ -550,6 +569,42 @@ body:has(.df2-app) #root {
     --df-list-row-icon: 16px;
     --df-list-row-action: 26px;
   }
+}
+
+/* Dark theme — remap primitives only. Component rules keep reading --df-*.
+   Opt-in via `data-theme="dark"` on <html> (or `.df2-theme-dark`). Do not
+   add a parallel dark stylesheet; that is how overlap broke the shell. */
+[data-theme="dark"],
+.df2-theme-dark {
+  color-scheme: dark;
+  --df-bg-canvas: #0c1219;
+  --df-bg-subtle: #121a24;
+  --df-surface: #161e29;
+  --df-surface-raised: #1c2533;
+  --df-surface-muted: #1a2330;
+  --df-surface-tint: rgba(13, 148, 136, 0.1);
+  --df-border: #2a3544;
+  --df-border-strong: #3a4658;
+  --df-text-primary: #e8eef5;
+  --df-text-secondary: #9aa8b8;
+  --df-text-tertiary: #6b7a8c;
+  --df-text-muted: #8a97a8;
+  --df-brand-muted: rgba(13, 148, 136, 0.16);
+  --df-brand-soft: rgba(20, 184, 166, 0.22);
+  --df-brand-subtle: rgba(13, 148, 136, 0.12);
+  --df-success-bg: rgba(5, 150, 105, 0.14);
+  --df-warning-bg: rgba(217, 119, 6, 0.14);
+  --df-danger-bg: rgba(220, 38, 38, 0.14);
+  --df-info-bg: rgba(2, 132, 199, 0.14);
+  --df-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.32);
+  --df-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.36), 0 1px 2px rgba(0, 0, 0, 0.24);
+  --df-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --df-shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.48);
+  --df-scrollbar-thumb: color-mix(in srgb, #94a3b8 32%, transparent);
+  --df-scrollbar-thumb-hover: color-mix(in srgb, #94a3b8 50%, transparent);
+  --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
+  --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
+  --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 70%, var(--df-surface));
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -47,8 +47,8 @@
 .df2-app select.df2-select {
   box-sizing: border-box;
   width: 100%;
-  min-height: 40px;
-  border-radius: 8px;
+  min-height: var(--df-control-height);
+  border-radius: var(--df-radius-md);
 }
 
 .df2-app .df2-field {
