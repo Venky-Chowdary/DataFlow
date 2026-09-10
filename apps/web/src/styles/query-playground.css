@@ -283,7 +283,7 @@
   padding: 4px 10px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 7px;
-  background: #fff;
+  background: var(--df-surface);
   color: var(--df-text-secondary, #475569);
   font-size: 12px;
   font-weight: 600;

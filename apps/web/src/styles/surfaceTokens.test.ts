@@ -174,4 +174,37 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-app \.df2-glass-panel,[\s\S]{0,80}--df-surface/);
     assert.doesNotMatch(polish, /\.df2-app \.df2-glass-panel,[\s\S]{0,80}#fff !important/);
   });
+
+  it("Query / Docs / Settings / MCP hosts do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+    const mcp = sheet("mcp-enterprise.css");
+    const settings = sheet("settings-enterprise.css");
+    const docs = sheet("docs-page.css");
+    const query = sheet("query-playground.css");
+
+    assert.match(
+      ui,
+      /\.df2-page-docs \.df2-docs-panel \{[\s\S]{0,160}--df-surface/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-page-pipelines \.df2-glass-panel,[\s\S]{0,200}background: #fff;/,
+    );
+    assert.match(ui, /\.df2-mcp-endpoint-card \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-mcp-endpoint-card \{[\s\S]{0,360}linear-gradient\(180deg, #f0fdfa/);
+    assert.match(ui, /\.df2-chart-placeholder-caption \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-chart-placeholder-caption \{[\s\S]{0,280}255, 255, 255/);
+
+    assert.match(mcp, /\.df2-mcp-panel \{[\s\S]{0,140}--df-surface/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-panel \{[\s\S]{0,140}background: #fff;/);
+    assert.match(mcp, /\.df2-mcp-hero \{[\s\S]{0,320}--df-surface/);
+    assert.match(settings, /\.df2-settings-summary-item \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(settings, /\.df2-settings-summary-item \{[\s\S]{0,160}background: #fff;/);
+    assert.match(settings, /\.df2-settings-log-level--warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(docs, /\.df2-page-docs \.df2-docs-architecture \{[\s\S]{0,80}--df-surface/);
+    assert.match(docs, /\.docs-space \{[\s\S]{0,520}--df-surface/);
+    assert.match(docs, /\.docs-space-main \{[\s\S]{0,180}--df-surface/);
+    assert.doesNotMatch(docs, /\.docs-space-main \{[\s\S]{0,180}background: #fff;/);
+    assert.match(query, /\.df2-query-editor-action \{[\s\S]{0,200}--df-surface/);
+  });
 });

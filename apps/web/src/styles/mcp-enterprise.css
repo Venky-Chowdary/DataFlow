@@ -11,7 +11,7 @@
   padding: 20px 22px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: linear-gradient(135deg, #f0fdfa 0%, #fff 55%);
+  background: linear-gradient(135deg, var(--df-brand-muted) 0%, var(--df-surface) 55%);
 }
 
 .df2-mcp-hero-copy h2 {
@@ -35,7 +35,7 @@
   gap: 10px;
   padding: 10px 14px;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--df-line, #e2e8f0);
 }
 
@@ -53,7 +53,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mcp-layout {
@@ -66,7 +66,7 @@
 .df2-mcp-panel {
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   overflow: visible;
 }
 
@@ -128,7 +128,7 @@
   padding: 10px 12px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mcp-integration-row .df2-cell-main {
@@ -172,7 +172,7 @@
   padding: 10px 12px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   min-height: 0;
   height: fit-content;
 }
@@ -215,7 +215,7 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #64748b;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-mcp-log-status {
@@ -227,12 +227,12 @@
 }
 
 .df2-mcp-log-status--ok {
-  background: #ecfdf5;
+  background: var(--df-success-bg);
   color: #047857;
 }
 
 .df2-mcp-log-status--err {
-  background: #fef2f2;
+  background: var(--df-danger-bg);
   color: #b91c1c;
 }
 
