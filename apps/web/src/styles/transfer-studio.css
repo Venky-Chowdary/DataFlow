@@ -1424,7 +1424,7 @@
 }
 
 .df2-transfer-step-secondary {
-  border-left: 1px solid #f1f5f9;
+  border-left: 1px solid var(--df-border);
   padding-left: 12px;
 }
 
@@ -1536,7 +1536,7 @@
   text-align: center;
   gap: 12px;
   min-height: 280px;
-  color: #64748b;
+  color: var(--df-text-muted);
   font-size: 13px;
 }
 
@@ -2641,9 +2641,9 @@ th.df2-type-string .df2-type-badge {
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px;
-  border: 1px solid #99f6e4;
+  border: 1px solid var(--df-border-brand);
   border-radius: 8px;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+  background: var(--df-brand-muted);
 }
 .df2-upload-result-compact .df2-upload-result-main {
   display: flex;
@@ -4483,11 +4483,11 @@ th.df2-type-string .df2-type-badge {
 
 .df2-transfer-step-panel .df2-label-hint,
 .df2-upload-hint {
-  color: #64748b;
+  color: var(--df-text-muted);
 }
 
 .df2-upload-title {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
 }
 
@@ -10656,9 +10656,9 @@ button.df2-vd-assist-toggle:focus-visible {
   min-height: 52px !important;
   margin: 0 !important;
   padding: 8px 10px !important;
-  border: 1px solid #e2e8f0 !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: var(--df-radius-md, 8px) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   background-clip: padding-box !important;
   box-shadow: none !important;
   outline: none !important;
@@ -10676,8 +10676,8 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card.active {
-  border-color: #0f766e !important;
-  background: #f0fdfa !important;
+  border-color: var(--df-brand) !important;
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card-icon {
@@ -10833,12 +10833,12 @@ button.df2-vd-assist-toggle:focus-visible {
   min-height: 40px !important;
   max-height: 40px !important;
   padding: 0 8px !important;
-  border: 1px solid #e2e8f0 !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: var(--df-radius-sm, 6px) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   font-size: 11.5px !important;
   font-weight: 600 !important;
-  color: #334155 !important;
+  color: var(--df-text-secondary) !important;
   cursor: pointer !important;
   overflow: hidden !important;
   box-sizing: border-box !important;
@@ -10856,9 +10856,9 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 .df2-page-transfer-studio .df2-dest-engine-tile.active {
-  border-color: #0f766e !important;
-  background: #f0fdfa !important;
-  color: #0f766e !important;
+  border-color: var(--df-brand) !important;
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand) !important;
 }
 
 /* Compact single-line search — never a tall empty panel. */
@@ -10872,9 +10872,9 @@ button.df2-vd-assist-toggle:focus-visible {
   min-height: 32px !important;
   max-height: 32px !important;
   padding: 0 8px !important;
-  border: 1px solid #e2e8f0 !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: var(--df-radius-md, 8px) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   margin: 0 !important;
   box-sizing: border-box !important;
 }

@@ -1702,9 +1702,9 @@ body {
 /* ─── Wizard & upload zones ─── */
 
 .df2-upload {
-  border: 1.5px dashed #cbd5e1 !important;
-  background: #ffffff !important;
-  color: #475569 !important;
+  border: 1.5px dashed var(--df-border-strong) !important;
+  background: var(--df-surface) !important;
+  color: var(--df-text-secondary) !important;
   border-radius: 10px;
   padding: 28px 20px !important;
   transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
@@ -1732,15 +1732,15 @@ body {
 
 .df2-upload:hover,
 .df2-upload.drag-over {
-  border-color: #0f766e !important;
-  background: #f0fdfa !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.08);
+  border-color: var(--df-brand) !important;
+  background: var(--df-brand-muted) !important;
+  box-shadow: 0 0 0 3px var(--df-brand-ring);
 }
 
 .df2-upload.has-file {
   border-style: solid !important;
-  border-color: #99f6e4 !important;
-  background: #f0fdfa !important;
+  border-color: var(--df-border-brand) !important;
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-upload.is-loading {
@@ -1749,13 +1749,13 @@ body {
 }
 
 .df2-upload-title {
-  color: #0f172a !important;
+  color: var(--df-text-primary) !important;
   font-size: 14px !important;
   font-weight: 600 !important;
 }
 
 .df2-upload-hint {
-  color: #64748b !important;
+  color: var(--df-text-muted) !important;
   font-size: 12px !important;
 }
 
@@ -1774,17 +1774,17 @@ body {
   text-transform: uppercase;
   padding: 3px 8px;
   border-radius: 999px;
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
-  color: #64748b;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-upload-result {
   margin-top: 12px;
   padding: 12px 14px;
-  border: 1px solid #d1fae5;
+  border: 1px solid var(--df-success-border);
   border-radius: 10px;
-  background: linear-gradient(180deg, #f0fdf4, #ffffff);
+  background: var(--df-success-bg);
   animation: df2-fade-in 200ms ease-out;
 }
 
@@ -1798,7 +1798,7 @@ body {
 
 .df2-upload-result-meta {
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-muted);
 }
 
 .df2-upload-result-cols {
@@ -1811,16 +1811,16 @@ body {
   font-size: 11px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
-  color: #065f46;
+  background: var(--df-success-bg);
+  border: 1px solid var(--df-success-border);
+  color: var(--df-success);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .df2-upload-col-chip.muted {
-  background: #f1f5f9;
-  border-color: #e2e8f0;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+  color: var(--df-text-muted);
 }
 
 .df2-alert-error {

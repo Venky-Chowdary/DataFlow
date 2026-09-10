@@ -51,4 +51,17 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(premium, /\.df2-pulse-dot[\s\S]{0,80}--df-brand/);
     assert.doesNotMatch(premium, /#2563eb/);
   });
+
+  it("Transfer Source upload and kind tiles do not flatten to #fff", () => {
+    const platform = sheet("enterprise-platform.css");
+    const polish = sheet("shell-polish.css");
+    const studio = sheet("transfer-studio.css");
+    assert.match(platform, /\.df2-upload \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(platform, /\.df2-upload \{[\s\S]{0,220}#ffffff !important/);
+    assert.match(polish, /\.df2-source-kind-tile \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-source-kind-tile \{[\s\S]{0,280}linear-gradient\(180deg, #fff/);
+    assert.match(polish, /\.df2-structure-preview \{[\s\S]{0,220}--df-surface-muted/);
+    assert.match(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}background: #fff !important/);
+  });
 });
