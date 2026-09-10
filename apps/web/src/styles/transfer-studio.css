@@ -3169,7 +3169,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-dest-advanced-drawer .df2-policy-option.active {
   border-color: rgba(15, 118, 110, 0.45);
-  background: rgba(15, 118, 110, 0.06);
+  background: var(--df-brand-muted);
 }
 .df2-dest-advanced-drawer .df2-policy-option strong {
   display: block;

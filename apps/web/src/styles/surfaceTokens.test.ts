@@ -472,5 +472,6 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(dataflow, /\.df2-policy-option\.active \{[\s\S]{0,80}#f0fdfa/);
     assert.match(dataflow, /\.df2-policy-console \{[\s\S]{0,160}--df-surface/);
     assert.doesNotMatch(dataflow, /rgba\(255, 255, 255, 0\.95\)/);
+    assert.match(dataflow, /\.df2-app \.df2-policy-option\.active \{[\s\S]{0,80}--df-brand-muted/);
   });
 });

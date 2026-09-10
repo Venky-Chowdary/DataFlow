@@ -4858,6 +4858,10 @@ body {
   border: 1px solid var(--df-border, #e2e8f0) !important;
 }
 
+.df2-app .df2-policy-option.active {
+  background: var(--df-brand-muted) !important;
+}
+
 .df2-app :is(
   .df2-card,
   .df2-stat,
