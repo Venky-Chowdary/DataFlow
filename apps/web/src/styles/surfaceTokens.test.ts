@@ -116,4 +116,23 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(map, /\.df2-column-review-editor \{[\s\S]{0,220}background: #fff;/);
     assert.match(map, /\.df2-map-step-metric \{[\s\S]{0,200}--df-surface/);
   });
+
+  it("Validate inner proof cards do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    assert.match(studio, /\.df2-vd-diff \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-diff \{[\s\S]{0,120}background: #fff;/);
+    assert.match(studio, /\.df2-vd-coerce \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce \{[\s\S]{0,120}background: #fff;/);
+    assert.match(studio, /\.df2-vd-chip \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-chip \{[\s\S]{0,220}background: #ffffff;/);
+    assert.doesNotMatch(studio, /\.df2-vd-chip \.dt-nav-icon \{[^}]*#2563eb/);
+    assert.match(studio, /\.df2-vd-explain-issues li \{[\s\S]{0,140}--df-surface/);
+    assert.match(studio, /\.df2-vd-explain-issues li\.sev-warning[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-explain-issues li\.sev-block[\s\S]{0,80}--df-danger-bg/);
+    assert.match(studio, /\.df2-vd-decision-path-steps li \{[\s\S]{0,180}--df-surface/);
+    assert.match(studio, /\.df2-vd-decision-path\.is-blocked[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-hs-metric \{[\s\S]{0,180}--df-surface/);
+    assert.match(studio, /\.df2-vd-coerce-row\.sev-warn \{[^}]*--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-map-proof-kpis > div \{[\s\S]{0,120}--df-surface/);
+  });
 });
