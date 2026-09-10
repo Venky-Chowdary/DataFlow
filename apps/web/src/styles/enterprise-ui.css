@@ -1356,7 +1356,7 @@
 
 .df2-gate8-proof {
   border: 1px solid #d1fae5;
-  background: linear-gradient(180deg, #ecfdf5 0%, #fff 70%);
+  background: var(--df-success-bg);
   border-radius: var(--df-radius-card, 8px);
   padding: 14px 16px;
   margin-bottom: 14px;
@@ -1364,7 +1364,7 @@
 
 .df2-gate8-proof.is-fail {
   border-color: #fecaca;
-  background: linear-gradient(180deg, #fef2f2 0%, #fff 70%);
+  background: var(--df-danger-bg);
 }
 
 .df2-gate8-proof-head {
@@ -1495,7 +1495,7 @@
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 8px;
-  background: #fff7ed;
+  background: var(--df-warning-bg);
   border: 1px solid #fed7aa;
 }
 
@@ -1853,17 +1853,17 @@
 
 .df2-jobs-evidence-chip.tone-ok {
   border-color: #86efac;
-  background: #f0fdf4;
+  background: var(--df-success-bg);
 }
 
 .df2-jobs-evidence-chip.tone-warn {
   border-color: #fcd34d;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 
 .df2-jobs-evidence-chip.tone-danger {
   border-color: #fca5a5;
-  background: #fef2f2;
+  background: var(--df-danger-bg);
 }
 
 .df2-jobs-evidence-chip-label {
@@ -2029,7 +2029,7 @@
   padding: 12px 14px;
   border: 1px solid #fde68a;
   border-radius: 10px;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   font-size: 13px;
   line-height: 1.5;
   color: #78350f;
@@ -2489,7 +2489,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-v3-alert.error {
-  background: #fef2f2;
+  background: var(--df-danger-bg);
   border-color: #fecaca;
   color: #991b1b;
 }
@@ -3270,9 +3270,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #475569;
 }
 
-.df2-status-metric-pill.ok { background: #ecfdf5; color: #059669; }
-.df2-status-metric-pill.warn { background: #fef2f2; color: #dc2626; }
-.df2-status-metric-pill.live { background: #f0fdfa; color: #0f766e; }
+.df2-status-metric-pill.ok { background: var(--df-success-bg); color: #059669; }
+.df2-status-metric-pill.warn { background: var(--df-danger-bg); color: #dc2626; }
+.df2-status-metric-pill.live { background: var(--df-brand-muted); color: #0f766e; }
 
 .df2-status-popover-actions {
   display: flex;
@@ -3405,12 +3405,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 /* Connectors: restore status colors in list context */
 .df2-connectors-list .df2-connector-card.error {
   border-color: #fecaca !important;
-  background: linear-gradient(180deg, #fef2f2 0%, #fff 100%) !important;
+  background: var(--df-danger-bg) !important;
 }
 
 .df2-connectors-list .df2-connector-card.selected {
   border-color: var(--df-brand, #0f766e) !important;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 72%) !important;
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-connectors-list .df2-badge-live {
@@ -4240,13 +4240,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-mcp-status-pill.is-online {
   color: #047857;
-  background: #ecfdf5;
+  background: var(--df-success-bg);
   border: 1px solid #a7f3d0;
 }
 
 .df2-mcp-status-pill.is-offline {
   color: #b45309;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   border: 1px solid #fde68a;
 }
 
@@ -4520,7 +4520,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 14px 16px;
   border: 1px solid #c7e7e2;
   border-radius: 12px;
-  background: linear-gradient(180deg, #f0fdfa 0%, #ffffff 72%);
+  background: var(--df-surface);
   overflow: hidden;
 }
 
@@ -4617,12 +4617,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-preflight.is-compact .df2-preflight-step.pass {
   border-color: #a7f3d0 !important;
-  background: #f0fdf4 !important;
+  background: var(--df-success-bg) !important;
 }
 
 .df2-preflight.is-compact .df2-preflight-step.block {
   border-color: #fecaca !important;
-  background: #fef2f2 !important;
+  background: var(--df-danger-bg) !important;
 }
 
 .df2-preflight.is-compact .df2-preflight-step.running {
@@ -4651,7 +4651,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-top: 8px;
   border: 1px solid #fecaca;
   border-radius: 10px;
-  background: #fff7f7;
+  background: var(--df-danger-bg);
   overflow: hidden;
 }
 
@@ -4790,7 +4790,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 10px 12px;
   border: 1px solid #a7f3d0;
   border-radius: 10px;
-  background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 100%);
+  background: var(--df-success-bg);
 }
 
 .df2-run-readiness-head {
@@ -4876,7 +4876,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   justify-content: center !important;
   gap: 10px;
   overflow: hidden !important;
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  background: var(--df-surface);
 }
 
 .df2-run-starting-hint {
@@ -5011,7 +5011,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 10px 12px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  background: var(--df-surface);
 }
 
 .df2-theater-v3-progress-top {
@@ -5754,7 +5754,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 12px 14px;
   border: 1px solid #bbf7d0;
   border-radius: 10px;
-  background: #f0fdf4;
+  background: var(--df-success-bg);
 }
 
 .df2-result-proof-head,
@@ -5818,7 +5818,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 14px 16px;
   border-radius: 10px;
   border: 1px solid #fecaca;
-  background: #fef2f2;
+  background: var(--df-danger-bg);
 }
 
 .df2-jobs-v3-failure-head {
@@ -5899,7 +5899,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   border: 1px solid #fcd34d;
   border-radius: 12px;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   overflow: hidden;
   min-height: 200px;
 }
@@ -5996,7 +5996,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid #fde68a;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 
 .df2-quarantine-explainer strong {
@@ -6049,7 +6049,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-quarantine-next-copy p.df2-quarantine-durable-warn {
   color: #9a3412;
-  background: #fff7ed;
+  background: var(--df-warning-bg);
   border: 1px solid #fdba74;
   border-radius: 8px;
   padding: 10px 12px;
@@ -6105,7 +6105,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--df-border, #e6e9ee);
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 
 .df2-quarantine-summary-chip {
@@ -7863,7 +7863,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 14px;
   border-radius: 12px;
   border: 1px solid #fcd34d;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   color: #78350f;
 }
 
@@ -8044,11 +8044,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 .df2-conn-probe.is-ok {
   border-color: rgba(5, 150, 105, 0.28);
-  background: #ecfdf5;
+  background: var(--df-success-bg);
 }
 .df2-conn-probe.is-fail {
   border-color: rgba(220, 38, 38, 0.28);
-  background: #fef2f2;
+  background: var(--df-danger-bg);
 }
 .df2-conn-probe-head {
   display: flex;
@@ -9396,18 +9396,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-overview-v3 .df2-metric-glass-teal {
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 88%, #fff) 0%, #fff 72%);
+  background: var(--df-brand-muted);
   border-color: color-mix(in srgb, var(--df-brand, #0d9488) 18%, var(--df-border, #e2e8f0));
 }
 
 .df2-overview-v3 .df2-metric-glass-green {
-  background: linear-gradient(180deg, #ecfdf5 0%, #fff 72%);
+  background: var(--df-success-bg);
   border-color: color-mix(in srgb, var(--df-success, #059669) 18%, var(--df-border, #e2e8f0));
 }
 
 .df2-overview-v3 .df2-metric-glass-amber {
-  background: linear-gradient(180deg, #fffbeb 0%, #fff 72%);
+  background: var(--df-warning-bg);
   border-color: color-mix(in srgb, var(--df-warning, #d97706) 18%, var(--df-border, #e2e8f0));
 }
 
@@ -12963,4 +12962,63 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-overview-v3-ops-chip.is-fail {
   background: var(--df-danger-bg);
+}
+
+/* Warn / success leftover chips and white-ending gradients. */
+.df2-app .df2-validate-stage,
+.df2-app .df2-run-step > .df2-card-body.df2-run-starting,
+.df2-app .df2-theater-v3-progress-block {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-jobs-evidence-chip.tone-ok,
+.df2-app .df2-mcp-status-pill.is-online,
+.df2-app .df2-gate8-proof,
+.df2-app .df2-run-readiness,
+.df2-app .df2-result-proof,
+.df2-app .df2-status-metric-pill.ok,
+.df2-app .df2-conn-probe.is-ok {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-gate8-proof.is-fail {
+  background: var(--df-danger-bg);
+}
+
+.df2-app .df2-jobs-evidence-chip.tone-warn,
+.df2-app .df2-jobs-quarantine-meaning,
+.df2-app .df2-mcp-status-pill.is-offline,
+.df2-app .df2-gate8-proof-mismatches,
+.df2-app .df2-quarantine-inspect,
+.df2-app .df2-quarantine-explainer,
+.df2-app .df2-quarantine-durable-warn,
+.df2-app .df2-quarantine-summary,
+.df2-app .df2-jobs-v3-quarantine,
+.df2-app .df2-theater-v3-quarantine {
+  background: var(--df-warning-bg);
+}
+
+.df2-app .df2-jobs-evidence-chip.tone-danger,
+.df2-app .df2-jobs-v3-alert.error,
+.df2-app .df2-jobs-v3-failure-panel,
+.df2-app .df2-status-metric-pill.warn,
+.df2-app .df2-conn-probe.is-fail,
+.df2-app .df2-preflight-diagnostics.df2-disclosure {
+  background: var(--df-danger-bg);
+}
+
+.df2-app .df2-status-metric-pill.live {
+  background: var(--df-brand-muted);
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-teal {
+  background: var(--df-brand-muted) !important;
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-green {
+  background: var(--df-success-bg) !important;
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-amber {
+  background: var(--df-warning-bg) !important;
 }
