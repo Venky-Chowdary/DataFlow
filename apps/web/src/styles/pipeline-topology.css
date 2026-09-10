@@ -258,7 +258,7 @@
   padding: 12px 14px;
   border: 1px solid #fcd34d;
   border-radius: 10px;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   font-size: 13px;
   color: #92400e;
 }
