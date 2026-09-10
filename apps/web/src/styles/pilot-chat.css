@@ -5,7 +5,7 @@
   flex-direction: column;
   gap: 0;
   padding: 0;
-  background: #fff;
+  background: var(--df-surface);
   border: none;
   min-height: 0;
   flex: 1 1 0;
@@ -15,9 +15,9 @@
 .df2-pilot-v2 .df2-pilot-status-bar {
   padding: 8px 16px;
   border: none;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--df-border);
   border-radius: 0;
-  background: #fff;
+  background: var(--df-surface);
   margin-bottom: 0;
   font-size: 12px;
   gap: 8px;
@@ -41,14 +41,14 @@
   border: none !important;
   border-right: 1px solid #eef2f6 !important;
   border-radius: 0 !important;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   padding: 10px 8px;
   overflow: hidden;
 }
 
 .df2-pilot-v2 .df2-pilot-aside.is-collapsed {
   padding: 8px 0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-v2 .df2-pilot-aside-scroll {
@@ -123,9 +123,9 @@
   align-items: flex-end;
   gap: 8px;
   padding: 8px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 16px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
   max-width: 720px;
   margin: 0 auto;
@@ -145,7 +145,7 @@
   /* The chat composer deliberately reads one rung above a form field */
   font-size: var(--df-fs-lg);
   line-height: 1.5;
-  color: #0f172a;
+  color: var(--df-text-primary);
   min-height: 44px;
   max-height: 160px;
   padding: 6px 0;
@@ -183,8 +183,8 @@
 .df2-pilot-v2 .df2-pilot-composer-sticky {
   padding: 10px 24px 16px;
   border: none;
-  border-top: 1px solid #e2e8f0;
-  background: #fff;
+  border-top: 1px solid var(--df-border);
+  background: var(--df-bg-canvas);
   flex-shrink: 0;
 }
 
@@ -218,15 +218,15 @@
 
 .df2-pilot-v2 .df2-pilot-msg.assistant {
   align-self: flex-start;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border: none;
-  color: #0f172a;
+  color: var(--df-text-primary);
   border-bottom-left-radius: 4px;
 }
 
 .df2-pilot-v2 .df2-pilot-thinking {
   align-self: flex-start;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border: none;
   border-radius: 12px;
   padding: 12px 16px;

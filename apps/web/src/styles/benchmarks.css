@@ -88,7 +88,7 @@
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-page-benchmarks-table th,

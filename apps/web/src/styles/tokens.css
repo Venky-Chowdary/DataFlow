@@ -79,6 +79,9 @@
   --df-text-secondary: #475569;
   --df-text-tertiary: #94a3b8;
   --df-text-muted: #64748b;
+  /* Alias used by leftover sheets (`var(--df-text, #0f172a)`). Must track primary so dark remaps. */
+  --df-text: var(--df-text-primary);
+  --df-surface-2: var(--df-surface-muted);
   --df-focus-ring: var(--df-brand-ring);
 
   /* Motion — shared easings / durations for landing + workspace */

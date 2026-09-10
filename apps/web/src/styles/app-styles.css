@@ -89,8 +89,16 @@
 .df2-app .df2-page-pilot,
 .df2-app .df2-page-transfer-studio,
 .df2-app .df2-pilot-workspace,
-.df2-app .df2-transfer-studio-shell {
+.df2-app .df2-transfer-studio-shell,
+.df2-app .df2-pilot-main,
+.df2-app .df2-pilot-v2 .df2-pilot-main {
   background: var(--df-surface, #fff) !important;
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-pilot-aside {
+  background: var(--df-surface-muted) !important;
+  color: var(--df-text-primary);
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),

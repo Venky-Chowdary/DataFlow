@@ -531,7 +531,7 @@ body {
   background: transparent;
 }
 
-.df2-btn-ghost:hover { background: #f1f5f9; }
+.df2-btn-ghost:hover { background: var(--df-surface-muted); }
 
 .df2-btn-sm {
   height: var(--df-btn-height-sm, 30px);
@@ -2004,9 +2004,9 @@ body {
 .df2-pilot-console-strip div {
   min-height: 72px;
   padding: 12px 14px;
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-console-strip span {
@@ -2124,11 +2124,11 @@ body {
 
 .df2-pilot-quick button {
   padding: 8px 14px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface-raised);
   font-size: 13px;
-  color: #475569;
+  color: var(--df-text-secondary);
   cursor: pointer;
 }
 
@@ -2149,9 +2149,10 @@ body {
   gap: 5px;
   min-height: 112px;
   padding: 13px;
-  border: 1px solid #dbe3ee;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   text-align: left;
   cursor: pointer;
   transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
@@ -2172,7 +2173,7 @@ body {
 }
 
 .df2-pilot-capability strong {
-  color: #111827;
+  color: var(--df-text-primary);
   font-size: 16px;
   font-weight: 700;
 }
@@ -2195,9 +2196,10 @@ body {
   align-items: flex-start;
   gap: 4px;
   padding: 16px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   text-align: left;
   cursor: pointer;
   transition: border-color 0.12s, box-shadow 0.12s;
@@ -2219,7 +2221,7 @@ body {
 .df2-pilot-idea-title {
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-pilot-idea-desc {
@@ -4911,16 +4913,16 @@ body {
 }
 
 .df2-btn {
-  border-color: #d7dfd8;
-  background: rgba(255, 255, 255, 0.92);
-  color: #26312a;
+  border-color: var(--df-border);
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
   font-weight: 600;
 }
 
 .df2-btn:hover {
-  background: #fbfdfb;
-  border-color: #b8c6ba;
-  box-shadow: 0 6px 14px rgba(20, 29, 25, 0.06);
+  background: var(--df-surface-muted);
+  border-color: var(--df-border-strong);
+  box-shadow: var(--df-shadow-xs);
 }
 
 .df2-btn-primary {
@@ -5439,8 +5441,8 @@ body {
 
 .df2-pilot-capability,
 .df2-pilot-idea {
-  border-color: var(--df-line);
-  background: rgba(255, 255, 255, 0.92);
+  border-color: var(--df-border);
+  background: var(--df-surface);
 }
 
 .df2-model-ops {

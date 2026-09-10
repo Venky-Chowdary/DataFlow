@@ -770,7 +770,7 @@
   padding: 12px;
   border: 1px solid var(--df-line);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   margin-bottom: 16px;
 }
 
