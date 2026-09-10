@@ -6124,26 +6124,25 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 /* ── Transfer Result Dashboard (dense enterprise composition) ── */
 .df2-result-dashboard {
   --df-result-pad-x: 16px;
-  background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.92) 0%, rgba(255, 255, 255, 1) 120px);
+  background: var(--df-surface);
 }
 
 .df2-result-dashboard.is-success {
   --df-result-accent: #059669;
-  --df-result-accent-soft: #ecfdf5;
+  --df-result-accent-soft: var(--df-success-bg);
   --df-result-accent-border: #a7f3d0;
 }
 
 .df2-result-dashboard.is-warn,
 .df2-result-dashboard.is-quarantine {
   --df-result-accent: #d97706;
-  --df-result-accent-soft: #fffbeb;
+  --df-result-accent-soft: var(--df-warning-bg);
   --df-result-accent-border: #fde68a;
 }
 
 .df2-result-dashboard.is-error {
   --df-result-accent: #dc2626;
-  --df-result-accent-soft: #fef2f2;
+  --df-result-accent-soft: var(--df-danger-bg);
   --df-result-accent-border: #fecaca;
 }
 
@@ -6157,8 +6156,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-left: 3px solid var(--df-result-accent, #059669);
   background: linear-gradient(
     90deg,
-    var(--df-result-accent-soft, #ecfdf5) 0%,
-    rgba(255, 255, 255, 0.96) 42%
+    var(--df-result-accent-soft, var(--df-success-bg)) 0%,
+    var(--df-surface) 42%
   );
   width: 100%;
   box-sizing: border-box;
@@ -13115,4 +13114,36 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-mapping-pair-conf-block,
 .df2-app .df2-mapping-pair-block {
   background: var(--df-danger-bg);
+}
+
+/* Result / theater leftover warn + white-ending dashboard. */
+.df2-app .df2-result-dashboard {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-result-dashboard.is-success {
+  --df-result-accent-soft: var(--df-success-bg);
+}
+
+.df2-app .df2-result-dashboard.is-warn,
+.df2-app .df2-result-dashboard.is-quarantine {
+  --df-result-accent-soft: var(--df-warning-bg);
+}
+
+.df2-app .df2-result-dashboard.is-error {
+  --df-result-accent-soft: var(--df-danger-bg);
+}
+
+.df2-app .df2-result-head {
+  background: linear-gradient(
+    90deg,
+    var(--df-result-accent-soft, var(--df-success-bg)) 0%,
+    var(--df-surface) 42%
+  );
+}
+
+.df2-app .df2-result-fidelity,
+.df2-app .df2-data-integrity,
+.df2-app .df2-theater-rejected {
+  background: var(--df-warning-bg);
 }
