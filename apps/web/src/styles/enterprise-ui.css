@@ -6235,7 +6235,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   box-sizing: border-box !important;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-result-route .df2-result-endpoint {
@@ -6269,7 +6269,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   box-sizing: border-box !important;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   overflow: hidden;
 }
 
@@ -6282,7 +6282,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-width: 0;
   padding: 12px 12px;
   border-right: 1px solid #eef2f7;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-result-metric:last-child {
@@ -6314,6 +6314,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   white-space: nowrap;
 }
 
+.df2-result-metric.is-ok {
+  background: var(--df-success-bg);
+}
 .df2-result-metric.is-ok strong { color: var(--df-success); }
 .df2-result-metric.is-warn {
   background: var(--df-warning-bg);

@@ -474,4 +474,28 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(dataflow, /rgba\(255, 255, 255, 0\.95\)/);
     assert.match(dataflow, /\.df2-app \.df2-policy-option\.active \{[\s\S]{0,80}--df-brand-muted/);
   });
+
+  it("Result route, metrics, and sections do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(studio, /\.df2-result-route-card,\s*\n\.df2-result-route \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-result-route-card,\s*\n\.df2-result-route \{[\s\S]{0,200}background: #fff;/);
+    assert.match(studio, /\.df2-result-stat-card,\s*\n\.df2-result-metric \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-result-stat-card,\s*\n\.df2-result-metric \{[\s\S]{0,200}background: #fff;/);
+    assert.match(studio, /\.df2-result-metric\.is-warn \{ background: var\(--df-warning-bg\)/);
+    assert.match(studio, /\.df2-result-metric\.is-ok \{ background: var\(--df-success-bg\)/);
+    assert.match(studio, /\.df2-result-section \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-result-section \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-result-section\.error \{[\s\S]{0,80}--df-danger-bg/);
+    assert.doesNotMatch(studio, /\.df2-result-section\.error \{[\s\S]{0,80}#fef2f2/);
+
+    assert.match(ui, /\.df2-result-route \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-route \{[\s\S]{0,420}background: #fff;/);
+    assert.match(ui, /\.df2-result-metrics \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-metrics \{[\s\S]{0,420}background: #fff;/);
+    assert.match(ui, /\.df2-result-metric \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-metric \{[\s\S]{0,220}background: #fff;/);
+    assert.match(ui, /\.df2-result-metric\.is-ok \{[\s\S]{0,80}--df-success-bg/);
+  });
 });

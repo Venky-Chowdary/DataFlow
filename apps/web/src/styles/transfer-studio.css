@@ -4008,7 +4008,7 @@ th.df2-type-string .df2-type-badge {
   gap: 10px;
   padding: 8px 10px;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   width: 100%;
 }
@@ -4088,7 +4088,7 @@ th.df2-type-string .df2-type-badge {
   gap: 3px;
   padding: 12px;
   border-radius: 0;
-  background: #fff;
+  background: var(--df-surface);
   border: none;
   min-width: 0;
   min-height: 0;
@@ -4119,11 +4119,11 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-result-stat-card.warn,
-.df2-result-metric.is-warn { background: #fffbeb; }
+.df2-result-metric.is-warn { background: var(--df-warning-bg); }
 .df2-result-stat-card.warn strong,
 .df2-result-metric.is-warn strong { color: #b45309; }
 .df2-result-stat-card.ok,
-.df2-result-metric.is-ok { background: #f0fdf4; }
+.df2-result-metric.is-ok { background: var(--df-success-bg); }
 .df2-result-stat-card.ok strong,
 .df2-result-metric.is-ok strong { color: #15803d; }
 
@@ -4200,7 +4200,7 @@ th.df2-type-string .df2-type-badge {
   text-align: left;
   padding: 18px 20px;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
 }
 
@@ -4221,7 +4221,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-result-section.error {
-  background: #fef2f2;
+  background: var(--df-danger-bg);
   border-color: #fecaca;
 }
 
