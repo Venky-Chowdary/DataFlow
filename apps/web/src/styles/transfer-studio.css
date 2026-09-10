@@ -1740,7 +1740,7 @@ button.df2-map-band-chip:hover {
   padding: 12px;
   max-height: min(280px, 32vh);
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mapping.is-minimal {
@@ -1804,13 +1804,13 @@ button.df2-map-band-chip:hover {
   padding: 14px 16px;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
 }
 
 .df2-inspector-guide {
   border-color: #ccfbf1;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+  background: var(--df-brand-muted);
 }
 
 .df2-inspector-guide p {
@@ -1939,7 +1939,7 @@ button.df2-map-band-chip:hover {
   gap: 8px;
   border: 1.5px solid #e2e8f0;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 }
@@ -1952,7 +1952,7 @@ button.df2-map-band-chip:hover {
 
 .df2-page-transfer-studio .df2-dest-type-tile.active {
   border-color: #0f766e;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
 }
 
@@ -2303,7 +2303,7 @@ th.df2-type-string .df2-type-badge {
   flex-direction: column;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-map-dialog .df2-column-review.is-dialog .df2-column-review-chrome {
@@ -2849,7 +2849,7 @@ th.df2-type-string .df2-type-badge {
   border-top: 1px solid #e8edf3;
   margin-top: 0;
   padding: 4px 12px !important;
-  background: #fff;
+  background: var(--df-surface);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2903,7 +2903,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn-ghost,
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger) {
-  background: #fff;
+  background: var(--df-surface);
   border-color: #e2e8f0;
   color: #334155;
 }
@@ -3821,7 +3821,7 @@ th.df2-type-string .df2-type-badge {
   flex-shrink: 0;
   padding: 6px 12px;
   border-top: 1px solid #e8edf3;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 /* Step 5 ? run: theater scrolls inside card, page stays fixed */
@@ -6652,7 +6652,7 @@ th.df2-type-string .df2-type-badge {
   margin: 0 !important;
   padding: 4px 12px !important;
   border-top: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   display: flex !important;
   align-items: center;
   justify-content: space-between;

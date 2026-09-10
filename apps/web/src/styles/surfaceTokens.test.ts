@@ -385,4 +385,52 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-result-more \{[\s\S]{0,120}--df-surface/);
     assert.doesNotMatch(ui, /\.df2-result-more \{[\s\S]{0,120}background: #fff;/);
   });
+
+  it("Inspector, map drawer, dest type tiles, and wizard footers do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const polish = sheet("shell-polish.css");
+
+    assert.match(studio, /\.df2-map-visual-drawer-body \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-map-visual-drawer-body \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-inspector-panel \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-inspector-panel \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-inspector-guide \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-inspector-guide \{[\s\S]{0,80}#fff 100%/);
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-type-tile \{[\s\S]{0,280}--df-surface/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-type-tile \{[\s\S]{0,280}background: #fff;/,
+    );
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-type-tile\.active \{[\s\S]{0,80}--df-brand-muted/,
+    );
+    assert.match(
+      studio,
+      /\.df2-map-dialog \.df2-column-review\.is-dialog \.df2-column-review-editor \{[\s\S]{0,220}--df-surface/,
+    );
+    assert.match(studio, /padding: 4px 12px !important;\s*\n\s*background: var\(--df-surface\)/);
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-wizard-footer \.df2-btn-ghost,[\s\S]{0,160}--df-surface/,
+    );
+    assert.match(
+      studio,
+      /\.df2-validate-step > \.df2-studio-actions,[\s\S]{0,220}--df-surface/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-validate-step > \.df2-studio-actions,[\s\S]{0,220}background: #fff;/,
+    );
+    assert.match(studio, /\.df2-theater-v3-footer \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-footer \{[\s\S]{0,120}background: #fff;/);
+
+    assert.match(polish, /\.df2-card-footer\.df2-wizard-footer \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-card-footer\.df2-wizard-footer \{[\s\S]{0,200}background: #f8fafc;/);
+    assert.match(polish, /\.df2-card-footer,\s*\n\.df2-wizard-footer \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-card-footer,\s*\n\.df2-wizard-footer \{[\s\S]{0,160}background: #fafbfc;/);
+  });
 });
