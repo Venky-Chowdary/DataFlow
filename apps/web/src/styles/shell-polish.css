@@ -1277,7 +1277,7 @@ textarea.df2-pilot-composer textarea {
   padding: 16px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   transition: border-color 0.18s ease, box-shadow 0.18s ease;
   text-align: left;
@@ -1291,12 +1291,12 @@ textarea.df2-pilot-composer textarea {
 .df2-connector-card.selected {
   border-color: var(--df-brand, #0f766e);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+  background: linear-gradient(180deg, var(--df-brand-muted) 0%, var(--df-surface) 100%);
 }
 
 .df2-connector-card.error {
-  border-color: #fecaca;
-  background: linear-gradient(180deg, #fef2f2 0%, #fff 100%);
+  border-color: var(--df-danger-border);
+  background: linear-gradient(180deg, var(--df-danger-bg) 0%, var(--df-surface) 100%);
 }
 
 .df2-connector-card-head {
@@ -5241,7 +5241,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-glass-panel {
   border-radius: 16px;
-  background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
   border: 1px solid rgba(226, 232, 240, 0.95);
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 1) inset,
@@ -5252,7 +5252,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-app .df2-glass-panel,
 .df2-app .df2-glass-panel-deep {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: none !important;
   border: 1px solid var(--df-border, #e2e8f0) !important;
 }

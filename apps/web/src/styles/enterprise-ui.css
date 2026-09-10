@@ -590,7 +590,7 @@
   padding: 10px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: var(--df-radius-card, 8px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 /* Jobs rows carry two content lines (title + route/metrics), so they use the
@@ -610,7 +610,7 @@
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: var(--df-radius-card, 8px);
-  background: #fff;
+  background: var(--df-surface);
   text-align: left;
   cursor: pointer;
   box-sizing: border-box;
@@ -6694,7 +6694,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-jobs .df2-job-row.is-active,
 .df2-job-row.is-active {
   border-color: var(--df-brand, #0f766e);
-  background: #ccfbf1;
+  background: var(--df-brand-soft);
   box-shadow: inset 3px 0 0 var(--df-brand, #0f766e);
 }
 
@@ -7178,7 +7178,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-enterprise .df2-glass-panel-head {
   border-bottom: 1px solid var(--df-border, #e6e9ee);
-  background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
 }
 
 .df2-overview-enterprise .df2-overview-text-link {
@@ -7348,7 +7348,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0 12px;
   border-radius: 999px;
   border: 1px solid var(--df-border, #e6e9ee);
-  background: #fff;
+  background: var(--df-surface);
   font-size: 13px;
   color: var(--df-text-secondary, #475569);
   cursor: pointer;
@@ -7398,7 +7398,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   max-height: min(90vh, 880px);
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: var(--df-radius-xl, 14px);
   box-shadow: var(--df-shadow-lg);
@@ -7443,7 +7443,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 12px;
   padding: 18px 20px 14px;
   border-bottom: 1px solid var(--df-border, #e6e9ee);
-  background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
 }
 
 .df2-modal-title {
@@ -7545,7 +7545,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   max-width: 96vw;
   height: 100%;
   max-height: 100dvh;
-  background: #fff;
+  background: var(--df-surface);
   border-left: 1px solid var(--df-border, #e6e9ee);
   box-shadow: var(--df-shadow-lg);
   outline: none;
@@ -7574,7 +7574,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 12px;
   padding: 16px 18px 14px;
   border-bottom: 1px solid var(--df-border, #e6e9ee);
-  background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
 }
 
 .df2-drawer-header-main {
