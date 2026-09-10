@@ -2433,7 +2433,7 @@ th.df2-type-string .df2-type-badge {
 .df2-page-transfer-studio .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-wizard-footer {
   padding: 6px 12px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border-radius: 0 !important;
   gap: 8px !important;
 }
@@ -10462,8 +10462,8 @@ button.df2-vd-assist-toggle:focus-visible {
   max-height: none !important;
   min-height: calc(var(--df-btn-height, 36px) + 8px) !important;
   height: auto !important;
-  border-top: 1px solid #e8edf3 !important;
-  background: #fff !important;
+  border-top: 1px solid var(--df-border) !important;
+  background: var(--df-surface) !important;
   box-shadow: none !important;
 }
 

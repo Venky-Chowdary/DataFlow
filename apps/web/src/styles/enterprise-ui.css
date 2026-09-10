@@ -3819,16 +3819,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-filter-bar .df2-tab:hover:not(.active):not([aria-selected="true"]),
 .df2-toolbar .df2-tab:hover:not(.active):not([aria-selected="true"]) {
-  color: #0f172a !important;
-  background: rgba(255, 255, 255, 0.55) !important;
+  color: var(--df-text-primary) !important;
+  background: color-mix(in srgb, var(--df-surface) 55%, transparent) !important;
 }
 
 .df2-filter-bar .df2-tab.active,
 .df2-filter-bar .df2-tab[aria-selected="true"],
 .df2-toolbar .df2-tab.active,
 .df2-toolbar .df2-tab[aria-selected="true"] {
-  background: #fff !important;
-  color: #0f172a !important;
+  background: var(--df-seg-active) !important;
+  color: var(--df-seg-ink-active) !important;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
@@ -4181,7 +4181,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin: 0 !important;
   padding: 10px 24px 16px !important;
   border-top: 1px solid var(--df-border, #e5e7eb);
-  background: #fff !important;
+  background: var(--df-surface) !important;
   z-index: 3;
 }
 
@@ -4326,7 +4326,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-command-search:focus-within,
 .df2-app .df2-workspace-search:focus-within {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border-color: var(--df-brand, #0f766e) !important;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
 }
@@ -4444,8 +4444,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 4px 12px !important;
   min-height: 0;
   max-height: 44px;
-  border-top: 1px solid #e8edf3 !important;
-  background: #fff !important;
+  border-top: 1px solid var(--df-border) !important;
+  background: var(--df-surface) !important;
   backdrop-filter: none;
 }
 
@@ -4607,9 +4607,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px !important;
   margin: 0 !important;
   padding: 8px 10px !important;
-  border: 1px solid #e2e8f0 !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 10px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   overflow: hidden !important;
   min-width: 0;
   min-height: 44px;
@@ -8650,7 +8650,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-settings-section,
   .df2-connectors-feature-card
 ) {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border: 1px solid var(--df-border, #e4e8ee) !important;
   border-radius: var(--df-radius-card, 8px) !important;
   box-shadow: none !important;
@@ -8659,14 +8659,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 /* Job rows keep hover / is-active / failed / live chrome — do not flatten. */
 .df2-app .df2-job-row.is-active,
 .df2-app .df2-job-row.is-active:hover {
-  background: #ccfbf1 !important;
+  background: var(--df-brand-soft) !important;
   border-color: var(--df-brand, #0f766e) !important;
   box-shadow: inset 3px 0 0 var(--df-brand, #0f766e) !important;
 }
 
 .df2-app .df2-card-head,
 .df2-app .df2-section-head {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border-bottom: 1px solid var(--df-border, #e4e8ee);
 }
 

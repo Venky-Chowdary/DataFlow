@@ -154,7 +154,7 @@
 
 .df2-app .df2-main .df2-screen-panel .df2-job-row.is-active {
   box-shadow: inset 3px 0 0 var(--df-brand, #0f766e) !important;
-  background: #ccfbf1 !important;
+  background: var(--df-brand-soft) !important;
   border-color: var(--df-brand, #0f766e) !important;
 }
 
@@ -1329,6 +1329,15 @@ html:has(.df2-app) #root {
    sticky toolbar can never be argued about against the sidebar or a toast. */
 .df2-app .df2-sidebar {
   z-index: var(--df-z-sidebar);
+  background: var(--df-surface) !important;
+  border-right-color: var(--df-border);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-topbar {
+  background: var(--df-surface) !important;
+  border-color: var(--df-border);
+  color: var(--df-text-primary);
 }
 
 .df2-app :is(.df2-toolbar, .df2-pilot-composer-sticky) {

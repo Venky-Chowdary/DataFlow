@@ -93,6 +93,10 @@ describe('control density ladder', () => {
     assert.doesNotMatch(TOKENS, /\.df2-tabs-dark|\.df2-theme-refresh/);
     assert.match(ENTERPRISE, /\.df2-app \.df2-sidebar/);
     assert.match(ENTERPRISE, /background:\s*var\(--df-surface\)/);
+    assert.match(
+      ENTERPRISE,
+      /\.df2-settings-section[\s\S]*?background:\s*var\(--df-surface\)/,
+    );
   });
 
   it('platform tabs and segments read the shared track tokens', () => {
