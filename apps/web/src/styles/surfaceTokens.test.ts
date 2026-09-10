@@ -433,4 +433,44 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-card-footer,\s*\n\.df2-wizard-footer \{[\s\S]{0,160}--df-surface-muted/);
     assert.doesNotMatch(polish, /\.df2-card-footer,\s*\n\.df2-wizard-footer \{[\s\S]{0,160}background: #fafbfc;/);
   });
+
+  it("Dest policy, schema preview, and dest form chips do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const dataflow = sheet("dataflow-ui.css");
+
+    assert.match(studio, /\.df2-dest-step \.df2-dest-schema-preview \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-dest-step \.df2-dest-schema-preview \{[\s\S]{0,280}background: #fff;/);
+    assert.match(studio, /\.df2-dest-step \.df2-policy-console \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-step \.df2-policy-console \{[\s\S]{0,160}background: #fafbfc;/);
+    assert.match(
+      studio,
+      /\.df2-dest-step\.is-advanced \.df2-policy-console \{[\s\S]{0,160}--df-surface/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-dest-step\.is-advanced \.df2-policy-console \{[\s\S]{0,160}background: #fff;/,
+    );
+    assert.match(
+      studio,
+      /\.df2-dest-advanced-drawer \.df2-policy-option \{[\s\S]{0,280}--df-surface/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-dest-advanced-drawer \.df2-policy-option \{[\s\S]{0,280}background: #fff;/,
+    );
+    assert.match(studio, /\.df2-object-combobox-menu \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-object-combobox-menu \{[\s\S]{0,420}background: #fff;/);
+    assert.match(studio, /\.df2-dest-type-chip \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-dest-type-chip \{[\s\S]{0,280}background: #fff;/);
+    assert.match(studio, /\.df2-dest-type-chip\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(studio, /\.df2-dest-engine-search \{[\s\S]{0,420}--df-surface/);
+    assert.match(studio, /\.df2-dest-engine-select \{[\s\S]{0,160}--df-surface/);
+
+    assert.match(dataflow, /\.df2-policy-option \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-policy-option \{[\s\S]{0,160}background: #fff;/);
+    assert.match(dataflow, /\.df2-policy-option\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(dataflow, /\.df2-policy-option\.active \{[\s\S]{0,80}#f0fdfa/);
+    assert.match(dataflow, /\.df2-policy-console \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(dataflow, /rgba\(255, 255, 255, 0\.95\)/);
+  });
 });

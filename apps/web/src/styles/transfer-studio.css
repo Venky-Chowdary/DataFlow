@@ -3163,7 +3163,7 @@ th.df2-type-string .df2-type-badge {
   padding: 12px 14px;
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   box-sizing: border-box;
 }
@@ -3291,7 +3291,7 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
   padding: 14px 16px;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-dest-step .df2-policy-head h4 {
@@ -3452,7 +3452,7 @@ th.df2-type-string .df2-type-badge {
   overflow: visible;
   border: 1px solid #e8edf3;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-dest-step .df2-dest-schema-preview .df2-structure-preview {
@@ -3618,7 +3618,7 @@ th.df2-type-string .df2-type-badge {
   -webkit-overflow-scrolling: touch;
   border: 1px solid #cbd5e1;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.12);
 }
 
@@ -4354,7 +4354,7 @@ th.df2-type-string .df2-type-badge {
   padding: 18px 20px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-dest-step.is-advanced .df2-policy-head {
@@ -4635,7 +4635,7 @@ th.df2-type-string .df2-type-badge {
   padding: 0 10px;
   border: 1px solid #e2e8f0;
   border-radius: var(--df-radius-md, 8px);
-  background: #fff;
+  background: var(--df-surface);
   color: #94a3b8;
   box-sizing: border-box;
 }
@@ -4703,7 +4703,7 @@ th.df2-type-string .df2-type-badge {
   padding: 7px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   font-weight: 600;
   color: #475569;
@@ -4717,7 +4717,7 @@ th.df2-type-string .df2-type-badge {
   padding: 7px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 13px;
   color: #0f172a;
 }
@@ -4730,7 +4730,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-dest-type-chip.active {
   border-color: #0f766e;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   color: #0f766e;
 }
 
