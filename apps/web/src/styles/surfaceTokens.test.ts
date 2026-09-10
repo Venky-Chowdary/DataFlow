@@ -135,4 +135,43 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-vd-coerce-row\.sev-warn \{[^}]*--df-warning-bg/);
     assert.match(studio, /\.df2-vd-map-proof-kpis > div \{[\s\S]{0,120}--df-surface/);
   });
+
+  it("Jobs / modal / drawer / overview chrome do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+    const polish = sheet("shell-polish.css");
+
+    assert.match(ui, /\.df2-jobs-v3-list \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-v3-list \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-job-row \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-job-row \{[\s\S]{0,420}background: #fff;/);
+    assert.match(ui, /\.df2-job-row\.is-active \{[\s\S]{0,120}--df-brand-soft/);
+    assert.match(ui, /\.df2-modal \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-modal \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-drawer \{[\s\S]{0,180}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-drawer \{[\s\S]{0,180}background: #fff;/);
+    assert.match(
+      ui,
+      /\.df2-modal-header \{[\s\S]{0,240}--df-surface/,
+    );
+    assert.doesNotMatch(ui, /\.df2-modal-header \{[\s\S]{0,240}linear-gradient\(180deg, #fff/);
+    assert.match(
+      ui,
+      /\.df2-drawer-header \{[\s\S]{0,240}--df-surface/,
+    );
+    assert.doesNotMatch(ui, /\.df2-drawer-header \{[\s\S]{0,240}linear-gradient\(180deg, #fff/);
+    assert.match(
+      ui,
+      /\.df2-overview-enterprise \.df2-glass-panel-head \{[\s\S]{0,160}--df-surface/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-overview-enterprise \.df2-glass-panel-head \{[\s\S]{0,160}linear-gradient\(180deg, #fff/,
+    );
+    assert.match(ui, /\.df2-overview-ops-chip \{[\s\S]{0,220}--df-surface/);
+
+    assert.match(polish, /\.df2-connector-card \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-connector-card \{[\s\S]{0,220}background: #fff;/);
+    assert.match(polish, /\.df2-app \.df2-glass-panel,[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-app \.df2-glass-panel,[\s\S]{0,80}#fff !important/);
+  });
 });
