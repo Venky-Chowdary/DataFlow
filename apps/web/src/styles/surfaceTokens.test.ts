@@ -611,6 +611,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.dt-modal-body \{[\s\S]{0,200}--df-surface/);
     assert.doesNotMatch(polish, /\.dt-modal-body \{[\s\S]{0,200}background: #fff;/);
     assert.match(polish, /\.dt-modal-body \.df2-input \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.df2-input:disabled,[\s\S]{0,80}--df-surface-muted/);
     assert.match(polish, /\.df2-stream-row \{[\s\S]{0,280}--df-surface/);
     assert.doesNotMatch(polish, /\.df2-stream-row \{[\s\S]{0,280}background: #fff;/);
     assert.match(polish, /\.df2-overview-kpis \.df2-stat \{[\s\S]{0,200}--df-surface/);

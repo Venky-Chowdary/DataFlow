@@ -1089,6 +1089,11 @@ select.df2-select {
   background: var(--df-surface) !important;
 }
 
+.df2-input:disabled,
+.df2-textarea:disabled {
+  background: var(--df-surface-muted) !important;
+}
+
 textarea.df2-pilot-composer textarea {
   color: var(--df-text-primary, #0f172a) !important;
   background: #fff !important;

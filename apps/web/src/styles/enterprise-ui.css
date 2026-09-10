@@ -12881,8 +12881,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-surface);
 }
 
-.df2-app .dt-modal-body .df2-input:disabled {
-  background: var(--df-surface-muted);
+.df2-app .dt-modal-body .df2-input:disabled,
+.df2-app .df2-input:disabled,
+.df2-app .df2-textarea:disabled {
+  background: var(--df-surface-muted) !important;
 }
 
 .df2-app .df2-overview-action:hover {
