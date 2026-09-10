@@ -773,4 +773,56 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(app, /\.df2-app \.df2-overview-v3 \.df2-metric-glass-teal \{[\s\S]{0,160}#fff 78%/);
     assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-composer-bar \{[\s\S]{0,80}background: #fff;/);
   });
+
+  it("Studio, shell, and badge warn leftovers follow warning tokens", () => {
+    const studio = sheet("transfer-studio.css");
+    const polish = sheet("shell-polish.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const platform = sheet("enterprise-platform.css");
+    const topology = sheet("pipeline-topology.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(studio, /\.df2-source-aside-stream-warn \{[\s\S]{0,200}--df-warning-bg/);
+    assert.doesNotMatch(studio, /\.df2-source-aside-stream-warn \{[\s\S]{0,200}#fffbeb/);
+    assert.match(studio, /\.df2-map-band-chip\.is-attention \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-csv-validation-alert \{[\s\S]{0,200}--df-warning-bg/);
+    assert.match(studio, /\.df2-dest-target-status\.is-pending \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-result-error-hint \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(studio, /\.df2-validate-rail-review \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(studio, /\.df2-theater-v3-live-pill\.is-quarantine \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-theater-v3-alert\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-cell-preview \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-iso-group \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-iso-issue \{[\s\S]{0,120}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-append-warn \{[\s\S]{0,200}--df-warning-bg/);
+    assert.match(studio, /\.df2-map-identity-banner \{[\s\S]{0,200}--df-warning-bg/);
+    assert.match(studio, /\.df2-map-blocker-bar \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-proof-chip\.band-low \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-proof-chip\.band-high \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(studio, /\.df2-vd-local-banner \{[\s\S]{0,200}--df-warning-bg/);
+
+    assert.match(polish, /\.df2-type-risk\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(polish, /\.df2-type-risk\.block \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(polish, /\.df2-structure-empty-rows \{[\s\S]{0,280}--df-warning-bg/);
+    assert.match(polish, /\.df2-col-badge-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(polish, /\.df2-overview-health-pill\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(polish, /\.df2-overview-health-pill\.live \{[\s\S]{0,80}--df-brand-muted/);
+
+    assert.match(dataflow, /\.df2-badge-run \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(dataflow, /\.df2-badge-run \{[\s\S]{0,80}#fffbeb/);
+    assert.match(dataflow, /\.dt-badge-warning \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-row-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-control-metric\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-rail-stage\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-rail-alert \{[\s\S]{0,200}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-assurance-chip\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-mapping-col\.pii \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-readiness-row\.warn \{[\s\S]{0,80}--df-warning-bg/);
+
+    assert.match(platform, /\.df2-badge-warning \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(platform, /\.df2-badge-beta \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(topology, /\.df2-csv-validation-alert \{[\s\S]{0,200}--df-warning-bg/);
+    assert.match(ui, /\.df2-app \.df2-control-metric\.warn,[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-app \.df2-readiness-row\.warn \{[\s\S]{0,80}--df-warning-bg/);
+  });
 });

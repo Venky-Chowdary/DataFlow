@@ -13022,3 +13022,62 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-overview-v3 .df2-metric-glass-amber {
   background: var(--df-warning-bg) !important;
 }
+
+/* Studio / shell / badge warn leftovers — beat leftover #fffbeb. */
+.df2-app .df2-source-aside-stream-warn,
+.df2-app .df2-csv-validation-alert,
+.df2-app .df2-map-band-chip.is-attention,
+.df2-app .df2-dest-target-status.is-pending,
+.df2-app .df2-result-error-hint,
+.df2-app .df2-validate-rail-review,
+.df2-app .df2-theater-v3-live-pill.is-quarantine,
+.df2-app .df2-theater-v3-alert.warn,
+.df2-app .df2-vd-cell-preview,
+.df2-app .df2-vd-iso-group,
+.df2-app .df2-vd-append-warn,
+.df2-app .df2-map-identity-banner,
+.df2-app .df2-map-blocker-bar,
+.df2-app .df2-vd-local-banner,
+.df2-app .df2-vd-proof-chip.band-low,
+.df2-app .df2-vd-proof-chip.grade-review,
+.df2-app .df2-vd-scope-chip.cov-sample,
+.df2-app .df2-type-risk.warn,
+.df2-app .df2-structure-empty-rows,
+.df2-app .df2-col-badge-warn,
+.df2-app .df2-overview-health-pill.warn,
+.df2-app .df2-badge-run,
+.df2-app .df2-badge-beta,
+.df2-app .df2-badge-warning,
+.df2-app .dt-badge-warning,
+.df2-app .df2-row-warn,
+.df2-app .df2-rail-alert,
+.df2-app .df2-rail-stage.warn,
+.df2-app .df2-assurance-chip.warn,
+.df2-app .df2-mapping-col.pii,
+.df2-app .df2-readiness-row.warn {
+  background: var(--df-warning-bg);
+}
+
+.df2-app .df2-control-metric.warn,
+.df2-app .df2-vd-iso-issue {
+  background: var(--df-warning-bg) !important;
+}
+
+.df2-app .df2-type-risk.block,
+.df2-app .df2-badge-error,
+.df2-app .dt-badge-error,
+.df2-app .df2-row-error {
+  background: var(--df-danger-bg);
+}
+
+.df2-app .df2-vd-proof-chip.band-high,
+.df2-app .df2-vd-proof-chip.grade-excellent,
+.df2-app .df2-rail-stage.ok,
+.df2-app .df2-badge-live,
+.df2-app .dt-badge-success {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-overview-health-pill.live {
+  background: var(--df-brand-muted);
+}

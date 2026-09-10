@@ -869,11 +869,11 @@ body {
   text-transform: capitalize;
 }
 
-.df2-badge-live { background: #ecfdf5; color: #059669; }
-.df2-badge-beta { background: #f0fdfa; color: #0f766e; }
+.df2-badge-live { background: var(--df-success-bg); color: #059669; }
+.df2-badge-beta { background: var(--df-brand-muted); color: #0f766e; }
 .df2-badge-muted { background: #f1f5f9; color: #64748b; }
-.df2-badge-error { background: #fef2f2; color: #dc2626; }
-.df2-badge-run { background: #fffbeb; color: #d97706; }
+.df2-badge-error { background: var(--df-danger-bg); color: #dc2626; }
+.df2-badge-run { background: var(--df-warning-bg); color: #d97706; }
 
 /* ─── Grid layouts ─── */
 
@@ -1842,9 +1842,9 @@ body {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
 }
-.df2-page .dt-badge-success { background: #ecfdf5; color: #059669; }
-.df2-page .dt-badge-error { background: #fef2f2; color: #dc2626; }
-.df2-page .dt-badge-warning { background: #fffbeb; color: #d97706; }
+.df2-page .dt-badge-success { background: var(--df-success-bg); color: #059669; }
+.df2-page .dt-badge-error { background: var(--df-danger-bg); color: #dc2626; }
+.df2-page .dt-badge-warning { background: var(--df-warning-bg); color: #d97706; }
 .df2-page .dt-badge-info { background: #f0fdfa; color: #0f766e; }
 .df2-page .dt-badge-default { background: #f1f5f9; color: #64748b; }
 
@@ -2664,8 +2664,8 @@ body {
 
 .df2-inline-bar span { font-size: 11px; color: #64748b; }
 
-.df2-row-error { background: #fef2f2; }
-.df2-row-warn { background: #fffbeb; }
+.df2-row-error { background: var(--df-danger-bg); }
+.df2-row-warn { background: var(--df-warning-bg); }
 .df2-text-error { color: #dc2626; }
 .df2-progress-warn { display: inline-flex; align-items: center; gap: 5px; color: #b45309; font-weight: 600; }
 .df2-progress-warn .dt-nav-icon { display: inline-flex; }
@@ -2937,7 +2937,7 @@ body {
 
 .df2-control-metric.warn {
   border-color: #fed7aa;
-  background: #fff7ed;
+  background: var(--df-warning-bg);
 }
 
 .df2-transfer-grid {
@@ -3029,8 +3029,8 @@ body {
   text-align: right;
 }
 
-.df2-rail-stage.ok { border-color: #bbf7d0; background: #f0fdf4; }
-.df2-rail-stage.warn { border-color: #fed7aa; background: #fff7ed; }
+.df2-rail-stage.ok { border-color: #bbf7d0; background: var(--df-success-bg); }
+.df2-rail-stage.warn { border-color: #fed7aa; background: var(--df-warning-bg); }
 .df2-rail-stage.block { border-color: #fecaca; background: #fef2f2; }
 .df2-rail-stage.muted { color: #94a3b8; }
 
@@ -3083,7 +3083,7 @@ body {
   padding: 8px 10px;
   border: 1px solid #fde68a;
   border-radius: 7px;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   color: #92400e;
   font-size: 12px;
   line-height: 1.35;
@@ -3400,7 +3400,7 @@ body {
 
 .df2-assurance-chip.warn {
   border-color: #fed7aa;
-  background: #fff7ed;
+  background: var(--df-warning-bg);
 }
 
 .df2-result-banner {
@@ -3711,7 +3711,7 @@ body {
 .df2-mapping-col.high { border-left: 3px solid #059669; }
 .df2-mapping-col.medium { border-left: 3px solid #0f766e; }
 .df2-mapping-col.low { border-left: 3px solid #d97706; }
-.df2-mapping-col.pii { background: #fffbeb; }
+.df2-mapping-col.pii { background: var(--df-warning-bg); }
 
 .df2-mapping-col-name {
   font-size: 13px;
@@ -4624,7 +4624,7 @@ body {
 
 .df2-readiness-row.warn {
   border-color: #fed7aa;
-  background: #fff7ed;
+  background: var(--df-warning-bg);
 }
 
 .df2-readiness-row.block {
