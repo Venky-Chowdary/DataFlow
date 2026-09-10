@@ -731,6 +731,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-gate8-proof \{[\s\S]{0,160}--df-success-bg/);
     assert.doesNotMatch(ui, /\.df2-gate8-proof \{[\s\S]{0,160}#fff 70%/);
     assert.match(ui, /\.df2-gate8-proof\.is-fail \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-app \.df2-gate8-proof\.is-fail \{[\s\S]{0,80}--df-danger-bg/);
     assert.match(ui, /\.df2-gate8-proof-mismatches \{[\s\S]{0,160}--df-warning-bg/);
     assert.doesNotMatch(ui, /\.df2-gate8-proof-mismatches \{[\s\S]{0,160}#fff7ed/);
     assert.match(ui, /\.df2-jobs-evidence-chip\.tone-ok \{[\s\S]{0,80}--df-success-bg/);

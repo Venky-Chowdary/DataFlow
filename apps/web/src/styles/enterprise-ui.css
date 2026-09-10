@@ -12981,6 +12981,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-success-bg);
 }
 
+.df2-app .df2-gate8-proof.is-fail {
+  background: var(--df-danger-bg);
+}
+
 .df2-app .df2-jobs-evidence-chip.tone-warn,
 .df2-app .df2-jobs-quarantine-meaning,
 .df2-app .df2-mcp-status-pill.is-offline,
