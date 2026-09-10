@@ -324,4 +324,30 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-quarantine-table tbody tr:hover td \{[\s\S]{0,80}--df-warning-bg/);
     assert.doesNotMatch(ui, /\.df2-app \.df2-quarantine-table tbody tr:hover td \{[\s\S]{0,80}#fffbeb/);
   });
+
+  it("Theater, preflight, and rail panels do not flatten to #fff", () => {
+    const polish = sheet("shell-polish.css");
+    const studio = sheet("transfer-studio.css");
+
+    assert.match(polish, /\.df2-theater \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-theater \{[\s\S]{0,200}background: #fff !important;/);
+    assert.match(polish, /\.df2-theater-log \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(polish, /\.df2-preflight \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-preflight \{[\s\S]{0,200}background: #fff !important;/);
+    assert.match(polish, /\.df2-preflight\.passed \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-preflight\.passed \{[\s\S]{0,160}#fff 100%/);
+    assert.match(polish, /\.df2-preflight\.blocked \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(polish, /\.df2-preflight-gate\.pass \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(polish, /\.df2-preflight-gate\.fail \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(polish, /\.df2-rail-panel \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-rail-panel \{[\s\S]{0,200}background: #fff !important;/);
+    assert.match(polish, /\.df2-rail-stage \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(polish, /\.df2-rail-stage\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(polish, /\.df2-rail-alert \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(polish, /\.df2-result-banner\.success \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-result-banner\.success \{[\s\S]{0,160}#fff 100%/);
+
+    assert.match(studio, /\.df2-run-step \.df2-theater-v3-metric \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-run-step \.df2-theater-v3-metric \{[\s\S]{0,80}background: #ffffff;/);
+  });
 });

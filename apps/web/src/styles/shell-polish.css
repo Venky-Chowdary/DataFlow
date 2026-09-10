@@ -1919,7 +1919,7 @@ textarea.df2-pilot-composer textarea {
 .df2-theater {
   border: 1px solid var(--df-border, #e2e8f0) !important;
   border-radius: 14px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
   overflow: hidden;
 }
@@ -1937,7 +1937,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-theater-log {
-  background: #f8fafc !important;
+  background: var(--df-surface-muted) !important;
   border: 1px solid var(--df-border, #e2e8f0);
   color: var(--df-text-secondary, #475569) !important;
 }
@@ -1951,7 +1951,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-job-log {
-  background: #f8fafc !important;
+  background: var(--df-surface-muted) !important;
   border: 1px solid var(--df-border, #e2e8f0);
   color: var(--df-text-secondary, #475569) !important;
 }
@@ -1977,12 +1977,12 @@ textarea.df2-pilot-composer textarea {
 
 .df2-result-banner.success {
   border-color: #bbf7d0;
-  background: linear-gradient(180deg, #f0fdf4 0%, #fff 100%);
+  background: linear-gradient(180deg, var(--df-success-bg) 0%, var(--df-surface) 100%);
 }
 
 .df2-result-banner.error {
   border-color: #fecaca;
-  background: linear-gradient(180deg, #fef2f2 0%, #fff 100%);
+  background: linear-gradient(180deg, var(--df-danger-bg) 0%, var(--df-surface) 100%);
 }
 
 .df2-plan-callout {
@@ -2066,19 +2066,19 @@ textarea.df2-pilot-composer textarea {
 .df2-preflight {
   border: 1px solid var(--df-border, #e2e8f0) !important;
   border-radius: 14px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
   animation: df2-panel-in 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .df2-preflight.passed {
   border-color: #bbf7d0 !important;
-  background: linear-gradient(180deg, #f0fdf4 0%, #fff 100%) !important;
+  background: linear-gradient(180deg, var(--df-success-bg) 0%, var(--df-surface) 100%) !important;
 }
 
 .df2-preflight.blocked {
   border-color: #fde68a !important;
-  background: linear-gradient(180deg, #fffbeb 0%, #fff 100%) !important;
+  background: linear-gradient(180deg, var(--df-warning-bg) 0%, var(--df-surface) 100%) !important;
 }
 
 .df2-preflight-title {
@@ -2101,11 +2101,11 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-preflight-gate.pass {
-  background: #f0fdf4 !important;
+  background: var(--df-success-bg) !important;
 }
 
 .df2-preflight-gate.fail {
-  background: #fef2f2 !important;
+  background: var(--df-danger-bg) !important;
 }
 
 /* ─── Wizard step rail ─── */
@@ -2502,7 +2502,7 @@ textarea.df2-pilot-composer textarea {
 .df2-rail-panel {
   border: 1px solid var(--df-border, #e2e8f0) !important;
   border-radius: 14px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
   padding: 16px 18px;
 }
@@ -2519,24 +2519,24 @@ textarea.df2-pilot-composer textarea {
 .df2-rail-stage {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   transition: border-color 0.18s ease, background 0.18s ease;
 }
 
 .df2-rail-stage.green {
   border-color: #bbf7d0;
-  background: #f0fdf4;
+  background: var(--df-success-bg);
 }
 
 .df2-rail-stage.blue {
   border-color: #bae6fd;
-  background: #f0f9ff;
+  background: var(--df-info-bg);
 }
 
 .df2-rail-stage.amber,
 .df2-rail-stage.warn {
   border-color: #fde68a;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 
 .df2-rail-stage span {
@@ -2567,7 +2567,7 @@ textarea.df2-pilot-composer textarea {
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-algorithm-list strong {
@@ -2580,7 +2580,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-rail-alert {
   border-radius: 10px;
-  background: #fffbeb !important;
+  background: var(--df-warning-bg) !important;
   color: #92400e !important;
 }
 
@@ -4503,7 +4503,7 @@ textarea.df2-pilot-composer textarea {
 .df2-rail-panel {
   border-radius: var(--df-radius-card, 12px) !important;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   padding: 16px 18px !important;
 }
 
