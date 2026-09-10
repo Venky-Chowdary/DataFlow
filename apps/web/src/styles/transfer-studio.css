@@ -7811,7 +7811,7 @@ th.df2-type-string .df2-type-badge {
   min-width: 0;
   padding: 8px 10px;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   display: flex;
   flex-direction: column;
@@ -8139,7 +8139,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-diff {
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   overflow: hidden;
 }
 
@@ -8149,7 +8149,7 @@ th.df2-type-string .df2-type-badge {
   gap: 8px;
   padding: 11px 16px;
   border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 12px;
   color: #475569;
 }
@@ -8207,25 +8207,25 @@ th.df2-type-string .df2-type-badge {
   white-space: nowrap;
 }
 
-.df2-vd-diff-table .df2-vd-diff-source { color: #b45309; background: #fffbeb; }
-.df2-vd-diff-table .df2-vd-diff-target { color: #0f766e; background: #f0fdfa; }
+.df2-vd-diff-table .df2-vd-diff-source { color: #b45309; background: var(--df-warning-bg); }
+.df2-vd-diff-table .df2-vd-diff-target { color: #0f766e; background: var(--df-brand-muted); }
 
 /* Blockers */
 /* Module 10 ? Validate decision path (Root Cause ? ? ? Execute) */
 .df2-vd-decision-path {
   border: 1px solid #cbd5e1;
   border-radius: 14px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   overflow: hidden;
   margin-bottom: 14px;
 }
 .df2-vd-decision-path.is-blocked {
-  border-color: #fcd34d;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 .df2-vd-decision-path.is-ready {
-  border-color: #99f6e4;
-  background: #f0fdfa;
+  border-color: var(--df-brand-border, #99f6e4);
+  background: var(--df-brand-muted);
 }
 .df2-vd-decision-path-head {
   display: flex;
@@ -8274,15 +8274,15 @@ th.df2-type-string .df2-type-badge {
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
 }
 .df2-vd-decision-path-steps li.is-blocked {
-  border-color: #fecaca;
-  background: #fef2f2;
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
 }
 .df2-vd-decision-path-steps li.is-action {
-  border-color: #fde68a;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 .df2-vd-decision-path-steps li.is-locked {
   border-color: #e2e8f0;
@@ -8364,15 +8364,15 @@ th.df2-type-string .df2-type-badge {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
 }
 .df2-vd-hs-metric.is-measured {
-  border-color: #a7f3d0;
-  background: #ecfdf5;
+  border-color: var(--df-success-border);
+  background: var(--df-success-bg);
 }
 .df2-vd-hs-metric.is-unmeasured {
   border-color: #e2e8f0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 .df2-vd-hs-badge {
   display: inline-flex;
@@ -9263,18 +9263,18 @@ button.df2-vd-assist-toggle:focus-visible {
   padding: 8px 12px;
   border-radius: 999px;
   border: 1px solid #cbd5e1;
-  background: #ffffff;
+  background: var(--df-surface);
   color: #1e293b;
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
 }
-.df2-vd-chip .dt-nav-icon { display: inline-flex; color: #2563eb; }
+.df2-vd-chip .dt-nav-icon { display: inline-flex; color: var(--df-brand); }
 .df2-vd-chip:hover:not(:disabled) {
-  background: #f0f6ff;
-  border-color: #93c5fd;
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.14);
+  background: var(--df-brand-muted);
+  border-color: var(--df-brand-border, #99f6e4);
+  box-shadow: 0 2px 8px var(--df-brand-ring);
   transform: translateY(-1px);
 }
 .df2-vd-chip:active:not(:disabled) { transform: translateY(0); }
@@ -9297,7 +9297,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-vd-coerce {
   border: 1px solid #e2e8f0;
   border-radius: 14px;
-  background: #fff;
+  background: var(--df-surface);
   overflow: hidden;
 }
 .df2-vd-coerce-head {
@@ -9306,7 +9306,7 @@ button.df2-vd-assist-toggle:focus-visible {
   gap: 8px;
   padding: 11px 16px;
   border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 12px;
   color: #64748b;
 }
@@ -9343,12 +9343,12 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-vd-coerce-table .df2-vd-failed { color: #b91c1c; font-weight: 600; }
 
 .df2-vd-coerce-row.has-detail { cursor: pointer; }
-.df2-vd-coerce-row.has-detail:hover { background: #f8fafc; }
-.df2-vd-coerce-row.sev-block { background: #fef5f5; }
-.df2-vd-coerce-row.sev-block:hover { background: #fdeaea; }
-.df2-vd-coerce-row.sev-warn { background: #fffbeb; }
-.df2-vd-coerce-row.sev-warn:hover { background: #fef6db; }
-.df2-vd-coerce-row.is-open { background: #eef2ff; }
+.df2-vd-coerce-row.has-detail:hover { background: var(--df-surface-muted); }
+.df2-vd-coerce-row.sev-block { background: var(--df-danger-bg); }
+.df2-vd-coerce-row.sev-block:hover { background: var(--df-danger-bg); }
+.df2-vd-coerce-row.sev-warn { background: var(--df-warning-bg); }
+.df2-vd-coerce-row.sev-warn:hover { background: var(--df-warning-bg); }
+.df2-vd-coerce-row.is-open { background: var(--df-brand-muted); }
 .df2-vd-coerce-caret { width: 28px; color: #94a3b8; }
 .df2-vd-coerce-caret .dt-nav-icon { display: inline-flex; }
 .df2-vd-coerce-col { display: flex; flex-direction: column; gap: 1px; }
@@ -9743,10 +9743,10 @@ button.df2-vd-assist-toggle:focus-visible {
   padding: 10px 12px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
-.df2-vd-explain-issues li.sev-block { border-color: #fecaca; background: #fef2f2; }
-.df2-vd-explain-issues li.sev-warning { border-color: #fde68a; background: #fffbeb; }
+.df2-vd-explain-issues li.sev-block { border-color: var(--df-danger-border); background: var(--df-danger-bg); }
+.df2-vd-explain-issues li.sev-warning { border-color: var(--df-warning-border); background: var(--df-warning-bg); }
 .df2-vd-explain-issues strong { display: block; font-size: 13px; color: #0f172a; }
 .df2-vd-explain-gate {
   display: flex;
@@ -9794,8 +9794,8 @@ button.df2-vd-assist-toggle:focus-visible {
   color: #64748b;
   background: #f8fafc;
 }
-.df2-vd-column-fixes-table tr.sev-block td { background: #fef2f2; }
-.df2-vd-column-fixes-table tr.sev-warn td { background: #fffbeb; }
+.df2-vd-column-fixes-table tr.sev-block td { background: var(--df-danger-bg); }
+.df2-vd-column-fixes-table tr.sev-warn td { background: var(--df-warning-bg); }
 .df2-vd-column-fixes-table small { display: block; color: #64748b; font-weight: 400; }
 
 /* Notification delivery strip (Job Theater + Result) */
