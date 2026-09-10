@@ -63,5 +63,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-structure-preview \{[\s\S]{0,220}--df-surface-muted/);
     assert.match(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}--df-surface/);
     assert.doesNotMatch(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}background: #fff !important/);
+    assert.match(studio, /\.df2-source-aside \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-source-aside \{[\s\S]{0,280}linear-gradient\(180deg, #fafbfc/);
   });
 });

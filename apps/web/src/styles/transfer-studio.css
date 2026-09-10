@@ -6096,9 +6096,9 @@ th.df2-type-string .df2-type-badge {
   gap: 14px;
   flex: 1;
   min-height: 280px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 12px;
-  background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+  background: var(--df-surface);
   padding: 16px;
 }
 
@@ -6113,13 +6113,13 @@ th.df2-type-string .df2-type-badge {
   margin: 0;
   font-size: 14px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-source-aside-head p {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-muted);
   line-height: 1.45;
 }
 
@@ -6326,9 +6326,9 @@ th.df2-type-string .df2-type-badge {
   gap: 10px;
   text-align: center;
   padding: 24px 16px;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--df-border-strong);
   border-radius: 10px;
-  color: #64748b;
+  color: var(--df-text-muted);
   font-size: 12px;
 }
 
@@ -6338,10 +6338,10 @@ th.df2-type-string .df2-type-badge {
   gap: 8px;
   padding: 10px 12px;
   border-radius: 8px;
-  background: #f0fdfa;
-  border: 1px solid #ccfbf1;
+  background: var(--df-brand-muted);
+  border: 1px solid var(--df-border-brand);
   font-size: 12px;
-  color: #0f766e;
+  color: var(--df-brand);
   margin-top: auto;
 }
 

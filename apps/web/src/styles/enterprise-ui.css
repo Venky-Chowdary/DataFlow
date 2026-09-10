@@ -2968,8 +2968,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-source-aside-steps li.done .df2-source-aside-step-marker { background: #059669; color: #fff; }
 .df2-source-aside-steps li.active .df2-source-aside-step-marker { background: #0f766e; color: #fff; }
 
-.df2-source-aside-steps li strong { display: block; font-size: 13px; color: #0f172a; }
-.df2-source-aside-steps li span { font-size: 12px; color: #64748b; }
+.df2-source-aside-steps li strong { display: block; font-size: 13px; color: var(--df-text-primary); }
+.df2-source-aside-steps li span { font-size: 12px; color: var(--df-text-muted); }
 
 .df2-source-aside-formats { display: flex; flex-direction: column; gap: 8px; }
 .df2-source-aside-formats-label {
@@ -2977,18 +2977,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-source-aside-format-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .df2-source-aside-format-chip {
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid #e2e8f0;
-  background: #fff;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   font-size: 11px;
   font-weight: 600;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-source-aside-sample,
