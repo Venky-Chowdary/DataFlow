@@ -1008,7 +1008,7 @@
 
 .df2-page-transfer-studio .df2-page-desc {
   font-size: 13px;
-  color: #64748b;
+  color: var(--df-text-muted);
   max-width: 42rem;
 }
 
@@ -1025,9 +1025,9 @@
   flex-direction: column;
   gap: 0;
   padding: 4px 8px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
   animation: df2-studio-rise 0.35s ease-out both;
   /* Content-box width ignores sidebar ? stack before stepper + route fight */
@@ -1107,12 +1107,12 @@
   max-width: 56px;
   margin: 0 clamp(6px, 1vw, 12px);
   border-radius: 0;
-  background: #e2e8f0;
+  background: var(--df-border);
   transition: background 0.3s ease;
 }
 
 .df2-wizard-studio .df2-wizard-line.done {
-  background: #0f766e;
+  background: var(--df-brand);
 }
 
 .df2-wizard-studio .df2-wizard-step {
@@ -1123,13 +1123,13 @@
 }
 
 .df2-wizard-studio .df2-wizard-step.active {
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   transform: none;
 }
 
 .df2-wizard-studio .df2-wizard-step.done:not(:disabled):hover {
   transform: none;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-wizard-studio .df2-wizard-num {
@@ -1159,7 +1159,7 @@
 .df2-wizard-progress {
   height: 3px;
   border-radius: 999px;
-  background: #e2e8f0;
+  background: var(--df-border);
   overflow: hidden;
 }
 
@@ -1211,7 +1211,7 @@
   height: 1px;
   margin: 0 4px;
   border-radius: 0;
-  background: #e2e8f0;
+  background: var(--df-border);
 }
 
 .df2-wizard-compact .df2-wizard-step {
@@ -1222,7 +1222,7 @@
 }
 
 .df2-wizard-compact .df2-wizard-step.active {
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
 }
 
 .df2-wizard-compact .df2-wizard-num {
@@ -1247,9 +1247,9 @@
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   min-width: 0;
   max-width: 240px;
@@ -1258,8 +1258,8 @@
 }
 
 .df2-route-bar-live {
-  border-color: #99f6e4;
-  background: #f0fdfa;
+  border-color: var(--df-border-brand);
+  background: var(--df-brand-muted);
 }
 
 @keyframes df2-route-pulse {
@@ -4469,9 +4469,9 @@ th.df2-type-string .df2-type-badge {
 
 .df2-transfer-studio-chrome {
   padding: 4px 8px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
 }
 
@@ -9481,7 +9481,7 @@ button.df2-vd-assist-toggle:focus-visible {
   flex-shrink: 0;
   isolation: isolate;
   overflow: hidden;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: var(--df-surface);
 }
 
 .df2-transfer-studio-chrome .df2-wizard-studio .df2-wizard-step.active {
