@@ -1518,9 +1518,9 @@
 
 /* Structure preview fills secondary pane */
 .df2-page-transfer-studio .df2-structure-preview {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 10px;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   padding: 10px 12px;
   overflow: hidden;
   min-width: 0;
