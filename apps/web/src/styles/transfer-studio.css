@@ -5819,7 +5819,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-run-step .df2-theater-v3-metric {
-  background: #ffffff;
+  background: var(--df-surface);
   border-color: #dbe5f0;
 }
 
