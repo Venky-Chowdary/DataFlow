@@ -1183,6 +1183,10 @@ textarea.df2-pilot-composer textarea {
   transition: transform 0.18s ease, box-shadow 0.18s ease;
 }
 
+.df2-model-card.ready {
+  background: var(--df-brand-muted) !important;
+}
+
 .df2-model-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
