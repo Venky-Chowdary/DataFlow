@@ -13081,3 +13081,38 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-overview-health-pill.live {
   background: var(--df-brand-muted);
 }
+
+/* Column workbench / map-proof leftovers. */
+.df2-app .df2-map-proof-pair,
+.df2-app .df2-map-editor-pane,
+.df2-app .df2-mapping-intelligence,
+.df2-app .df2-mapping-pairs-route,
+.df2-app .df2-dashboard-next,
+.df2-app .df2-jobs-command {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-map-proof-risks li.sev-warn,
+.df2-app .df2-map-proof-pair-risks li.sev-warn,
+.df2-app .df2-badge.fidelity-warn,
+.df2-app .df2-mapping-attention,
+.df2-app .df2-mapping-intelligence-pair.tier-warn,
+.df2-app .df2-mapping-pair-conf-warn,
+.df2-app .df2-mapping-pair-warn,
+.df2-app .df2-column-review-alert,
+.df2-app .df2-column-review-table tr.warn td {
+  background: var(--df-warning-bg);
+}
+
+.df2-app .df2-map-proof-pair.is-aligned,
+.df2-app .df2-badge.fidelity-ok,
+.df2-app .df2-mapping-pairs-bridge,
+.df2-app .df2-mapping-pair-conf-ok {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-mapping-intelligence-pair.tier-block,
+.df2-app .df2-mapping-pair-conf-block,
+.df2-app .df2-mapping-pair-block {
+  background: var(--df-danger-bg);
+}

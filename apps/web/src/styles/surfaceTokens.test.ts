@@ -825,4 +825,46 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-control-metric\.warn,[\s\S]{0,80}--df-warning-bg/);
     assert.match(ui, /\.df2-app \.df2-readiness-row\.warn \{[\s\S]{0,80}--df-warning-bg/);
   });
+
+  it("Column workbench and map-proof leftovers follow tokens", () => {
+    const workbench = sheet("column-workbench.css");
+    const premium = sheet("premium-theme.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(workbench, /\.df2-map-proof-pair-risks li\.sev-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(workbench, /\.df2-map-proof-pair-risks li\.sev-warn \{[\s\S]{0,80}#fffbeb/);
+    assert.match(workbench, /\.df2-map-proof-pair \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(workbench, /\.df2-map-proof-pair \{[\s\S]{0,200}background: #fff;/);
+    assert.match(workbench, /\.df2-map-proof-pair\.is-aligned \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(workbench, /\.df2-badge\.fidelity-ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(workbench, /\.df2-badge\.fidelity-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(workbench, /\.df2-map-editor-pane \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(workbench, /\.df2-map-editor-pane \{[\s\S]{0,200}background: #fff;/);
+    assert.match(workbench, /\.df2-mapping-intelligence \{[\s\S]{0,200}--df-surface/);
+    assert.match(workbench, /\.df2-mapping-attention \{[\s\S]{0,200}--df-warning-bg/);
+    assert.doesNotMatch(workbench, /\.df2-mapping-attention \{[\s\S]{0,200}#fffbeb/);
+    assert.match(workbench, /\.df2-mapping-intelligence-pair\.tier-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(workbench, /\.df2-mapping-intelligence-pair\.tier-block \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(workbench, /\.df2-mapping-pairs-route \{[\s\S]{0,320}--df-surface/);
+    assert.match(workbench, /\.df2-mapping-pairs-bridge \{[\s\S]{0,160}--df-success-bg/);
+    assert.match(workbench, /\.df2-mapping-pair-conf-ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(workbench, /\.df2-mapping-pair-conf-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(workbench, /\.df2-mapping-pair-conf-block \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(workbench, /\.df2-mapping-pair-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(workbench, /\.df2-mapping-pair-block \{[\s\S]{0,80}--df-danger-bg/);
+
+    assert.match(premium, /\.df2-dashboard-next \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-dashboard-next \{[\s\S]{0,200}#ffffff/);
+    assert.match(premium, /\.df2-jobs-command \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-jobs-command \{[\s\S]{0,200}#fff;/);
+    assert.match(premium, /\.df2-column-review-alert \{[\s\S]{0,160}--df-warning-bg/);
+    assert.doesNotMatch(premium, /\.df2-column-review-alert \{[\s\S]{0,160}#fffbeb/);
+    assert.match(premium, /\.df2-column-review-table tr\.warn td \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-jobs-command \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-column-review-table tr\.warn td \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-app \.df2-mapping-pair-block \{[\s\S]{0,80}--df-danger-bg/);
+  });
 });
