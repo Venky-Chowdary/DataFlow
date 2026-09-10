@@ -530,4 +530,33 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(app, /\.df2-app \.df2-context-bar \{[\s\S]{0,120}--df-surface/);
     assert.doesNotMatch(app, /\.df2-app \.df2-context-bar \{[\s\S]{0,160}#fff 70%/);
   });
+
+  it("Source aside, multistream, and structure preview do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const polish = sheet("shell-polish.css");
+
+    assert.match(studio, /\.df2-multistream-preview \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-multistream-preview \{[\s\S]{0,200}background: #fff;/);
+    assert.match(studio, /\.df2-multistream-tabs \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(studio, /\.df2-multistream-tab:hover \{[\s\S]{0,80}--df-surface/);
+    assert.match(studio, /\.df2-multistream-tab\.is-active \{[\s\S]{0,80}--df-surface/);
+    assert.match(studio, /\.df2-multistream-tab\.is-error\.is-active \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(studio, /\.df2-source-aside-connector \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-source-aside-connector \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-source-aside-connector-row \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-source-aside-connector-row \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-source-aside-path \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(studio, /\.df2-structure-field-more \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-structure-field-more \{[\s\S]{0,80}background: #fff;/);
+    assert.match(studio, /\.df2-structure-field-chip \{[\s\S]{0,200}--df-surface-muted/);
+
+    assert.match(polish, /\.df2-structure-view-toggle button\.active \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-structure-view-toggle button\.active \{[\s\S]{0,80}background: #fff;/);
+    assert.match(polish, /\.df2-structure-json-doc \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-structure-json-doc \{[\s\S]{0,160}background: #fff;/);
+    assert.match(polish, /\.df2-structure-field-chip \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-structure-field-chip \{[\s\S]{0,160}background: #fff;/);
+    assert.match(polish, /\.df2-structure-table-wrap \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-structure-table-wrap \{[\s\S]{0,120}background: #fff;/);
+  });
 });

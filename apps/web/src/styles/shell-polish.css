@@ -3057,7 +3057,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-structure-view-toggle button.active {
   color: #0f172a;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
 }
 
@@ -3076,7 +3076,7 @@ textarea.df2-pilot-composer textarea {
   padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   overflow-x: auto;
 }
 
@@ -3103,7 +3103,7 @@ textarea.df2-pilot-composer textarea {
   gap: 2px;
   padding: 6px 10px;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   min-width: 0;
 }
@@ -3131,7 +3131,7 @@ textarea.df2-pilot-composer textarea {
   overflow-x: auto;
   border-radius: 10px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-structure-table {
