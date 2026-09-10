@@ -1360,8 +1360,8 @@ body {
   gap: 0;
   margin-bottom: 24px;
   padding: 16px 20px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
   border-radius: 8px;
   overflow-x: auto;
 }

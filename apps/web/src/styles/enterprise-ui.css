@@ -7241,7 +7241,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-transfer-studio-chrome {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.94) 100%);
+  background: var(--df-surface);
   border-bottom: 1px solid var(--df-border, #e6e9ee);
   box-shadow: none;
   backdrop-filter: blur(10px);
@@ -7268,7 +7268,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 6px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none !important;
   overflow: visible;
 }
@@ -8500,7 +8500,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 6px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none !important;
   overflow: visible;
 }

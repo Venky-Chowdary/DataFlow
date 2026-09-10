@@ -66,4 +66,19 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-source-aside \{[\s\S]{0,280}--df-surface/);
     assert.doesNotMatch(studio, /\.df2-source-aside \{[\s\S]{0,280}linear-gradient\(180deg, #fafbfc/);
   });
+
+  it("studio wizard chrome does not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+    assert.match(studio, /\.df2-transfer-studio-chrome \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-transfer-studio-chrome \{[\s\S]{0,240}#ffffff/);
+    assert.doesNotMatch(studio, /\.df2-transfer-studio-chrome \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-transfer-studio-chrome \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-transfer-studio-chrome \{[\s\S]{0,240}255, 255, 255/);
+    assert.match(ui, /\.df2-route-bar \{[\s\S]{0,220}--df-surface/);
+    assert.match(premium, /\.df2-wizard \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-wizard \{[\s\S]{0,280}linear-gradient\(180deg, #fff/);
+    assert.match(studio, /\.df2-wizard-studio \.df2-wizard-step\.active \{[\s\S]{0,80}--df-brand-muted/);
+  });
 });
