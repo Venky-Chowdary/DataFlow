@@ -81,7 +81,7 @@
 }
 
 .df2-page-docs .df2-docs-architecture {
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-page-docs .df2-docs-stats .df2-stat {
@@ -591,7 +591,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   transition: border-color var(--df-dur-fast, 140ms) ease, transform var(--df-dur-fast, 140ms) var(--df-ease, ease);
 }
 
@@ -1493,7 +1493,7 @@
   min-height: calc(100vh - 140px);
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 16px;
-  background: #fff;
+  background: var(--df-surface);
   overflow: clip;
   box-shadow: 0 12px 40px rgba(15, 23, 42, 0.04);
 }
@@ -1544,7 +1544,7 @@
   min-width: 0;
   max-width: 100%;
   padding: clamp(24px, 3vw, 40px) clamp(20px, 3vw, 44px) 56px;
-  background: #fff;
+  background: var(--df-surface);
   overflow-x: clip;
 }
 

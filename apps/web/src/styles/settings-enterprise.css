@@ -18,7 +18,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-settings-summary-item span {
@@ -340,7 +340,7 @@
   box-sizing: border-box;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   color: #0f172a;
   font-size: 14px;
 }
@@ -444,7 +444,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-settings-smtp-label {
@@ -577,7 +577,7 @@
 }
 
 .df2-settings-log-level--warn {
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   color: #b45309;
 }
 
@@ -803,8 +803,8 @@
   gap: 12px;
   padding: 12px 16px;
   border-radius: 12px;
-  border: 1px solid #fcd34d;
-  background: #fffbeb;
+  border: 1px solid var(--df-warning-border);
+  background: var(--df-warning-bg);
   font-size: 13px;
   color: var(--df-text-secondary, #475569);
 }
@@ -821,7 +821,7 @@
   padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   user-select: all;
 }
 

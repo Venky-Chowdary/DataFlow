@@ -4202,7 +4202,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 16px 18px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: 12px;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 70%);
+  background: linear-gradient(180deg, var(--df-brand-muted) 0%, var(--df-surface) 70%);
 }
 
 .df2-mcp-endpoint-copy {
@@ -7999,7 +7999,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-docs .df2-docs-panel {
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: var(--df-radius-panel, 12px);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
 }
 
@@ -8748,7 +8748,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 13px;
   line-height: 1.45;
   color: var(--df-text-secondary, #64748b);
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--df-surface);
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
   pointer-events: none;
