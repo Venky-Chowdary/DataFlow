@@ -258,4 +258,36 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-contract-rows-head \{[\s\S]{0,200}--df-surface-muted/);
     assert.doesNotMatch(ui, /\.df2-contract-rows-head \{[\s\S]{0,200}--df-surface-subtle/);
   });
+
+  it("Trust score, ledger, popover, and quarantine dialog do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(ui, /\.df2-status-popover \{[\s\S]{0,240}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-status-popover \{[\s\S]{0,240}background: #fff;/);
+    assert.match(ui, /\.df2-status-popover-icon\.warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(ui, /\.df2-status-popover-icon\.warn \{[\s\S]{0,80}#fffbeb/);
+
+    assert.match(ui, /\.df2-trust-score \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-trust-score \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-trust-score\.is-ok \{[\s\S]{0,160}--df-success-bg/);
+    assert.match(ui, /\.df2-trust-score\.is-warn \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(ui, /\.df2-trust-score\.is-danger \{[\s\S]{0,160}--df-danger-bg/);
+    assert.doesNotMatch(ui, /\.df2-trust-score\.is-warn \{[\s\S]{0,160}%, white\)/);
+
+    assert.match(ui, /\.df2-conservation-ledger \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-conservation-ledger \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-conservation-ledger\.is-ok \{[\s\S]{0,160}--df-success-bg/);
+    assert.match(ui, /\.df2-conservation-ledger\.is-warn \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(ui, /\.df2-conservation-ledger\.is-danger \{[\s\S]{0,160}--df-danger-bg/);
+    assert.match(ui, /\.df2-conservation-ledger-compare article \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-conservation-ledger-compare article \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-conservation-ledger-chips li \{[\s\S]{0,180}--df-surface/);
+
+    assert.match(ui, /\.df2-quarantine-edit-dialog \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-edit-dialog \{[\s\S]{0,200}background: #fff;/);
+
+    assert.match(ui, /\.df2-overview-attention \{[\s\S]{0,280}--df-warning-bg/);
+    assert.match(ui, /\.df2-freshness-slo\.is-warn \{[\s\S]{0,160}--df-warning-bg/);
+    assert.match(ui, /\.df2-freshness-slo\.is-critical \{[\s\S]{0,160}--df-danger-bg/);
+  });
 });

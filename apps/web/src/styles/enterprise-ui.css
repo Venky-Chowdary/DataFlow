@@ -3203,7 +3203,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 14px;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e5e7eb);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: var(--df-shadow-lg, 0 12px 32px rgba(17, 24, 39, 0.16));
 }
 
@@ -3238,17 +3238,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  background: #ecfdf5;
+  background: var(--df-success-bg);
   color: #059669;
 }
 
 .df2-status-popover-icon.warn {
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   color: #d97706;
 }
 
 .df2-status-popover-icon.live {
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   color: #0f766e;
 }
 
@@ -8768,7 +8768,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-bottom: 0.75rem;
   border: 1px solid color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+  background: var(--df-warning-bg);
   order: -2;
 }
 
@@ -8808,7 +8808,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-left: auto;
   align-self: center;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: white;
+  background: var(--df-surface);
   border-radius: 8px;
   padding: 0.4rem 0.75rem;
   font-size: 13px;
@@ -8833,17 +8833,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-freshness-slo.is-ok {
   border-color: color-mix(in srgb, var(--df-ok, #15803d) 30%, transparent);
-  background: color-mix(in srgb, var(--df-ok, #15803d) 6%, white);
+  background: var(--df-success-bg);
 }
 
 .df2-freshness-slo.is-warn {
   border-color: color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
-  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+  background: var(--df-warning-bg);
 }
 
 .df2-freshness-slo.is-critical {
   border-color: color-mix(in srgb, var(--df-danger, #b91c1c) 40%, transparent);
-  background: color-mix(in srgb, var(--df-danger, #b91c1c) 8%, white);
+  background: var(--df-danger-bg);
 }
 
 .df2-freshness-slo-body {
@@ -8890,23 +8890,23 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0.9rem 1rem;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   margin: 0.75rem 0;
 }
 
 .df2-trust-score.is-ok {
   border-color: color-mix(in srgb, var(--df-ok, #15803d) 35%, transparent);
-  background: color-mix(in srgb, var(--df-ok, #15803d) 5%, white);
+  background: var(--df-success-bg);
 }
 
 .df2-trust-score.is-warn {
   border-color: color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
-  background: color-mix(in srgb, var(--df-warn, #b45309) 6%, white);
+  background: var(--df-warning-bg);
 }
 
 .df2-trust-score.is-danger {
   border-color: color-mix(in srgb, var(--df-danger, #b91c1c) 40%, transparent);
-  background: color-mix(in srgb, var(--df-danger, #b91c1c) 6%, white);
+  background: var(--df-danger-bg);
 }
 
 .df2-trust-score-head {
@@ -8997,23 +8997,23 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0.9rem 1rem;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   margin: 0.75rem 0;
 }
 
 .df2-conservation-ledger.is-ok {
   border-color: color-mix(in srgb, var(--df-ok, #15803d) 35%, transparent);
-  background: color-mix(in srgb, var(--df-ok, #15803d) 5%, white);
+  background: var(--df-success-bg);
 }
 
 .df2-conservation-ledger.is-warn {
   border-color: color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
-  background: color-mix(in srgb, var(--df-warn, #b45309) 6%, white);
+  background: var(--df-warning-bg);
 }
 
 .df2-conservation-ledger.is-danger {
   border-color: color-mix(in srgb, var(--df-danger, #b91c1c) 40%, transparent);
-  background: color-mix(in srgb, var(--df-danger, #b91c1c) 6%, white);
+  background: var(--df-danger-bg);
 }
 
 .df2-conservation-ledger.is-muted {
@@ -9023,7 +9023,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conservation-ledger.is-mirror.is-ok {
   border-color: color-mix(in srgb, var(--df-brand-strong, #115e59) 38%, transparent);
-  background: color-mix(in srgb, var(--df-brand-strong, #115e59) 5%, white);
+  background: var(--df-brand-muted);
 }
 
 .df2-conservation-ledger.is-mirror .df2-conservation-ledger-count {
@@ -9116,7 +9116,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0.5rem 0.65rem;
   border-radius: 10px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-conservation-ledger-compare article span {
@@ -9140,7 +9140,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conservation-ledger-compare article.is-warn {
   border-color: color-mix(in srgb, var(--df-warn, #b45309) 40%, transparent);
-  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+  background: var(--df-warning-bg);
 }
 
 .df2-conservation-ledger-compare article.is-muted strong {
@@ -9221,7 +9221,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 0.1rem;
   padding: 0.4rem 0.5rem;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--df-border, #e2e8f0);
 }
 
@@ -9244,7 +9244,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: flex-start;
   padding: 0.45rem 0.55rem;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+  background: var(--df-warning-bg);
 }
 
 .df2-conservation-ledger-ack strong {
@@ -11101,7 +11101,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 10px;
   padding: 20px;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
 }
 
