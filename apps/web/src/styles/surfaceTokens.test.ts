@@ -350,4 +350,38 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-run-step \.df2-theater-v3-metric \{[\s\S]{0,80}--df-surface/);
     assert.doesNotMatch(studio, /\.df2-run-step \.df2-theater-v3-metric \{[\s\S]{0,80}background: #ffffff;/);
   });
+
+  it("Notify strip, coerce samples, and model cards do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+    const polish = sheet("shell-polish.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(studio, /\.df2-notify-strip \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-notify-strip \{[\s\S]{0,160}background: #ffffff;/);
+    assert.match(studio, /\.df2-notify-strip-item \{[\s\S]{0,200}--df-surface-muted/);
+    assert.match(studio, /\.df2-notify-strip-item\.is-ok \{[^}]*--df-success-bg/);
+    assert.match(studio, /\.df2-notify-strip-item\.is-fail \{[^}]*--df-danger-bg/);
+    assert.match(studio, /\.df2-vd-blocker-fix \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-blocker-fix \{[\s\S]{0,160}background: #ffffff;/);
+    assert.match(studio, /\.df2-vd-coerce-samples table \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce-samples table \{[\s\S]{0,160}background: #ffffff;/);
+    assert.match(studio, /\.df2-vd-coerce-samples th \{[\s\S]{0,200}--df-surface-muted/);
+    assert.match(
+      studio,
+      /\.df2-result-fidelity-metrics article,\s*\n\.df2-data-integrity-metric \{[\s\S]{0,200}--df-surface/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-result-fidelity-metrics article,\s*\n\.df2-data-integrity-metric \{[\s\S]{0,200}background: #ffffff;/,
+    );
+
+    assert.match(polish, /\.df2-model-card \{[\s\S]{0,240}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-model-card \{[\s\S]{0,240}background: #fff !important;/);
+    assert.match(polish, /\.df2-model-route strong \{[\s\S]{0,200}--df-surface/);
+    assert.match(dataflow, /\.df2-model-card \{[\s\S]{0,160}--df-surface/);
+    assert.match(dataflow, /\.df2-model-card\.ready \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-result-more \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-more \{[\s\S]{0,120}background: #fff;/);
+  });
 });

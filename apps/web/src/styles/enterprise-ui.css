@@ -6444,19 +6444,19 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-result-fidelity-inline > span.is-dropped {
   border-color: #fecaca;
-  background: #fef2f2;
+  background: var(--df-danger-bg);
 }
 .df2-result-fidelity-inline > span.is-dropped strong { color: #b91c1c; }
 .df2-result-fidelity-inline > span.is-coerced {
   border-color: #fde68a;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 .df2-result-fidelity-inline > span.is-coerced strong { color: #b45309; }
 
 .df2-result-more {
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   padding: 0;
   overflow: hidden;
 }
