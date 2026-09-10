@@ -939,6 +939,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(dataflow, /\.df2-btn \{[\s\S]{0,160}#26312a/);
     assert.match(dataflow, /\.df2-pilot-idea \{[\s\S]{0,240}--df-surface/);
     assert.match(dataflow, /\.df2-pilot-capability \{[\s\S]{0,280}--df-surface/);
+    assert.match(dataflow, /\.df2-pilot-quick button \{[\s\S]{0,200}--df-surface-raised/);
 
     assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,200}--df-surface/);
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);

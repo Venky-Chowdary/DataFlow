@@ -48,7 +48,7 @@
   flex-direction: column !important;
   gap: 0 !important;
   overflow: hidden !important;
-  background: #fff;
+  background: var(--df-surface);
   border: none;
   padding: 0;
 }
@@ -65,7 +65,7 @@
   border: none;
   border-bottom: 1px solid var(--df-border, #e5e7eb);
   border-radius: 0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-status-brand {
@@ -133,7 +133,7 @@
   border: none !important;
   border-radius: 0 !important;
   box-shadow: none !important;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-v2 .df2-pilot-aside {
@@ -13176,13 +13176,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #fff;
 }
 
+.df2-app .df2-content-flush .df2-pilot-workspace.df2-pilot-v2,
 .df2-app .df2-pilot-workspace,
 .df2-app .df2-pilot-status-bar,
+.df2-app .df2-pilot-v2 .df2-pilot-status-bar,
+.df2-app .df2-pilot-v2 .df2-pilot-main,
 .df2-app .df2-pilot-main,
 .df2-app .df2-pilot-composer-bar,
 .df2-app .df2-pilot-console-strip,
 .df2-app .df2-pilot-console-strip div,
 .df2-app .df2-pilot-capability,
+.df2-app .df2-pilot-quick button,
 .df2-app .df2-pilot-idea {
   background: var(--df-surface);
   color: var(--df-text-primary);
@@ -13198,6 +13202,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-pilot-session-row.active {
   background: var(--df-brand-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-pilot-v2 .df2-pilot-session {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-pilot-v2 .df2-pilot-session-row.active .df2-pilot-session {
+  color: var(--df-brand-strong);
 }
 
 .df2-app .df2-pilot-composer-bar textarea,
