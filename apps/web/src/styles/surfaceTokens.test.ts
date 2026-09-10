@@ -36,11 +36,14 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     );
     assert.match(ui, /\.df2-result-metric\.is-warn[\s\S]{0,220}--df-warning-bg/);
     assert.match(studio, /\.df2-plan-callout\.is-warn[\s\S]{0,220}--df-warning-bg/);
+    assert.match(ui, /\.is-metric-dest\.is-warn[\s\S]{0,160}--df-warning-bg/);
+    assert.match(ui, /\.is-metric-writer\.is-warn[\s\S]{0,160}--df-warning-bg/);
     assert.doesNotMatch(
       ui,
       /\.df2-jobs-v3-summary-metrics article\.is-metric-quarantine\.is-warn[\s\S]{0,160}#fffbeb/,
     );
     assert.doesNotMatch(studio, /\.df2-plan-callout\.is-warn[\s\S]{0,160}#fffbeb/);
+    assert.doesNotMatch(ui, /\.is-metric-dest\.is-warn[\s\S]{0,120}#fffbeb/);
   });
 
   it("indigo leftover pulse-dot is gone from premium-theme", () => {

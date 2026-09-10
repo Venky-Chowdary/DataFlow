@@ -1309,9 +1309,9 @@
   padding: 6px 8px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: var(--df-radius-card, 8px);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border-left-width: 3px;
-  border-left-color: #94a3b8;
+  border-left-color: var(--df-text-tertiary);
 }
 
 .df2-jobs-v3-summary-metrics article strong {
@@ -9289,28 +9289,28 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-dest {
-  border-left-color: #0f766e;
-  background: #f0fdfa;
+  border-left-color: var(--df-brand);
+  background: var(--df-brand-muted);
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-dest.is-unmeasured {
-  border-left-color: #94a3b8;
-  background: #f8fafc;
+  border-left-color: var(--df-text-tertiary);
+  background: var(--df-surface-muted);
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-dest.is-danger {
-  border-left-color: #dc2626;
-  background: #fef2f2;
+  border-left-color: var(--df-danger);
+  background: var(--df-danger-bg);
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-dest.is-warn {
-  border-left-color: #d97706;
-  background: #fffbeb;
+  border-left-color: var(--df-warning);
+  background: var(--df-warning-bg);
 }
 
 .df2-jobs-v3-summary-metrics article.is-metric-writer.is-warn {
-  border-left-color: #d97706;
-  background: #fffbeb;
+  border-left-color: var(--df-warning);
+  background: var(--df-warning-bg);
 }
 
 .df2-overview-v3 {
