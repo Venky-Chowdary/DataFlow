@@ -553,7 +553,7 @@
   padding: 6px 10px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   color: #64748b;
 }
@@ -566,7 +566,7 @@
 }
 
 .df2-map-step-metric.warn strong { color: #d97706; }
-.df2-map-step-metric.muted { background: #f8fafc; }
+.df2-map-step-metric.muted { background: var(--df-surface-muted); }
 
 /* Split workspace — grid children MUST have min-height: 0 to scroll */
 .df2-map-step-workspace {
@@ -666,7 +666,7 @@
   overflow: hidden;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-column-review-data-preview {
@@ -679,7 +679,7 @@
 
 .df2-column-review-data-preview .df2-structure-preview {
   padding: 8px 10px;
-  background: #fff;
+  background: var(--df-surface-muted);
   border-radius: 8px;
   border: 1px solid #e2e8f0;
   height: 100%;
@@ -1179,7 +1179,7 @@
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--df-line, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   min-width: 0;
 }
 
@@ -1547,7 +1547,7 @@
   overflow: auto;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mapping-pair {
