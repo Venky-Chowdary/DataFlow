@@ -867,4 +867,53 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-column-review-table tr\.warn td \{[\s\S]{0,80}--df-warning-bg/);
     assert.match(ui, /\.df2-app \.df2-mapping-pair-block \{[\s\S]{0,80}--df-danger-bg/);
   });
+
+  it("Result dashboard and theater-rejected leftovers follow tokens", () => {
+    const studio = sheet("transfer-studio.css");
+    const topology = sheet("pipeline-topology.css");
+    const premium = sheet("premium-theme.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(topology, /\.df2-theater-rejected \{[\s\S]{0,200}--df-warning-bg/);
+    assert.doesNotMatch(topology, /\.df2-theater-rejected \{[\s\S]{0,200}#fffbeb/);
+
+    assert.match(
+      studio,
+      /\.df2-result-fidelity,\s*\n\.df2-data-integrity \{[\s\S]{0,200}--df-warning-bg/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-result-fidelity,\s*\n\.df2-data-integrity \{[\s\S]{0,200}#fffbeb/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-result-fidelity,\s*\n\.df2-data-integrity \{[\s\S]{0,200}#ffffff/,
+    );
+
+    assert.match(
+      ui,
+      /\.df2-result-dashboard \{\s*--df-result-pad-x: 16px;[\s\S]{0,80}--df-surface/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-result-dashboard \{\s*--df-result-pad-x: 16px;[\s\S]{0,160}255, 255, 255/,
+    );
+    assert.match(
+      ui,
+      /\.df2-result-dashboard\.is-warn,\s*\n\.df2-result-dashboard\.is-quarantine \{[\s\S]{0,200}--df-warning-bg/,
+    );
+    assert.doesNotMatch(ui, /\.df2-result-dashboard\.is-warn[\s\S]{0,200}#fffbeb/);
+    assert.match(ui, /\.df2-result-dashboard\.is-success \{[\s\S]{0,200}--df-success-bg/);
+    assert.match(ui, /\.df2-result-dashboard\.is-error \{[\s\S]{0,200}--df-danger-bg/);
+    assert.match(ui, /\.df2-result-head \{[\s\S]{0,320}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-head \{[\s\S]{0,320}255, 255, 255/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-result-dashboard \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-theater-rejected \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-app \.df2-result-fidelity,/);
+    assert.match(ui, /\.df2-app \.df2-result-dashboard\.is-error \{[\s\S]{0,80}--df-danger-bg/);
+  });
 });
