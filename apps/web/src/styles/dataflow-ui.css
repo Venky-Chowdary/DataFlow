@@ -5495,13 +5495,13 @@ body {
   padding: 16px;
   border: 1px solid var(--df-line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--df-surface);
   box-shadow: 0 10px 30px rgba(20, 29, 25, 0.055);
 }
 
 .df2-model-card.ready {
   border-color: #b7ebe2;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
 }
 
 .df2-model-card-head {

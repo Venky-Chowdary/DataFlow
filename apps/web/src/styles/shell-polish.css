@@ -1160,7 +1160,7 @@ textarea.df2-pilot-composer textarea {
   border: 1px solid var(--df-border, #e2e8f0) !important;
   border-radius: 999px;
   color: var(--df-brand, #0f766e) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   font-size: 11px;
   font-weight: 600;
 }
@@ -1179,8 +1179,12 @@ textarea.df2-pilot-composer textarea {
   padding: 16px 18px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.df2-model-card.ready {
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-model-card:hover {
