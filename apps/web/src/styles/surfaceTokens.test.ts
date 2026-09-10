@@ -693,4 +693,34 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-gate8-control-totals\.is-proven,[\s\S]{0,80}--df-success-bg/);
     assert.match(ui, /\.df2-app \.df2-jobs-v3-failure-message,[\s\S]{0,120}--df-danger-bg/);
   });
+
+  it("Connector setup, overview-v3, and dest-card leftovers do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+
+    assert.match(ui, /\.df2-conn-setup-icon \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-conn-setup-icon \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-auth-card \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-auth-card \{[\s\S]{0,360}background: #fff;/);
+    assert.match(ui, /\.df2-auth-card\.is-active,[\s\S]{0,120}--df-brand-muted/);
+    assert.match(ui, /\.df2-conn-help \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-conn-help \{[\s\S]{0,360}background: #fff;/);
+    assert.match(ui, /\.df2-overview-v3-ops-chip \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-overview-v3-ops-chip \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-overview-v3-ops-chip\.is-live \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-overview-v3-ops-chip\.is-fail \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-overview-v3-card-head \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-overview-v3-card-head \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.lp-mkt-page \.lp-mkt-list li \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-dest-connector-card \{[\s\S]{0,420}background: #fff;/);
+    assert.match(studio, /\.df2-dest-connector-card\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(studio, /\.df2-page-transfer-studio \.df2-dest-connector-card \{[\s\S]{0,420}--df-surface/);
+    assert.match(studio, /\.df2-page-transfer-studio \.df2-dest-connector-card\.active \{[\s\S]{0,80}--df-brand-muted/);
+
+    assert.match(ui, /\.df2-app \.df2-conn-setup-icon,[\s\S]{0,280}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-auth-card\.is-active,[\s\S]{0,160}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-overview-v3-ops-chip\.is-fail \{[\s\S]{0,80}--df-danger-bg/);
+  });
 });

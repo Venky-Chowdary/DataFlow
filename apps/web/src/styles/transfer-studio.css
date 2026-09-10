@@ -3340,7 +3340,7 @@ th.df2-type-string .df2-type-badge {
   box-sizing: border-box;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   text-align: left;
   transition: border-color 0.12s, background 0.12s;
@@ -3352,7 +3352,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-dest-connector-card.active {
   border-color: #0f766e;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   box-shadow: none;
 }
 
