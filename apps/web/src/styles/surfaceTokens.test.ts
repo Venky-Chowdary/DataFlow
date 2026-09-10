@@ -498,4 +498,36 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-result-metric \{[\s\S]{0,220}background: #fff;/);
     assert.match(ui, /\.df2-result-metric\.is-ok \{[\s\S]{0,80}--df-success-bg/);
   });
+
+  it("Sidebar chrome, toolbar, and jobs detail hosts do not flatten to #fff", () => {
+    const polish = sheet("shell-polish.css");
+    const ui = sheet("enterprise-ui.css");
+    const app = sheet("app-styles.css");
+
+    assert.match(polish, /\.df2-user-actions button \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-user-actions button \{[\s\S]{0,220}background: #fff;/);
+    assert.match(polish, /\.df2-sidebar-expand-topbar \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-sidebar-expand-topbar \{[\s\S]{0,200}background: #fff;/);
+    assert.match(polish, /\.df2-sidebar-collapse-btn \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-sidebar-collapse-btn \{[\s\S]{0,220}background: #fff;/);
+    assert.match(polish, /\.df2-security-row \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-security-row \{[\s\S]{0,200}background: #fff;/);
+
+    assert.match(ui, /\.df2-toolbar \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-toolbar \{[\s\S]{0,420}background: #fff;/);
+    assert.match(ui, /\.df2-toolbar-search \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-search \{[\s\S]{0,420}background: #fff;/);
+    assert.match(ui, /\.df2-toolbar-search:focus-within \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-search:focus-within \{[\s\S]{0,120}background: #fff !important;/);
+    assert.match(ui, /\.df2-toolbar-gitops-toggle \{[\s\S]{0,280}--df-surface/);
+    assert.match(ui, /\.df2-jobs-detail-tab\.is-active \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-detail-tab\.is-active \{[\s\S]{0,80}background: #fff;/);
+    assert.match(ui, /\.df2-jobs-detail-panel \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-detail-panel \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-transfer-step-viewport \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-transfer-step-viewport \{[\s\S]{0,80}background: #fff;/);
+
+    assert.match(app, /\.df2-app \.df2-context-bar \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(app, /\.df2-app \.df2-context-bar \{[\s\S]{0,160}#fff 70%/);
+  });
 });
