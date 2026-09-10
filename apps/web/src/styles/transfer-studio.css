@@ -3405,19 +3405,19 @@ th.df2-type-string .df2-type-badge {
   margin-top: 10px;
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   font-size: 12px;
 }
 
 .df2-dest-step .df2-plan-callout.is-ready {
-  border-color: #a7f3d0;
-  background: #ecfdf5;
+  border-color: var(--df-success-border);
+  background: var(--df-success-bg);
 }
 
 .df2-dest-step .df2-plan-callout.is-warn {
-  border-color: #fde68a;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-dest-step .df2-plan-callout-title {
@@ -5766,12 +5766,12 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-theater-v3-sla-card.is-warn {
-  border-color: #f0d3a8;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-theater-v3-sla-card.is-warn strong {
-  color: #b45309;
+  color: var(--df-warning);
 }
 
 .df2-theater-v3-sla-card span {
