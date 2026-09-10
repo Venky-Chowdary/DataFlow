@@ -663,7 +663,7 @@ body {
   padding: 14px 16px;
   border: 1px solid #dbe3ee;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
@@ -1800,7 +1800,7 @@ body {
   padding: 20px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-code-block {
@@ -4862,6 +4862,14 @@ body {
   background: var(--df-brand-muted) !important;
 }
 
+.df2-app .df2-ops-card.ok {
+  background: var(--df-success-bg) !important;
+}
+
+.df2-app .df2-ops-card.warn {
+  background: var(--df-warning-bg) !important;
+}
+
 .df2-app :is(
   .df2-card,
   .df2-stat,
@@ -5003,7 +5011,7 @@ body {
 
 .df2-tab.active {
   color: #0f766e;
-  background: #f0fdfa;
+  background: var(--df-surface);
   border-bottom-color: transparent;
   box-shadow: inset 0 0 0 1px #b7ebe2;
 }
@@ -5097,7 +5105,7 @@ body {
   padding: 8px;
   border: 1px solid var(--df-line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.84);
+  background: var(--df-surface);
   box-shadow: 0 10px 30px rgba(20, 29, 25, 0.055);
 }
 
@@ -5113,8 +5121,7 @@ body {
 
 .df2-pipeline {
   border-radius: 12px;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 247, 0.9));
+  background: var(--df-surface);
 }
 
 .df2-pipeline-route {
@@ -5126,8 +5133,7 @@ body {
   overflow: hidden;
   border: 1px solid var(--df-line);
   border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 249, 247, 0.9));
+  background: var(--df-surface);
   box-shadow: 0 16px 42px rgba(20, 29, 25, 0.07);
 }
 

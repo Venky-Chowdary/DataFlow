@@ -309,7 +309,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
 }
@@ -354,18 +354,18 @@
   padding: 14px 16px;
   border-radius: 10px;
   border: 1px solid var(--df-line);
-  background: #fff;
+  background: var(--df-surface);
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .df2-ops-card.ok {
   border-color: #a7f3d0;
-  background: linear-gradient(180deg, #f0fdf4, #fff);
+  background: var(--df-success-bg);
 }
 
 .df2-ops-card.warn {
   border-color: #fed7aa;
-  background: linear-gradient(180deg, #fff7ed, #fff);
+  background: var(--df-warning-bg);
 }
 
 .df2-ops-card span {
@@ -423,7 +423,7 @@
 }
 
 .df2-tab.active {
-  background: #fff;
+  background: var(--df-surface);
   color: #0f766e;
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
@@ -629,7 +629,7 @@
 .df2-connection-workbench {
   border-radius: var(--df-premium-radius);
   border: 1px solid var(--df-line);
-  background: #fff;
+  background: var(--df-surface);
   overflow: hidden;
   box-shadow: var(--df-premium-shadow-sm);
 }
@@ -847,7 +847,7 @@
   padding: 16px 18px;
   border: 1px solid var(--df-line);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: var(--df-premium-shadow-sm);
   transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
   animation: df-premium-rise 0.4s var(--df-premium-ease) both;
@@ -884,7 +884,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
 }
 

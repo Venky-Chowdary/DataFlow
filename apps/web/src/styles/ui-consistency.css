@@ -106,7 +106,7 @@
   padding: 14px 16px !important;
   border-radius: var(--df-radius-card, 12px);
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
 }
 

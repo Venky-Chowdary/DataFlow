@@ -586,4 +586,74 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-theater-v2-phase\.active \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(studio, /\.df2-theater-v2-phase\.failed \{[\s\S]{0,80}--df-danger-bg/);
   });
+
+  it("Overview, MCP, and modal leftovers do not flatten to #fff", () => {
+    const polish = sheet("shell-polish.css");
+    const premium = sheet("premium-theme.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const pages = sheet("enterprise-pages.css");
+    const consistency = sheet("ui-consistency.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(polish, /\.df2-connector-chip \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-connector-chip \{[\s\S]{0,280}background: #fff;/);
+    assert.match(polish, /\.df2-job-phase-pill \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-job-phase-pill \{[\s\S]{0,280}background: #fff;/);
+    assert.match(polish, /\.df2-job-phase-pill\.done \{[\s\S]{0,120}--df-success-bg/);
+    assert.match(polish, /\.df2-job-phase-pill\.active \{[\s\S]{0,120}--df-brand-muted/);
+    assert.match(polish, /\.df2-job-phase-pill\.failed \{[\s\S]{0,120}--df-danger-bg/);
+    assert.match(polish, /\.df2-settings-nav \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.df2-mcp-tile \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.df2-search-dropdown \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.df2-control-metric \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.dt-modal \{[\s\S]{0,320}--df-surface/);
+    assert.doesNotMatch(polish, /\.dt-modal \{[\s\S]{0,320}background: #ffffff;/);
+    assert.match(polish, /\.dt-modal-body \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.dt-modal-body \{[\s\S]{0,200}background: #fff;/);
+    assert.match(polish, /\.dt-modal-body \.df2-input \{[\s\S]{0,280}--df-surface/);
+    assert.match(polish, /\.df2-input:disabled,[\s\S]{0,80}--df-surface-muted/);
+    assert.match(polish, /\.df2-stream-row \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-stream-row \{[\s\S]{0,280}background: #fff;/);
+    assert.match(polish, /\.df2-overview-kpis \.df2-stat \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-overview-kpis \.df2-stat \{[\s\S]{0,200}background: #fff;/);
+    assert.match(polish, /\.df2-overview-action \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-overview-action \{[\s\S]{0,360}background: #fff;/);
+    assert.match(polish, /\.df2-overview-action:hover \{[\s\S]{0,120}--df-brand-muted/);
+    assert.match(polish, /\.df2-stats \.df2-stat,[\s\S]{0,160}background: var\(--df-surface\)/);
+
+    assert.match(premium, /\.df2-dashboard-matrix button \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-dashboard-matrix button \{[\s\S]{0,280}background: #fff;/);
+    assert.match(premium, /\.df2-ops-card \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-ops-card \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-ops-card\.ok \{[\s\S]{0,120}--df-success-bg/);
+    assert.match(premium, /\.df2-ops-card\.warn \{[\s\S]{0,120}--df-warning-bg/);
+    assert.match(premium, /\.df2-tab\.active \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-tab\.active \{[\s\S]{0,120}background: #fff;/);
+    assert.match(premium, /\.df2-connection-workbench \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-connection-workbench \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-pipeline \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-pipeline \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-mcp-tile \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(premium, /\.df2-mcp-tile \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,200}background: #fff;/);
+
+    assert.match(dataflow, /\.df2-mcp-tile \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-mcp-tile \{[\s\S]{0,200}background: #fff;/);
+    assert.match(dataflow, /\.df2-ops-card \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-ops-card \{[\s\S]{0,200}background: #fff;/);
+    assert.match(dataflow, /\.df2-app \.df2-ops-card\.ok \{[\s\S]{0,120}--df-success-bg/);
+    assert.match(dataflow, /\.df2-app \.df2-ops-card\.warn \{[\s\S]{0,120}--df-warning-bg/);
+    assert.match(dataflow, /\.df2-connection-workbench \{[\s\S]{0,280}--df-surface/);
+
+    assert.match(pages, /\.df2-mcp-tile \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(pages, /\.df2-mcp-tile \{[\s\S]{0,280}background: #fff;/);
+    assert.match(consistency, /\.df2-control-metric \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(consistency, /\.df2-control-metric \{[\s\S]{0,360}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.dt-modal,[\s\S]{0,520}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-ops-card\.ok,[\s\S]{0,120}--df-success-bg/);
+    assert.match(ui, /\.df2-app \.df2-job-phase-pill\.active \{[\s\S]{0,120}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-job-phase-pill\.failed \{[\s\S]{0,120}--df-danger-bg/);
+  });
 });

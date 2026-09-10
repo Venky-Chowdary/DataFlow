@@ -12860,3 +12860,50 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-brand-muted);
   color: var(--df-brand-strong);
 }
+
+/* Overview / MCP / modal leftovers — beat leftover #fff without a sibling sheet. */
+.df2-app .dt-modal,
+.df2-app .dt-modal-header,
+.df2-app .dt-modal-body,
+.df2-app .dt-modal-header .df2-btn-ghost,
+.df2-app .dt-modal-body .df2-input,
+.df2-app .dt-modal-body .df2-select,
+.df2-app .df2-overview-kpis .df2-stat,
+.df2-app .df2-stats .df2-stat,
+.df2-app .df2-overview-action,
+.df2-app .df2-dashboard-matrix button,
+.df2-app .df2-connection-workbench,
+.df2-app .df2-stream-row,
+.df2-app .df2-job-phase-pill,
+.df2-app .df2-connector-chip,
+.df2-app .df2-search-dropdown,
+.df2-app .df2-pipeline-card-route {
+  background: var(--df-surface);
+}
+
+.df2-app .dt-modal-body .df2-input:disabled,
+.df2-app .df2-input:disabled,
+.df2-app .df2-textarea:disabled {
+  background: var(--df-surface-muted) !important;
+}
+
+.df2-app .df2-overview-action:hover {
+  background: var(--df-brand-muted);
+}
+
+.df2-app .df2-ops-card.ok,
+.df2-app .df2-job-phase-pill.done {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-ops-card.warn {
+  background: var(--df-warning-bg);
+}
+
+.df2-app .df2-job-phase-pill.active {
+  background: var(--df-brand-muted);
+}
+
+.df2-app .df2-job-phase-pill.failed {
+  background: var(--df-danger-bg);
+}

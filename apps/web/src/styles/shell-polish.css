@@ -437,7 +437,7 @@
   padding: 8px 10px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   min-width: 0;
 }
 
@@ -504,25 +504,25 @@
   font-size: 11px;
   font-weight: 600;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   color: var(--df-text-muted, #64748b);
 }
 
 .df2-job-phase-pill.done {
   border-color: #bbf7d0;
-  background: #f0fdf4;
+  background: var(--df-success-bg);
   color: #15803d;
 }
 
 .df2-job-phase-pill.active {
   border-color: #99f6e4;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   color: #0f766e;
 }
 
 .df2-job-phase-pill.failed {
   border-color: #fecaca;
-  background: #fef2f2;
+  background: var(--df-danger-bg);
   color: #b91c1c;
 }
 
@@ -589,7 +589,7 @@
   padding: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 14px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-settings-nav button {
@@ -821,7 +821,7 @@ select.df2-select {
   padding: 14px 16px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-mcp-tool-name {
@@ -1019,7 +1019,7 @@ select.df2-select {
   flex: 0 0 var(--df-control-height, 36px);
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-md, 8px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-connector-select-placeholder-icon {
@@ -1087,6 +1087,11 @@ select.df2-select {
 .df2-textarea {
   color: var(--df-text-primary, #0f172a) !important;
   background: var(--df-surface) !important;
+}
+
+.df2-input:disabled,
+.df2-textarea:disabled {
+  background: var(--df-surface-muted) !important;
 }
 
 textarea.df2-pilot-composer textarea {
@@ -1322,7 +1327,7 @@ textarea.df2-pilot-composer textarea {
   height: 48px;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-connector-card-badges {
@@ -1483,7 +1488,7 @@ textarea.df2-pilot-composer textarea {
   padding: 6px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 16px 48px rgba(15, 23, 42, 0.14);
   max-height: 360px;
   overflow-y: auto;
@@ -1751,7 +1756,7 @@ textarea.df2-pilot-composer textarea {
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pipeline-card-node {
@@ -2764,7 +2769,7 @@ textarea.df2-pilot-composer textarea {
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-control-metric span {
@@ -3534,7 +3539,7 @@ textarea.df2-pilot-composer textarea {
   max-height: min(90vh, 820px);
   display: flex;
   flex-direction: column;
-  background: #ffffff;
+  background: var(--df-surface);
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 16px;
   box-shadow: 0 32px 64px rgba(15, 23, 42, 0.28);
@@ -3566,7 +3571,7 @@ textarea.df2-pilot-composer textarea {
   gap: 16px;
   padding: 20px 24px;
   border-bottom: 1px solid var(--df-border, #eef2f6);
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: var(--df-surface);
 }
 
 .df2-app .dt-modal-title,
@@ -3597,7 +3602,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: center;
   border-radius: 9px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   color: #64748b;
 }
 
@@ -3611,7 +3616,7 @@ textarea.df2-pilot-composer textarea {
   flex: 1 1 auto;
   padding: 24px;
   overflow-y: auto;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-modal-xl .dt-modal-body {
@@ -3679,7 +3684,7 @@ textarea.df2-pilot-composer textarea {
   border-radius: 9px;
   font-size: 14px;
   color: #0f172a;
-  background: #fff;
+  background: var(--df-surface);
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
@@ -3690,7 +3695,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .dt-modal-body .df2-input:disabled {
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   color: #94a3b8;
 }
 
@@ -3904,7 +3909,7 @@ textarea.df2-pilot-composer textarea {
   padding: 10px 14px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-stream-row strong {
@@ -4072,7 +4077,7 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-kpis .df2-stat {
   border-radius: 14px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: none;
   min-height: 96px;
 }
@@ -4287,7 +4292,7 @@ textarea.df2-pilot-composer textarea {
   padding: 12px 14px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   text-align: left;
   cursor: pointer;
   color: inherit;
@@ -4296,7 +4301,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-overview-action:hover {
   border-color: #99f6e4;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
   box-shadow: 0 4px 12px rgba(15, 118, 110, 0.08);
 }
 
@@ -4462,7 +4467,7 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-kpis .df2-stat {
   border-radius: var(--df-radius-card, 12px);
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   padding: 16px 18px;
   min-height: 92px;
 }
