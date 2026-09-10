@@ -2940,16 +2940,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: flex-start;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface-muted);
 }
 
-.df2-source-aside-steps li.done { border-color: #a7f3d0; background: #f0fdf4; }
+.df2-source-aside-steps li.done { border-color: var(--df-success-border); background: var(--df-success-bg); }
 .df2-source-aside-steps li.active {
-  border-color: #5eead4;
-  background: #f0fdfa;
-  box-shadow: 0 0 0 1px rgba(15, 118, 110, 0.12);
+  border-color: var(--df-border-brand);
+  background: var(--df-brand-muted);
+  box-shadow: 0 0 0 1px var(--df-brand-ring);
 }
 
 .df2-source-aside-step-marker {
@@ -2959,17 +2959,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
   font-size: 11px;
   font-weight: 700;
-  color: #64748b;
+  color: var(--df-text-muted);
 }
 
-.df2-source-aside-steps li.done .df2-source-aside-step-marker { background: #059669; color: #fff; }
-.df2-source-aside-steps li.active .df2-source-aside-step-marker { background: #0f766e; color: #fff; }
+.df2-source-aside-steps li.done .df2-source-aside-step-marker { background: var(--df-success); color: var(--df-surface); }
+.df2-source-aside-steps li.active .df2-source-aside-step-marker { background: var(--df-brand); color: var(--df-surface); }
 
-.df2-source-aside-steps li strong { display: block; font-size: 13px; color: #0f172a; }
-.df2-source-aside-steps li span { font-size: 12px; color: #64748b; }
+.df2-source-aside-steps li strong { display: block; font-size: 13px; color: var(--df-text-primary); }
+.df2-source-aside-steps li span { font-size: 12px; color: var(--df-text-muted); }
 
 .df2-source-aside-formats { display: flex; flex-direction: column; gap: 8px; }
 .df2-source-aside-formats-label {
@@ -2977,18 +2977,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-source-aside-format-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .df2-source-aside-format-chip {
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid #e2e8f0;
-  background: #fff;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   font-size: 11px;
   font-weight: 600;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-source-aside-sample,

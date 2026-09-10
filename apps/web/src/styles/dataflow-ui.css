@@ -3347,8 +3347,8 @@ body {
   width: 48px;
   height: 48px;
   border-radius: 8px;
-  background: #f0fdfa;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
 }
 
 .df2-plan-callout {
@@ -5015,8 +5015,8 @@ body {
 
 .df2-cell-icon,
 .df2-upload-icon {
-  background: #edf7f4;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
 }
 
 .df2-badge-live {
