@@ -5963,8 +5963,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #fef3c7 !important;
-  color: #78350f !important;
+  background: var(--df-warning-bg) !important;
+  color: var(--df-text-primary) !important;
   border-bottom-color: #fde68a !important;
   font-size: var(--df-fs-xs) !important;
   font-weight: 700 !important;
@@ -5975,7 +5975,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-quarantine-table td {
   color: var(--df-text-primary) !important;
-  background: #ffffff;
+  background: var(--df-surface);
   border-bottom-color: color-mix(in srgb, #fde68a 55%, var(--df-border)) !important;
   white-space: normal;
   word-break: break-word;
@@ -7905,20 +7905,20 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-jobs-v3-quarantine .df2-quarantine-inspect,
 .df2-theater-v3-quarantine .df2-quarantine-inspect {
-  background: #ffffff;
+  background: var(--df-surface);
   border-color: #fde68a;
 }
 
 .df2-jobs-v3-quarantine .df2-quarantine-table td,
 .df2-theater-v3-quarantine .df2-quarantine-table td {
-  color: #0f172a !important;
-  background: #ffffff;
+  color: var(--df-text-primary) !important;
+  background: var(--df-surface);
 }
 
 .df2-jobs-v3-quarantine .df2-quarantine-table th,
 .df2-theater-v3-quarantine .df2-quarantine-table th {
-  color: #334155 !important;
-  background: #f8fafc !important;
+  color: var(--df-text-secondary) !important;
+  background: var(--df-warning-bg) !important;
 }
 
 .df2-jobs-v3-alert {
@@ -11253,17 +11253,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-app .df2-quarantine-table th {
-  background: #fef3c7 !important;
-  color: #78350f !important;
-  box-shadow: inset 0 -1px 0 #fde68a;
+  background: var(--df-warning-bg) !important;
+  color: var(--df-text-primary) !important;
+  box-shadow: inset 0 -1px 0 var(--df-warning-border, #fde68a);
 }
 
 .df2-app .df2-quarantine-table tbody tr:nth-child(even) td {
-  background: #fffdf5;
+  background: color-mix(in srgb, var(--df-warning-bg) 45%, var(--df-surface));
 }
 
 .df2-app .df2-quarantine-table tbody tr:hover td {
-  background: #fffbeb !important;
+  background: var(--df-warning-bg) !important;
 }
 
 /* Short stepper labels before route bar overlaps (tablet / 14" / split view) */

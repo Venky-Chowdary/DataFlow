@@ -1520,8 +1520,8 @@ body {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   font-size: 14px;
-  background: #fff;
-  color: #0f172a;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
 }
 
 .df2-input:focus,
