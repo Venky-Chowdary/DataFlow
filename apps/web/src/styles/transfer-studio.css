@@ -5286,28 +5286,28 @@ th.df2-type-string .df2-type-badge {
   padding: 12px;
   border-radius: 10px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   overflow-wrap: anywhere;
 }
 
 .df2-validate-rail-panel.passed {
-  border-color: #a7f3d0;
-  background: #ecfdf5;
+  border-color: var(--df-success-border);
+  background: var(--df-success-bg);
 }
 
 .df2-validate-rail-panel.review {
-  border-color: #fcd34d;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-validate-rail-panel.live {
-  border-color: #bae6fd;
-  background: #f0f9ff;
+  border-color: var(--df-info-border);
+  background: var(--df-info-bg);
 }
 
 .df2-validate-rail-panel.blocked {
-  border-color: #fde68a;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-validate-rail-score strong {
@@ -5762,7 +5762,7 @@ th.df2-type-string .df2-type-badge {
   padding: 10px 12px;
   border: 1px solid #dbe5f0;
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--df-surface);
 }
 
 .df2-theater-v3-sla-card.is-warn {
@@ -7671,7 +7671,7 @@ th.df2-type-string .df2-type-badge {
   padding: 8px 12px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 .df2-vd-metric {
   display: inline-flex;
@@ -7862,7 +7862,7 @@ th.df2-type-string .df2-type-badge {
   padding: 14px 16px;
   border: 1px solid #e2e8f0;
   border-radius: 14px;
-  background: #ffffff;
+  background: var(--df-surface);
 }
 .df2-vd-ring-svg {
   position: relative;
@@ -7909,7 +7909,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-rules {
   border: 1px solid #e2e8f0;
   border-radius: 14px;
-  background: #ffffff;
+  background: var(--df-surface);
   overflow: hidden;
 }
 .df2-vd-rules-head {
@@ -7941,16 +7941,16 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid #e2e8f0;
   border-left: 3px solid #cbd5e1;
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--df-surface);
 }
-.df2-vd-rule.status-pass { border-left-color: #22c55e; background: #f6fef9; }
-.df2-vd-rule.status-block { border-left-color: #ef4444; background: #fef7f7; }
-.df2-vd-rule.status-warn { border-left-color: #f59e0b; background: #fffbeb; }
-.df2-vd-rule.status-skip { border-left-color: #cbd5e1; background: #f8fafc; opacity: 0.85; }
-.df2-vd-rule.status-running { border-left-color: #0ea5e9; background: #f0f9ff; }
+.df2-vd-rule.status-pass { border-left-color: #22c55e; background: var(--df-success-bg); }
+.df2-vd-rule.status-block { border-left-color: #ef4444; background: var(--df-danger-bg); }
+.df2-vd-rule.status-warn { border-left-color: #f59e0b; background: var(--df-warning-bg); }
+.df2-vd-rule.status-skip { border-left-color: #cbd5e1; background: var(--df-surface-muted); opacity: 0.85; }
+.df2-vd-rule.status-running { border-left-color: #0ea5e9; background: var(--df-info-bg); }
 .df2-vd-rule.status-pending {
   border-left-color: #99f6e4;
-  background: linear-gradient(90deg, rgba(240, 253, 250, 0.55) 0%, #fff 48%);
+  background: linear-gradient(90deg, var(--df-brand-muted) 0%, var(--df-surface) 48%);
 }
 .df2-vd-rule.is-compact {
   gap: 4px;

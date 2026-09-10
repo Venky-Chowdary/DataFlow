@@ -949,7 +949,7 @@
   padding: 16px;
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: var(--df-radius-card, 8px);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-jobs-v3-detail .df2-theater-v3 {
@@ -4906,7 +4906,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 0 !important;
   padding: 0 !important;
   overflow: hidden !important;
-  background: #fff;
+  background: var(--df-surface);
   border: none;
   border-radius: 0;
   box-sizing: border-box;
@@ -4916,14 +4916,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0 14px;
   border-top: 1px solid #e2e8f0;
   border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-theater-v3-log-section {
   position: relative;
   flex: 0 0 auto;
   padding: 8px 14px;
-  background: #ffffff;
+  background: var(--df-surface);
   border-top: 1px solid #e2e8f0;
   z-index: 1;
 }
@@ -5184,7 +5184,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 6px 8px !important;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   min-width: 0;
 }
 
@@ -5203,13 +5203,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-metric.is-warn {
-  border-color: #fcd34d;
-  background: #fffbeb;
+  border-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
 }
 
 .df2-theater-v3-metric.is-danger {
-  border-color: #fecaca;
-  background: #fef2f2;
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
 }
 
 .df2-theater-pop-strip {
@@ -7288,7 +7288,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-page-jobs .df2-jobs-v3-detail,
 .df2-page-jobs .df2-theater-v3 {
-  background: linear-gradient(180deg, #fff 0%, #fafbfc 100%);
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
 }
 
 .df2-page-connectors .df2-connector-card:hover {
@@ -8367,7 +8367,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 /* Validate + Map step enterprise polish */
 .df2-validate-dashboard-host,
 .df2-validate-step {
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-vd-gate-list {

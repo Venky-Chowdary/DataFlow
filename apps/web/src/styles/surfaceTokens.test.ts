@@ -81,4 +81,39 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(premium, /\.df2-wizard \{[\s\S]{0,280}linear-gradient\(180deg, #fff/);
     assert.match(studio, /\.df2-wizard-studio \.df2-wizard-step\.active \{[\s\S]{0,80}--df-brand-muted/);
   });
+
+  it("Validate / Map / theater hosts do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const map = sheet("column-workbench.css");
+
+    assert.match(ui, /\.df2-validate-dashboard-host,\s*\n\.df2-validate-step \{\s*\n\s*background: var\(--df-surface\)/);
+    assert.doesNotMatch(ui, /\.df2-validate-dashboard-host,\s*\n\.df2-validate-step \{\s*\n\s*background: #fff;/);
+    assert.match(ui, /\.df2-run-step \.df2-theater-v3,[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-run-step \.df2-theater-v3,[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-theater-v3-metric\.is-warn[\s\S]{0,160}--df-warning-bg/);
+    assert.match(ui, /\.df2-theater-v3-metric\.is-danger[\s\S]{0,160}--df-danger-bg/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-metric\.is-warn[\s\S]{0,120}#fffbeb/);
+    assert.match(
+      ui,
+      /\.df2-page-jobs \.df2-jobs-v3-detail,[\s\S]{0,160}--df-surface/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-page-jobs \.df2-jobs-v3-detail,[\s\S]{0,160}linear-gradient\(180deg, #fff/,
+    );
+
+    assert.match(studio, /\.df2-validate-rail-panel \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-validate-rail-panel \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-validate-rail-panel\.review[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-vd-ring \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-ring \{[\s\S]{0,200}background: #ffffff;/);
+    assert.match(studio, /\.df2-vd-rules \{[\s\S]{0,120}--df-surface/);
+    assert.match(studio, /\.df2-theater-v3-sla-card \{[\s\S]{0,180}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-sla-card \{[\s\S]{0,180}background: #ffffff;/);
+
+    assert.match(map, /\.df2-column-review-editor \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(map, /\.df2-column-review-editor \{[\s\S]{0,220}background: #fff;/);
+    assert.match(map, /\.df2-map-step-metric \{[\s\S]{0,200}--df-surface/);
+  });
 });
