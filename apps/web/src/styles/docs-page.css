@@ -1508,7 +1508,7 @@
   border-radius: 0;
   border: 0;
   border-right: 1px solid var(--df-border, #e2e8f0);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   padding: 18px 12px 28px;
   overflow: auto;
 }
@@ -1694,7 +1694,7 @@
   margin: 20px 0 28px;
   padding: 12px 14px;
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border: 1px solid #e2e8f0;
 }
 
@@ -1857,7 +1857,7 @@
   .docs-space-nav-mobile {
     display: block;
     border-bottom: 1px solid #e2e8f0;
-    background: #f8fafc;
+    background: var(--df-surface-muted);
   }
 
   .docs-space-nav-mobile summary {

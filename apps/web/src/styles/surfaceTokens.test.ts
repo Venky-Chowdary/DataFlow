@@ -223,6 +223,18 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(docs, /\.docs-space-start \{[\s\S]{0,220}#fff 100%/);
     assert.match(docs, /\.docs-space-algorithm \{[\s\S]{0,200}--df-surface/);
     assert.doesNotMatch(docs, /\.docs-space-algorithm \{[\s\S]{0,200}#fff,/);
+    assert.match(docs, /\.docs-sidebar--space \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(docs, /\.docs-sidebar--space \{[\s\S]{0,280}background: #f8fafc;/);
+    assert.match(docs, /\.docs-toc--inline \{[\s\S]{0,160}--df-surface-muted/);
+
+    const editorial = sheet("marketing-editorial.css");
+    assert.match(editorial, /\.docs-space \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(editorial, /\.docs-space \{[\s\S]{0,280}background: #fff;/);
+    assert.match(editorial, /\.docs-space-algorithm \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(editorial, /\.docs-space-algorithm \{[\s\S]{0,240}#f8fafc;/);
+    assert.match(editorial, /\.docs-space-algorithm-steps li \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(editorial, /\.docs-space-algorithm-steps li \{[\s\S]{0,80}background: #fff;/);
+    assert.match(editorial, /\.docs-sidebar--space \{[\s\S]{0,280}--df-surface-muted/);
 
     assert.match(ui, /\.df2-pipe-card \{[\s\S]{0,280}--df-surface/);
     assert.doesNotMatch(ui, /\.df2-pipe-card \{[\s\S]{0,280}background: #fff;/);
