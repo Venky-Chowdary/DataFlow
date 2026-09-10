@@ -98,7 +98,7 @@
 }
 
 .df2-command-search:focus-within {
-  background: #fff;
+  background: var(--df-surface);
   border-color: #99f6e4;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
 }
@@ -112,7 +112,7 @@
 }
 
 .df2-system-pill.degraded {
-  background: #fffbeb;
+  background: var(--df-warning-bg);
   border-color: #fcd34d;
   color: #92400e;
 }

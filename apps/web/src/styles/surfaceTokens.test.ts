@@ -290,4 +290,38 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-freshness-slo\.is-warn \{[\s\S]{0,160}--df-warning-bg/);
     assert.match(ui, /\.df2-freshness-slo\.is-critical \{[\s\S]{0,160}--df-danger-bg/);
   });
+
+  it("Form controls and table cells do not flatten to #fff", () => {
+    const dataflow = sheet("dataflow-ui.css");
+    const polish = sheet("shell-polish.css");
+    const premium = sheet("premium-theme.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(dataflow, /\.df2-input,\s*\n\.df2-select \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-input,\s*\n\.df2-select \{[\s\S]{0,200}background: #fff;/);
+
+    assert.match(polish, /\.df2-input,\s*\n\.df2-textarea \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-input,\s*\n\.df2-textarea \{[\s\S]{0,120}background: #fff !important;/);
+    assert.match(polish, /background-color: var\(--df-surface\) !important;/);
+    assert.doesNotMatch(polish, /background-color: #fff !important;/);
+    assert.match(polish, /\.df2-table-search \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-table-search \{[\s\S]{0,280}background: #fff;/);
+    assert.match(polish, /\.df2-structure-table th \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(polish, /\.df2-command-search:focus-within,[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-command-search:focus-within,[\s\S]{0,80}background: #fff !important;/);
+    assert.match(polish, /\.df2-system-pill \{[\s\S]{0,160}--df-surface/);
+    assert.match(polish, /\.df2-system-pill\.degraded \{[\s\S]{0,80}--df-warning-bg/);
+
+    assert.match(premium, /\.df2-command-search:focus-within \{[\s\S]{0,80}--df-surface/);
+    assert.match(premium, /\.df2-system-pill\.degraded \{[\s\S]{0,80}--df-warning-bg/);
+
+    assert.match(ui, /\.df2-quarantine-table td \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-table td \{[\s\S]{0,80}background: #ffffff;/);
+    assert.match(ui, /\.df2-jobs-v3-quarantine \.df2-quarantine-table td,[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-v3-quarantine \.df2-quarantine-table td,[\s\S]{0,160}background: #ffffff;/);
+    assert.match(ui, /\.df2-app \.df2-quarantine-table th \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(ui, /\.df2-app \.df2-quarantine-table th \{[\s\S]{0,80}#fef3c7/);
+    assert.match(ui, /\.df2-app \.df2-quarantine-table tbody tr:hover td \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(ui, /\.df2-app \.df2-quarantine-table tbody tr:hover td \{[\s\S]{0,80}#fffbeb/);
+  });
 });

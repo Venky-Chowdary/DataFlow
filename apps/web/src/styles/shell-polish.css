@@ -642,7 +642,7 @@ select.df2-select {
   background-position: right 12px center;
   padding-right: 36px !important;
   color: var(--df-text-primary, #0f172a) !important;
-  background-color: #fff !important;
+  background-color: var(--df-surface) !important;
 }
 
 /* ─── Text visibility fixes ─── */
@@ -866,13 +866,13 @@ select.df2-select {
 
 .df2-system-pill {
   color: var(--df-text-secondary, #475569) !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border: 1px solid var(--df-border, #e2e8f0) !important;
 }
 
 .df2-system-pill.degraded {
   color: #b45309 !important;
-  background: #fffbeb !important;
+  background: var(--df-warning-bg) !important;
   border-color: #fde68a !important;
 }
 
@@ -1084,7 +1084,11 @@ select.df2-select {
 
 /* ─── Inputs universal readability ─── */
 .df2-input,
-.df2-textarea,
+.df2-textarea {
+  color: var(--df-text-primary, #0f172a) !important;
+  background: var(--df-surface) !important;
+}
+
 textarea.df2-pilot-composer textarea {
   color: var(--df-text-primary, #0f172a) !important;
   background: #fff !important;
@@ -2290,7 +2294,7 @@ textarea.df2-pilot-composer textarea {
   padding: 8px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-table-search input {
@@ -3145,7 +3149,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-structure-table th {
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-weight: 600;
   color: #334155;
 }
@@ -3765,7 +3769,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-command-search:focus-within,
 .df2-workspace-search:focus-within {
-  background: #fff !important;
+  background: var(--df-surface) !important;
   border-color: var(--df-brand, #0f766e) !important;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12) !important;
 }
@@ -5436,7 +5440,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-overview-enterprise .df2-overview-migrations .df2-table thead th {
-  background: rgba(248, 250, 252, 0.85);
+  background: var(--df-surface-muted);
   border-bottom: 1px solid #e2e8f0;
   font-size: 11px;
   text-transform: uppercase;
