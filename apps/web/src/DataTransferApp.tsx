@@ -22,6 +22,7 @@ import { clearSession, readSession, writeSession } from "./lib/session";
 import { WORKSPACE_CHANGED_EVENT, clearActiveWorkspaceId, getActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
+import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
@@ -106,6 +107,7 @@ function AppShell({
   onSignOut: () => void;
 }) {
   const { toast } = useToast();
+  useTheme();
   const connectorWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const { confirm } = useConfirm();
   const [screen, setScreenState] = useState<Screen>(() => {

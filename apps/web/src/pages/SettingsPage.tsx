@@ -17,6 +17,8 @@ import { TenantSettings } from "./settings/TenantSettings";
 import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
 import { useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
+import { useTheme } from "../lib/useTheme";
+import type { ThemePreference } from "../lib/theme";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -44,6 +46,7 @@ type AuditLog = {
 export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => void }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const { preference: themePreference, setTheme } = useTheme();
   const [tab, setTab] = useState<TabId>("general");
   const [orgName, setOrgName] = useState("Datawrap");
   const [timezone, setTimezone] = useState("UTC");
@@ -538,6 +541,32 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
           <div className="df2-settings-panel" role="tabpanel" aria-label={TABS.find((t) => t.id === tab)?.label ?? "Settings"}>
             {tab === "general" && (
               <>
+                <section className="df2-settings-section" data-testid="settings-appearance">
+                  <div className="df2-settings-section-head">
+                    <div>
+                      <h2>Appearance</h2>
+                      <p>Light and dark share one token set. This is this browser — not a workspace admin setting.</p>
+                    </div>
+                  </div>
+                  <div className="df2-settings-section-body">
+                    <div className="df2-settings-field">
+                      <label id="appearance-theme-label">Theme</label>
+                      <FilterTabs<ThemePreference>
+                        ariaLabel="Theme"
+                        value={themePreference}
+                        onChange={setTheme}
+                        items={[
+                          { id: "light", label: "Light", icon: <DtIcon name="sun" size={13} /> },
+                          { id: "dark", label: "Dark", icon: <DtIcon name="moon" size={13} /> },
+                          { id: "system", label: "System" },
+                        ]}
+                      />
+                      <p className="df2-label-hint">
+                        Teal brand stays. System follows the operating-system color scheme.
+                      </p>
+                    </div>
+                  </div>
+                </section>
                 <section className="df2-settings-section">
                   <div className="df2-settings-section-head">
                     <div>

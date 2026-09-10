@@ -486,21 +486,21 @@
 }
 
 .df2-alert-error {
-  border: 1px solid #fecaca;
-  background: linear-gradient(90deg, #fef2f2, #fff);
-  color: #991b1b;
+  border: 1px solid var(--df-danger-border);
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
 .df2-alert-info {
-  border: 1px solid #bfdbfe;
-  background: linear-gradient(90deg, #eff6ff, #fff);
+  border: 1px solid var(--df-border-brand);
+  background: var(--df-brand-muted);
 }
 
 .df2-pulse-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2563eb;
+  background: var(--df-brand);
   flex-shrink: 0;
   margin-top: 6px;
   animation: df-premium-pulse 1.5s ease-in-out infinite;
