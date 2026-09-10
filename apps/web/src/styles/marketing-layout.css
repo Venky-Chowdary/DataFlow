@@ -193,7 +193,7 @@
   border: 1px solid var(--lp-line) !important;
   box-shadow: none !important;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 /* Section rhythm ? tighter, consistent */
@@ -1585,7 +1585,7 @@
   padding: 22px 22px !important;
   border: 1px solid var(--lp-line) !important;
   border-radius: 14px !important;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 72%) !important;
+  background: linear-gradient(180deg, var(--df-brand-muted) 0%, var(--df-surface) 72%) !important;
   box-shadow: none !important;
 }
 
@@ -1654,7 +1654,7 @@
   border: 1px solid var(--lp-line) !important;
   border-left: 3px solid var(--lp-teal) !important;
   border-radius: 10px !important;
-  background: #fff !important;
+  background: var(--df-surface) !important;
   min-width: 0;
 }
 

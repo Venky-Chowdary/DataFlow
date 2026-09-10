@@ -227,6 +227,12 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(docs, /\.docs-sidebar--space \{[\s\S]{0,280}background: #f8fafc;/);
     assert.match(docs, /\.docs-toc--inline \{[\s\S]{0,160}--df-surface-muted/);
 
+    const layout = sheet("marketing-layout.css");
+    assert.match(layout, /\.docs-space-algorithm-steps li \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(layout, /\.docs-space-algorithm-steps li \{[\s\S]{0,280}background: #fff !important;/);
+    assert.match(layout, /\.docs-space-start \{[\s\S]{0,240}--df-surface/);
+    assert.doesNotMatch(layout, /\.docs-space-start \{[\s\S]{0,240}#fff 72%/);
+
     const editorial = sheet("marketing-editorial.css");
     assert.match(editorial, /\.docs-space \{[\s\S]{0,280}--df-surface/);
     assert.doesNotMatch(editorial, /\.docs-space \{[\s\S]{0,280}background: #fff;/);
