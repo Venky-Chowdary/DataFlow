@@ -365,7 +365,7 @@
   padding: 6px;
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--df-surface);
 }
 
 .df2-page-docs .df2-docs-toc-item {

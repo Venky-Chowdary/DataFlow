@@ -636,7 +636,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(premium, /\.df2-mcp-tile \{[\s\S]{0,200}--df-surface/);
     assert.doesNotMatch(premium, /\.df2-mcp-tile \{[\s\S]{0,200}background: #fff;/);
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,200}background: #fff;/);
-    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,200}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,200}--df-surface/);
 
     assert.match(dataflow, /\.df2-mcp-tile \{[\s\S]{0,200}--df-surface/);
     assert.doesNotMatch(dataflow, /\.df2-mcp-tile \{[\s\S]{0,200}background: #fff;/);
@@ -771,7 +771,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-overview-v3 \.df2-metric-glass-amber \{[\s\S]{0,80}--df-warning-bg/);
     assert.match(app, /\.df2-app \.df2-overview-v3 \.df2-metric-glass-teal \{[\s\S]{0,80}--df-brand-muted/);
     assert.doesNotMatch(app, /\.df2-app \.df2-overview-v3 \.df2-metric-glass-teal \{[\s\S]{0,160}#fff 78%/);
-    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-composer-bar \{[\s\S]{0,80}background: #fff;/);
+    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-composer-bar \{[\s\S]{0,80}--df-surface/);
   });
 
   it("Studio, shell, and badge warn leftovers follow warning tokens", () => {
@@ -861,7 +861,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(premium, /\.df2-column-review-alert \{[\s\S]{0,160}#fffbeb/);
     assert.match(premium, /\.df2-column-review-table tr\.warn td \{[\s\S]{0,80}--df-warning-bg/);
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
-    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}--df-surface/);
 
     assert.match(ui, /\.df2-app \.df2-jobs-command \{[\s\S]{0,80}--df-surface/);
     assert.match(ui, /\.df2-app \.df2-column-review-table tr\.warn td \{[\s\S]{0,80}--df-warning-bg/);
@@ -909,11 +909,50 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-result-head \{[\s\S]{0,320}255, 255, 255/);
 
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
-    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}background: #fff;/);
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,240}--df-surface/);
 
     assert.match(ui, /\.df2-app \.df2-result-dashboard \{[\s\S]{0,80}--df-surface/);
     assert.match(ui, /\.df2-app \.df2-theater-rejected \{[\s\S]{0,80}--df-warning-bg/);
     assert.match(ui, /\.df2-app \.df2-result-fidelity,/);
     assert.match(ui, /\.df2-app \.df2-result-dashboard\.is-error \{[\s\S]{0,80}--df-danger-bg/);
+  });
+
+  it("Pilot, Proofs, Help, and job-action leftovers follow tokens", () => {
+    const tokens = sheet("tokens.css");
+    const pilot = sheet("pilot-chat.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const premium = sheet("premium-theme.css");
+    const benches = sheet("benchmarks.css");
+    const docs = sheet("docs-page.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(tokens, /--df-text:\s*var\(--df-text-primary\)/);
+    assert.match(tokens, /--df-surface-2:\s*var\(--df-surface-muted\)/);
+
+    assert.match(pilot, /\.df2-pilot-workspace\.df2-pilot-v2 \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(pilot, /\.df2-pilot-workspace\.df2-pilot-v2 \{[\s\S]{0,160}background: #fff;/);
+    assert.match(pilot, /\.df2-pilot-v2 \.df2-pilot-composer-bar \{[\s\S]{0,200}--df-surface/);
+    assert.match(pilot, /\.df2-pilot-v2 \.df2-pilot-msg\.assistant \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(pilot, /\.df2-pilot-v2 \.df2-pilot-send \{[\s\S]{0,200}color: #fff;/);
+
+    assert.match(dataflow, /\.df2-btn \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(dataflow, /\.df2-btn \{[\s\S]{0,160}#26312a/);
+    assert.match(dataflow, /\.df2-pilot-idea \{[\s\S]{0,240}--df-surface/);
+    assert.match(dataflow, /\.df2-pilot-capability \{[\s\S]{0,280}--df-surface/);
+
+    assert.match(premium, /\.df2-pilot-console-strip \{[\s\S]{0,200}--df-surface/);
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(benches, /\.df2-page-benchmarks-table \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(benches, /\.df2-page-benchmarks-table \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(docs, /\.df2-page-docs \.df2-docs-toc nav \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(docs, /\.df2-page-docs \.df2-docs-toc nav \{[\s\S]{0,200}255, 255, 255/);
+
+    assert.match(ui, /\.df2-app \.df2-btn:not\(\.df2-btn-primary\):not\(\.df2-btn-danger\) \{[\s\S]{0,120}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-jobs-detail-footer \.df2-btn:not\(\.df2-btn-primary\):not\(\.df2-btn-danger\),/);
+    assert.match(ui, /\.df2-app \.df2-pilot-idea \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-page-benchmarks-table th \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-page-docs \.df2-docs-toc nav \{[\s\S]{0,80}--df-surface/);
   });
 });
