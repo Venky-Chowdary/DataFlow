@@ -8143,7 +8143,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--df-border, #e6e9ee);
 }
 
@@ -8181,7 +8181,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
   cursor: pointer;
   color: inherit;
   overflow: hidden;
@@ -8309,7 +8309,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   gap: 14px;
   padding: 20px 18px;
-  background: #fff;
+  background: var(--df-surface);
   border-left: 1px solid var(--df-border, #e6e9ee);
   box-shadow: -12px 0 32px rgba(15, 23, 42, 0.08);
   overflow-y: auto;
@@ -9336,7 +9336,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 8px 14px;
   border-radius: 10px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fff;
+  background: var(--df-surface);
   font: inherit;
   cursor: pointer;
   transition: border-color 120ms ease, background 120ms ease;
@@ -9354,12 +9354,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-v3-ops-chip.is-live {
   border-color: #99f6e4;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
 }
 
 .df2-overview-v3-ops-chip.is-fail {
   border-color: #fecaca;
-  background: #fef2f2;
+  background: var(--df-danger-bg);
 }
 
 .df2-overview-v3-ops-chip:disabled {
@@ -9555,7 +9555,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 12px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--df-border, #e4e8ee);
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-overview-v3-card-title {
@@ -12942,4 +12942,25 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-result-fidelity-inline > span.is-coerced {
   background: var(--df-warning-bg);
+}
+
+/* Connector setup / overview-v3 leftovers — beat leftover #fff. */
+.df2-app .df2-conn-setup-icon,
+.df2-app .df2-auth-card,
+.df2-app .df2-conn-help,
+.df2-app .df2-overview-v3-ops-chip,
+.df2-app .df2-overview-v3-card-head,
+.df2-app .df2-dest-connector-card {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-auth-card.is-active,
+.df2-app .df2-auth-card[aria-selected="true"],
+.df2-app .df2-overview-v3-ops-chip.is-live,
+.df2-app .df2-dest-connector-card.active {
+  background: var(--df-brand-muted);
+}
+
+.df2-app .df2-overview-v3-ops-chip.is-fail {
+  background: var(--df-danger-bg);
 }
