@@ -1439,7 +1439,7 @@
 }
 
 .df2-gate8-proof-grid div {
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 8px 10px;
@@ -1668,7 +1668,7 @@
 }
 
 .df2-result-cdc-strip dl div {
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 8px 10px;
@@ -1739,7 +1739,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   border-radius: 8px;
 }
@@ -1826,7 +1826,7 @@
   padding: 0 10px;
   border: 1px solid #e2e8f0;
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface);
   color: #0f172a;
   font-size: 12px;
   font-weight: 600;
@@ -2049,7 +2049,7 @@
   padding: 10px 12px;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-jobs-quarantine-metric span {
@@ -4844,7 +4844,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px;
   padding-top: 10px;
   border-top: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   z-index: 2;
 }
 
@@ -5244,19 +5244,19 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 8px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   color: #334155;
 }
 
 .df2-gate8-control-totals.is-proven {
   border-color: #bbf7d0;
-  background: #f0fdf4;
+  background: var(--df-success-bg);
 }
 
 .df2-gate8-control-totals.is-unproven {
   border-color: #fed7aa;
-  background: #fffbeb;
+  background: var(--df-warning-bg);
 }
 
 .df2-gate8-control-totals-head {
@@ -5309,7 +5309,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 8px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-theater-lineage summary {
@@ -5470,13 +5470,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-alert.success {
-  background: #f0fdf4;
+  background: var(--df-success-bg);
   border-color: #a7f3d0;
   color: #166534;
 }
 
 .df2-theater-v3-alert.error {
-  background: #fef2f2;
+  background: var(--df-danger-bg);
   border-color: #fecaca;
   color: #b91c1c;
 }
@@ -5491,7 +5491,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   min-width: 0;
   position: static;
   z-index: auto;
@@ -5844,7 +5844,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin: 0;
   padding: 10px 12px;
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-danger-bg);
   border: 1px solid #fecaca;
   font-family: var(--df-font-mono);
   font-size: 12px;
@@ -5939,7 +5939,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   max-height: 360px;
   overflow: auto;
   padding: 0;
-  background: #ffffff;
+  background: var(--df-surface);
   color: #0f172a;
 }
 
@@ -6112,7 +6112,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 11px;
   padding: 4px 8px;
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #fde68a;
   color: #78350f;
 }
@@ -6435,7 +6435,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 5px 9px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   color: #475569;
 }
@@ -12906,4 +12906,40 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-job-phase-pill.failed {
   background: var(--df-danger-bg);
+}
+
+/* Theater / result / quarantine leftovers — beat leftover #fff. */
+.df2-app .df2-gate8-proof-grid div,
+.df2-app .df2-result-cdc-strip dl div,
+.df2-app .df2-cdc-snapshot-list li,
+.df2-app .df2-jobs-evidence-chip,
+.df2-app .df2-jobs-quarantine-metric,
+.df2-app .df2-run-ready-actions,
+.df2-app .df2-gate8-control-totals,
+.df2-app .df2-theater-lineage,
+.df2-app .df2-theater-v3-next,
+.df2-app .df2-quarantine-inspect-body,
+.df2-app .df2-quarantine-summary-chip,
+.df2-app .df2-result-fidelity-inline > span {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-gate8-control-totals.is-proven,
+.df2-app .df2-theater-v3-alert.success {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-gate8-control-totals.is-unproven,
+.df2-app .df2-jobs-quarantine-metric.is-warn {
+  background: var(--df-warning-bg);
+}
+
+.df2-app .df2-jobs-v3-failure-message,
+.df2-app .df2-theater-v3-alert.error,
+.df2-app .df2-result-fidelity-inline > span.is-dropped {
+  background: var(--df-danger-bg);
+}
+
+.df2-app .df2-result-fidelity-inline > span.is-coerced {
+  background: var(--df-warning-bg);
 }
