@@ -1051,7 +1051,7 @@ html:has(.df2-app) #root {
 }
 
 .df2-app .df2-overview-v3 .df2-metric-glass-teal {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 92%, #fff) 0%, #fff 78%);
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-app .df2-overview-v3 .df2-metric-glass-value {
