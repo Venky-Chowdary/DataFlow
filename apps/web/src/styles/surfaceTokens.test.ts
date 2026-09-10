@@ -656,4 +656,41 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-job-phase-pill\.active \{[\s\S]{0,120}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-job-phase-pill\.failed \{[\s\S]{0,120}--df-danger-bg/);
   });
+
+  it("Theater, result, and quarantine leftovers do not flatten to #fff", () => {
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(ui, /\.df2-gate8-proof-grid div \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-gate8-proof-grid div \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-result-cdc-strip dl div \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-cdc-strip dl div \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-cdc-snapshot-list li \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-cdc-snapshot-list li \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-jobs-evidence-chip \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-evidence-chip \{[\s\S]{0,360}background: #fff;/);
+    assert.match(ui, /\.df2-jobs-quarantine-metric \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-jobs-quarantine-metric \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-run-ready-actions \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-run-ready-actions \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-gate8-control-totals \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-gate8-control-totals \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-gate8-control-totals\.is-proven \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(ui, /\.df2-gate8-control-totals\.is-unproven \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-theater-lineage \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-theater-lineage \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-theater-v3-alert\.success \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(ui, /\.df2-theater-v3-alert\.error \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-theater-v3-next \{[\s\S]{0,360}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-next \{[\s\S]{0,360}background: #fff;/);
+    assert.match(ui, /\.df2-jobs-v3-failure-message \{[\s\S]{0,200}--df-danger-bg/);
+    assert.doesNotMatch(ui, /\.df2-jobs-v3-failure-message \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-quarantine-inspect-body \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-inspect-body \{[\s\S]{0,200}background: #ffffff;/);
+    assert.match(ui, /\.df2-quarantine-summary-chip \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-summary-chip \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-result-fidelity-inline > span \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-result-fidelity-inline > span \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-app \.df2-gate8-control-totals\.is-proven,[\s\S]{0,80}--df-success-bg/);
+    assert.match(ui, /\.df2-app \.df2-jobs-v3-failure-message,[\s\S]{0,120}--df-danger-bg/);
+  });
 });
