@@ -207,4 +207,55 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(docs, /\.docs-space-main \{[\s\S]{0,180}background: #fff;/);
     assert.match(query, /\.df2-query-editor-action \{[\s\S]{0,200}--df-surface/);
   });
+
+  it("Docs inner cards and schedule chrome do not flatten to #fff", () => {
+    const docs = sheet("docs-page.css");
+    const ui = sheet("enterprise-ui.css");
+
+    assert.match(docs, /\.docs-card,[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(docs, /\.docs-card,[\s\S]{0,200}background: #fff;/);
+    assert.match(docs, /\.docs-faq-item \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(docs, /\.docs-faq-item \{[\s\S]{0,160}background: #fff;/);
+    assert.match(docs, /\.docs-sidebar \{[\s\S]{0,480}--df-surface/);
+    assert.match(docs, /\.docs-search-results \{[\s\S]{0,160}--df-surface/);
+    assert.match(docs, /\.docs-toc \{[\s\S]{0,160}--df-surface/);
+    assert.match(docs, /\.docs-space-start \{[\s\S]{0,220}--df-surface/);
+    assert.doesNotMatch(docs, /\.docs-space-start \{[\s\S]{0,220}#fff 100%/);
+    assert.match(docs, /\.docs-space-algorithm \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(docs, /\.docs-space-algorithm \{[\s\S]{0,200}#fff,/);
+    assert.match(docs, /\.docs-sidebar--space \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(docs, /\.docs-sidebar--space \{[\s\S]{0,280}background: #f8fafc;/);
+    assert.match(docs, /\.docs-toc--inline \{[\s\S]{0,160}--df-surface-muted/);
+
+    const layout = sheet("marketing-layout.css");
+    assert.match(layout, /\.docs-space-algorithm-steps li \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(layout, /\.docs-space-algorithm-steps li \{[\s\S]{0,280}background: #fff !important;/);
+    assert.match(layout, /\.docs-space-start \{[\s\S]{0,240}--df-surface/);
+    assert.doesNotMatch(layout, /\.docs-space-start \{[\s\S]{0,240}#fff 72%/);
+
+    const editorial = sheet("marketing-editorial.css");
+    assert.match(editorial, /\.docs-space \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(editorial, /\.docs-space \{[\s\S]{0,280}background: #fff;/);
+    assert.match(editorial, /\.docs-space-algorithm \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(editorial, /\.docs-space-algorithm \{[\s\S]{0,240}#f8fafc;/);
+    assert.match(editorial, /\.docs-space-algorithm-steps li \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(editorial, /\.docs-space-algorithm-steps li \{[\s\S]{0,80}background: #fff;/);
+    assert.match(editorial, /\.docs-sidebar--space \{[\s\S]{0,280}--df-surface-muted/);
+
+    assert.match(ui, /\.df2-pipe-card \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-pipe-card \{[\s\S]{0,280}background: #fff;/);
+    assert.match(ui, /\.df2-pipe-card\.is-active \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-pipe-card\.is-active \{[\s\S]{0,160}#fff 70%/);
+    assert.match(ui, /\.df2-sched-toggle \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-sched-toggle \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-sched-seg \{[\s\S]{0,160}--df-surface/);
+    assert.match(ui, /\.df2-sched-switch-row \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-sched-switch-row \{[\s\S]{0,200}background: #fff;/);
+    assert.match(ui, /\.df2-sched-run \{[\s\S]{0,240}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-sched-run \{[\s\S]{0,240}background: #fff;/);
+    assert.match(ui, /\.df2-pipeline-rows-head \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-pipeline-rows-head \{[\s\S]{0,200}--df-surface-subtle/);
+    assert.match(ui, /\.df2-contract-rows-head \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-contract-rows-head \{[\s\S]{0,200}--df-surface-subtle/);
+  });
 });

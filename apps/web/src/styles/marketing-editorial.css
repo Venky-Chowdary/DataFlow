@@ -4073,7 +4073,7 @@
   grid-template-columns: var(--docs-rail) minmax(0, 1fr);
   gap: 0;
   min-height: 70vh;
-  background: #fff;
+  background: var(--df-surface);
   border-top: 1px solid var(--lp-line);
   /* Near full viewport so workspace screenshots stay large and aligned */
   width: min(1680px, calc(100% - clamp(16px, 2vw, 40px)));
@@ -4083,7 +4083,7 @@
 
 .docs-space > .docs-space-nav-desktop {
   min-width: 0;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border-right: 1px solid var(--lp-line);
 }
 
@@ -4103,7 +4103,7 @@
   overflow: auto;
   padding: 28px 18px 48px;
   border-right: 1px solid var(--lp-line);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .docs-sidebar-brand {
@@ -4113,7 +4113,7 @@
   margin-bottom: 18px;
   padding: 12px 12px;
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
 }
 
@@ -4207,7 +4207,7 @@
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--lp-line);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   width: 100%;
   max-width: none;
 }
@@ -4231,7 +4231,7 @@
   text-align: left;
   border: 1px solid var(--lp-line);
   border-radius: 14px;
-  background: #fff;
+  background: var(--df-surface);
   padding: 18px 16px;
   cursor: pointer;
   display: grid;
@@ -4285,7 +4285,7 @@
   border: 1px solid var(--lp-line);
   border-radius: 14px;
   overflow: hidden;
-  background: #fff;
+  background: var(--df-surface);
   text-align: left;
   cursor: pointer;
   padding: 0;
@@ -4341,7 +4341,7 @@
   border: 1px solid rgba(13, 148, 136, 0.2);
   background:
     radial-gradient(ellipse 70% 80% at 0% 0%, rgba(13, 148, 136, 0.08), transparent 55%),
-    #f8fafc;
+    var(--df-surface-muted);
 }
 
 .docs-space-algorithm h2 {
@@ -4362,7 +4362,7 @@
 }
 
 .docs-space-algorithm-steps li {
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid var(--lp-line);
   border-radius: 12px;
   padding: 14px;
