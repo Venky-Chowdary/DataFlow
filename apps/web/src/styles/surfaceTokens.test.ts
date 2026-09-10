@@ -955,5 +955,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-pilot-idea \{[\s\S]{0,80}--df-surface/);
     assert.match(ui, /\.df2-app \.df2-page-benchmarks-table th \{[\s\S]{0,80}--df-surface-muted/);
     assert.match(ui, /\.df2-app \.df2-page-docs \.df2-docs-toc nav \{[\s\S]{0,80}--df-surface/);
+
+    const platform = sheet("enterprise-platform.css");
+    assert.match(platform, /\.df2-pilot-main,[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(platform, /\.df2-pilot-main,[\s\S]{0,120}#f8fafc !important/);
   });
 });

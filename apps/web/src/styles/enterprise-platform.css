@@ -1606,27 +1606,27 @@ body {
   min-height: 0;
 }
 
-/* ─── Datawrap Pilot — always light (no dark jarvis bleed) ─── */
+/* Pilot follows workspace tokens so dark remaps (login stays light). */
 
 .df2-pilot,
 .df2-pilot-main,
 .df2-pilot-aside {
-  background: #f8fafc !important;
-  color: #0f172a !important;
+  background: var(--df-surface) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-pilot-aside {
-  background: #ffffff !important;
-  border-right: 1px solid #e2e8f0;
+  background: var(--df-surface-muted) !important;
+  border-right: 1px solid var(--df-border);
 }
 
 .df2-pilot-session {
-  color: #475569 !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-pilot-session.active {
-  background: #f0fdfa !important;
-  color: #0f766e !important;
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong) !important;
 }
 
 /* ─── Connection hub — crisp light nodes ─── */
