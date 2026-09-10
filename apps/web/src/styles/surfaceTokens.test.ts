@@ -559,4 +559,31 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-structure-table-wrap \{[\s\S]{0,120}--df-surface/);
     assert.doesNotMatch(polish, /\.df2-structure-table-wrap \{[\s\S]{0,120}background: #fff;/);
   });
+
+  it("Validate repair, run-id, and compact preflight leftovers do not flatten to #fff", () => {
+    const studio = sheet("transfer-studio.css");
+
+    assert.match(studio, /\.df2-repair-issues li \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-repair-issues li \{[\s\S]{0,120}background: #fff;/);
+    assert.match(studio, /\.df2-repair-issues li\.is-block \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(studio, /\.df2-repair-issues li\.is-warn \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(studio, /\.df2-repair-actions li \{[\s\S]{0,120}--df-surface-muted/);
+    assert.match(studio, /\.df2-vd-assist-chevron \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-assist-chevron \{[\s\S]{0,200}background: #fff;/);
+    assert.match(studio, /\.df2-vd-run-id \{[\s\S]{0,200}--df-surface-muted/);
+    assert.match(studio, /\.df2-vd-run-id code \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-run-id code \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-vd-run-id-copy \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-vd-run-id-copy \{[\s\S]{0,160}background: #fff;/);
+    assert.match(studio, /\.df2-vd-xform-hash \{[\s\S]{0,120}--df-surface/);
+    assert.match(studio, /\.df2-map-pk-details-body \{[\s\S]{0,280}--df-surface/);
+    assert.match(studio, /\.df2-preflight\.is-compact \.df2-preflight-step \{[\s\S]{0,120}--df-surface/);
+    assert.match(studio, /\.df2-preflight-diagnostics-list > li \{[\s\S]{0,80}--df-surface/);
+    assert.match(studio, /\.df2-run-launch-stage \{[\s\S]{0,120}--df-surface/);
+    assert.match(studio, /\.df2-theater-v2-phase \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-theater-v2-phase \{[\s\S]{0,280}background: #fff;/);
+    assert.match(studio, /\.df2-theater-v2-phase\.done \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(studio, /\.df2-theater-v2-phase\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(studio, /\.df2-theater-v2-phase\.failed \{[\s\S]{0,80}--df-danger-bg/);
+  });
 });
