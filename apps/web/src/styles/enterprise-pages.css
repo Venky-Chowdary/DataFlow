@@ -277,7 +277,7 @@
   padding: 14px 16px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: var(--df-radius-card, 12px);
-  background: #fff;
+  background: var(--df-surface);
   min-width: 0;
   min-height: 88px;
 }
