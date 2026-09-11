@@ -178,7 +178,7 @@ body {
 .df2-brand-name {
   font-size: 15px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   letter-spacing: 0;
 }
 
