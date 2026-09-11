@@ -1436,4 +1436,26 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-count\.ok strong \{[\s\S]{0,40}--df-success/);
     assert.match(ui, /\.df2-app \.df2-vd-count\.block strong \{[\s\S]{0,40}--df-danger/);
   });
+
+  it("Job-timeline leftover mint and status pastels follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-job-timeline-dot \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-job-timeline-dot \{[\s\S]{0,240}background: #f1f5f9/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-done \.df2-job-timeline-dot \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(ui, /\.df2-job-timeline-item\.is-done \.df2-job-timeline-dot \{[\s\S]{0,80}#dcfce7/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-failed \.df2-job-timeline-dot \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-active \.df2-job-timeline-dot \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-job-timeline-item\.is-active \.df2-job-timeline-dot \{[\s\S]{0,80}#ccfbf1/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-skipped \.df2-job-timeline-dot \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-warning \.df2-job-timeline-dot \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-job-timeline-item\.is-warning strong \{[\s\S]{0,40}--df-warning/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-job-timeline-dot \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-job-timeline-item\.is-active \.df2-job-timeline-dot \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-job-timeline-item\.is-warning strong \{[\s\S]{0,40}--df-warning/);
+  });
 });
