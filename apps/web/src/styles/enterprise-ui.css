@@ -1825,10 +1825,10 @@
   min-height: var(--df-btn-height-sm, 30px);
   height: var(--df-btn-height-sm, 30px);
   padding: 0 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 999px;
   background: var(--df-surface);
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1837,14 +1837,14 @@
 }
 
 .df2-jobs-evidence-chip:hover {
-  border-color: #94a3b8;
-  background: #f8fafc;
+  border-color: var(--df-border);
+  background: var(--df-surface-muted);
 }
 
 .df2-jobs-evidence-chip em {
   font-style: normal;
   font-weight: 500;
-  color: #64748b;
+  color: var(--df-text-secondary);
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
@@ -2016,7 +2016,7 @@
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-jobs-quarantine-overview {
@@ -2200,8 +2200,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-adv-behavior-callout {
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   border-radius: 10px;
   padding: 12px 14px;
   margin-bottom: 14px;
@@ -2233,9 +2233,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-adv-suggest-chip {
-  border: 1px dashed #0f766e;
-  background: #f0fdfa;
-  color: #0f766e;
+  border: 1px dashed var(--df-brand);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
   border-radius: 999px;
   padding: 6px 12px;
   font-size: 12px;
@@ -2243,7 +2243,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-adv-suggest-chip:hover {
-  background: #ccfbf1;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
 }
 
 .df2-adv-load-controls {
@@ -2256,7 +2257,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin: 0 0 4px;
   font-size: 13px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-adv-load-grid {
@@ -13670,6 +13671,38 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 }
 
 .df2-app .df2-pilot-followup:hover {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+  border-color: var(--df-brand);
+}
+
+/* Jobs leftover navy / paper / mint on evidence chips and advanced hosts. */
+.df2-app .df2-jobs-evidence-chip {
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-jobs-evidence-chip:hover {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-jobs-evidence-chip em {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-jobs-explanation-prose,
+.df2-app .df2-adv-section-title {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-adv-behavior-callout {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-adv-suggest-chip,
+.df2-app .df2-adv-suggest-chip:hover {
   background: var(--df-brand-muted);
   color: var(--df-brand-strong);
   border-color: var(--df-brand);
