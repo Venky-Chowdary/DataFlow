@@ -1591,4 +1591,34 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-toolbar-status \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-toolbar-status::before \{[\s\S]{0,40}--df-brand/);
   });
+
+  it("Pilot leftover mint active category tabs follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(
+      ui,
+      /\.df2-pilot-v2 \.df2-pilot-categories \.df2-tab\.is-active,[\s\S]{0,160}--df-brand-muted/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-pilot-v2 \.df2-pilot-categories \.df2-tab\.is-active,[\s\S]{0,160}#f0fdfa/,
+    );
+    assert.match(
+      ui,
+      /\.df2-pilot-v2 \.df2-pilot-categories button\.is-active \{[\s\S]{0,80}--df-brand-strong/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-pilot-v2 \.df2-pilot-categories button\.is-active \{[\s\S]{0,80}#0f766e/,
+    );
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-pilot-v2 \.df2-pilot-categories \.df2-tab\.is-active,/);
+    assert.match(
+      ui,
+      /\.df2-app \.df2-pilot-v2 \.df2-pilot-categories button\.is-active \{[\s\S]{0,80}--df-brand-muted/,
+    );
+  });
 });
