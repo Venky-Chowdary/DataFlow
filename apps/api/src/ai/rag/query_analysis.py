@@ -315,6 +315,15 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("cdc", "sync", "mode", "log", "change")),
     (re.compile(r"\bdead\s+letter\b", re.I), ("quarantine", "dlq", "reject")),
     (re.compile(r"\bprimary\s+key\b", re.I), ("key", "upsert", "identity", "deduped")),
+    # The other sense of "key". With only the identity sense above, "can I use
+    # my own encryption key" landed on whichever sync-mode sentence says the
+    # word most often — upsert's "key-idempotently: new keys insert, known keys
+    # update" — while the BYOK section it was asking about ranked below.
+    (re.compile(r"\b(?:encryption|kms|customer[\s-]managed|private|secret)\s+keys?\b"
+                r"|\bkey\s+management\b"
+                # What the acronym stands for, which is how it gets asked.
+                r"|\bbring\s+(?:my|your|our)\s+own\b", re.I),
+     ("byok", "kms", "encryption", "secret")),
     (re.compile(r"\bslowly\s+changing\s+dimension\b", re.I),
      ("scd2", "sync", "mode", "history")),
     (re.compile(r"\bscd\s*(?:type\s*)?2\b", re.I),

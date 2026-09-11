@@ -30,6 +30,8 @@ from src.ai.rag.lexical_index import Bm25Index, content_terms, normalize, tokeni
 from src.ai.rag.product_docs import (  # noqa: E402
     HELP_CORPUS_PATH,
     compose_documented_answer,
+    compose_product_answer,
+    retrieve_product_answer,
     load_generated_chunks,
     load_help_corpus_chunks,
     load_product_doc_chunks,
@@ -121,6 +123,37 @@ def test_use_is_part_of_the_question_frame_not_its_subject():
     assert content_terms("which sync mode should I use") == ["sync", "mode"]
     # The nouns survive — only the verb is framing.
     assert "usage" not in content_terms("how do I use the API")
+
+
+def test_the_bring_my_own_frame_leaves_only_the_subject():
+    """"Can I bring my own encryption key" is a question about the key.
+
+    ``own`` is a possessive intensifier in all ten of its corpus occurrences
+    and ``bring`` appears once, in a sentence about Pilot and MCP that this
+    question kept being answered from.
+    """
+    assert content_terms("can I bring my own encryption key") == ["encryption", "key"]
+    assert content_terms("can I use my own domain") == ["domain"]
+
+
+def test_both_senses_of_key_reach_their_own_subject():
+    """``key`` is the most overloaded word in a data-movement product.
+
+    "Can I use my own encryption key" was answered from sync mode upsert —
+    "key-idempotently: new keys insert, known keys update" says the word three
+    times — while the BYOK section it asked about ranked below. The identity
+    sense had a phrase expansion and the encryption sense did not.
+    """
+    encryption = compose_product_answer(
+        retrieve_product_answer("can I use my own encryption key")
+    ).lower()
+    assert "byok" in encryption and "kms" in encryption
+    assert "sync mode" not in encryption
+
+    identity = compose_product_answer(
+        retrieve_product_answer("which sync mode needs a primary key")
+    ).lower()
+    assert "primary key" in identity and "sync mode" in identity
 
 
 def test_grounding_counts_terms_the_corpus_cannot_answer():
