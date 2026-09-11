@@ -1758,4 +1758,38 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-pilot-composer,\n\.df2-app \.df2-pilot-composer-sticky \{[\s\S]{0,80}--df-surface/);
     assert.match(ui, /\.df2-app \.df2-pilot-tool-log \{[\s\S]{0,80}--df-surface-muted/);
   });
+
+  it("Result leftover navy metric and notify titles follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-result-fidelity-metrics article strong,\n\.df2-data-integrity-metric strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-fidelity-metrics article strong,\n\.df2-data-integrity-metric strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-result-fidelity-metrics article > span,\n\.df2-data-integrity-metric > span \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-result-fidelity-metrics article > span,\n\.df2-data-integrity-metric > span \{[\s\S]{0,80}color: #334155/);
+    assert.match(studio, /\.df2-result-endpoint strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-endpoint strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-result-stat-card strong,\n\.df2-result-metric strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-stat-card strong,\n\.df2-result-metric strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-result-section h4 \{[\s\S]{0,220}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-section h4 \{[\s\S]{0,220}color: #0f172a/);
+    assert.match(studio, /\.df2-notify-strip-head strong \{[\s\S]{0,40}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-notify-strip-head strong \{[\s\S]{0,40}color: #0f172a/);
+    assert.match(studio, /\.df2-notify-kind \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-notify-kind \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-repair-issues li strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-repair-issues li strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-blocker-fix \{[\s\S]{0,200}--df-brand-strong/);
+    assert.doesNotMatch(studio, /\.df2-vd-blocker-fix \{[\s\S]{0,200}#0f766e/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-result-fidelity-metrics article:not\(\.is-dropped\):not\(\.is-coerced\) strong,/);
+    assert.match(ui, /\.df2-app \.df2-data-integrity-metric:not\(\.is-dropped\):not\(\.is-coerced\) strong,/);
+    assert.match(ui, /\.df2-app \.df2-notify-strip-head strong,/);
+    assert.match(ui, /\.df2-app \.df2-repair-issues li strong,/);
+    assert.match(ui, /\.df2-app \.df2-result-fidelity-metrics article\.is-dropped strong,/);
+    assert.match(ui, /\.df2-app \.df2-vd-blocker-fix \{[\s\S]{0,40}--df-brand-strong/);
+  });
 });

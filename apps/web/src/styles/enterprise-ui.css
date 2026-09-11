@@ -13924,8 +13924,37 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-result-proof-dl dd,
 .df2-app .df2-result-metric strong,
 .df2-app .df2-result-meta-chip strong,
+.df2-app .df2-result-stat-card strong,
+.df2-app .df2-result-endpoint strong,
+.df2-app .df2-result-section h4,
+.df2-app .df2-result-fidelity-metrics article:not(.is-dropped):not(.is-coerced) strong,
+.df2-app .df2-data-integrity-metric:not(.is-dropped):not(.is-coerced) strong,
+.df2-app .df2-notify-strip-head strong,
+.df2-app .df2-notify-kind,
+.df2-app .df2-repair-issues li strong,
 .df2-app .df2-quarantine-inspect-body {
   color: var(--df-text-primary);
+}
+
+.df2-app .df2-result-fidelity-metrics article > span,
+.df2-app .df2-data-integrity-metric > span,
+.df2-app .df2-repair-actions li,
+.df2-app .df2-notify-status {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-result-fidelity-metrics article.is-dropped strong,
+.df2-app .df2-data-integrity-metric.is-dropped strong {
+  color: var(--df-danger);
+}
+
+.df2-app .df2-result-fidelity-metrics article.is-coerced strong,
+.df2-app .df2-data-integrity-metric.is-coerced strong {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-blocker-fix {
+  color: var(--df-brand-strong) !important;
 }
 
 .df2-app .df2-result-more > summary,
