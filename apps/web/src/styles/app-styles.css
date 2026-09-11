@@ -101,6 +101,14 @@
   color: var(--df-text-primary);
 }
 
+.df2-app .df2-pilot-aside.is-collapsed {
+  background: var(--df-surface) !important;
+}
+
+.df2-app .df2-pilot-v2 .df2-pilot-session-row.active .df2-pilot-session {
+  color: var(--df-brand-strong) !important;
+}
+
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) > .df2-screen-panel,
 .df2-app .df2-page-untitled.df2-page-fluid {

@@ -39,7 +39,7 @@
 .df2-pilot-v2 .df2-pilot-aside {
   width: auto;
   border: none !important;
-  border-right: 1px solid #eef2f6 !important;
+  border-right: 1px solid var(--df-border) !important;
   border-radius: 0 !important;
   background: var(--df-surface-muted);
   padding: 10px 8px;
