@@ -1277,4 +1277,30 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-pilot-aside \{[\s\S]{0,160}--df-surface-muted/);
     assert.doesNotMatch(polish, /\.df2-pilot-aside \{[\s\S]{0,160}linear-gradient\(180deg, #fff/);
   });
+
+  it("Jobs leftover navy, paper, and mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-jobs-evidence-chip \{[\s\S]{0,280}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-jobs-evidence-chip \{[\s\S]{0,280}color: #0f172a/);
+    assert.match(ui, /\.df2-jobs-evidence-chip:hover \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-jobs-evidence-chip:hover \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(ui, /\.df2-jobs-explanation-prose \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-jobs-explanation-prose \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(ui, /\.df2-adv-section-title \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-adv-section-title \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-adv-behavior-callout \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-adv-behavior-callout \{[\s\S]{0,160}background: #f8fafc/);
+    assert.match(ui, /\.df2-adv-suggest-chip \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-adv-suggest-chip \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.doesNotMatch(ui, /\.df2-adv-suggest-chip \{[\s\S]{0,160}color: #0f766e/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-jobs-evidence-chip \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-jobs-explanation-prose,/);
+    assert.match(ui, /\.df2-app \.df2-adv-suggest-chip,/);
+    assert.match(ui, /\.df2-app \.df2-adv-behavior-callout \{[\s\S]{0,80}--df-surface-muted/);
+  });
 });
