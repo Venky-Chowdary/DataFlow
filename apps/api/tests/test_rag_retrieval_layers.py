@@ -369,7 +369,11 @@ def test_the_answer_leads_with_the_answer_then_reads_in_order():
         href="#/help/q",
         order=0,
         terms=frozenset({"operation", "job"}),
-        score=3.0,
+        # Comfortably over ``RELEVANCE_FLOOR`` of the lead. This test is about
+        # the order the chosen sentences are read in, not about which ones
+        # qualify; the floor has its own coverage in
+        # ``test_rag_sentence_selection_signals``.
+        score=4.5,
     )
     chosen = select_sentences([lead, first])
     assert chosen[0] is lead

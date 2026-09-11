@@ -107,6 +107,22 @@ def test_stopwords_carry_no_signal_and_domain_words_do():
     assert "gate" in terms and "fix" in terms
 
 
+def test_use_is_part_of_the_question_frame_not_its_subject():
+    """"How do I use the API" is about the API, not about using.
+
+    The corpus writes "Use this path when…" as the opening of unrelated
+    procedures, so scored as a subject term ``use`` made every imperative step
+    in the corpus a candidate: the question was answered from "Preflight gates
+    → Procedure: fix a blocked gate" instead of "API reference → Core
+    endpoints". It joins ``show``, ``tell`` and ``explain``, which were already
+    read as framing.
+    """
+    assert content_terms("how do I use the API") == ["api"]
+    assert content_terms("which sync mode should I use") == ["sync", "mode"]
+    # The nouns survive — only the verb is framing.
+    assert "usage" not in content_terms("how do I use the API")
+
+
 def test_grounding_counts_terms_the_corpus_cannot_answer():
     index = Bm25Index([
         ("a", "Quarantine holds rejected rows with column, value and reason."),

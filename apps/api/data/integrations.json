@@ -43,8 +43,8 @@
     }
   },
   "pilot": {
-    "engine": "auto"
+    "engine": "local"
   },
   "api_keys": [],
-  "updated_at": "2026-08-21T01:55:58.641528+00:00"
+  "updated_at": "2026-09-11T17:30:03.694900+00:00"
 }

@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from src.ai.rag.answer_composer import (
     PHRASE_CREDIT,
+    RELEVANCE_FLOOR,
+    Candidate,
     build_candidates,
+    select_sentences,
     split_sentences,
     term_weights,
 )
@@ -159,3 +162,136 @@ def test_marker_captions_go_too() -> None:
         "live product UI."
     )
     assert kept == ["Follow all five steps in order."]
+
+
+# --------------------------------------------------------------------------
+# An example is not the subject
+# --------------------------------------------------------------------------
+
+def test_a_term_matched_only_inside_a_code_literal_is_not_a_match() -> None:
+    """The demo file is called orders; the sentence is not about column order.
+
+    Asked "do you preserve column order" the pilot answered correctly and then
+    appended three sentences of the CSV tutorial, each of which had matched
+    ``order`` inside ``sample-orders.csv``, ``order_id`` or ``public.orders``.
+    """
+    literal = [
+        (
+            "Example transfer used in this guide",
+            "Transfer Studio guide → Example transfer",
+            "#/help/transfer-studio",
+            "**Destination:** **File Export** → **CSV** → "
+            "`exports/sample-orders.csv`.\n",
+        )
+    ]
+    assert not build_candidates(analyze_query("do you preserve column order"), literal)
+
+
+def test_the_same_term_in_prose_still_matches() -> None:
+    """Only the literal is discounted — a sentence that says it keeps its credit."""
+    prose = [
+        (
+            "Every aspect a migration certificate answers for",
+            "Type fidelity → Aspects",
+            "#/help/product-facts",
+            "Column order is recorded on the certificate as carried or "
+            "unsupported.\n",
+        )
+    ]
+    candidates = build_candidates(analyze_query("do you preserve column order"), prose)
+    assert candidates and candidates[0].score > 0
+
+
+def test_a_sentence_naming_the_subject_then_showing_it_keeps_full_credit() -> None:
+    """Prose and literal in one sentence scores as the prose alone would."""
+    question = "which sync mode replaces the destination"
+    with_literal = [
+        ("S", "Help", "", "Sync mode `full_refresh_overwrite` replaces the destination.\n")
+    ]
+    without = [
+        ("S", "Help", "", "Sync mode full_refresh_overwrite replaces the destination.\n")
+    ]
+    scored = build_candidates(analyze_query(question), with_literal)[0].score
+    plain = build_candidates(analyze_query(question), without)[0].score
+    # ``sync``, ``mode``, ``replaces`` and ``destination`` are all prose in both.
+    assert scored == plain
+
+
+# --------------------------------------------------------------------------
+# The answer stops when it is answered
+# --------------------------------------------------------------------------
+
+def test_a_sentence_far_weaker_than_the_lead_is_left_out() -> None:
+    """Relevance never ended selection — only the sentence budget did."""
+    lead = Candidate(
+        text="Quarantine is the rule that no row disappears silently.",
+        section_title="What happens to bad rows",
+        citation="Quarantine → Bad rows",
+        href="#/help/product-facts",
+        order=0,
+        terms=frozenset({"quarantine", "row"}),
+        score=10.0,
+    )
+    weak = Candidate(
+        text="Wait until the file chip shows the row and column counts.",
+        section_title="Procedure: run the sample-orders transfer",
+        citation="Transfer Studio → Procedure",
+        href="#/help/transfer-studio",
+        order=1,
+        terms=frozenset({"row", "column", "count"}),
+        score=10.0 * RELEVANCE_FLOOR - 0.1,
+    )
+    assert select_sentences([lead, weak]) == [lead]
+
+
+def test_a_sentence_just_over_the_floor_is_kept() -> None:
+    """The floor sits in a measured gap, so it has to be a boundary, not a wall."""
+    lead = Candidate(
+        text="Quarantine is the rule that no row disappears silently.",
+        section_title="What happens to bad rows",
+        citation="Quarantine → Bad rows",
+        href="#/help/product-facts",
+        order=0,
+        terms=frozenset({"quarantine", "row"}),
+        score=10.0,
+    )
+    support = Candidate(
+        text="Quarantined rows can be exported as CSV and replayed.",
+        section_title="What happens to bad rows",
+        citation="Quarantine → Bad rows",
+        href="#/help/product-facts",
+        order=1,
+        terms=frozenset({"quarantine", "export", "replay"}),
+        score=10.0 * RELEVANCE_FLOOR + 0.1,
+    )
+    assert select_sentences([lead, support]) == [lead, support]
+
+
+def test_a_list_item_is_exempt_from_the_floor() -> None:
+    """A list is vouched for by its heading and admitted whole.
+
+    G1 scores nothing against "what are the preflight gates" — the heading the
+    question matched is what earns it — so a relevance floor measured against
+    the lead would drop the gates the question asked to see.
+    """
+    lead = Candidate(
+        text="G9 Data integrity — encoding, required nulls, identity duplicates.",
+        section_title="Core gates (before write)",
+        citation="Preflight gates → Core gates",
+        href="#/help/preflight",
+        order=8,
+        terms=frozenset({"data", "integrity", "encoding"}),
+        score=10.0,
+        list_item=True,
+    )
+    sibling = Candidate(
+        text="G1 Source readable — source connects and rows can be read.",
+        section_title="Core gates (before write)",
+        citation="Preflight gates → Core gates",
+        href="#/help/preflight",
+        order=0,
+        terms=frozenset({"source", "readable", "row"}),
+        score=0.2,
+        list_item=True,
+    )
+    assert select_sentences([lead, sibling]) == [sibling, lead]

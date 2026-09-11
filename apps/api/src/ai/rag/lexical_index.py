@@ -115,6 +115,7 @@ _STOPWORD_WORDS = """
     what which who whom whose when where why how
     not no nor so too very just also only
     please tell show explain mean means help
+    use used using
     """.split()
 STOPWORDS = frozenset(_STOPWORD_WORDS) | frozenset(normalize(w) for w in _STOPWORD_WORDS)
 

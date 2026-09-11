@@ -56,6 +56,21 @@ PHRASE_CREDIT = 2.0
 # sentence that elaborates it.
 MMR_LAMBDA = 0.7
 
+# What a supporting sentence has to be worth, as a share of the sentence that
+# answers, before it is allowed into the answer. Relevance alone never ended
+# selection: the loop ran until the sentence budget did, so an answer that was
+# complete in one sentence was padded to six with whatever else scored above
+# zero. "Do you preserve column order" was answered correctly and then handed
+# three sentences of a CSV tutorial.
+#
+# Not a tuned knob — it sits in a measured gap. Across the corpus the weakest
+# sentence that genuinely elaborates its lead scores 0.42 of it (the mapping
+# threshold advice under "why is my mapping confidence low"), while the
+# strongest off-subject sentence scores 0.31. List items are exempt: they are
+# vouched for by the heading the question matched, not by their own wording,
+# and a list is admitted or refused whole.
+RELEVANCE_FLOOR = 0.35
+
 MAX_SENTENCES = 6
 MAX_CITED_SECTIONS = 3
 
@@ -114,6 +129,15 @@ _CODE_LINE = re.compile(r"^\s*(?:\{|\[|GET |POST |PUT |PATCH |DELETE |curl |\$ )
 # from the live Create recurring sync form" — it contains the phrase the
 # operator typed and nothing they can act on.
 _DOC_META = re.compile(r"\b(?:screenshots?|markers on)\b", re.I)
+
+# A code span is an example, not what the sentence is about. The corpus writes
+# fixture and column names as literals — `sample-orders.csv`, `order_id`,
+# `public.orders` — so asked "do you preserve column order" three sentences of
+# the CSV tutorial were appended to a correct answer, having matched `order`
+# inside the name of the demo file. The word is present; the sentence is not
+# about it. Prose matches are untouched, so a sentence that names the subject
+# and then shows it as a literal keeps its full credit.
+_CODE_SPAN = re.compile(r"`[^`]*`")
 _IMPERATIVE = re.compile(
     r"^(?:Open|Click|Pick|Choose|Select|Set|Enter|Type|Paste|Copy|Add|Create|"
     r"Review|Return|Expand|Fix|Remediate|Use|Run|Press|Confirm|Approve|Sign|"
@@ -337,7 +361,11 @@ def build_candidates(
         for sentence, is_list_item in _split_annotated(text, section_title):
             sentence_terms = content_terms(sentence)
             terms = frozenset(sentence_terms)
-            hit_terms = terms & typed
+            # Scored on prose; ``terms`` keeps the literals, because redundancy
+            # and length are properties of the whole sentence either way.
+            hit_terms = terms & typed & frozenset(
+                content_terms(_CODE_SPAN.sub(" ", sentence))
+            )
             typed_hits = (
                 sum(weights.get(t, 1.0) for t in hit_terms)
                 if weights
@@ -414,6 +442,9 @@ def select_sentences(
     best = max(pool, key=lambda c: c.score)
     chosen.append(best)
     pool.remove(best)
+
+    floor = RELEVANCE_FLOOR * best.score
+    pool = [c for c in pool if c.list_item or c.score >= floor]
 
     top = best.score or 1.0
     while pool and len(chosen) < limit:
