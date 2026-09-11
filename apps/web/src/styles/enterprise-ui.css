@@ -14041,6 +14041,28 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   background: var(--df-brand) !important;
 }
 
+.df2-app .df2-source-aside-streams {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-source-aside-streams strong,
+.df2-app .df2-source-aside-connector strong,
+.df2-app .df2-source-aside-connector-row strong,
+.df2-app .df2-transfer-step-panel .df2-card-title,
+.df2-app .df2-multistream-preview-head h4 {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-source-aside-streams p,
+.df2-app .df2-source-aside-streams ol,
+.df2-app .df2-source-aside-path {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-source-aside-streams code {
+  background: var(--df-surface);
+}
+
 .df2-app .df2-result-more > summary,
 .df2-app .df2-quarantine-next-copy strong,
 .df2-app .df2-quarantine-next-copy p,
