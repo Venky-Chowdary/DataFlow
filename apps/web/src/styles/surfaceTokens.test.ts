@@ -1570,4 +1570,25 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
       /\.df2-app \.df2-page-transfer-studio \.df2-dest-right-empty \{[\s\S]{0,80}--df-text-secondary/,
     );
   });
+
+  it("Pipe-card and toolbar leftover mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-pipe-card-arrow \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-pipe-card-arrow \{[\s\S]{0,200}background: #f0fdfa/);
+    assert.match(ui, /\.df2-pipe-card-arrow \{[\s\S]{0,200}--df-brand-strong/);
+    assert.match(ui, /\.df2-toolbar-status \{[\s\S]{0,240}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-status \{[\s\S]{0,240}background: #f0fdfa/);
+    assert.match(ui, /\.df2-toolbar-status \{[\s\S]{0,240}--df-brand-strong/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-status \{[\s\S]{0,240}color: #0f766e/);
+    assert.match(ui, /\.df2-toolbar-status::before \{[\s\S]{0,160}--df-brand/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-status::before \{[\s\S]{0,160}#14b8a6/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-pipe-card-arrow \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-toolbar-status \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-toolbar-status::before \{[\s\S]{0,40}--df-brand/);
+  });
 });

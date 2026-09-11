@@ -2802,8 +2802,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #f0fdfa;
-  color: var(--df-brand, #0f766e);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
   flex-shrink: 0;
 }
 
@@ -6762,11 +6762,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 6px;
   padding: 5px 10px;
   border-radius: 999px;
-  border: 1px solid #99f6e4;
-  background: #f0fdfa;
+  border: 1px solid var(--df-brand);
+  background: var(--df-brand-muted);
   font-size: 12px;
   font-weight: 600;
-  color: #0f766e;
+  color: var(--df-brand-strong);
   white-space: nowrap;
 }
 
@@ -6775,7 +6775,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #14b8a6;
+  background: var(--df-brand);
   animation: df2-toolbar-pulse 1.4s ease-in-out infinite;
 }
 
@@ -13910,4 +13910,20 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 .df2-app .df2-page-transfer-studio .df2-dest-right-empty {
   color: var(--df-text-secondary) !important;
+}
+
+/* Pipe-card / toolbar leftover mint. */
+.df2-app .df2-pipe-card-arrow {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-toolbar-status {
+  border-color: var(--df-brand);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-toolbar-status::before {
+  background: var(--df-brand);
 }
