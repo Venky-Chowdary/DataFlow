@@ -7376,17 +7376,17 @@ th.df2-type-string .df2-type-badge {
   gap: 5px;
   padding: 5px 11px;
   border-radius: 8px;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
   font-size: 12px;
-  color: #475569;
+  color: var(--df-text-secondary);
   font-weight: 600;
 }
 .df2-vd-count strong { font-size: 15px; color: var(--df-text-primary); }
-.df2-vd-count.ok { background: #f0fdf4; color: var(--df-success); }
+.df2-vd-count.ok { background: var(--df-success-bg); color: var(--df-success); }
 .df2-vd-count.ok strong { color: var(--df-success); }
-.df2-vd-count.block { background: #fef2f2; color: var(--df-danger); }
+.df2-vd-count.block { background: var(--df-danger-bg); color: var(--df-danger); }
 .df2-vd-count.block strong { color: var(--df-danger); }
-.df2-vd-count.skip { background: #f8fafc; }
+.df2-vd-count.skip { background: var(--df-surface-muted); }
 
 .df2-vd-hero-summary {
   margin: 0;
