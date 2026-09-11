@@ -3010,8 +3010,12 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         lower,
     ):
         return True
+    # ``by <column>`` may sit between the object and its scope: "orders by
+    # region on Audit SQLite" is the same read as "orders on Audit SQLite",
+    # grouped.
     if re.search(
-        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+"
+        r"(?:data\s+)?(?:by\s+\w+\s+)?(?:from|on|in)\b",
         lower,
     ):
         return True
@@ -3041,6 +3045,36 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         r"(?:tables?|columns?|fields?|schemas?|datasets?|objects?|rows?|records?|"
         r"jobs?|runs?|connections?|pipelines?|schedules?)\b"
         r"[\w\s]{0,12}?\b(?:on|in|from|under|for)\b\s+\S",
+        lower,
+    ):
+        return True
+    # The declarative form of an inventory read. "list tables on Audit SQLite"
+    # already routed; "what tables are on Audit SQLite" is the same request
+    # phrased as a question, and it answered with a passage about how a datetime
+    # column is created on each engine. The scope preposition followed by a
+    # *named* object is what keeps this off "what tables does the product
+    # support", which names nothing of the operator's, and the article guard
+    # keeps it off "what fields are in an audit event".
+    if re.search(
+        r"\b(?:what|which)\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|objects?|collections?|schemas?|views?|"
+        r"datasets?|streams?|topics?)\s+"
+        r"(?:are|is|live|lives|exist|exists|do|does|did|have|has)\b"
+        r"[\w\s']{0,20}?\b(?:on|in|from|under|inside)\b\s+(?!a\s|an\s)\S",
+        lower,
+    ):
+        return True
+    # A grouped aggregate over the operator's own table. "count orders by region
+    # on Audit SQLite" routed because ``orders on`` is a business object with a
+    # scope, but "break down orders by region on Audit SQLite" put the
+    # aggregation verb too far from either for any rule above to see it, and the
+    # turn answered with a passage about snapshot resume. The ``by`` clause and
+    # the scope are both required: "how do you break down a large table" has
+    # neither and stays a documentation question.
+    if re.search(
+        r"\b(?:break\s*(?:down)?|group|bucket|split|segment|count|sum|total|"
+        r"average|avg|tally|roll\s*up)\b[\w\s']{0,40}?\bby\b\s+\w+"
+        r"[\w\s']{0,30}?\b(?:on|in|from)\b\s+(?!a\s|an\s)\S",
         lower,
     ):
         return True
