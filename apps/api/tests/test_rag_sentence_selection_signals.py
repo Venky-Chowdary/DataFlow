@@ -267,31 +267,89 @@ def test_a_sentence_just_over_the_floor_is_kept() -> None:
     assert select_sentences([lead, support]) == [lead, support]
 
 
-def test_a_list_item_is_exempt_from_the_floor() -> None:
-    """A list is vouched for by its heading and admitted whole.
+def _gate(order: int, text: str, terms: set[str], score: float, vouched: bool) -> Candidate:
+    return Candidate(
+        text=text,
+        section_title="Core gates (before write)",
+        citation="Preflight gates → Core gates",
+        href="#/help/preflight",
+        order=order,
+        terms=frozenset(terms),
+        score=score,
+        list_item=True,
+        list_vouched=vouched,
+    )
+
+
+def test_a_vouched_list_item_is_exempt_from_the_floor() -> None:
+    """A list the question asked for is admitted whole.
 
     G1 scores nothing against "what are the preflight gates" — the heading the
     question matched is what earns it — so a relevance floor measured against
     the lead would drop the gates the question asked to see.
     """
-    lead = Candidate(
-        text="G9 Data integrity — encoding, required nulls, identity duplicates.",
-        section_title="Core gates (before write)",
-        citation="Preflight gates → Core gates",
-        href="#/help/preflight",
-        order=8,
-        terms=frozenset({"data", "integrity", "encoding"}),
-        score=10.0,
-        list_item=True,
-    )
-    sibling = Candidate(
-        text="G1 Source readable — source connects and rows can be read.",
-        section_title="Core gates (before write)",
-        citation="Preflight gates → Core gates",
-        href="#/help/preflight",
-        order=0,
-        terms=frozenset({"source", "readable", "row"}),
-        score=0.2,
-        list_item=True,
-    )
+    lead = _gate(8, "G9 Data integrity — encoding, required nulls.", {"data", "integrity"}, 10.0, True)
+    sibling = _gate(0, "G1 Source readable — source connects.", {"source", "readable"}, 0.2, True)
     assert select_sentences([lead, sibling]) == [sibling, lead]
+
+
+def test_an_unvouched_list_item_has_to_clear_the_floor_like_any_other() -> None:
+    """Being a list item is not itself a reason to be in the answer.
+
+    The exemption exists because a heading the question matched speaks for
+    items that repeat none of its words. With no such heading there is nothing
+    vouching for the item, and the blanket exemption let any list in any
+    retrieved passage past the floor: asked "can I limit who sees a connector",
+    the four connector maturity labels were appended to an answer about roles.
+    """
+    lead = _gate(8, "G9 Data integrity — encoding, required nulls.", {"data", "integrity"}, 10.0, False)
+    sibling = _gate(0, "G1 Source readable — source connects.", {"source", "readable"}, 0.2, False)
+    assert select_sentences([lead, sibling]) == [lead]
+
+
+def test_an_unvouched_list_item_does_not_drag_in_its_siblings() -> None:
+    """List completion is for a list that was admitted as a unit."""
+    picked = _gate(0, "**Beta** — works with known limits.", {"beta", "work", "limit"}, 3.0, False)
+    sibling = _gate(1, "**Planned** — catalog presence only.", {"planned", "catalog"}, 0.1, False)
+    assert select_sentences([picked, sibling]) == [picked]
+
+
+def test_an_enumeration_ask_vouches_for_the_list_it_asked_for() -> None:
+    """"What are the preflight gates" is a request for a list, so it gets one."""
+    sections = [
+        (
+            "Core gates (before write)",
+            "Preflight gates → Core gates",
+            "#/help/preflight",
+            "Core gates (before write)\nG1 Source readable — source connects\n"
+            "G2 Destination write access — destination is reachable",
+        ),
+    ]
+    candidates = build_candidates(analyze_query("what are the preflight gates"), sections)
+    listed = [c for c in candidates if c.list_item]
+    assert listed and all(c.list_vouched for c in listed)
+
+
+def test_a_list_the_question_only_brushes_is_not_vouched_for() -> None:
+    """Reaching a list is not the same as asking for one.
+
+    A capability question whose heading overlap is one term of four gets the
+    items it genuinely matched and no free pass for their siblings. Under the
+    blanket exemption this list arrived whole, which is how four connector
+    maturity labels ended up under an answer about roles.
+    """
+    sections = [
+        (
+            "Honest transfer-ready labels",
+            "Connectors → Honest transfer-ready labels",
+            "#/help/connectors",
+            "Honest transfer-ready labels\n**Beta** — works with known limits.\n"
+            "**Planned** — catalog presence only; do not schedule yet.",
+        ),
+    ]
+    candidates = build_candidates(
+        analyze_query("can I schedule a beta connector for production"), sections
+    )
+    listed = [c for c in candidates if c.list_item]
+    assert listed, "expected the labels to be recognised as list items"
+    assert not any(c.list_vouched for c in listed)

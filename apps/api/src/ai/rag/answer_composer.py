@@ -66,9 +66,9 @@ MMR_LAMBDA = 0.7
 # Not a tuned knob — it sits in a measured gap. Across the corpus the weakest
 # sentence that genuinely elaborates its lead scores 0.42 of it (the mapping
 # threshold advice under "why is my mapping confidence low"), while the
-# strongest off-subject sentence scores 0.31. List items are exempt: they are
-# vouched for by the heading the question matched, not by their own wording,
-# and a list is admitted or refused whole.
+# strongest off-subject sentence scores 0.31. Vouched list items are exempt:
+# they are carried by the heading the question matched, not by their own
+# wording, and such a list is admitted or refused whole. See ``Candidate``.
 RELEVANCE_FLOOR = 0.35
 
 MAX_SENTENCES = 6
@@ -180,6 +180,19 @@ class Candidate:
     #: (``G1 Source readable — …``, ``1. Open Connectors``). List items are
     #: selected as a group, because half a list is not an answer.
     list_item: bool = False
+    #: True when this list is what the question asked for, and may therefore
+    #: speak as a unit: the question asked to be enumerated, or the heading
+    #: above the list carries enough of the question to vouch for items that
+    #: repeat none of it.
+    #:
+    #: Being a list was once enough on its own, which let any list in any
+    #: retrieved passage past ``RELEVANCE_FLOOR`` and pull in its siblings.
+    #: Asked "can I limit who sees a connector" the highest-scoring sentence in
+    #: the corpus was "**Beta** — works with known limits", a maturity label
+    #: matching on the wrong sense of ``limit``, and it brought Live, Planned
+    #: and Connect-only with it: four sentences about transfer-readiness
+    #: appended to a correct answer about roles.
+    list_vouched: bool = False
 
 
 def _split_annotated(text: str, section_title: str = "") -> list[tuple[str, bool]]:
@@ -358,6 +371,9 @@ def build_candidates(
             rank_prior *= share
         anchor_bar = HEADING_ANCHOR_TOP if share >= 1.0 else HEADING_ANCHOR
         heading_match = _heading_match(citation or section_title, typed)
+        # An enumeration ask is a request for a list, whichever passage holds
+        # it; otherwise the heading has to speak for its items.
+        list_vouched = analysis.ask == "enumeration" or heading_match >= anchor_bar
         for sentence, is_list_item in _split_annotated(text, section_title):
             sentence_terms = content_terms(sentence)
             terms = frozenset(sentence_terms)
@@ -422,6 +438,7 @@ def build_candidates(
                     terms=terms,
                     score=score,
                     list_item=is_list_item,
+                    list_vouched=is_list_item and list_vouched,
                 )
             )
             order += 1
@@ -444,7 +461,7 @@ def select_sentences(
     pool.remove(best)
 
     floor = RELEVANCE_FLOOR * best.score
-    pool = [c for c in pool if c.list_item or c.score >= floor]
+    pool = [c for c in pool if c.list_vouched or c.score >= floor]
 
     top = best.score or 1.0
     while pool and len(chosen) < limit:
@@ -490,7 +507,7 @@ def _complete_lists(
     shape and half their words. Left to itself it returned "G1" and "G4" and
     called that the gate list. A list is one unit of evidence.
     """
-    sections_with_items = {c.section_title for c in chosen if c.list_item}
+    sections_with_items = {c.section_title for c in chosen if c.list_vouched}
     if not sections_with_items:
         return chosen
     picked = {c.order for c in chosen}
@@ -499,12 +516,12 @@ def _complete_lists(
         siblings = [
             c
             for c in candidates
-            if c.list_item
+            if c.list_vouched
             and c.section_title == section
             and c.order not in picked
         ]
         already = sum(
-            1 for c in chosen if c.list_item and c.section_title == section
+            1 for c in chosen if c.list_vouched and c.section_title == section
         )
         for cand in siblings[: max(0, MAX_LIST_ITEMS - already)]:
             out.append(cand)
