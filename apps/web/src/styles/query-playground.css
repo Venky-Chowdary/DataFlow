@@ -292,9 +292,9 @@
 }
 
 .df2-query-editor-action:hover:not(:disabled) {
-  background: #f1f5f9;
-  border-color: #cbd5e1;
-  color: var(--df-text-primary, #0f172a);
+  background: var(--df-surface-muted);
+  border-color: var(--df-border-strong);
+  color: var(--df-text-primary);
 }
 
 .df2-query-editor-action:disabled {
@@ -968,7 +968,7 @@
 .df2-qw-col-type[data-tone="struct"],
 .df2-qw-th-type[data-tone="struct"] { background: #fdf4ff; color: #a21caf; }
 .df2-qw-col-type[data-tone="binary"],
-.df2-qw-th-type[data-tone="binary"] { background: #f1f5f9; color: #334155; }
+.df2-qw-th-type[data-tone="binary"] { background: var(--df-surface-muted); color: var(--df-text-secondary); }
 .df2-qw-col-type[data-tone="text"],
 .df2-qw-th-type[data-tone="text"] { background: #f0fdfa; color: #0f766e; }
 .df2-qw-col-type[data-tone="unknown"],

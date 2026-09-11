@@ -1038,4 +1038,40 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-sched-panel-head strong,/);
     assert.match(ui, /\.df2-app \.df2-empty-state,/);
   });
+
+  it("Settings, Query hover, and tab leftovers follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const settings = sheet("settings-enterprise.css");
+    const workspace = sheet("settings-workspace.css");
+    const query = sheet("query-playground.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(dataflow, /\.df2-tab:hover \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(dataflow, /\.df2-tab:hover \{[\s\S]{0,80}#0f172a/);
+    assert.match(dataflow, /\.df2-settings-nav button:hover \{[\s\S]{0,120}--df-surface-muted/);
+    assert.doesNotMatch(dataflow, /\.df2-settings-nav button:hover \{[\s\S]{0,120}#f1f5f9/);
+    assert.match(dataflow, /\.df2-catalog-nav button:hover \{[\s\S]{0,120}--df-surface-muted/);
+
+    assert.match(settings, /\.df2-settings-summary-item strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(settings, /\.df2-settings-summary-item strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(settings, /\.df2-settings-section-footer \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(settings, /\.df2-settings-section-footer \{[\s\S]{0,200}background: #fafbfc/);
+    assert.match(settings, /\.df2-settings-policy-row \{[\s\S]{0,220}--df-surface-muted/);
+    assert.match(settings, /\.df2-settings-policy-row h3 \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(settings, /\.df2-settings-sso-card \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(settings, /\.df2-settings-field label \{[\s\S]{0,160}--df-text-secondary/);
+
+    assert.match(workspace, /\.df2-page-settings \.df2-security-row \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(workspace, /\.df2-settings-model-title \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(workspace, /\.df2-settings-model-title \{[\s\S]{0,120}color: #0f172a/);
+
+    assert.match(query, /\.df2-query-editor-action:hover:not\(:disabled\) \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(query, /\.df2-query-editor-action:hover:not\(:disabled\) \{[\s\S]{0,160}#f1f5f9/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-settings-section-footer,/);
+    assert.match(ui, /\.df2-app \.df2-settings-nav button:hover,/);
+  });
 });

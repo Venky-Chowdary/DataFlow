@@ -13399,3 +13399,34 @@ html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-btn-primary,
 html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   color: #fff;
 }
+
+/* Settings / Query / tab leftovers — leftover navy + paper. */
+.df2-app .df2-settings-summary-item strong,
+.df2-app .df2-settings-policy-row h3,
+.df2-app .df2-settings-model-title,
+.df2-app .df2-settings-field input,
+.df2-app .df2-settings-field select,
+.df2-app .df2-settings-field textarea {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-settings-nav button:hover,
+.df2-app .df2-catalog-nav button:hover,
+.df2-app .df2-query-editor-action:hover:not(:disabled) {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-settings-nav button.active,
+.df2-app .df2-catalog-nav button.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-settings-section-footer,
+.df2-app .df2-settings-policy-row,
+.df2-app .df2-settings-sso-card,
+.df2-app .df2-settings-channel-form,
+.df2-app .df2-page-settings .df2-security-row {
+  background: var(--df-surface-muted);
+}
