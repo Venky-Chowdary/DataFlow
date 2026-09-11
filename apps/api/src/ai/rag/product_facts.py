@@ -805,6 +805,89 @@ def _catalog_count_section() -> GeneratedSection | None:
     )
 
 
+#: English for each metric the aggregation tool can actually run. Reading the
+#: set from the tool's own whitelist is the point: the passage cannot claim a
+#: metric the engine does not have, and cannot fall behind one it gains.
+_METRIC_ENGLISH: dict[str, str] = {
+    "count": "count the rows",
+    "count_distinct": "count distinct values",
+    "sum": "sum a column",
+    "avg": "average a column",
+    "min": "take the minimum",
+    "max": "take the maximum",
+}
+
+
+def _aggregation_section() -> GeneratedSection | None:
+    """What a grouped aggregate is, and what this one guarantees.
+
+    The Pilot computes these — "break down orders by region on Audit SQLite"
+    runs a real ``GROUP BY`` against the live table — but the corpus said
+    nothing about them, so "what does group by do" and "what is group by" were
+    refused as outside the documentation while the engine next door could
+    execute exactly that. Measured both before and after the routing fix that
+    stopped the same phrasing being *mistaken* for an aggregation: the refusal
+    was not a regression, it was a gap.
+
+    The two claims worth documenting are the ones an operator cannot verify by
+    looking: the aggregate is computed server-side rather than extrapolated
+    from a sample, and a NULL group is reported rather than dropped — which is
+    the same no-silent-loss rule quarantine states for rows.
+    """
+    try:
+        from ..copilot.aggregate_tools import (
+            _DEFAULT_GROUP_LIMIT,
+            _MAX_GROUP_LIMIT,
+            _METRICS,
+        )
+    except Exception:
+        return None
+
+    available = [
+        _METRIC_ENGLISH[name] for name in _METRIC_ENGLISH if name in _METRICS
+    ]
+    if not available:
+        return None
+
+    lines = [
+        # Shaped as a definition on purpose. Sentence selection gives a
+        # definitional ask its shape bonus only to a sentence that opens
+        # subject-then-copula, and the first draft opened "A grouped aggregate
+        # answers one question per…" — so the paragraph below, which happens to
+        # read "A group whose value is NULL is reported…", collected the
+        # definition credit and led the answer to "what is group by" with the
+        # null rule instead of the definition.
+        "A grouped aggregate is one measure per distinct value of a column: "
+        "`group by` (also asked as a `break down by`, `bucket by`, "
+        "`segment by` or `per`) splits the rows of a table into groups on one "
+        "column, then reports that measure for each group. "
+        f"Pilot can {', '.join(available[:-1])} or {available[-1]}, "
+        "with an optional row filter and a top-N ranking.",
+        "The numbers are exact server-side aggregates, never extrapolated from "
+        "a sample: the work is pushed down to the source engine as SQL, or to "
+        "MongoDB as a real `$group` pipeline with `$dateTrunc` for time "
+        "buckets, rather than tallied on a page of rows this end.",
+        "A group whose value is NULL is reported as its own group rather than "
+        "silently filtered away, for the same reason a bad row is quarantined "
+        "rather than dropped: a total that quietly excludes rows is a wrong "
+        "total that looks right.",
+        "The table and every column are resolved against the introspected "
+        "schema first, so a mis-heard column name produces the real column "
+        "list instead of invalid SQL or an invented number, and the measure "
+        "comes from a fixed whitelist so no typed text reaches SQL as code.",
+        f"Groups are capped at {_DEFAULT_GROUP_LIMIT} by default and "
+        f"{_MAX_GROUP_LIMIT} at most, so a high-cardinality column returns a "
+        "readable head rather than a page of thousands.",
+    ]
+    return GeneratedSection(
+        doc_title="Analytics on live tables",
+        section_title="What a grouped aggregate is and what it guarantees",
+        text="\n".join(lines),
+        source_module="src/ai/copilot/aggregate_tools.py",
+        category="analytics",
+    )
+
+
 #: Engines to show the carrier for. Naming a handful keeps the passage readable;
 #: the rule it states is the same for every engine in ``DDL_TYPES``.
 _CARRIER_ENGINES: tuple[str, ...] = (
@@ -1198,6 +1281,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _row_ledger_section,
         _connector_catalog_section,
         _catalog_count_section,
+        _aggregation_section,
         _quarantine_section,
         _job_phase_section,
         _gitops_section,

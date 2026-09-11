@@ -326,3 +326,105 @@ def test_a_cardinality_question_is_answered_with_the_number(question: str) -> No
 
     body = compose_product_answer(retrieve_product_answer(question, limit=4))
     assert str(catalog_summary()["unique_drivers"]) in body.split(".")[0], body[:200]
+
+
+# --------------------------------------------------------------------------
+# Grouped aggregates: the operation Pilot could run but not explain
+# --------------------------------------------------------------------------
+#
+# "break down orders by region on Demo Orders" plans a real ``GROUP BY``
+# against the live table, and "what does group by do" was refused as outside
+# the documentation. Measured both before and after the routing fix that
+# stopped the same phrasing being *mistaken* for an aggregation, so the refusal
+# was never a regression — the corpus simply said nothing about the one
+# analytical operation the product performs.
+
+_AGGREGATE_SECTION = "What a grouped aggregate is and what it guarantees"
+
+
+def test_every_metric_the_passage_offers_is_one_the_engine_runs() -> None:
+    """The passage cannot advertise a measure the aggregation tool lacks.
+
+    Read out of ``_METRICS`` rather than retyped beside it: a hand-written list
+    is how documentation ends up offering a median the engine cannot compute.
+    """
+    from src.ai.copilot.aggregate_tools import _METRICS
+    from src.ai.rag.product_facts import _METRIC_ENGLISH
+
+    text = _section(_AGGREGATE_SECTION).text
+    for name, english in _METRIC_ENGLISH.items():
+        if name in _METRICS:
+            assert english in text, f"{name} is runnable but unlisted"
+        else:
+            assert english not in text, f"{name} is offered but not runnable"
+
+
+def test_the_group_cap_is_the_constant_the_tool_enforces() -> None:
+    """An operator planning around the cap is told the number that applies."""
+    from src.ai.copilot.aggregate_tools import _DEFAULT_GROUP_LIMIT, _MAX_GROUP_LIMIT
+
+    text = _section(_AGGREGATE_SECTION).text
+    assert str(_DEFAULT_GROUP_LIMIT) in text
+    assert str(_MAX_GROUP_LIMIT) in text
+
+
+def test_the_null_group_rule_is_stated_rather_than_left_to_be_discovered() -> None:
+    """A total that quietly drops rows is the failure this product forbids.
+
+    The same no-silent-loss rule quarantine states for rows, said for groups,
+    because it is the one thing an operator cannot verify by looking at the
+    result.
+    """
+    text = _section(_AGGREGATE_SECTION).text.lower()
+    assert "null" in text
+    assert "filtered away" in text or "rather than" in text
+
+
+def test_the_aggregate_is_documented_as_exact_and_not_sampled() -> None:
+    """Pushed down to the engine, so the number is not an extrapolation."""
+    text = _section(_AGGREGATE_SECTION).text.lower()
+    assert "exact" in text
+    assert "sample" in text
+
+
+def test_the_definition_opens_in_the_shape_a_definition_is_scored_in() -> None:
+    """Sentence selection pays the definition bonus on subject-then-copula.
+
+    The first draft opened "A grouped aggregate *answers* one question per…",
+    which is not that shape, so the null-group paragraph — which happens to
+    read "A group whose value *is* NULL is reported…" — collected the
+    definition credit and led the answer to "what is group by" with the null
+    rule instead of the definition.
+    """
+    from src.ai.rag.answer_composer import _DEFINITIONAL, split_sentences
+
+    lead = split_sentences(_section(_AGGREGATE_SECTION).text)[0]
+    assert _DEFINITIONAL.match(lead), lead
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what does group by do",
+        "what is group by",
+        "what is a group by clause",
+        "what is a grouped aggregate",
+        "what is an aggregate",
+        "explain aggregation",
+        "what does a breakdown show me",
+        "does a breakdown include null values",
+        "is the count exact or a sample",
+        "can pilot average a column",
+    ],
+)
+def test_an_aggregation_question_leads_with_the_aggregation_passage(
+    question: str,
+) -> None:
+    """Named-fixture floor. Every one of these was refused outright before."""
+    from src.ai.rag.product_docs import compose_product_answer
+
+    answer = retrieve_product_answer(question, limit=4)
+    assert answer.answerable, f"{question!r} refused: {answer.verdict.reason}"
+    body = compose_product_answer(answer)
+    assert body.strip(), f"{question!r} composed nothing"
+    assert _AGGREGATE_SECTION in body, body[:300]
