@@ -1512,4 +1512,62 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
       /\.df2-app \.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}--df-brand-muted/,
     );
   });
+
+  it("Dest leftover navy and paper flatteners follow tokens", () => {
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-dest-connector-card-name \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-dest-connector-card-name \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-connector-card-name \{[\s\S]{0,120}--df-text-primary/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-connector-card-name \{[\s\S]{0,120}color: #0f172a/,
+    );
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-panel \{[\s\S]{0,480}--df-surface-muted/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-panel \{[\s\S]{0,480}background: #f8fafc/,
+    );
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-search input \{[\s\S]{0,360}--df-text-primary/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-search input \{[\s\S]{0,360}color: #0f172a/,
+    );
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-search-clear:hover \{[\s\S]{0,80}--df-surface-muted/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-engine-search-clear:hover \{[\s\S]{0,80}#f1f5f9/,
+    );
+    assert.match(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-right-empty \{[\s\S]{0,200}--df-surface-muted/,
+    );
+    assert.doesNotMatch(
+      studio,
+      /\.df2-page-transfer-studio \.df2-dest-right-empty \{[\s\S]{0,200}background: #f8fafc/,
+    );
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-page-transfer-studio \.df2-dest-connector-card-name,/);
+    assert.match(ui, /\.df2-app \.df2-page-transfer-studio \.df2-dest-engine-panel,/);
+    assert.match(
+      ui,
+      /\.df2-app \.df2-page-transfer-studio \.df2-dest-right-empty \{[\s\S]{0,80}--df-text-secondary/,
+    );
+  });
 });
