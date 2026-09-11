@@ -409,6 +409,50 @@ _DEFINITIONAL_TITLE = (
     "what happens",
 )
 
+#: The generated role matrix, whose every chunk is one role crossed with the
+#: verb list for that role. It therefore holds the vocabulary of nearly any
+#: operator question — "read the audit log", "start transfers", "cancel, retry
+#: and resume jobs" are all in it — while answering only one question about
+#: them: who is allowed to. Its heading also begins "What each", so it drew the
+#: definitional prior on top of that overlap. Measured, it led "show me the
+#: audit log", "start the transfer" and "how do I cancel a running transfer",
+#: and half its sentences are the negative form, so the last of those was
+#: answered with "a viewer cannot … cancel, retry and resume jobs".
+_ROLE_MATRIX_DOC = "roles & permissions"
+
+#: What the role matrix is the right answer to. Naming a role is enough, as is
+#: asking who may do something; ``role`` and ``permission`` are kept as bare
+#: words because an operator who types either is asking about authorization.
+_PERMISSION_QUESTION = re.compile(
+    # Bare ``who``: in this product's vocabulary a question about a person is a
+    # question about authorization. Requiring a modal after it missed "can I
+    # limit who sees a connector", which is the matrix's question asked without
+    # the word "can" next to the word "who".
+    r"\bwho\b"
+    r"|\b(?:permission|permissions|rbac|authoriz|unauthoriz|forbidden|"
+    r"role|roles)\b"
+    # A named role is the matrix's subject, so naming one is the question.
+    # ``operator`` is not in that list: this documentation calls its reader an
+    # operator on every page, so the bare word says nothing about authorization
+    # and only counts next to a permission verb.
+    r"|\b(?:viewer|editor|admin|owner)s?\b"
+    r"|\boperators?\s+(?:can|cannot|can't|may|need)\b"
+    r"|\b(?:allowed|permitted)\s+to\b"
+    r"|\baccess\s+(?:level|control)\b",
+    re.I,
+)
+
+#: A permission question wants it, so it keeps the prior a definitional heading
+#: earns. Anything else has to outrank it on its own terms.
+#:
+#: The penalty was swept against the 158-case answer audit and the operator
+#: questions above. -3.0 was not enough to move "show me the audit log" off the
+#: role list; -4.5 was the knee where it flipped to "Settings → Audit Logs lists
+#: mapping decisions, job runs, quarantine events…"; -4.5 through -9.0 were
+#: indistinguishable on both sets, so this sits above the knee with margin.
+_ROLE_MATRIX_ON_ASK = 3.2
+_ROLE_MATRIX_OFF_ASK = -6.0
+
 
 def _section_intent_bonus(
     chunk: ProductDocChunk,
@@ -427,6 +471,14 @@ def _section_intent_bonus(
     subject the question is about, and what it is worth depends on the ask.
     """
     from .evidence_policy import is_subject_term
+
+    # Decided before the on-subject gate, because the role matrix is *always*
+    # nominally on subject: it names every verb in the product, so whatever the
+    # operator asked about, its heading covers it.
+    if (chunk.doc_title or "").strip().lower() == _ROLE_MATRIX_DOC:
+        if _PERMISSION_QUESTION.search(analysis.text):
+            return _ROLE_MATRIX_ON_ASK
+        return _ROLE_MATRIX_OFF_ASK
 
     title = (chunk.section_title or "").strip().lower()
     heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))

@@ -37,8 +37,11 @@ from src.ai.rag.lexical_index import identifier_shingles, normalize  # noqa: E40
 from src.ai.rag.product_docs import (  # noqa: E402
     MAX_SECTION_CHARS,
     ProductDocHit,
+    _ROLE_MATRIX_DOC,
+    _section_intent_bonus,
     _select_covering,
     _split_procedure,
+    compose_product_answer,
     load_product_doc_chunks,
     retrieval_passages,
     retrieve_product_answer,
@@ -242,6 +245,83 @@ def test_a_two_part_question_retrieves_both_parts():
     terms = {t for hit in answer.hits for t in hit.matched_terms}
     assert {"postgresql", "snowflake"} & terms
     assert {"decimal", "precision"} & terms
+
+
+# --- heading and intent priors ----------------------------------------------
+
+def _role_matrix_chunk():
+    """One chunk of the generated role×verb matrix."""
+    for chunk in retrieval_passages():
+        if (chunk.doc_title or "").strip().lower() == _ROLE_MATRIX_DOC:
+            return chunk
+    raise AssertionError(f"no passage from {_ROLE_MATRIX_DOC!r} in the corpus")
+
+
+def _lead(question: str) -> str:
+    return " ".join(
+        (compose_product_answer(retrieve_product_answer(question)) or "").split()
+    )
+
+
+def test_the_role_matrix_is_demoted_for_a_question_that_is_not_about_roles():
+    """It lists every verb in the product, so it overlaps almost any question.
+
+    Measured: it led "show me the audit log", "start the transfer" and "how do
+    I cancel a running transfer" — the last of those with the sentence saying a
+    *viewer* cannot cancel, which is not merely off topic but the opposite of
+    what the operator asked for.
+    """
+    bonus = _section_intent_bonus(_role_matrix_chunk(), analyze_query("start the transfer"))
+    assert bonus < 0
+
+
+def test_the_role_matrix_is_promoted_for_a_question_that_is_about_roles():
+    bonus = _section_intent_bonus(_role_matrix_chunk(), analyze_query("what can a viewer do"))
+    assert bonus > 0
+
+
+def test_who_alone_marks_a_question_as_being_about_permission():
+    """"can I limit who sees a connector" is the matrix's question asked
+    without the word "can" next to the word "who" — requiring a modal there
+    cost this case, measured on the answer audit."""
+    bonus = _section_intent_bonus(
+        _role_matrix_chunk(), analyze_query("can I limit who sees a connector")
+    )
+    assert bonus > 0
+
+
+def test_the_bare_word_operator_is_not_a_permission_question():
+    """This documentation calls its reader an operator on every page, so the
+    bare word cannot be the signal — otherwise the matrix wins everything
+    again by the same route it won before."""
+    bonus = _section_intent_bonus(
+        _role_matrix_chunk(),
+        analyze_query("what does the operator see when a gate blocks"),
+    )
+    assert bonus < 0
+
+
+def test_a_different_section_that_merely_says_role_is_not_demoted():
+    """``Semantic roles`` is about detected column roles, not authorization.
+    The rule keys on the article, not on the presence of the word."""
+    semantic = next(
+        (c for c in retrieval_passages() if (c.section_title or "") == "Semantic roles"),
+        None,
+    )
+    assert semantic is not None
+    assert (semantic.doc_title or "").strip().lower() != _ROLE_MATRIX_DOC
+
+
+def test_an_operator_asking_where_the_audit_log_is_is_told_where():
+    answer = _lead("show me the audit log")
+    assert "audit log" in answer.lower()
+    # Not the role list, which was the measured answer before.
+    assert "rotate their own password" not in answer
+
+
+def test_a_permission_question_is_still_answered_from_the_role_matrix():
+    answer = _lead("what can a viewer do")
+    assert "viewer" in answer.lower()
 
 
 # --- evidence policy --------------------------------------------------------
