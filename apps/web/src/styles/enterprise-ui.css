@@ -13997,6 +13997,19 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   background: var(--df-surface-muted);
 }
 
+.df2-app .df2-jobs-now {
+  background: var(--df-surface) !important;
+  color: var(--df-text-primary) !important;
+}
+
+.df2-app .df2-jobs-now-bar {
+  background: var(--df-surface-muted) !important;
+}
+
+.df2-app .df2-jobs-now-bar i {
+  background: var(--df-brand) !important;
+}
+
 .df2-app .df2-result-more > summary,
 .df2-app .df2-quarantine-next-copy strong,
 .df2-app .df2-quarantine-next-copy p,

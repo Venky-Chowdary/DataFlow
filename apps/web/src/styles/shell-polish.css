@@ -1859,8 +1859,8 @@ textarea.df2-pilot-composer textarea {
   min-height: 128px;
   border: 1px solid var(--df-border, #e2e8f0) !important;
   border-radius: 14px !important;
-  background: linear-gradient(180deg, #fff 0%, #f0fdfa 100%) !important;
-  color: var(--df-text-primary, #0f172a) !important;
+  background: var(--df-surface) !important;
+  color: var(--df-text-primary) !important;
   box-shadow: 0 4px 16px rgba(15, 23, 42, 0.06) !important;
 }
 
@@ -1887,7 +1887,7 @@ textarea.df2-pilot-composer textarea {
 .df2-jobs-now-bar {
   height: 6px;
   border-radius: 999px;
-  background: #e2e8f0 !important;
+  background: var(--df-surface-muted) !important;
   overflow: hidden;
 }
 
@@ -1895,7 +1895,7 @@ textarea.df2-pilot-composer textarea {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #0f766e, var(--df-brand)) !important;
+  background: var(--df-brand) !important;
   transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 

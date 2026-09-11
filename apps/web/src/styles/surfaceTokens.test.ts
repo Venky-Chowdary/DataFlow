@@ -1832,4 +1832,24 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-validate-rail-score strong \{[\s\S]{0,40}--df-brand-strong/);
     assert.match(ui, /\.df2-app \.df2-validate-rail-panel\.blocked \.df2-validate-rail-outcome \{[\s\S]{0,40}--df-danger/);
   });
+
+  it("Jobs-now leftover mint gradient follows tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const polish = sheet("shell-polish.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(polish, /\.df2-jobs-now \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-jobs-now \{[\s\S]{0,280}#f0fdfa/);
+    assert.doesNotMatch(polish, /\.df2-jobs-now \{[\s\S]{0,280}#fff 0%/);
+    assert.match(polish, /\.df2-jobs-now-bar \{[\s\S]{0,120}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-jobs-now-bar \{[\s\S]{0,120}#e2e8f0/);
+    assert.match(polish, /\.df2-jobs-now-bar i \{[\s\S]{0,160}--df-brand/);
+    assert.doesNotMatch(polish, /\.df2-jobs-now-bar i \{[\s\S]{0,160}#0f766e/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-jobs-now \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-jobs-now-bar \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-jobs-now-bar i \{[\s\S]{0,80}--df-brand/);
+  });
 });
