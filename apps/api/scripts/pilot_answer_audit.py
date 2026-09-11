@@ -29,7 +29,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 _API_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +43,58 @@ sys.path.insert(0, str(_API_ROOT))
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+
+# The operation suite asks Pilot to read and count real rows, so the audit owns
+# its workspace instead of measuring whatever connectors happen to be saved on
+# the machine. Both stores are redirected into a temp directory *before* any
+# product module is imported; the operator's own connectors are never touched,
+# and the numbers are reproducible on any checkout.
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pilot-audit-"))
+os.environ["DATAFLOW_CONNECTOR_STORE"] = str(_FIXTURE_DIR / "connectors.json")
+os.environ["DATAFLOW_PILOT_MEMORY_PATH"] = str(_FIXTURE_DIR / "pilot_memory.json")
+os.environ["DATAFLOW_SEED_DEMO"] = "0"
+
+FIXTURE_CONNECTOR = "Audit SQLite"
+FIXTURE_TABLE = "orders"
+FIXTURE_ROWS = 12
+
+
+def seed_fixture_workspace() -> None:
+    """Create one real SQLite connector with one real table.
+
+    ``count the rows in orders`` has to reach a database and come back with 12,
+    otherwise the suite only proves that Pilot can phrase an error nicely.
+    """
+    from services.connector_store import create_connector
+
+    db_path = _FIXTURE_DIR / "audit.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {FIXTURE_TABLE} ("
+            "id INTEGER PRIMARY KEY, customer TEXT NOT NULL, region TEXT,"
+            " amount REAL, status TEXT)"
+        )
+        conn.execute(f"DELETE FROM {FIXTURE_TABLE}")
+        conn.executemany(
+            f"INSERT INTO {FIXTURE_TABLE} (id, customer, region, amount, status)"
+            " VALUES (?, ?, ?, ?, ?)",
+            [
+                (i, f"customer-{i}", ("emea", "apac", "amer")[i % 3], 10.0 * i,
+                 ("paid", "pending")[i % 2])
+                for i in range(1, FIXTURE_ROWS + 1)
+            ],
+        )
+        conn.commit()
+
+    create_connector(
+        {
+            "name": FIXTURE_CONNECTOR,
+            "type": "sqlite",
+            "role": "source",
+            "database": str(db_path),
+            "connection_string": str(db_path),
+        }
+    )
 
 # One case = (question, subject, must_include).
 #
@@ -170,6 +224,75 @@ COMMAND_QUESTIONS: list[Case] = [
     ("show me the proofs screen", "navigate", ("proof",)),
 ]
 
+# Operations — the operator asking Pilot to *do* one of the things this product
+# does, in the words they would actually use. The seeded workspace holds one
+# SQLite connector with one 12-row ``orders`` table and no jobs, so the live
+# reads must come back with real values while the rest show Pilot understood
+# the operation and named the one input it is missing. Answering an operation
+# request with an inventory listing, a documentation essay, or "I'm not sure
+# how to do that" all count as failures.
+OPERATION_QUESTIONS: list[Case] = [
+    # create_connector — the endpoint is stated in prose, not labelled fields
+    (
+        "create a connector to postgres at localhost:5433",
+        "connector_create",
+        ("username", "password", "connection url"),
+    ),
+    (
+        "add a mysql connector at db.acme.com:3306 user root password secret database orders",
+        "connector_create",
+        ("could not connect", "host not found", "created", "confirm"),
+    ),
+    # introspect_connector_schema — "the orders table" is how people name one
+    ("show me the schema of the orders table", "schema", ("connector", "customer")),
+    (
+        "what columns are in the orders table on Audit SQLite",
+        "schema",
+        ("customer", "region"),
+    ),
+    ("list the tables on Audit SQLite", "schema", ("orders",)),
+    # transfer planning
+    ("run a transfer from orders to orders_warehouse", "transfer", ("connector",)),
+    (
+        "plan a transfer of orders from Audit SQLite to Audit SQLite",
+        "transfer",
+        ("source and destination", "nothing to move", "plan"),
+    ),
+    ("start a transfer in transfer studio", "transfer", ("transfer studio",)),
+    # advisory
+    (
+        "which sync mode should I use for a nightly load",
+        "sync_mode",
+        ("full_refresh_overwrite", "incremental_append", "full overwrite"),
+    ),
+    # schedules
+    ("pause my nightly orders sync schedule", "schedule", ("pipeline", "schedule")),
+    ("run my nightly orders sync now", "schedule", ("pipeline", "schedule")),
+    # live aggregation — real rows, so the expected value is the real answer
+    ("count the rows in orders on Audit SQLite", "analytics", ("12",)),
+    ("what is the average amount in orders on Audit SQLite", "analytics", ("65",)),
+    ("count orders by region on Audit SQLite", "analytics", ("emea", "apac", "amer")),
+    ("show me 3 rows from orders on Audit SQLite", "analytics", ("customer-1", "customer")),
+    # quarantine replay — "quarantined" describes the rows, it is not a table
+    ("replay the quarantined rows on my last job", "quarantine", ("job", "transfer")),
+    # refusals that must stay refusals: destructive work is not prompt-driven
+    (
+        "delete all my connectors",
+        "unsupported",
+        ("not something a prompt", "read-only", "in the ui"),
+    ),
+    (
+        "drop the orders table",
+        "unsupported",
+        ("not something a prompt", "read-only", "in the ui"),
+    ),
+    (
+        "export my data to csv",
+        "unsupported",
+        ("not something i can do", "query", "sample"),
+    ),
+]
+
 # Conversational / meta — a chatbot has to hold these without falling over.
 META_QUESTIONS: list[Case] = [
     ("who are you", "meta", ("pilot",)),
@@ -193,6 +316,7 @@ OFF_SUBJECT_QUESTIONS: list[Case] = [
 SUITES: dict[str, list[Case]] = {
     "product": PRODUCT_QUESTIONS,
     "workspace": WORKSPACE_QUESTIONS,
+    "operation": OPERATION_QUESTIONS,
     "command": COMMAND_QUESTIONS,
     "meta": META_QUESTIONS,
     "off_subject": OFF_SUBJECT_QUESTIONS,
@@ -242,6 +366,7 @@ def run(suite: str, *, fresh_session: bool = False) -> list[dict]:
     """
     from src.ai.copilot.pilot_agent import DataPilotAgent, carries_evidence
 
+    seed_fixture_workspace()
     agent = DataPilotAgent()
     cases: list[Case] = []
     if suite == "all":
