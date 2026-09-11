@@ -87,6 +87,18 @@ def extract_url_credentials(message: str) -> dict[str, Any] | None:
     return None
 
 
+#: An endpoint stated in prose rather than labelled: "at localhost:5433",
+#: "@ db.acme.com", "on 10.0.0.7:3306". The host shape is deliberately strict —
+#: ``localhost``, an IPv4 address or a dotted hostname — so an ordinary "on
+#: <connector name>" clause cannot be read as a host.
+_ENDPOINT_PHRASE = re.compile(
+    r"\b(?:at|on|@)\s+"
+    r"(localhost|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9][\w-]*(?:\.[\w-]+)+)"
+    r"(?::(\d{2,5}))?\b",
+    re.I,
+)
+
+
 def extract_field_credentials(message: str) -> dict[str, Any]:
     """Parse host/user/password/port/database from labeled lines or inline prose."""
     lower = message.lower()
@@ -120,9 +132,17 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
         return ""
 
     host = _field("host", "hostname", "server", "mysql host", "postgres host")
+    port_s = _field("port", "mysql port", "postgres port")
+    if not host:
+        # "create a connector to postgres at localhost:5433" states the endpoint
+        # the way people say it, with no "host" label anywhere. Without this the
+        # operator who gave a host was asked for one.
+        endpoint = _ENDPOINT_PHRASE.search(message)
+        if endpoint:
+            host = endpoint.group(1)
+            port_s = port_s or (endpoint.group(2) or "")
     if host:
         out["host"] = host
-    port_s = _field("port", "mysql port", "postgres port")
     if port_s.isdigit():
         out["port"] = int(port_s)
     db = _field("database", "db", "dbname")
@@ -169,7 +189,30 @@ _HOW_TO_QUESTION = re.compile(
     r"|\bhow\s+to\b"
     r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
     r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
-    r"|\bwalk\s+me\s+through\b",
+    r"|\bwalk\s+me\s+through\b"
+    # "Can I add a postgres connector" asks whether the product supports one;
+    # "add a postgres connector at db.acme.com" hands one over. Only the second
+    # carries endpoint detail, which is what separates them below.
+    r"|\bcan\s+(?:i|we|you)\b"
+    r"|\bdo\s+you\s+support\b"
+    r"|\bis\s+it\s+possible\b",
+    re.I,
+)
+
+#: The engines the create tool can actually build a connector for. Naming one is
+#: endpoint detail in its own right: nobody says "postgres" while asking a
+#: generic question about the Connectors page.
+_ENGINE_NAME = (
+    r"postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|snowflake|sql\s*server|sqlite"
+)
+
+#: A creation verb applied to a connector, however the operator words it.
+#: Enumerating the literal phrasings missed "create a connector to postgres at
+#: localhost:5433" — an ordinary way to ask, which fell through to a listing of
+#: the connectors that already exist.
+_CREATE_CONNECTOR_OBJECT = re.compile(
+    r"\b(?:create|add|save|register|make|set\s*up|setup)\s+"
+    r"(?:a|an|the|this|new)?\s*(?:\w+\s+){0,2}?(?:connector|connection)\b",
     re.I,
 )
 
@@ -222,6 +265,13 @@ def wants_create_connector(message: str) -> bool:
         "save mysql",
     )
     if any(v in lower for v in verbs):
+        return True
+    # A creation verb on a connector, plus something that says *which* endpoint.
+    # Without the second half, "add a connector" is as likely to be a request
+    # for the procedure as a handover, so it keeps its existing route.
+    if _CREATE_CONNECTOR_OBJECT.search(lower) and (
+        _CONNECTION_DETAIL.search(text) or re.search(rf"\b(?:{_ENGINE_NAME})\b", lower)
+    ):
         return True
     # "create a <engine> connector at host…" / "add mysql named warehouse host…"
     if re.search(
