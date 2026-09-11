@@ -1907,7 +1907,7 @@ body {
   margin-bottom: 6px;
   border-radius: 8px;
   font-size: 11px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   border: 1px solid #e2e8f0;
 }
 
@@ -1917,7 +1917,7 @@ body {
 .df2-pilot-tool-log code {
   display: block;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
   margin-bottom: 2px;
 }
 
@@ -2061,7 +2061,7 @@ body {
 }
 
 .df2-pilot-composer {
-  background: #fff;
+  background: var(--df-surface);
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 16px;
@@ -2076,7 +2076,7 @@ body {
   font-size: 15px;
   font-family: inherit;
   line-height: 1.5;
-  color: #0f172a;
+  color: var(--df-text-primary);
   outline: none;
   min-height: 72px;
 }
@@ -2095,7 +2095,7 @@ body {
   gap: 8px;
   padding: 16px 24px;
   border-top: 1px solid #e2e8f0;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-composer-sticky textarea {
@@ -2256,9 +2256,9 @@ body {
 
 .df2-pilot-msg.assistant {
   align-self: flex-start;
-  background: #fff;
+  background: var(--df-surface-muted);
   border: 1px solid #e2e8f0;
-  color: #0f172a;
+  color: var(--df-text-primary);
   border-bottom-left-radius: 4px;
 }
 

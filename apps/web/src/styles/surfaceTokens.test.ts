@@ -1724,4 +1724,38 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-catalog-nav button\.active,/);
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.dt-modal-title,/);
   });
+
+  it("Pilot leftover paper assistant and composer follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const premium = sheet("premium-theme.css");
+    const polish = sheet("shell-polish.css");
+
+    assert.match(dataflow, /\.df2-pilot-msg\.assistant \{[\s\S]{0,160}--df-surface-muted/);
+    assert.match(dataflow, /\.df2-pilot-msg\.assistant \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(dataflow, /\.df2-pilot-msg\.assistant \{[\s\S]{0,160}background: #fff/);
+    assert.doesNotMatch(dataflow, /\.df2-pilot-msg\.assistant \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(dataflow, /\.df2-pilot-composer \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-pilot-composer \{[\s\S]{0,80}background: #fff/);
+    assert.match(dataflow, /\.df2-pilot-composer-sticky \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-pilot-composer-sticky \{[\s\S]{0,200}background: #fff/);
+    assert.match(dataflow, /\.df2-pilot-tool-log \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(dataflow, /\.df2-pilot-tool-log \{[\s\S]{0,160}background: #f8fafc/);
+
+    assert.match(polish, /\.df2-pilot-msg\.assistant \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-pilot-msg\.assistant \{[\s\S]{0,80}#f8fafc/);
+    assert.match(polish, /\.df2-pilot-composer,\n\.df2-pilot-composer-sticky \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-pilot-composer,\n\.df2-pilot-composer-sticky \{[\s\S]{0,160}background: #fff/);
+    assert.match(polish, /\.df2-pilot-tool-log \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-pilot-tool-log \{[\s\S]{0,160}background: #fff/);
+
+    assert.match(premium, /\.df2-pilot-msg\.assistant \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(premium, /\.df2-pilot-msg\.assistant \{[\s\S]{0,80}#f8fafc/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-pilot-msg\.assistant \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-pilot-composer,\n\.df2-app \.df2-pilot-composer-sticky \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-pilot-tool-log \{[\s\S]{0,80}--df-surface-muted/);
+  });
 });

@@ -1095,8 +1095,8 @@ select.df2-select {
 }
 
 textarea.df2-pilot-composer textarea {
-  color: var(--df-text-primary, #0f172a) !important;
-  background: #fff !important;
+  color: var(--df-text-primary) !important;
+  background: var(--df-surface) !important;
 }
 
 .df2-input::placeholder {
@@ -2634,7 +2634,7 @@ textarea.df2-pilot-composer textarea {
 .df2-model-mini-strip {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-console-strip span,
@@ -2664,7 +2664,7 @@ textarea.df2-pilot-composer textarea {
 .df2-pilot-composer-sticky {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 14px;
-  background: #fff;
+  background: var(--df-surface);
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
 }
 
@@ -2675,15 +2675,15 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pilot-msg.assistant {
-  background: #f8fafc !important;
-  color: var(--df-text-primary, #0f172a) !important;
+  background: var(--df-surface-muted) !important;
+  color: var(--df-text-primary) !important;
   border: 1px solid var(--df-border, #e2e8f0);
 }
 
 .df2-pilot-tool-log {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-tool-log.ok {

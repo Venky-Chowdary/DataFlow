@@ -816,7 +816,7 @@
 }
 
 .df2-pilot-msg.assistant {
-  background: linear-gradient(180deg, #f8fafc, #fff);
+  background: var(--df-surface-muted);
   border: 1px solid var(--df-line);
   border-radius: 12px 12px 12px 4px;
 }
