@@ -2614,7 +2614,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-pilot-aside {
   border-right: 1px solid var(--df-border, #e2e8f0) !important;
-  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%) !important;
+  background: var(--df-surface-muted) !important;
 }
 
 .df2-pilot-session {

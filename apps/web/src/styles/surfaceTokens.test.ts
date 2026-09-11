@@ -1228,6 +1228,9 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
 
   it("Pilot leftover paper, navy, and mint follow tokens", () => {
     const ui = sheet("enterprise-ui.css");
+    const app = sheet("app-styles.css");
+    const responsive = sheet("responsive-shell-fixes.css");
+    const polish = sheet("shell-polish.css");
     const premium = sheet("premium-theme.css");
 
     assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-aside \{[\s\S]{0,280}--df-surface-muted/);
@@ -1258,5 +1261,14 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-pilot-followup \{/);
     assert.match(ui, /\.df2-app \.df2-pilot-followup:hover \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-pilot-pending-row,/);
+
+    assert.match(app, /\.df2-app \.df2-pilot-aside\.is-collapsed \{[\s\S]{0,80}--df-surface/);
+    assert.match(responsive, /\.df2-pilot-workspace\.df2-pilot-v2 \.df2-pilot-aside \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(
+      responsive,
+      /\.df2-pilot-workspace\.df2-pilot-v2 \.df2-pilot-aside \{[\s\S]{0,280}background: #fafbfc/,
+    );
+    assert.match(polish, /\.df2-pilot-aside \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-pilot-aside \{[\s\S]{0,160}linear-gradient\(180deg, #fff/);
   });
 });
