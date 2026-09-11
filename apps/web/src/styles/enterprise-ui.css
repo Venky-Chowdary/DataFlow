@@ -14422,6 +14422,24 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-text-secondary);
 }
 
+.df2-app .df2-type-float .df2-type-badge,
+.df2-app th.df2-type-float .df2-type-badge {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
+
+.df2-app .df2-type-bool .df2-type-badge,
+.df2-app th.df2-type-bool .df2-type-badge {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-type-json .df2-type-badge,
+.df2-app th.df2-type-json .df2-type-badge {
+  background: var(--df-brand-muted);
+  color: var(--df-text-primary);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
