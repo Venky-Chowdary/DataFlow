@@ -2144,4 +2144,35 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-run-launch-kicker \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-vd-chip \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Dest leftover paper and mint target-status follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-dest-target-status \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status \{[\s\S]{0,280}background: #f8fafc/);
+    assert.match(studio, /\.df2-dest-target-status\.is-existing \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-existing \{[\s\S]{0,80}background: #f0fdfa/);
+    assert.match(studio, /\.df2-dest-target-status\.is-existing svg \{[\s\S]{0,40}--df-brand-strong/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-existing svg \{[\s\S]{0,40}color: #0f766e/);
+    assert.match(studio, /\.df2-dest-target-status\.is-create \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-create \{[\s\S]{0,80}background: #eff6ff/);
+    assert.match(studio, /\.df2-dest-target-status\.is-pending \{[\s\S]{0,80}--df-warning/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-pending \{[\s\S]{0,80}color: #92400e/);
+    assert.match(studio, /\.df2-dest-target-status\.is-loading \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-loading \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(studio, /\.df2-dest-target-status\.is-loading svg \{[\s\S]{0,80}--df-brand-strong/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status\.is-loading svg \{[\s\S]{0,80}color: #0f766e/);
+    assert.match(studio, /\.df2-dest-target-status code \{[\s\S]{0,120}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-dest-target-status code \{[\s\S]{0,120}background: rgba\(15, 23, 42/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-dest-target-status \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-existing \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-pending \{[\s\S]{0,80}--df-warning/);
+    assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-loading \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-run-launch-kicker \{[\s\S]{0,80}--df-brand-muted/);
+  });
 });
