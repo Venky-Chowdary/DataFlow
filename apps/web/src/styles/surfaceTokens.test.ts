@@ -1152,4 +1152,44 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-qw-col-type\[data-tone="bool"\],/);
     assert.match(ui, /\.df2-app \.df2-page-query \.df2-query-results tbody tr:hover td \{[\s\S]{0,160}--df-surface/);
   });
+
+  it("Help / docs leftover navy and mint follow tokens", () => {
+    const docs = sheet("docs-page.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(docs, /\.df2-docs-arch-title \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(docs, /\.df2-docs-arch-title \{[\s\S]{0,80}fill: #0f172a/);
+    assert.match(docs, /\.df2-docs-walkthrough-steps \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(docs, /\.df2-docs-walkthrough-steps \{[\s\S]{0,80}color: #334155/);
+    assert.match(docs, /\.df2-docs-shot img \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(docs, /\.df2-docs-shot img \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(docs, /\.df2-docs-shot figcaption strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(docs, /\.df2-docs-shot figcaption strong \{[\s\S]{0,80}color: #0f172a/);
+
+    assert.match(docs, /\.docs-sidebar-home \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(docs, /\.docs-sidebar-home \{[\s\S]{0,200}background: #f0fdfa/);
+    assert.match(docs, /\.docs-sidebar-group button \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(docs, /\.docs-sidebar-group button \{[\s\S]{0,200}color: #334155/);
+    assert.match(docs, /\.docs-sidebar-group button\.is-active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(docs, /\.docs-sidebar-group button\.is-active \{[\s\S]{0,80}#ecfdf5/);
+    assert.match(docs, /\.docs-sidebar-brand strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(docs, /\.docs-sidebar-brand strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(docs, /\.docs-space-page-head h1 \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(docs, /\.docs-space-page-head h1 \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(docs, /\.docs-space-tree-group \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(docs, /\.docs-space-tree-group \{[\s\S]{0,160}background: #fafbfc/);
+    assert.match(docs, /\.docs-space-algorithm-steps strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(docs, /\.docs-callout \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(docs, /\.docs-callout \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.match(docs, /\.docs-card-icon \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(docs, /\.docs-card-icon \{[\s\S]{0,200}background: #f0fdfa/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-docs-shot figcaption strong,/);
+    assert.match(ui, /\.df2-app \.docs-space-page-head h1,/);
+    assert.match(ui, /\.df2-app \.docs-sidebar-home,/);
+    assert.match(ui, /\.df2-app \.docs-callout \{[\s\S]{0,80}--df-brand-muted/);
+  });
 });
