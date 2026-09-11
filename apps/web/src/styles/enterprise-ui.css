@@ -14404,6 +14404,24 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-brand-strong);
 }
 
+.df2-app .df2-type-temporal .df2-type-badge,
+.df2-app th.df2-type-temporal .df2-type-badge {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-type-spatial .df2-type-badge,
+.df2-app th.df2-type-spatial .df2-type-badge {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-type-uuid .df2-type-badge,
+.df2-app th.df2-type-uuid .df2-type-badge {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
