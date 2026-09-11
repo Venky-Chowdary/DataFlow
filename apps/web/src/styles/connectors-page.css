@@ -43,7 +43,7 @@
 .df2-connector-rows-head {
   padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
-  background: var(--df-surface-subtle, #f8fafc);
+  background: var(--df-surface-muted);
   font-size: 10.5px;
   font-weight: 700;
   text-transform: uppercase;
@@ -60,6 +60,8 @@
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background var(--df-dur-fast, 140ms) ease;
@@ -68,7 +70,7 @@
 .df2-connector-row:last-child { border-bottom: none; }
 
 .df2-connector-row:hover {
-  background: var(--df-surface-subtle, #f8fafc);
+  background: var(--df-surface-muted);
 }
 
 .df2-connector-row.selected,
@@ -201,8 +203,8 @@
 
 .df2-connector-row:hover .df2-connector-row-open,
 .df2-connector-row.selected .df2-connector-row-open {
-  color: #0f766e;
-  background: #fff;
+  color: var(--df-brand-strong, #0f766e);
+  background: var(--df-surface-raised);
 }
 
 /* Laptop: icon-only Test so the row stays as short as Contracts / Schedules */
@@ -241,7 +243,7 @@
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: var(--df-radius-card, 8px);
-  background: var(--df-surface-subtle, #f8fafc);
+  background: var(--df-surface-muted);
   min-width: 0;
 }
 
@@ -254,7 +256,7 @@
 
 .df2-drawer-fact strong {
   font-size: var(--df-fs-sm, 12.5px);
-  color: #0f172a;
+  color: var(--df-text-primary);
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
@@ -295,7 +297,7 @@
   margin: 0;
   font-size: 12.5px;
   font-weight: 700;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-drawer-count {
@@ -432,7 +434,7 @@
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: 9px;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-drawer-related-row.is-clickable {
@@ -442,7 +444,7 @@
 
 .df2-drawer-related-row.is-clickable:hover {
   border-color: color-mix(in srgb, var(--df-brand, #0d9488) 40%, var(--df-border, #e6e9ee));
-  background: var(--df-surface-subtle, #f8fafc);
+  background: var(--df-surface-muted);
 }
 
 .df2-drawer-related-main {
@@ -454,7 +456,7 @@
 
 .df2-drawer-related-main strong {
   font-size: var(--df-list-row-title);
-  color: #0f172a;
+  color: var(--df-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -514,9 +516,9 @@
 
 .df2-connectors-feature-card {
   padding: 20px 18px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: #fff;
+  background: var(--df-surface);
   transition: border-color 0.2s ease;
 }
 
@@ -542,7 +544,7 @@
   margin: 0 0 6px;
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-connectors-feature-card p {

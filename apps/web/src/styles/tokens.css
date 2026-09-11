@@ -82,6 +82,9 @@
   /* Alias used by leftover sheets (`var(--df-text, #0f172a)`). Must track primary so dark remaps. */
   --df-text: var(--df-text-primary);
   --df-surface-2: var(--df-surface-muted);
+  /* Leftover sheets still read these undeclared names and fall back to paper. */
+  --df-surface-subtle: var(--df-surface-muted);
+  --df-surface-sunken: var(--df-surface-muted);
   --df-focus-ring: var(--df-brand-ring);
 
   /* Motion — shared easings / durations for landing + workspace */
@@ -615,6 +618,8 @@ html.df2-theme-dark:has(.df2-app),
   --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
   --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 55%, var(--df-surface));
   --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 70%, var(--df-surface));
+  /* Platform leftover `.df2-btn { color: var(--df-navy-700) }` — keep ink readable. */
+  --df-navy-700: var(--df-text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {

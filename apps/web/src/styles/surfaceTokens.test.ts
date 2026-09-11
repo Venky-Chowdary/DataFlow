@@ -960,4 +960,51 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(platform, /\.df2-pilot-main,[\s\S]{0,80}--df-surface/);
     assert.doesNotMatch(platform, /\.df2-pilot-main,[\s\S]{0,120}#f8fafc !important/);
   });
+
+  it("Contracts list, portaled drawers, and Jobs detail buttons follow tokens", () => {
+    const tokens = sheet("tokens.css");
+    const ui = sheet("enterprise-ui.css");
+    const connectors = sheet("connectors-page.css");
+    const platform = sheet("enterprise-platform.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(tokens, /--df-surface-subtle:\s*var\(--df-surface-muted\)/);
+    assert.match(tokens, /--df-surface-sunken:\s*var\(--df-surface-muted\)/);
+    assert.match(tokens, /--df-navy-700:\s*var\(--df-text-secondary\)/);
+
+    assert.match(ui, /\.df2-contract-row \{\s*\n\s*min-height:[\s\S]{0,280}--df-surface/);
+    assert.match(ui, /\.df2-contract-row-name \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-contract-row-name \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(ui, /\.df2-contract-rows-head \{[\s\S]{0,280}--df-text-tertiary/);
+    assert.doesNotMatch(ui, /\.df2-contract-rows-head \{[\s\S]{0,280}color: #94a3b8/);
+    assert.match(ui, /\.df2-pipeline-row-name \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-pipeline-row-name \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(ui, /\.df2-drawer-footer \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-drawer-footer \{[\s\S]{0,160}background: #fafbfc/);
+
+    assert.match(connectors, /\.df2-connector-rows-head \{[\s\S]{0,220}--df-surface-muted/);
+    assert.match(connectors, /\.df2-drawer-fact strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(connectors, /\.df2-drawer-fact strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(connectors, /\.df2-drawer-related-row \{[\s\S]{0,420}--df-surface/);
+    assert.doesNotMatch(connectors, /\.df2-drawer-related-row \{[\s\S]{0,420}background: #fff;/);
+    assert.match(connectors, /\.df2-drawer-related-main strong \{[\s\S]{0,80}--df-text-primary/);
+
+    assert.match(platform, /\.df2-btn \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(platform, /\.df2-btn \{[\s\S]{0,80}--df-navy-700/);
+    assert.match(platform, /\.df2-cell-title \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(platform, /\.df2-cell-title \{[\s\S]{0,80}#0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(
+      ui,
+      /\.df2-app \.df2-jobs-detail-card \.df2-btn:not\(\.df2-btn-primary\):not\(\.df2-btn-danger\),/,
+    );
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-drawer,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-drawer-footer,/);
+    assert.match(
+      ui,
+      /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-drawer \.df2-btn:not\(\.df2-btn-primary\):not\(\.df2-btn-danger\),/,
+    );
+  });
 });

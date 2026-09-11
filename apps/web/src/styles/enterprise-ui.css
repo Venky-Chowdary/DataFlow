@@ -2542,7 +2542,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-pipeline-rows-head-name {
@@ -2554,6 +2554,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background 140ms ease;
@@ -2602,7 +2604,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: var(--df-list-row-title);
   font-weight: 600;
   line-height: 1.25;
-  color: #0f172a;
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7649,7 +7651,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-drawer-footer {
   padding: 12px 18px 16px;
   border-top: 1px solid var(--df-border, #e6e9ee);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 @keyframes df2-drawer-in-right {
@@ -10934,7 +10936,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-contract-rows-head-name {
@@ -10946,6 +10948,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background 140ms ease;
@@ -10984,7 +10988,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: var(--df-list-row-title);
   font-weight: 600;
   line-height: 1.25;
-  color: #0f172a;
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -10995,7 +10999,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-contract-row-schema {
   font-size: var(--df-list-row-meta);
   line-height: 1.25;
-  color: #64748b;
+  color: var(--df-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -11021,8 +11025,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-contract-row:hover .df2-contract-row-open,
 .df2-contract-row.selected .df2-contract-row-open {
-  color: #0f766e;
-  background: #f0fdfa;
+  color: var(--df-brand-strong, #0f766e);
+  background: var(--df-brand-muted, #f0fdfa);
 }
 
 @media (max-width: 720px) {
@@ -13230,4 +13234,116 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-page-docs .df2-docs-toc nav {
   background: var(--df-surface);
+}
+
+/* List-row titles + column heads — leftover navy / paper made them vanish in dark. */
+.df2-app :is(
+  .df2-contract-row,
+  .df2-pipeline-row,
+  .df2-connector-row
+) {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df2-app :is(
+  .df2-contract-row.selected,
+  .df2-contract-row[aria-current="true"],
+  .df2-pipeline-row.selected,
+  .df2-pipeline-row[aria-current="true"],
+  .df2-connector-row.selected,
+  .df2-connector-row[aria-current="true"]
+) {
+  background: var(--df-brand-muted);
+}
+
+.df2-app :is(
+  .df2-contract-row-name,
+  .df2-pipeline-row-name,
+  .df2-connector-row-name
+) {
+  color: var(--df-text-primary);
+}
+
+.df2-app :is(
+  .df2-contract-rows-head,
+  .df2-pipeline-rows-head,
+  .df2-connector-rows-head
+) {
+  background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
+}
+
+.df2-app .df2-cell-title {
+  color: var(--df-text-primary) !important;
+}
+
+/* Jobs detail-card actions — beat leftover navy ink and paper fill. */
+.df2-app .df2-jobs-detail-card .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger),
+.df2-app .df2-jobs-detail-footer .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger),
+.df2-app .df2-jobs-v3-actions .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger),
+.df2-app .df2-jobs-quarantine-actions .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger) {
+  background: var(--df-surface-raised) !important;
+  color: var(--df-text-primary) !important;
+  border-color: var(--df-border) !important;
+}
+
+.df2-app .df2-jobs-detail-card .df2-btn-primary,
+.df2-app .df2-jobs-detail-footer .df2-btn-primary,
+.df2-app .df2-jobs-v3-actions .df2-btn-primary,
+.df2-app .df2-jobs-quarantine-actions .df2-btn-primary {
+  color: #fff !important;
+}
+
+/*
+ * Drawers portal to <body>, outside .df2-app. Token remaps still inherit from
+ * html[data-theme="dark"]:has(.df2-app), but leftover paper / navy hosts do not.
+ */
+html[data-theme="dark"]:has(.df2-app) .df2-drawer,
+html.df2-theme-dark:has(.df2-app) .df2-drawer {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-header,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-header {
+  background: linear-gradient(180deg, var(--df-surface) 0%, var(--df-surface-muted) 100%);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-title,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-title,
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-fact strong,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-fact strong,
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-related-main strong,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-related-main strong {
+  color: var(--df-text-primary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-footer,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-footer,
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-fact,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-fact {
+  background: var(--df-surface-muted);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-related-row,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-related-row {
+  background: var(--df-surface);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer-section-head h3,
+html.df2-theme-dark:has(.df2-app) .df2-drawer-section-head h3 {
+  color: var(--df-text-secondary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger),
+html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger) {
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-btn-primary,
+html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-btn-primary {
+  color: #fff;
 }
