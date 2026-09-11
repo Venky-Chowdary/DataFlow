@@ -1394,7 +1394,7 @@
   margin: 0;
   font-size: 15px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-gate8-proof-badge {
@@ -1406,18 +1406,18 @@
 }
 
 .df2-gate8-proof-badge.is-ok {
-  background: #d1fae5;
-  color: #065f46;
+  background: var(--df-success-bg);
+  color: var(--df-success);
 }
 
 .df2-gate8-proof-badge.is-bad {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
 .df2-gate8-proof-badge.is-pending {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
 }
 
 .df2-gate8-proof.is-pending {
@@ -1429,7 +1429,7 @@
   margin: 0 0 10px;
   font-size: 12px;
   line-height: 1.45;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-gate8-proof-grid {
@@ -1459,13 +1459,13 @@
   margin: 0;
   font-size: 13px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-variant-numeric: tabular-nums;
   word-break: break-all;
 }
 
-.df2-gate8-proof-grid dd.is-ok { color: #047857; }
-.df2-gate8-proof-grid dd.is-warn { color: #b45309; }
+.df2-gate8-proof-grid dd.is-ok { color: var(--df-success); }
+.df2-gate8-proof-grid dd.is-warn { color: var(--df-warning); }
 
 .df2-gate8-proof-explain {
   border-top: 1px solid #e2e8f0;
@@ -3660,8 +3660,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-toolbar-gitops-toggle:hover {
-  border-color: #cbd5e1;
-  color: #0f172a;
+  border-color: var(--df-border-strong);
+  color: var(--df-text-primary);
 }
 
 .df2-toolbar-search {
@@ -4552,7 +4552,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin: 0;
   font-size: 15px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-validate-stage-core > p {
@@ -4629,14 +4629,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-preflight.is-compact .df2-preflight-step.running {
-  border-color: #bae6fd !important;
-  background: #f0f9ff !important;
+  border-color: var(--df-info-border) !important;
+  background: var(--df-info-bg) !important;
 }
 
 .df2-preflight.is-compact .df2-preflight-step-title {
   font-size: 12px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.25;
 }
 
@@ -4815,7 +4815,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   gap: 8px;
   min-width: 0;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-size: 13px;
 }
 
@@ -5110,7 +5110,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-progress-ring-label strong {
   font-size: 13px;
   font-weight: var(--df-fw-bold);
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-progress-ring-label small {
@@ -5134,13 +5134,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-v3-ring-label strong {
   font-size: 11px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-theater-v3-progress-copy h3 {
   margin: 0 0 2px;
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-theater-v3-progress-copy p {
@@ -13577,4 +13577,50 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 .df2-app .df2-docs-arch-title {
   fill: var(--df-text-primary);
+}
+
+/* Studio leftover navy on Gate8 / Validate / Theater / gitops. */
+.df2-app .df2-gate8-proof-head h3,
+.df2-app .df2-gate8-proof-grid dd,
+.df2-app .df2-validate-stage-core h3,
+.df2-app .df2-preflight.is-compact .df2-preflight-step-title,
+.df2-app .df2-progress-ring-label strong,
+.df2-app .df2-theater-v3-ring-label strong,
+.df2-app .df2-theater-v3-progress-copy h3,
+.df2-app .df2-run-readiness-route,
+.df2-app .df2-toolbar-gitops-toggle:hover {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-gate8-proof-lede,
+.df2-app .df2-gate8-proof-message {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-gate8-proof-badge.is-ok {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-gate8-proof-badge.is-bad {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-gate8-proof-badge.is-pending {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-gate8-proof-grid dd.is-ok {
+  color: var(--df-success);
+}
+
+.df2-app .df2-gate8-proof-grid dd.is-warn {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-preflight.is-compact .df2-preflight-step.running {
+  background: var(--df-info-bg) !important;
+  border-color: var(--df-info-border) !important;
 }

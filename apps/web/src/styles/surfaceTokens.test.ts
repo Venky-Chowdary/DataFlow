@@ -1192,4 +1192,35 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.docs-sidebar-home,/);
     assert.match(ui, /\.df2-app \.docs-callout \{[\s\S]{0,80}--df-brand-muted/);
   });
+
+  it("Studio leftover navy on Gate8, Validate, and Theater follows tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-gate8-proof-head h3 \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-gate8-proof-head h3 \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-gate8-proof-grid dd \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-gate8-proof-grid dd \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(ui, /\.df2-gate8-proof-badge\.is-ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(ui, /\.df2-gate8-proof-badge\.is-ok \{[\s\S]{0,80}#d1fae5/);
+    assert.match(ui, /\.df2-gate8-proof-badge\.is-bad \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-gate8-proof-badge\.is-pending \{[\s\S]{0,80}--df-warning-bg/);
+    assert.match(ui, /\.df2-validate-stage-core h3 \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-validate-stage-core h3 \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-preflight\.is-compact \.df2-preflight-step-title \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-preflight\.is-compact \.df2-preflight-step-title \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-preflight\.is-compact \.df2-preflight-step\.running \{[\s\S]{0,80}--df-info-bg/);
+    assert.doesNotMatch(ui, /\.df2-preflight\.is-compact \.df2-preflight-step\.running \{[\s\S]{0,80}#f0f9ff/);
+    assert.match(ui, /\.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-theater-v3-progress-copy h3 \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-progress-copy h3 \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-run-readiness-route \{[\s\S]{0,160}--df-text-primary/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-gate8-proof-head h3,/);
+    assert.match(ui, /\.df2-app \.df2-validate-stage-core h3,/);
+    assert.match(ui, /\.df2-app \.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
