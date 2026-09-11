@@ -2268,4 +2268,27 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app th\.df2-type-string \.df2-type-badge \{[\s\S]{0,40}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Type-badge leftover mint-green spatial uuid and temporal follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /th\.df2-type-temporal \.df2-type-badge \{[\s\S]{0,80}--df-warning/);
+    assert.doesNotMatch(studio, /th\.df2-type-temporal \.df2-type-badge \{[\s\S]{0,80}color: #9a3412/);
+    assert.match(studio, /th\.df2-type-spatial \.df2-type-badge \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /th\.df2-type-spatial \.df2-type-badge \{[\s\S]{0,80}background: #f0fdf4/);
+    assert.match(studio, /th\.df2-type-uuid \.df2-type-badge \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /th\.df2-type-uuid \.df2-type-badge \{[\s\S]{0,80}background: #ecfdf5/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-type-temporal \.df2-type-badge,/);
+    assert.match(ui, /\.df2-app th\.df2-type-temporal \.df2-type-badge \{[\s\S]{0,40}--df-warning-bg/);
+    assert.match(ui, /\.df2-app \.df2-type-spatial \.df2-type-badge,/);
+    assert.match(ui, /\.df2-app th\.df2-type-spatial \.df2-type-badge \{[\s\S]{0,40}--df-success-bg/);
+    assert.match(ui, /\.df2-app \.df2-type-uuid \.df2-type-badge,/);
+    assert.match(ui, /\.df2-app th\.df2-type-uuid \.df2-type-badge \{[\s\S]{0,40}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
