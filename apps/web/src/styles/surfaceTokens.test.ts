@@ -1373,4 +1373,32 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-quarantine-next,/);
     assert.match(ui, /\.df2-app \.df2-quarantine-apply-suggested code \{[\s\S]{0,80}--df-brand-muted/);
   });
+
+  it("Job-row leftover mint and status pastels follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-job-row:hover \{[\s\S]{0,80}--df-list-row-hover/);
+    assert.doesNotMatch(ui, /\.df2-job-row:hover \{[\s\S]{0,80}background: #f0fdfa/);
+    assert.match(ui, /\.df2-job-row\.is-active,\n\.df2-job-row\.is-active:hover \{[\s\S]{0,80}--df-brand-soft/);
+    assert.doesNotMatch(ui, /\.df2-job-row\.is-active,\n\.df2-job-row\.is-active:hover \{[\s\S]{0,80}background: #ccfbf1/);
+    assert.match(ui, /\.df2-job-row-status \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-job-row-status \{[\s\S]{0,160}background: #f1f5f9/);
+    assert.match(ui, /\.df2-job-row-status\.is-completed \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(ui, /\.df2-job-row-status\.is-completed \{[\s\S]{0,80}#dcfce7/);
+    assert.match(ui, /\.df2-job-row-status\.is-failed \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-job-row-status\.is-running,\n\.df2-job-row-status\.is-pending \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(
+      ui,
+      /\.df2-job-row-status\.is-running,\n\.df2-job-row-status\.is-pending \{[\s\S]{0,80}background: #ccfbf1/,
+    );
+    assert.match(ui, /\.df2-job-row-bar > i \{[\s\S]{0,80}--df-brand/);
+    assert.doesNotMatch(ui, /\.df2-job-row-bar > i \{[\s\S]{0,80}linear-gradient\(90deg, #0f766e/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-job-row:hover:not\(\.is-active\) \{[\s\S]{0,80}--df-list-row-hover/);
+    assert.match(ui, /\.df2-app \.df2-job-row-status\.is-pending \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-job-row-bar > i \{[\s\S]{0,40}--df-brand/);
+  });
 });
