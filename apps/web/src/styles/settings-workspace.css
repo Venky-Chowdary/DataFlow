@@ -197,7 +197,7 @@
   padding: 16px 18px;
   border-radius: 10px;
   border: 1px solid var(--df-border, #e2e8f0);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-page-settings .df2-model-grid {
@@ -215,7 +215,7 @@
   margin: 4px 0 8px;
   font-size: 20px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-settings-section-body--flush {

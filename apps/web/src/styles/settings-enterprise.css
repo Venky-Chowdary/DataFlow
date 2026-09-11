@@ -33,7 +33,7 @@
 
 .df2-settings-summary-item strong {
   font-size: 15px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-settings-layout {
@@ -218,7 +218,7 @@
   gap: 8px;
   padding: 14px 22px;
   border-top: 1px solid var(--df-line, #e2e8f0);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   border-radius: 0 0 var(--df-radius-card, 12px) var(--df-radius-card, 12px);
 }
 
@@ -328,7 +328,7 @@
 .df2-settings-field label {
   font-size: var(--df-fs-label);
   font-weight: var(--df-fw-semibold);
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-settings-field input,
@@ -341,7 +341,7 @@
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 8px;
   background: var(--df-surface);
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-size: 14px;
 }
 
@@ -384,14 +384,14 @@
   padding: 16px 18px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 10px;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-settings-policy-row h3 {
   margin: 0 0 4px;
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-settings-policy-row p {
@@ -411,7 +411,7 @@
   padding: 18px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -433,7 +433,7 @@
   padding: 18px;
   border: 1px solid var(--df-line, #e2e8f0);
   border-radius: 12px;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-settings-grid--channel {
@@ -541,7 +541,7 @@
 .df2-settings-logs-table td {
   padding: 10px 14px;
   text-align: left;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid var(--df-border);
 }
 
 .df2-settings-logs-table th {

@@ -729,7 +729,7 @@ body {
   transition: color 0.12s, border-color 0.12s;
 }
 
-.df2-tab:hover { color: #0f172a; }
+.df2-tab:hover { color: var(--df-text-primary); }
 
 .df2-tab.active {
   color: #0f766e;
@@ -934,8 +934,8 @@ body {
   cursor: pointer;
 }
 
-.df2-catalog-nav button:hover { background: #f1f5f9; color: #0f172a; }
-.df2-catalog-nav button.active { background: #f0fdfa; color: #0f766e; font-weight: 600; }
+.df2-catalog-nav button:hover { background: var(--df-surface-muted); color: var(--df-text-primary); }
+.df2-catalog-nav button.active { background: var(--df-brand-muted); color: var(--df-brand-strong); font-weight: 600; }
 
 .df2-search {
   position: relative;
@@ -1728,8 +1728,8 @@ body {
   text-align: left;
 }
 
-.df2-settings-nav button:hover { background: #f1f5f9; color: #0f172a; }
-.df2-settings-nav button.active { background: #f0fdfa; color: #0f766e; font-weight: 600; }
+.df2-settings-nav button:hover { background: var(--df-surface-muted); color: var(--df-text-primary); }
+.df2-settings-nav button.active { background: var(--df-brand-muted); color: var(--df-brand-strong); font-weight: 600; }
 
 .df2-settings-grid {
   display: grid;
