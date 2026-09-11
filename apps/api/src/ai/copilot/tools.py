@@ -2949,14 +2949,19 @@ def _looks_like_unsupported_mutation(lower: str) -> bool:
         )
     ):
         return True
+    # Plurals are the natural way to ask for a bulk delete ("delete all my
+    # connectors"), and without them the request fell through to the inventory
+    # tool, which listed the connectors and never said that Pilot does not
+    # delete. A destructive ask answered with a listing reads like consent.
     if re.search(
-        r"\b(?:delete|drop|destroy|remove)\b.+\b(?:connector|connection|schedule|pipeline)\b",
+        r"\b(?:delete|drop|destroy|remove)\b.+"
+        r"\b(?:connectors?|connections?|schedules?|pipelines?|jobs?|contracts?)\b",
         lower,
     ):
         return True
-    if re.search(r"\b(?:delete|drop|destroy)\b.+\b(?:table|collection)\b", lower):
+    if re.search(r"\b(?:delete|drop|destroy|truncate)\b.+\b(?:tables?|collections?)\b", lower):
         return True
-    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
+    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connectors?\b", lower):
         return True
     # Create-schedule only — do not refuse show/run/open schedule <name>.
     if re.search(
@@ -3572,6 +3577,71 @@ def _extract_route_endpoints(text: str) -> tuple[str, str, str]:
     return src, _capture_connector_name(dst), mode
 
 
+# How an operator names a table out loud: "the orders table", "orders". The
+# introspection patterns read the identifier itself, so without allowing the
+# article and the trailing noun the match landed on the word "the" — "show me
+# the schema of the orders table" parsed no table at all and fell through to a
+# documentation answer about schema *policy*.
+_TABLE_REF = r"(?:the\s+|a\s+|this\s+)?([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection))?"
+
+# The word before "rows" is usually the table — but not when it describes the
+# state of the rows. "Replay the quarantined rows on my last job" was planned as
+# a sample of a table named ``quarantined`` on a connector named "my last job",
+# and answered with a refusal to guess which database that was, stacked on top
+# of the real answer. These are the product's own words for a row's state, so
+# the list is bounded by the domain rather than by English.
+_ROW_STATE_WORDS = frozenset(
+    """
+    quarantined rejected refused failed failing bad invalid
+    written read skipped dropped duplicate duplicated missing
+    unaccounted rolled_back replayed changed new stale affected
+    """.split()
+)
+
+_NOT_A_TABLE_NAME = frozenset(
+    {"data", "rows", "me", "some", "the", "my", "all"}
+) | _ROW_STATE_WORDS
+
+
+# A row preview always puts the quantity between the verb and the table:
+# "show me 3 rows from orders", "preview the first 5 rows of orders", "sample
+# some rows from orders". The sample planner grew one literal alternative per
+# phrasing it had seen, so any unlisted combination read the count as the table
+# name and the remainder of the sentence as the connector — "show me 3 rows
+# from orders on Audit SQLite" sampled a table called ``3``. One pattern with
+# an optional count covers the whole family, and the count becomes the limit.
+_SAMPLE_ROWS_RE = re.compile(
+    r"\b(?:show|give\s+me|get|fetch|pull|sample|preview|peek\s+at|display|read)\s+"
+    r"(?:me\s+)?(?:the\s+)?"
+    r"(?:(?:first|top|last)\s+)?"
+    r"(?:(?P<count>\d{1,4})\s+|some\s+|a\s+few\s+)?"
+    r"(?:rows?|records?|documents?|data)\s+(?:of|from|in)\s+"
+    r"(?P<table>[a-zA-Z0-9_.-]+)"
+    r"(?:\s+(?:table|collection))?"
+    r"(?:\s+(?:on|in|from|using)\s+(?P<connector>.+))?$",
+    re.IGNORECASE,
+)
+
+
+def _asks_whether_any_exist(lower: str, *objects: str) -> bool:
+    """"Do I have any contracts", "are there any pipelines" — an inventory ask.
+
+    Every listing pattern keyed on an imperative verb (list / show) or on a
+    possessive, so the most natural way to ask whether something exists at all
+    reached no tool and got the generic capability list back instead.
+    """
+    nouns = "|".join(objects)
+    return bool(
+        re.search(
+            rf"\b(?:do|did|have)\s+(?:i|we)\s+(?:have\s+|got\s+|set\s+up\s+)?"
+            rf"(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\b(?:are|is)\s+there\s+(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\bhave\s+(?:i|we)\s+got\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b",
+            lower,
+        )
+    )
+
+
 def _asks_for_schema(lower: str) -> bool:
     """True when the operator actually asked to see a schema, not just a transfer."""
     return bool(
@@ -3937,7 +4007,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")):
+    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")) or _asks_whether_any_exist(lower, "schedules?", "pipelines?"):
         planned.append(("list_schedules", {"limit": 20}))
         planned = [
             (n, a) for n, a in planned
@@ -4131,8 +4201,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
             lower,
         )
-        and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower)
-    ):
+        or _asks_whether_any_exist(lower, "contracts?")
+    ) and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -4171,6 +4241,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and any(w in lower for w in ("list", "show", "recent", "my"))
             and "dataset" not in lower
         )
+        or _asks_whether_any_exist(lower, "jobs?", "transfers?")
     ):
         planned.append(("list_jobs", {"limit": 10}))
         planned = [
@@ -4432,34 +4503,34 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Skip when we already scheduled schema-policy inspection.
     _policy_planned = any(n == "inspect_schema_policy" for n, _ in planned)
     schema_of = None if _policy_planned else re.search(
-        r"(?:schema|columns|structure)\s+(?:of|for|on)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:schema|columns|structure)\s+(?:of|for|on)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     )
     columns_on = None if _policy_planned else re.search(
-        r"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"break\s+down\s+the\s+columns?\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"break\s+down\s+the\s+columns?\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
         # "what columns does orders have on sales"
-        r"(?:what\s+)?columns\s+does\s+([a-zA-Z0-9_.-]+)\s+have"
+        rf"(?:what\s+)?columns\s+does\s+{_TABLE_REF}\s+have"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+([a-zA-Z0-9_.-]+)"
+        rf"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
     describe_table = None if _policy_planned else re.search(
-        r"describe\s+(?:table\s+)?([a-zA-Z0-9_.-]+)"
+        rf"describe\s+(?:table\s+)?{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
@@ -4487,6 +4558,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         # Reject inventory / policy nouns mistaken as table names
         if table.lower() not in {
             "drift", "change", "policy", "tables", "collections", "list", "schema", "schemas",
+            "table", "collection",
         }:
             connector_name = ""
             if m.lastindex and m.lastindex >= 2 and m.group(2):
@@ -4627,7 +4699,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Sample / analyze live table data
     # Prefer "show the data from <table>" before the generic "show …" pattern —
     # otherwise "show the data from countries" captures table=`data`.
-    sample_m = re.search(
+    rows_m = _SAMPLE_ROWS_RE.search(lower)
+    sample_m = rows_m or re.search(
         r"(?:show|give\s+me|get|fetch|pull)\s+(?:me\s+)?(?:the\s+)?(?:data|rows|records)\s+"
         r"(?:from|in|on)\s+([a-zA-Z0-9_.-]+)"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
@@ -4682,18 +4755,27 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and not any(w in lower for w in (" to ", " into ", "->"))
             and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
         ):
-            table = (sample_m.group(1) or "").strip()
-            cname = ""
-            if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
-                cname = _capture_connector_name(sample_m.group(2))
+            row_limit = 0
+            if rows_m:
+                table = (rows_m.group("table") or "").strip()
+                cname = _capture_connector_name(rows_m.group("connector") or "")
+                row_limit = int(rows_m.group("count") or 0)
+            else:
+                table = (sample_m.group(1) or "").strip()
+                cname = ""
+                if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
+                    cname = _capture_connector_name(sample_m.group(2))
             # "get tables from X" is inventory, not a table named "tables".
             if table.lower() in {"tables", "collections", "objects", "schemas", "databases"}:
                 if cname and "list_connector_objects" not in [p[0] for p in planned]:
                     planned.append(("list_connector_objects", {"connector_name": cname}))
-            elif table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
+            elif table and table not in _NOT_A_TABLE_NAME:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
+                # "show me 3 rows" asked for three, not the default page.
+                if row_limit:
+                    args["limit"] = max(1, min(row_limit, 500))
                 planned.append(("sample_connector_object", args))
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
