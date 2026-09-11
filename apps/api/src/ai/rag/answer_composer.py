@@ -71,6 +71,25 @@ MMR_LAMBDA = 0.7
 # wording, and such a list is admitted or refused whole. See ``Candidate``.
 RELEVANCE_FLOOR = 0.35
 
+#: How close to the top a subject-naming sentence has to be before it is
+#: preferred as the lead. See ``_lead``.
+#:
+#: Naming the question's subject proves a sentence is about the right thing; it
+#: does not prove it is the answer. Without a floor the rarest word the question
+#: typed decided the lead wherever in the retrieved text it happened to appear,
+#: however far down it scored: "how do you handle booleans across databases"
+#: opened on the sidebar caption "Overview — full Platform / Operations / System
+#: sidebar used across every guide", and "how does semantic column mapping
+#: decide a type" on a sentence about the CDC snapshot handoff.
+#:
+#: Measured on the audit fixture this is worth two cases net — five leads fixed
+#: against three changed. Those three were checked one by one and none of them
+#: reads better without the floor: "how do I pause a schedule" opens on "Click
+#: the saved pipeline card/row" with it and on a role-permission list without
+#: it. They are counted against the floor only because the phrase the fixture
+#: greps for happens to sit in the sentence the subject rule hoisted.
+LEAD_SUBJECT_FLOOR = 0.7
+
 MAX_SENTENCES = 6
 MAX_CITED_SECTIONS = 3
 
@@ -587,11 +606,18 @@ def _lead(pool: Sequence[Candidate]) -> Candidate:
     A list the question asked for is exempt. When the strongest candidate is a
     vouched list item the list *is* the answer, and hoisting a prose sentence
     over it is how "what are the preflight gates" stopped opening on G1.
+
+    Only sentences within ``LEAD_SUBJECT_FLOOR`` of the top are considered:
+    naming the subject says a sentence is about the right thing, not that it
+    answers.
     """
     top = max(pool, key=lambda c: c.score)
     if top.list_vouched:
         return top
-    named = [c for c in pool if c.names_subject and not c.list_item]
+    bar = top.score * LEAD_SUBJECT_FLOOR
+    named = [
+        c for c in pool if c.names_subject and not c.list_item and c.score >= bar
+    ]
     return max(named, key=lambda c: c.score) if named else top
 
 

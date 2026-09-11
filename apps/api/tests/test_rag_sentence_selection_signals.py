@@ -13,6 +13,7 @@ Each contract here names the answer the pilot gave before the signal existed.
 from __future__ import annotations
 
 from src.ai.rag.answer_composer import (
+    LEAD_SUBJECT_FLOOR,
     PHRASE_CREDIT,
     RELEVANCE_FLOOR,
     Candidate,
@@ -453,6 +454,43 @@ def test_a_list_the_question_asked_for_still_leads() -> None:
         ),
     ]
     assert _opening("what are the preflight gates", sections).startswith("G1 Source readable")
+
+
+def test_a_subject_naming_sentence_far_below_the_top_does_not_lead() -> None:
+    """Naming the subject says a sentence is on topic, not that it answers.
+
+    Without a floor the rarest word decided the lead wherever it appeared, so
+    "how do you handle booleans across databases" opened on a sidebar caption
+    and "how does semantic column mapping decide a type" on a sentence about the
+    CDC snapshot handoff. Both scored a fraction of the sentence that answered.
+    """
+    text = (
+        "What each sync mode does\n"
+        "Deleted rows are removed at the destination in this mode, so a mode "
+        "that deletes rows leaves the destination holding exactly the rows the "
+        "source holds, and rows deleted at the source are deleted here too.\n"
+        "The sidebar groups every guide under Platform, Operations and System, "
+        "and the mirror page sits beside the schedule page, the team page, the "
+        "audit page and the settings page in the second of those three groups "
+        "rather than in the first or the last one, which is worth knowing "
+        "before you go looking for it in the navigation.\n"
+    )
+    opening = _opening(
+        "what does mirror mode do to deleted rows",
+        [(*_MODE_SECTION, text)],
+        idf=_idf({"mirror": 4.2, "mode": 1.0, "rows": 0.9, "delet": 2.0}),
+    )
+    assert opening.startswith("Deleted rows are removed at the destination")
+
+
+def test_the_floor_is_a_share_of_the_top_score_not_an_absolute() -> None:
+    """Scores are unnormalized sums, so only a ratio is comparable across questions.
+
+    A one-word question and a nine-word one produce scores an order of magnitude
+    apart; any absolute bar would be permissive for one and prohibitive for the
+    other.
+    """
+    assert 0.0 < LEAD_SUBJECT_FLOOR < 1.0
 
 
 def test_the_rarest_word_the_question_typed_is_its_subject() -> None:
