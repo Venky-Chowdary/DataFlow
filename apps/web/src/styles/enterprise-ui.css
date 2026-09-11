@@ -13810,3 +13810,31 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-job-row-bar > i {
   background: var(--df-brand);
 }
+
+/* Validate leftover navy on vd titles. Do not flatten ok/block count tones. */
+.df2-app .df2-vd-remediation-log strong,
+.df2-app .df2-vd-count strong,
+.df2-app .df2-vd-rules-head strong,
+.df2-app .df2-vd-rule-label,
+.df2-app .df2-vd-blockers li strong,
+.df2-app .df2-vd-assist-summary,
+.df2-app .df2-vd-coerce-head strong,
+.df2-app .df2-vd-coerce-col strong,
+.df2-app .df2-vd-explain-issues strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-vd-remediation-log li,
+.df2-app .df2-vd-explain-issues p {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-count.ok,
+.df2-app .df2-vd-count.ok strong {
+  color: var(--df-success);
+}
+
+.df2-app .df2-vd-count.block,
+.df2-app .df2-vd-count.block strong {
+  color: var(--df-danger);
+}

@@ -1401,4 +1401,39 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-job-row-status\.is-pending \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-job-row-bar > i \{[\s\S]{0,40}--df-brand/);
   });
+
+  it("Validate leftover navy vd titles follow tokens", () => {
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-remediation-log strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-remediation-log strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-remediation-log li \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-remediation-log li \{[\s\S]{0,160}color: #334155/);
+    assert.match(studio, /\.df2-vd-count strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-count strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-count\.ok strong \{[\s\S]{0,40}--df-success/);
+    assert.match(studio, /\.df2-vd-count\.block strong \{[\s\S]{0,40}--df-danger/);
+    assert.match(studio, /\.df2-vd-rules-head strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-rules-head strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-rule-label \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-rule-label \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-blockers li strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-assist-summary \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-coerce-head strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-coerce-col strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-explain-issues strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-explain-issues p \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-explain-issues p \{[\s\S]{0,80}color: #334155/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-remediation-log strong,/);
+    assert.match(ui, /\.df2-app \.df2-vd-rule-label,/);
+    assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-vd-count\.ok strong \{[\s\S]{0,40}--df-success/);
+    assert.match(ui, /\.df2-app \.df2-vd-count\.block strong \{[\s\S]{0,40}--df-danger/);
+  });
 });
