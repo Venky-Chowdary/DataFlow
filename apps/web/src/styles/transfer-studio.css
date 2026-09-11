@@ -3646,7 +3646,7 @@ th.df2-type-string .df2-type-badge {
   border: 0;
   border-radius: 7px;
   background: transparent;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
@@ -3654,7 +3654,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-object-combobox-option:hover,
 .df2-object-combobox-option.is-active {
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
 }
 
 .df2-object-combobox-option-name {
@@ -4648,7 +4648,7 @@ th.df2-type-string .df2-type-badge {
   outline: 0;
   background: transparent;
   font-size: 12.5px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-dest-engine-search input::placeholder {
@@ -4720,7 +4720,7 @@ th.df2-type-string .df2-type-badge {
   border-radius: 8px;
   background: var(--df-surface);
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-dest-type-chip span,
@@ -4913,7 +4913,7 @@ th.df2-type-string .df2-type-badge {
 .df2-preflight-progress .df2-mapping-progress-meta span {
   flex: 1 1 0;
   min-width: 0;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
   text-align: left;
   white-space: normal;
@@ -6488,7 +6488,7 @@ th.df2-type-string .df2-type-badge {
   justify-content: center;
   font-size: 12px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 .df2-theater-v3-ring.is-failed .fill { stroke: #dc2626; }
 .df2-theater-v3-ring.is-done .fill { stroke: #16a34a; }
