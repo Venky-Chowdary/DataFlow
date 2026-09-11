@@ -3991,7 +3991,7 @@ th.df2-type-string .df2-type-badge {
   margin: 0;
   font-size: 17px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-result-subtitle {

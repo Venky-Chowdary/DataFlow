@@ -1335,4 +1335,42 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-theater-v3-phase\.active \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-theater-cdc-chip,/);
   });
+
+  it("Result leftover navy, paper, and mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-result-title \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-result-title \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(studio, /\.df2-result-title \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-title \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-result-metric strong \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-result-metric strong \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(ui, /\.df2-result-meta-chip strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-result-meta-chip strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-result-proof-dl dd \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-result-proof-dl dd \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-quarantine-inspect-body \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-inspect-body \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(ui, /\.df2-quarantine-next \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-next \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(ui, /\.df2-quarantine-next-copy strong \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-next-copy strong \{[\s\S]{0,160}color: #334155/);
+    assert.match(ui, /\.df2-result-more > summary \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-result-more > summary \{[\s\S]{0,160}color: #334155/);
+    assert.match(ui, /\.df2-result-more\[open\] > summary \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-result-more\[open\] > summary \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(ui, /\.df2-quarantine-apply-suggested \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-apply-suggested \{[\s\S]{0,160}color: #475569/);
+    assert.match(ui, /\.df2-quarantine-apply-suggested code \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-apply-suggested code \{[\s\S]{0,80}background: #ecfdf5/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-result-title,/);
+    assert.match(ui, /\.df2-app \.df2-result-metric strong,/);
+    assert.match(ui, /\.df2-app \.df2-quarantine-next,/);
+    assert.match(ui, /\.df2-app \.df2-quarantine-apply-suggested code \{[\s\S]{0,80}--df-brand-muted/);
+  });
 });
