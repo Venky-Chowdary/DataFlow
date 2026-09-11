@@ -823,7 +823,7 @@
 
 .df2-job-row:hover {
   border-color: var(--df-brand);
-  background: var(--df-brand-muted);
+  background: var(--df-list-row-hover);
 }
 
 .df2-job-row.is-active,
@@ -13782,7 +13782,7 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 /* Job-row leftover mint / paper on hover, status chips, and bar. */
 .df2-app .df2-job-row:hover:not(.is-active) {
-  background: var(--df-brand-muted);
+  background: var(--df-list-row-hover);
   border-color: var(--df-brand);
 }
 

@@ -1378,7 +1378,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     const ui = sheet("enterprise-ui.css");
     const premium = sheet("premium-theme.css");
 
-    assert.match(ui, /\.df2-job-row:hover \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-job-row:hover \{[\s\S]{0,80}--df-list-row-hover/);
     assert.doesNotMatch(ui, /\.df2-job-row:hover \{[\s\S]{0,80}background: #f0fdfa/);
     assert.match(ui, /\.df2-job-row\.is-active,\n\.df2-job-row\.is-active:hover \{[\s\S]{0,80}--df-brand-soft/);
     assert.doesNotMatch(ui, /\.df2-job-row\.is-active,\n\.df2-job-row\.is-active:hover \{[\s\S]{0,80}background: #ccfbf1/);
@@ -1397,7 +1397,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
 
     assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
 
-    assert.match(ui, /\.df2-app \.df2-job-row:hover:not\(\.is-active\) \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-job-row:hover:not\(\.is-active\) \{[\s\S]{0,80}--df-list-row-hover/);
     assert.match(ui, /\.df2-app \.df2-job-row-status\.is-pending \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-job-row-bar > i \{[\s\S]{0,40}--df-brand/);
   });
