@@ -1079,4 +1079,48 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(polish, /\.df2-settings-nav button\.active \{[\s\S]{0,120}--df-brand-muted/);
     assert.doesNotMatch(polish, /\.df2-settings-nav button\.active \{[\s\S]{0,120}#f0fdfa !important/);
   });
+
+  it("MCP titles, Query leftover mint chips, and Validate launch follow tokens", () => {
+    const mcp = sheet("mcp-enterprise.css");
+    const query = sheet("query-playground.css");
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(mcp, /\.df2-mcp-hero-copy h2 \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-hero-copy h2 \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(mcp, /\.df2-mcp-hero-status strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-hero-status strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(mcp, /\.df2-mcp-logs-table th,[\s\S]{0,160}--df-border/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-logs-table th,[\s\S]{0,160}#f1f5f9/);
+    assert.match(mcp, /\.df2-mcp-log-status--ok \{[\s\S]{0,80}--df-success/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-log-status--ok \{[\s\S]{0,80}#047857/);
+    assert.match(mcp, /\.df2-mcp-log-status--err \{[\s\S]{0,80}--df-danger/);
+    assert.match(mcp, /\.df2-mcp-tile code \{[\s\S]{0,160}--df-brand-strong/);
+    assert.doesNotMatch(mcp, /\.df2-mcp-tile code \{[\s\S]{0,160}color: #0f766e/);
+    assert.match(mcp, /\.df2-mcp-panel-head h2 \{[\s\S]{0,120}--df-text-primary/);
+
+    assert.match(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}--df-success/);
+    assert.doesNotMatch(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}#047857/);
+    assert.doesNotMatch(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}#a7f3d0/);
+    assert.match(ui, /\.df2-mcp-status-pill\.is-offline \{[\s\S]{0,120}--df-warning/);
+
+    assert.match(query, /\.df2-query-editor-dialect-pill \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(query, /\.df2-query-editor-dialect-pill \{[\s\S]{0,200}#f0fdfa/);
+    assert.match(query, /\.df2-qw-th-type\[data-tone="text"\] \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(query, /\.df2-qw-th-type\[data-tone="text"\] \{[\s\S]{0,80}#f0fdfa/);
+
+    assert.match(studio, /\.df2-validate-launch \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-validate-launch \{[\s\S]{0,160}#f0fdfa !important/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-mcp-hero-copy h2,/);
+    assert.match(ui, /\.df2-app \.df2-query-editor-dialect-pill,/);
+    assert.match(ui, /\.df2-app \.df2-mcp-tile code \{[\s\S]{0,80}--df-brand-strong/);
+    assert.match(ui, /\.df2-app \.df2-validate-launch \{[\s\S]{0,120}--df-brand-muted/);
+    assert.match(ui, /\.df2-filter-bar \{[\s\S]{0,360}--df-seg-track/);
+    assert.doesNotMatch(ui, /\.df2-filter-bar \{[\s\S]{0,360}background: #f1f5f9/);
+    assert.match(ui, /\.df2-app \.df2-filter-bar \{[\s\S]{0,80}--df-seg-track/);
+  });
 });

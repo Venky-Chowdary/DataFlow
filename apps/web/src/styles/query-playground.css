@@ -543,9 +543,9 @@
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  background: #f0fdfa;
-  color: #0f766e;
-  border: 1px solid rgba(15, 118, 110, 0.25);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+  border: 1px solid var(--df-border-brand);
 }
 
 .qe-tok--keyword { color: #5eead4; font-weight: 600; }
@@ -970,7 +970,10 @@
 .df2-qw-col-type[data-tone="binary"],
 .df2-qw-th-type[data-tone="binary"] { background: var(--df-surface-muted); color: var(--df-text-secondary); }
 .df2-qw-col-type[data-tone="text"],
-.df2-qw-th-type[data-tone="text"] { background: #f0fdfa; color: #0f766e; }
+.df2-qw-th-type[data-tone="text"] {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
 .df2-qw-col-type[data-tone="unknown"],
 .df2-qw-th-type[data-tone="unknown"] {
   background: var(--df-surface-muted, #f8fafc);
