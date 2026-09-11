@@ -129,6 +129,13 @@ def resolve_platform_coreference(
     text = _clean(message)
     if not text or not _COREFERENCE_RE.search(text):
         return None
+    # "how do I get the list of rows that failed" contains ``that`` as a
+    # relative pronoun, not as a pointer at a previous turn, and ``failed`` as
+    # part of its own subject. Read as a coreference it became "list the failed
+    # jobs", which on an empty workspace answered a documented question with
+    # "No transfer jobs yet".
+    if has_own_question_frame(text):
+        return None
     prior = last_assistant_content(history).lower()
     low = text.lower()
     jobs_cue = bool(re.search(r"\b(?:jobs?|transfers?|failed|failures|runs?)\b", low)) or (
@@ -250,25 +257,30 @@ _QUESTION_FRAME = re.compile(
 _EXISTENTIAL_THERE = re.compile(r"\b(?:are|is|was|were)\s+there\b", re.I)
 
 
-def asks_its_own_question(message: str) -> bool:
-    """Whether the turn is a self-contained question about a documented subject.
+def has_own_question_frame(text: str) -> bool:
+    """Whether the text is an interrogative about a subject the product documents.
 
     Both halves are required. The frame alone would swallow data questions that
     legitimately inherit the remembered table; the subject alone would swallow
     "by region", which names a corpus heading word and is still elliptical.
     """
-    text = _clean(message)
-    if not text:
-        return False
-    if _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text)):
-        return False
-    if not _QUESTION_FRAME.search(text):
+    if not text or not _QUESTION_FRAME.search(text):
         return False
     try:
         from ..rag.product_docs import names_product_subject
     except Exception:
         return False
     return names_product_subject(text)
+
+
+def asks_its_own_question(message: str) -> bool:
+    """``has_own_question_frame``, unless the turn points at a remembered subject."""
+    text = _clean(message)
+    if not text:
+        return False
+    if _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text)):
+        return False
+    return has_own_question_frame(text)
 
 
 def looks_like_fresh_intent(message: str) -> bool:

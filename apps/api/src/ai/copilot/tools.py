@@ -2574,6 +2574,17 @@ def _is_meta_pilot_question(lower: str) -> bool:
 # forms of both.
 _KNOWLEDGE_ASKS = frozenset({"enumeration", "comparison"})
 
+# A question, as opposed to a command. Either it opens with an interrogative or
+# it ends in one — "my connector test passed but the transfer failed, why".
+_INTERROGATIVE = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|how|when|where|which|who|whose|can|could|do|does|did|is|are|"
+    r"was|were|will|would|should|am|any|explain|tell\s+me|remind)\b"
+    r"|\bwhy\s*\?*\s*$"
+    r"|\?\s*$",
+    re.I,
+)
+
 
 def _looks_like_product_howto(lower: str) -> bool:
     """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
@@ -2690,6 +2701,33 @@ def _asks_about_the_product(message: str) -> bool:
     if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
         return False
     if _looks_like_live_data_fetch(lower) or _has_explicit_workspace_subject(lower):
+        return False
+    return names_product_subject(message)
+
+
+def _wants_documentation_companion(message: str) -> bool:
+    """Whether a documented explanation belongs *beside* whatever live tool ran.
+
+    An operator asking why something happened, or how to do something, wants
+    both halves: what their workspace says now, and what the product documents.
+    Returning only the live half meant an empty workspace answered "No transfer
+    jobs yet" to a question about where quarantined rows go, and "Name two saved
+    connectors" to a question about losing decimal precision — in both cases the
+    documentation answered outright and was dropped.
+
+    Strict on the *kind* of message: a live-state read, a command, a meta
+    question and an unsupported mutation each already have the right owner.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower):
+        return False
+    if not _INTERROGATIVE.search(lower):
+        return False
+    if classify_ask(message) == "other" and not _looks_like_product_howto(lower):
         return False
     return names_product_subject(message)
 
@@ -2970,10 +3008,16 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
     # "how many connectors do I have" is a read of the operator's own workspace,
     # not a question about what a connector is. Without this it collected a
     # documentation essay in front of the inventory it asked for.
+    #
+    # Kept to questions about *state*. A bare possessive is not enough: "can I
+    # keep my pipelines in git" says "my pipelines" and is asking about the
+    # GitOps export, not for a list of them.
     if re.search(
         r"\b(?:do|did|does)\s+(?:i|we)\s+(?:have|own|already\s+have)\b"
-        r"|\bmy\s+(?:connectors?|jobs?|pipelines?|schedules?|contracts?|transfers?|runs?)\b"
-        r"|\bhow\s+many\s+(?:\w+\s+){0,2}(?:do|did)\s+(?:i|we)\b",
+        r"|\bhow\s+many\s+(?:\w+\s+){0,2}(?:do|did)\s+(?:i|we)\b"
+        r"|\b(?:status|state|result|outcome)\s+of\s+(?:my|our|the)\b"
+        r"|\b(?:my|our)\s+(?:last|latest|most\s+recent|current)\s+"
+        r"(?:job|run|transfer|pipeline|schedule|sync)\b",
         lower,
     ):
         return True
@@ -5102,6 +5146,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         # knowledge tool is always better than an empty plan — the tool refuses
         # on its own evidence if the retrieval turns out not to cover it.
         planned.append(("explain_product", {"query": message[:240]}))
+
+    # A live tool answering alone is only half the answer to a question. This
+    # adds the documentation beside it rather than instead of it, so an empty
+    # workspace cannot turn a documented question into "nothing here yet".
+    if (
+        planned
+        and not ({n for n, _ in planned} & _KNOWLEDGE_TOOLS)
+        and _wants_documentation_companion(message)
+    ):
+        planned.insert(0, ("explain_product", {"query": message[:240]}))
 
     # "How do I pause a schedule" is a question about the procedure, not a
     # request to pause a particular schedule. Object-lookup tools ran anyway,

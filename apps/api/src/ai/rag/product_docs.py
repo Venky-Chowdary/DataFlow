@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -85,6 +85,15 @@ FUSED_RANK_SCALE = 10.0
 # repeating a term. Half of each: the rank list decides the shortlist, the score
 # decides the order within it.
 RRF_WEIGHT = 0.45
+
+# How the evidence window trades relevance for coverage of the question. Both
+# are expressed against the normalized rank score, so 1.0 would let a passage
+# that covers the whole question outrank the best-ranked one outright. The
+# novelty bonus is shared across the question's terms; the redundancy penalty
+# is the share of a passage's matches that the window already has, so a passage
+# that only restates what is already there is close to worthless.
+COVERAGE_NOVELTY = 1.0
+COVERAGE_REDUNDANCY = 0.6
 
 # Definitional asks ("what is quarantine") must not lose to a long Procedure
 # section just because the procedure also says the word. FAQ / core-gate
@@ -192,6 +201,82 @@ def load_help_corpus_chunks() -> tuple[ProductDocChunk, ...]:
     return tuple(chunks)
 
 
+# A section longer than this is retrieved as its steps rather than whole. The
+# median help section is ~370 characters; the procedures run to 4,500. BM25
+# divides a document's term weight by its length, so the longest and most
+# instructive passages in the corpus were systematically the hardest to reach:
+# "what is the difference between jobs and pipelines" is answered verbatim by
+# one line of "Procedure: create a pipeline", and that section did not make the
+# top five for a question naming both of its subjects.
+MAX_SECTION_CHARS = 1200
+
+# Every procedure in the corpus closes each step with a ``Where:`` breadcrumb,
+# which is what makes the step boundaries real structure rather than a guess.
+# Two steps is the minimum that makes splitting meaningful.
+MIN_STEPS_TO_SPLIT = 2
+
+_STEP_TRAILER = ("Where:", "Tip:", "Note:")
+
+
+def _split_procedure(text: str) -> list[tuple[str, str]]:
+    """One long procedure as ``(step_title, step_text)``, or ``[]`` if not one.
+
+    A step runs from its title line to its ``Where:`` breadcrumb, taking any
+    ``Tip:`` that trails the breadcrumb with it. Everything before the first
+    step is the section's own preamble and is returned with an empty title.
+    """
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    if sum(1 for line in lines if line.strip().startswith("Where:")) < MIN_STEPS_TO_SPLIT:
+        return []
+
+    steps: list[list[str]] = [[]]
+    closed = False
+    for line in lines:
+        stripped = line.strip()
+        trailer = stripped.startswith(_STEP_TRAILER)
+        if closed and stripped and not trailer:
+            steps.append([])
+            closed = False
+        steps[-1].append(line)
+        if stripped.startswith("Where:"):
+            closed = True
+
+    out: list[tuple[str, str]] = []
+    for index, block in enumerate(steps):
+        body = "\n".join(block).strip()
+        if not body:
+            continue
+        # The preamble keeps the section's own title; a step is named by its
+        # first line, which is how the corpus writes step headings.
+        title = "" if index == 0 else body.splitlines()[0].strip()
+        out.append((title, body))
+    return out if len(out) > MIN_STEPS_TO_SPLIT else []
+
+
+def _as_step_chunks(chunk: ProductDocChunk) -> list[ProductDocChunk]:
+    """``chunk`` split into its steps when it is long enough to need it."""
+    if len(chunk.text) <= MAX_SECTION_CHARS:
+        return [chunk]
+    steps = _split_procedure(chunk.text)
+    if not steps:
+        return [chunk]
+    out: list[ProductDocChunk] = []
+    for index, (title, body) in enumerate(steps):
+        section_title = (
+            chunk.section_title if not title else f"{chunk.section_title} → {title}"
+        )
+        out.append(
+            replace(
+                chunk,
+                id=f"{chunk.id}#s{index}",
+                section_id=f"{chunk.section_id}-s{index}",
+                section_title=section_title,
+                text=body,
+            )
+        )
+    return out
+
+
 @lru_cache(maxsize=1)
 def load_generated_chunks() -> tuple[ProductDocChunk, ...]:
     """Passages generated from the product's own enforcing modules."""
@@ -217,13 +302,28 @@ def load_generated_chunks() -> tuple[ProductDocChunk, ...]:
 
 @lru_cache(maxsize=1)
 def load_product_doc_chunks() -> tuple[ProductDocChunk, ...]:
-    """Every retrievable passage: shipped help first, generated facts after."""
+    """Every documented section: shipped help first, generated facts after.
+
+    Sections as the documentation declares them. This is what the corpus is
+    *about* — ``evidence_policy`` reads its headings to decide which subjects
+    the product documents — so it stays one entry per authored section even
+    when retrieval indexes that section as several passages.
+    """
     return load_help_corpus_chunks() + load_generated_chunks()
 
 
 @lru_cache(maxsize=1)
+def retrieval_passages() -> tuple[ProductDocChunk, ...]:
+    """The same corpus at retrieval granularity, long procedures split by step."""
+    out: list[ProductDocChunk] = []
+    for chunk in load_product_doc_chunks():
+        out.extend(_as_step_chunks(chunk))
+    return tuple(out)
+
+
+@lru_cache(maxsize=1)
 def _index() -> tuple[Bm25Index, dict[str, ProductDocChunk]]:
-    chunks = load_product_doc_chunks()
+    chunks = retrieval_passages()
     by_id = {c.id: c for c in chunks}
     return Bm25Index([(c.id, f"{c.doc_title}\n{c.text}") for c in chunks]), by_id
 
@@ -238,7 +338,7 @@ def _ngram_index() -> CharNgramIndex:
     return CharNgramIndex(
         [
             (c.id, f"{c.doc_title} {c.section_title} {c.doc_title} {c.section_title}\n{c.text}")
-            for c in load_product_doc_chunks()
+            for c in retrieval_passages()
         ]
     )
 
@@ -438,6 +538,54 @@ class ProductAnswer:
         )
 
 
+def _select_covering(
+    ranked: Sequence[tuple[float, ProductDocHit]],
+    limit: int,
+    typed_terms: Sequence[str],
+) -> list[ProductDocHit]:
+    """Fill the evidence window to cover the question, not to repeat its best match.
+
+    Ranking scores each passage on its own, but answerability is judged on what
+    the window covers *jointly* — so taking the top ``limit`` by rank optimizes
+    a different objective than the one the evidence policy then measures.
+    "How do I move data from Postgres to Snowflake without losing decimal
+    precision" asks two things; every one of the five best-ranked passages
+    answered the route half, and the precision half never entered the window
+    even though the corpus states it.
+
+    Greedy selection with a novelty bonus and a redundancy penalty, the same
+    maximal-marginal-relevance shape the sentence composer uses, one level up.
+    """
+    if len(ranked) <= limit:
+        return [hit for _, hit in ranked]
+    wanted = set(typed_terms)
+    if not wanted:
+        return [hit for _, hit in ranked[:limit]]
+
+    top = max((score for score, _ in ranked), default=0.0) or 1.0
+    pool = list(ranked)
+    chosen: list[ProductDocHit] = []
+    covered: set[str] = set()
+    while pool and len(chosen) < limit:
+        def value(pair: tuple[float, ProductDocHit]) -> float:
+            score, hit = pair
+            matched = set(hit.matched_terms) & wanted
+            if not matched:
+                return score / top
+            fresh = matched - covered
+            return (
+                score / top
+                + COVERAGE_NOVELTY * len(fresh) / len(wanted)
+                - COVERAGE_REDUNDANCY * len(matched & covered) / len(matched)
+            )
+
+        pick = max(pool, key=value)
+        pool.remove(pick)
+        chosen.append(pick[1])
+        covered |= set(pick[1].matched_terms) & wanted
+    return chosen
+
+
 def _rank_hits(
     analysis: QueryAnalysis,
     limit: int,
@@ -532,7 +680,7 @@ def _rank_hits(
             )
         )
     ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return [hit for _, hit in ranked[:limit]]
+    return _select_covering(ranked, limit, typed_terms)
 
 
 def retrieve_product_answer(
@@ -681,7 +829,7 @@ def product_doc_documents() -> tuple[list[str], list[dict], list[str]]:
     texts: list[str] = []
     metas: list[dict] = []
     ids: list[str] = []
-    for chunk in load_product_doc_chunks():
+    for chunk in retrieval_passages():
         texts.append(f"{chunk.doc_title}. {chunk.text}")
         metas.append(
             {

@@ -66,6 +66,7 @@ GENERIC_QUESTION_WORDS = frozenset(
     question questions asked frequently related optional checklist
     procedure step steps first second next last
     different same other another
+    difference differences between compare compares comparison versus
     """.split()
 )
 

@@ -59,6 +59,18 @@ LENGTH_PIVOT = 18
 # list sits under, scaled by how much of the question that heading carries.
 LIST_ITEM_CREDIT = 2.6
 
+# What a sentence is worth on its heading alone, when the heading restates the
+# whole question. Below the credit one typed word earns, so a sentence that
+# answers in the operator's own words always outranks one vouched for by the
+# title above it.
+HEADING_CREDIT = 0.9
+
+# The heading has to carry *every* anchor term of the question before it can
+# speak for a sentence that carries none. A partial overlap is how "which
+# engines can I connect to" reached "Procedure: connect Cursor" — one word of
+# two, and a section about MCP answered a question about database engines.
+HEADING_ANCHOR = 1.0
+
 # A list answers a question as a whole or not at all, so once one item is
 # selected its siblings come with it. Nine is the number of preflight gates —
 # the longest enumeration the shipped documentation contains.
@@ -222,16 +234,29 @@ def build_candidates(
             listed_credit = (
                 LIST_ITEM_CREDIT * heading_match if is_list_item else 0.0
             )
-            if not typed_hits and not expanded_hits and not listed_credit:
-                continue
             match = typed_hits + EXPANSION_WEIGHT * expanded_hits
-            score = (
-                match * _length_norm(len(terms))
-                + listed_credit
-                + _section_bonus(analysis.ask, section_title)
-                + _shape_bonus(analysis.ask, sentence)
-                + 0.8 * rank_prior
-            )
+            if match or listed_credit:
+                score = (
+                    match * _length_norm(len(terms))
+                    + listed_credit
+                    + _section_bonus(analysis.ask, section_title)
+                    + _shape_bonus(analysis.ask, sentence)
+                    + 0.8 * rank_prior
+                )
+            elif heading_match >= HEADING_ANCHOR:
+                # The same argument as for list items, one level weaker. "Do
+                # you have webhooks" is answered by "Subscribe to job.completed,
+                # job.failed and pipeline.quarantine_threshold events", which
+                # names the events instead of the feature — ``webhook`` appears
+                # only in the heading above it. Scored on its own words that
+                # sentence is worth nothing, so the answer came from an
+                # unrelated section. The ask-shape and section priors are left
+                # out on purpose: they describe how well a sentence fits the
+                # question's shape, and there is no fit to grade when the
+                # sentence matched none of it.
+                score = HEADING_CREDIT + 0.8 * rank_prior
+            else:
+                continue
             candidates.append(
                 Candidate(
                     text=sentence,
