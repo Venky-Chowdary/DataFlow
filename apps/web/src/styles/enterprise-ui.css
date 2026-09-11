@@ -14384,6 +14384,26 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   background: var(--df-brand-muted);
 }
 
+.df2-app .df2-type-int .df2-type-badge,
+.df2-app th.df2-type-int .df2-type-badge {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
+
+.df2-app .df2-type-decimal .df2-type-badge,
+.df2-app th.df2-type-decimal .df2-type-badge,
+.df2-app .df2-type-binary .df2-type-badge,
+.df2-app th.df2-type-binary .df2-type-badge {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-type-string .df2-type-badge,
+.df2-app th.df2-type-string .df2-type-badge {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
