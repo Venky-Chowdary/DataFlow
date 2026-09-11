@@ -172,6 +172,52 @@ def _asks_for_a_definition(text: str) -> bool:
     return bool(_DEFINITIONAL_RE.search(text)) and not _STATISTICAL_MEAN_RE.search(text)
 
 
+# The operation named rather than commanded. A determiner in front of the
+# measure makes it the noun the question is *about* — "does **a breakdown**
+# include null values", "is **the count** exact or a sample" — where a request
+# uses it as a verb ("break down orders by region") or applies it to data ("the
+# count of orders by status").
+#
+# Measured over HTTP: both of those routed to the aggregator, which had nothing
+# to aggregate and answered "Connector not found" over the top of the
+# documentation that states the rule they asked about. Worse than a bare miss,
+# because the measure tail is read as a column name and the rest of the English
+# became one: "does a breakdown include null values" planned a count over a
+# table called `include null values`.
+#
+# Decided before any slot filling, for that reason — once the tail has been
+# mined for a column there is an invented subject to mistake for a real one.
+# Paired with the question naming no data at all, so "does the count include
+# nulls on Demo Orders" and "is the total revenue in orders" still reach the
+# aggregator, and "show me the count", which reads the same way and is a real
+# request, is untouched.
+_ABOUT_THE_OPERATION_RE = re.compile(
+    r"\b(?:is|are|does|do|can|could|will|would|should)\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|mean|min|minimum|max|maximum|"
+    r"breakdown|break\s*down|aggregate|aggregation|group(?:ing)?)\b"
+    r"|\bwhat\s+does\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|breakdown|break\s*down|aggregate|"
+    r"aggregation|group(?:ing)?)\b",
+    re.I,
+)
+
+
+#: A scope clause is the operator pointing at data — "in orders", "on Demo
+#: Orders". Its absence is what makes a measure word a topic rather than a
+#: request.
+_NAMES_A_SCOPE_RE = re.compile(
+    r"\b(?:on|from|in|inside|within)\s+(?:the\s+)?[A-Za-z_]",
+    re.I,
+)
+
+
+def _asks_about_the_operation(text: str) -> bool:
+    """True when the measure is the subject of the question, not the work to do."""
+    return bool(_ABOUT_THE_OPERATION_RE.search(text)) and not _NAMES_A_SCOPE_RE.search(
+        text
+    )
+
+
 # "top 5 customers by revenue" carries no metric word but is a ranking request:
 # group by the dimension, rank by the measure.
 _RANKING_RE = re.compile(
@@ -300,7 +346,7 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
         return None
 
-    if _asks_for_a_definition(text):
+    if _asks_for_a_definition(text) or _asks_about_the_operation(text):
         return None
 
     # "orders where amount > 10 on PilotSQLite" — table-first filtered count.

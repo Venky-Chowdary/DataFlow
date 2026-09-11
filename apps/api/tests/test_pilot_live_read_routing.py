@@ -181,6 +181,32 @@ CLAUSE_QUESTIONS = [
     "what does grouped by mean",
 ]
 
+# The operation named rather than commanded. Measured over HTTP: each of these
+# routed to the aggregator, which had nothing to aggregate and answered
+# "Connector not found" over the top of the documentation that states the rule
+# they asked about. "Does a breakdown include null values" was worse than a bare
+# miss — the measure tail is read as a column name, so it planned a count over
+# a table called ``include null values``.
+ABOUT_THE_OPERATION = [
+    "does a breakdown include null values",
+    "is the count exact or a sample",
+    "is the average exact",
+    "can the count be wrong",
+    "does the aggregate include nulls",
+    "what does an aggregate do",
+]
+
+# The same measure words with the operator pointing at data. A scope clause is
+# what separates a topic from a request, so these must still reach the tool.
+SCOPED_REQUESTS = [
+    "does the count include nulls on Demo Orders",
+    "count of orders by status",
+    "the count of orders by status on Demo Orders",
+    "average amount on Demo Orders",
+    "sum revenue by month on Demo Orders",
+    "count rows in orders",
+]
+
 GROUPING_VERBS = [
     ("break down orders by region on Demo Orders", "region"),
     ("breakdown of orders by status on Demo Orders", "status"),
@@ -238,3 +264,31 @@ def test_a_copula_between_the_object_and_its_scope_still_reads_the_table(questio
     assert "list_connector_objects" in _tools(question), (
         f"{question!r} planned {_tools(question)}"
     )
+
+
+@pytest.mark.parametrize("question", ABOUT_THE_OPERATION)
+def test_a_question_about_the_measure_is_not_a_request_for_it(question):
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    assert parse_aggregation_request(question) is None, question
+
+
+@pytest.mark.parametrize("question", SCOPED_REQUESTS)
+def test_a_measure_with_a_scope_still_reaches_the_aggregator(question):
+    """The guard is the absence of data to point at, not the measure word."""
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    assert parse_aggregation_request(question) is not None, question
+
+
+def test_the_guard_does_not_swallow_a_plain_request_that_reads_the_same_way():
+    """"Show me the count" has the same determiner and is a real request.
+
+    Its own slot is empty, which the parser has always answered with a
+    follow-up rather than a refusal, and that path must stay reachable.
+    """
+    from src.ai.copilot.aggregate_tools import _asks_about_the_operation
+
+    assert not _asks_about_the_operation("show me the count")
+    assert not _asks_about_the_operation("count of orders by status")
+    assert _asks_about_the_operation("is the count exact or a sample")
