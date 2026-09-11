@@ -10,7 +10,8 @@ This module turns one question into the three things the rest of the pipeline
 needs:
 
 ``ask``       what kind of answer is wanted (a definition, a procedure, a
-              diagnosis, a capability check, a comparison, an enumeration). The
+              diagnosis, a capability check, a comparison, an enumeration, a
+              count). The
               composer uses this to pick sentences an operator would actually
               read first — a definition for "what is", steps for "how do I".
 
@@ -86,6 +87,23 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"define|meaning\s+of|tell\s+me\s+about|explain(?:\s+what)?)\b"
             r"|\bwhat\s+(?:is|are)\s+(?:a|an|the)?\s*\w+\s*\??$"
             r"|\bmean(?:s|ing)?\s*\??$",
+            re.I,
+        ),
+    ),
+    (
+        # A cardinality question, which is not the enumeration it looks like.
+        # "How many connectors do you support" matched ``capability`` on "do you
+        # support" and was answered with "Open Platform → Connectors" followed
+        # by the transfer-readiness legend — navigation and four labels, and not
+        # one number, while the catalog passage two sections over states every
+        # count the product publishes. Listed first because the phrasings below
+        # also match ``capability``, ``procedure`` and ``enumeration``, and the
+        # shape they ask for is the narrowest of the four.
+        "count",
+        re.compile(
+            r"\bhow\s+(?:many|much)\b"
+            r"|\b(?:number|count|total)\s+of\b"
+            r"|\bhow\s+big\b",
             re.I,
         ),
     ),

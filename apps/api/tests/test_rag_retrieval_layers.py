@@ -85,6 +85,33 @@ def test_ask_type_is_read_from_the_question_not_guessed():
     assert classify_ask("do you support CDC") == "capability"
     assert classify_ask("which sync modes are there") == "enumeration"
     assert classify_ask("full overwrite vs mirror") == "comparison"
+    assert classify_ask("how many connectors do you support") == "count"
+
+
+def test_a_cardinality_question_is_not_the_enumeration_it_looks_like():
+    """A count wants a number; the list is a different answer to a different ask.
+
+    "How many connectors do you support" matched ``capability`` on "do you
+    support" and was answered with "Open Platform → Connectors" and the four
+    transfer-readiness labels — navigation and no number, while every count the
+    product publishes sat two sections over. It is listed before the other
+    patterns because these phrasings also match ``capability``, ``procedure``
+    and ``enumeration``, and the shape they ask for is the narrowest.
+    """
+    for question in (
+        "how many connectors do you support",
+        "how many preflight gates are there",
+        "how much data can it move",
+        "what is the number of sync modes",
+        "what is the total of quarantined rows",
+        "how big can a decimal be",
+    ):
+        assert classify_ask(question) == "count", question
+
+    # Asking to be shown the list is still an enumeration, and asking how to do
+    # something is still a procedure, however many things it involves.
+    assert classify_ask("which sync modes are there") == "enumeration"
+    assert classify_ask("how do I add a connector") == "procedure"
 
 
 def test_a_comparison_frame_carries_no_subject_signal():

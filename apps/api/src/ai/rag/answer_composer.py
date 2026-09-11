@@ -181,7 +181,21 @@ _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
     # answered it with "wait until the file chip shows Sample-Orders.csv" —
     # a sentence that matches only because the demo fixture is named orders.
     "capability": (("what is", 1.0), ("support", 1.4), ("procedure:", -1.2)),
+    # A count is published in the catalog and engine passages, never in a
+    # wizard step. The shape test below withholds the positive credit from any
+    # sentence that states no number, so the heading only breaks ties among
+    # sentences that could answer.
+    "count": (("engin", 1.4), ("connect", 1.2), ("gate", 1.0), ("procedure:", -1.6)),
 }
+
+#: A sentence that answers "how many" says a number. The corpus writes both
+#: digits ("717 tiles", "46 of them") and small cardinals in words ("nine
+#: preflight gates", "five modes"), so both count.
+_CARDINAL = re.compile(
+    r"\b(?:\d[\d,]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|dozen|hundred|thousand|million)\b",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -271,6 +285,7 @@ def split_sentences(text: str, section_title: str = "") -> list[str]:
 _ASK_SHAPE_TEST: dict[str, re.Pattern[str]] = {
     "definition": _DEFINITIONAL,
     "procedure": _IMPERATIVE,
+    "count": _CARDINAL,
 }
 
 
@@ -289,7 +304,11 @@ def _section_bonus(ask: str, section_title: str, sentence: str) -> float:
     """
     title = (section_title or "").strip().lower()
     shape = _ASK_SHAPE_TEST.get(ask)
-    fits = shape.match(sentence) is not None if shape else True
+    # ``search``, not ``match``: each pattern says for itself where it has to
+    # appear. A definition and an imperative are anchored at the start of the
+    # sentence; the number that answers "how many" is wherever the sentence
+    # puts it.
+    fits = shape.search(sentence) is not None if shape else True
     return sum(
         weight
         for needle, weight in _ASK_SECTION_BONUS.get(ask, ())
@@ -321,6 +340,8 @@ def _shape_bonus(ask: str, sentence: str) -> float:
         return 2.0
     if ask == "enumeration" and ("·" in sentence or sentence.count(",") >= 2):
         return 0.9
+    if ask == "count" and _CARDINAL.search(sentence):
+        return 2.0
     return 0.0
 
 

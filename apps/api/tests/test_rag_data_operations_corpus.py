@@ -170,10 +170,37 @@ def test_the_tile_count_is_stated_as_tiles_and_the_planned_share_with_it() -> No
     from services.catalog_service import catalog_summary
 
     summary = catalog_summary()
-    text = _section("Which engines you can connect").text
-    assert f"{summary['catalog_tile_total']} tiles in total" in text
-    assert f"{summary['planned']} of them" in text
-    assert "it cannot move a row" in text
+    text = _section("How many connectors are transfer-ready").text
+    assert f"{summary['catalog_tile_total']} connector tiles in total" in text
+    assert f"{summary['planned']} are planned" in text
+    assert "the overclaim this product refuses to make" in text
+
+
+def test_the_counts_are_their_own_section_under_their_own_question() -> None:
+    """"How many connectors" carries one term, and it is not ``engines``.
+
+    Held inside "Which engines you can connect" the counts were unreachable:
+    the question retrieved the Connectors page tour instead and answered a
+    cardinality question with navigation. Expanding ``connector`` onto
+    ``engine`` was measured first and was worse — it put the engine vocabulary
+    into every connector question and cost the audit a case. One section per
+    question an operator asks is the rule this corpus already follows.
+    """
+    titles = {section.section_title for section in generated_sections()}
+    assert "Which engines you can connect" in titles
+    assert "How many connectors are transfer-ready" in titles
+
+
+def test_the_count_section_stays_short_enough_to_rank_for_its_own_question() -> None:
+    """BM25 length normalization decides whether the answer is retrievable at all.
+
+    The first draft stated the counts, the honesty caveat, the planned share,
+    all 46 driver names and the per-side split. It ranked fourth of five for
+    "how many connectors do you support" — below three sections that say
+    nothing about counts — and the Pilot retrieves four, so it was cut off.
+    """
+    text = _section("How many connectors are transfer-ready").text
+    assert len(text.split()) < 120, f"{len(text.split())} words is back over the bar"
 
 
 def test_the_capture_downgrade_is_documented_where_the_module_allows_it() -> None:
@@ -276,3 +303,26 @@ def test_a_data_engineering_question_is_answered_rather_than_refused(
     assert answer.answerable, f"{question!r} refused: {answer.verdict.reason}"
     joined = " ".join(hit.chunk.text for hit in answer.hits)
     assert expected in joined, f"{question!r} did not reach {expected!r}"
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "how many connectors do you support",
+        "how many connectors are live",
+        "how many connectors are there",
+        "how many engines are transfer ready",
+    ],
+)
+def test_a_cardinality_question_is_answered_with_the_number(question: str) -> None:
+    """Named-fixture floor, on the composed answer rather than on the passages.
+
+    Reaching the passage is not enough for a count: the number has to be in the
+    sentence the operator reads. The Pilot retrieves four passages, so this also
+    holds the count section inside that window.
+    """
+    from services.catalog_service import catalog_summary
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = compose_product_answer(retrieve_product_answer(question, limit=4))
+    assert str(catalog_summary()["unique_drivers"]) in body.split(".")[0], body[:200]

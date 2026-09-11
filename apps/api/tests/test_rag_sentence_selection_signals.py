@@ -17,6 +17,7 @@ from src.ai.rag.answer_composer import (
     PHRASE_CREDIT,
     RELEVANCE_FLOOR,
     Candidate,
+    _shape_bonus,
     build_candidates,
     select_sentences,
     split_sentences,
@@ -454,6 +455,45 @@ def test_a_list_the_question_asked_for_still_leads() -> None:
         ),
     ]
     assert _opening("what are the preflight gates", sections).startswith("G1 Source readable")
+
+
+def test_a_count_question_leads_on_the_sentence_holding_the_number() -> None:
+    """"How many" has one shape of answer, and it is not a tour of the page.
+
+    Measured over eighteen cardinality phrasings, 3 led with a number before
+    the count ask existed and 12 do now. The sentence's own shape decides:
+    a heading about engines cannot make a sentence without a number into the
+    answer to "how many".
+    """
+    sections = [
+        (
+            "Which engines you can connect",
+            "Connections & engines → Which engines you can connect",
+            "#/help/connectors",
+            "Which engines you can connect\n"
+            "You add a connector under Connectors and Test it before use.\n"
+            "There are 46 transfer-ready connector drivers today.\n",
+        ),
+    ]
+    assert _opening("how many connectors do you support", sections).startswith(
+        "There are 46 transfer-ready"
+    )
+
+
+def test_the_number_counts_wherever_the_sentence_puts_it() -> None:
+    """The shape test searches; it does not anchor at the start of the sentence.
+
+    A definition and an imperative are anchored — they are recognised by how the
+    sentence opens. A count is not: "Every role is one of viewer, operator,
+    editor or admin" answers "how many roles are there" with its number in the
+    middle, and requiring it first withheld the credit from every sentence that
+    actually answered.
+    """
+    mid = "Exactly nine preflight gates run before any production write."
+    tail = "Preflight runs before any production write, across nine gates."
+    for sentence in (mid, tail):
+        assert _shape_bonus("count", sentence) > 0, sentence
+    assert _shape_bonus("count", "Preflight runs before any production write.") == 0
 
 
 def test_a_subject_naming_sentence_far_below_the_top_does_not_lead() -> None:

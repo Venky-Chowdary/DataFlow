@@ -709,36 +709,23 @@ def _connector_catalog_section() -> GeneratedSection | None:
         "drivers; a tile is transfer-live only when it carries transfer-ready "
         "evidence."
     )
-    # The honest counts and the transfer-ready driver names, read from the
-    # canonical catalog service rather than the raw file — a roadmap tile in the
-    # file carries ``status: live`` and counting those is the overclaim this
-    # product exists to avoid. "Can it do salesforce" was refused outright,
-    # which is a worse answer than "yes, and here is what that means".
-    #
-    # The names come from ``transfer_live_driver_types`` because that is what
-    # ``catalog_summary`` counts as ``unique_drivers``, and the passage has to
-    # agree with the number the rest of the product reports. Deriving them from
-    # the tiles instead listed 31 of the 46 — every tile-backed driver, and none
-    # of the file formats a transfer can also run on.
+    # The transfer-ready names, so "can it do salesforce" is answered with "yes,
+    # and here is what that means" rather than refused for naming a subject no
+    # heading covered. They come from ``unique_driver_types`` because that is
+    # what ``catalog_summary`` counts as ``unique_drivers``, and the passage has
+    # to agree with the number the rest of the product reports; deriving them
+    # from the catalog tiles listed 31 of the 46 — every tile-backed driver, and
+    # none of the file formats a transfer can also run on.
     try:
         from services.catalog_service import catalog_summary
 
-        summary = catalog_summary()
-        tiles = int(summary.get("catalog_tile_total") or summary.get("total") or 0)
-        planned = int(summary.get("planned") or 0)
-        drivers = sorted(str(d) for d in (summary.get("unique_driver_types") or ()) if d)
+        drivers = sorted(
+            str(d) for d in (catalog_summary().get("unique_driver_types") or ()) if d
+        )
         if drivers:
             lines.append(
                 f"Transfer-ready drivers — the ones a transfer can actually run "
                 f"on today, {len(drivers)} of them: " + ", ".join(drivers) + "."
-            )
-        if tiles and planned:
-            lines.append(
-                f"The catalog shows {tiles} tiles in total and {planned} of them "
-                f"are planned. A planned tile is a roadmap entry: it has no "
-                f"driver, it cannot be tested, and it cannot move a row. Asking "
-                f"for one is answered with that rather than with a connection "
-                f"form."
             )
     except Exception:
         pass
@@ -747,6 +734,73 @@ def _connector_catalog_section() -> GeneratedSection | None:
         section_title="Which engines you can connect",
         text="\n".join(lines),
         source_module="apps/api/registry.py",
+        category="connectors",
+    )
+
+
+def _catalog_count_section() -> GeneratedSection | None:
+    """How many connectors there are, honestly — its own section, and its own heading.
+
+    The counts started out inside "Which engines you can connect", where they
+    could not be reached: "how many connectors do you support" carries the one
+    term ``connector`` and that heading says ``engines``, so it retrieved the
+    Connectors page tour instead and answered a cardinality question with
+    navigation and the four transfer-readiness labels — not one number, while
+    every number the product publishes sat two sections over.
+
+    Expanding ``connector`` onto ``engine`` was tried first and measured worse:
+    it put the engine vocabulary into every connector question and cost the
+    audit a case. One section per question an operator asks is the rule this
+    corpus already follows, and "how many" is its own question.
+    """
+    try:
+        from services.catalog_service import catalog_summary
+    except Exception:
+        return None
+
+    # Read from the canonical catalog service rather than the raw file: a
+    # roadmap tile in the file carries ``status: live``, and counting those is
+    # the overclaim this product exists to avoid. The names come from
+    # ``unique_driver_types`` because that is what ``catalog_summary`` counts as
+    # ``unique_drivers``, so the passage agrees with the number the rest of the
+    # product reports. Deriving them from the tiles instead listed 31 of the
+    # 46 — every tile-backed driver, and none of the file formats a transfer can
+    # also run on.
+    summary = catalog_summary()
+    tiles = int(summary.get("catalog_tile_total") or summary.get("total") or 0)
+    planned = int(summary.get("planned") or 0)
+    drivers = sorted(str(d) for d in (summary.get("unique_driver_types") or ()) if d)
+    if not drivers:
+        return None
+
+    # Kept short on purpose. The first draft stated the counts, the honesty
+    # caveat, the planned share, all 46 driver names and the per-side split, and
+    # BM25 length normalization put it fourth of five for its own question —
+    # below three sections that say nothing about counts — so the top-four
+    # retrieval the Pilot runs cut it off. The names live in the catalog section
+    # next door, where they already rank for "can it do salesforce".
+    lines = [
+        # ``live`` is the summary's own key for this number, and it is the word
+        # an operator uses — "how many connectors are live" otherwise found the
+        # **Live** readiness label and the Connectors page tour, both of which
+        # use the word about one connector rather than about the count.
+        f"{len(drivers)} connectors are live and transfer-ready: those are the "
+        f"unique drivers a transfer can actually run on today. The catalog shows "
+        f"{tiles} connector tiles in total, of which {planned} are planned.",
+        "The two numbers are not interchangeable and the larger one is not a "
+        "capability claim: tiles include hosted aliases of one driver and "
+        "roadmap entries, so quoting the tile count as the number of connectors "
+        "that work is the overclaim this product refuses to make.",
+        f"Counted per side instead of per engine there are "
+        f"{summary.get('source_live')} sources and "
+        f"{summary.get('dest_live')} destinations, because the two differ: a "
+        f"vector store is a destination only and a REST feed a source only.",
+    ]
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="How many connectors are transfer-ready",
+        text="\n".join(lines),
+        source_module="services/catalog_service.py",
         category="connectors",
     )
 
@@ -1143,6 +1197,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _schema_policy_section,
         _row_ledger_section,
         _connector_catalog_section,
+        _catalog_count_section,
         _quarantine_section,
         _job_phase_section,
         _gitops_section,

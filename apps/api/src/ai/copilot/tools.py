@@ -3031,6 +3031,19 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         lower,
     ):
         return True
+    # A count scoped to a named object is a read of that object, not a question
+    # about what the noun means: "how many tables on sales" counts the
+    # operator's own schema. The scope is what makes it safe — "how many
+    # connectors do you support" names no object of theirs and is a catalog
+    # question, and it is the one the documentation now answers with a number.
+    if re.search(
+        r"\bhow\s+many\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|schemas?|datasets?|objects?|rows?|records?|"
+        r"jobs?|runs?|connections?|pipelines?|schedules?)\b"
+        r"[\w\s]{0,12}?\b(?:on|in|from|under|for)\b\s+\S",
+        lower,
+    ):
+        return True
     # An imperative aimed at the operator's own objects is a read, whatever the
     # ask classifier makes of it. "List my connectors" is graded an
     # *enumeration* — true of "what are the sync modes", not of this — so the
