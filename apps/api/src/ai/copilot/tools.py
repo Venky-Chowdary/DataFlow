@@ -4397,7 +4397,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ) or re.search(r"\bwhy\s+did\s+(?:the\s+)?(?:last\s+)?(?:transfer|job)\s+fail\b", lower) or re.search(
         r"\b(?:status|details?)\s+of\s+(?:my\s+|the\s+)?(?:last\s+)?(?:transfer|job)\b",
         lower,
-    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower):
+    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower) or re.search(
+        # Whatever is wanted *from* the operator's last run, the run has to be
+        # fetched first. The literal list above grew a phrase at a time and
+        # still missed "prove the row counts matched on my last transfer" and
+        # "give me the proof for my last transfer": both were recognised as
+        # reads of the workspace and then reached no tool at all, so the reply
+        # asked which table they meant.
+        r"\b(?:my|our|the)\s+(?:last|latest|most\s+recent|previous)\s+"
+        r"(?:job|run|transfer|sync|load|migration)\b",
+        lower,
+    ):
         planned.append(("list_jobs", {"limit": 5}))
         planned = [
             (n, a) for n, a in planned

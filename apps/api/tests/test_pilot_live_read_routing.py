@@ -26,11 +26,15 @@ os.environ.setdefault("DATAFLOW_PILOT_ENGINE", "local")
 
 import pytest
 
-from src.ai.copilot.tools import _looks_like_live_data_fetch
+from src.ai.copilot.tools import _looks_like_live_data_fetch, infer_tools_from_message
 
 
 def _is_read(question: str) -> bool:
     return _looks_like_live_data_fetch(question.lower())
+
+
+def _tools(question: str) -> list[str]:
+    return [name for name, _ in infer_tools_from_message(question)]
 
 
 #: An inventory or schema read asked as a question rather than ordered.
@@ -114,3 +118,43 @@ def test_a_grouped_aggregate_needs_both_the_by_clause_and_the_scope():
     # A scope with no grouping is covered by the plain object rules, not this
     # one; the point here is that the grouping rule does not fire without both.
     assert not _is_read("how do you break down a large table")
+
+
+# --- a question about the operator's last run has to fetch the run ----------
+#
+# Recognising a request as a read of the workspace and then reaching no tool is
+# worse than either: "prove the row counts matched on my last transfer" was
+# taken for a live read, planned nothing, and was answered by asking which
+# table and connector the operator meant.
+
+#: Everything an operator asks *about* their last run. The verb varies and the
+#: noun for the run varies; what they have in common is the run.
+LAST_RUN_REQUESTS = [
+    "prove the row counts matched on my last transfer",
+    "give me the proof for my last transfer",
+    "was my last transfer complete",
+    "show the checksum for my last job",
+    "did my latest sync finish",
+    "what happened in our most recent load",
+    "how many rows did the last transfer write",
+]
+
+
+@pytest.mark.parametrize("question", LAST_RUN_REQUESTS)
+def test_a_question_about_the_last_run_fetches_the_run(question):
+    assert "list_jobs" in _tools(question), (
+        f"{question!r} planned {_tools(question)} — no way to reach the run"
+    )
+
+
+def test_a_recognised_read_never_plans_nothing():
+    """The failure mode this closes, stated as the rule it broke."""
+    for question in LAST_RUN_REQUESTS:
+        if _is_read(question):
+            assert _tools(question), f"{question!r} is a read that plans no tool"
+
+
+def test_reconcile_asked_in_general_stays_a_documentation_question():
+    """No run is named, so there is nothing to fetch — explain the proof."""
+    assert "list_jobs" not in _tools("show me the reconcile proof")
+    assert "list_jobs" not in _tools("what does checksum MATCH prove")
