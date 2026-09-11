@@ -14276,6 +14276,25 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-text-primary);
 }
 
+.df2-app .df2-source-multistream-head,
+.df2-app .df2-result-checksum-pair dd,
+.df2-app .df2-run-launch h3 {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-run-launch > p {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-result-checksum-pair code {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-run-launch-kicker {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);

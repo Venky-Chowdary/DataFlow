@@ -2118,4 +2118,30 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-chip\.is-static,/);
     assert.match(ui, /\.df2-app \.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Studio leftover navy run-launch and checksum titles follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-source-multistream-head \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-source-multistream-head \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(studio, /\.df2-result-checksum-pair dd \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-checksum-pair dd \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-result-checksum-pair code \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-result-checksum-pair code \{[\s\S]{0,80}background: #f1f5f9/);
+    assert.match(studio, /\.df2-run-launch-kicker \{[\s\S]{0,280}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-run-launch-kicker \{[\s\S]{0,280}background: #f0fdfa/);
+    assert.match(studio, /\.df2-run-launch h3 \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-run-launch h3 \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(studio, /\.df2-run-launch > p \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-run-launch > p \{[\s\S]{0,80}color: #475569/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-source-multistream-head,/);
+    assert.match(ui, /\.df2-app \.df2-run-launch h3 \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-run-launch-kicker \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-vd-chip \{[\s\S]{0,40}--df-text-primary/);
+  });
 });

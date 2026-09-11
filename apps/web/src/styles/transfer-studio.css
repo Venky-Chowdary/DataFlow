@@ -483,7 +483,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-size: 13px;
   font-weight: 600;
 }
@@ -4304,12 +4304,12 @@ th.df2-type-string .df2-type-badge {
 .df2-result-checksum-pair dd {
   margin: 0;
   font-size: 12px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-result-checksum-pair code {
   font-size: 11px;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
   padding: 2px 5px;
   border-radius: 4px;
 }
@@ -5541,8 +5541,8 @@ th.df2-type-string .df2-type-badge {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #0f766e;
-  background: #f0fdfa;
+  color: var(--df-brand-strong);
+  background: var(--df-brand-muted);
   border: 1px solid #99f6e4;
 }
 
@@ -5550,13 +5550,13 @@ th.df2-type-string .df2-type-badge {
   margin: 0;
   font-size: var(--df-fs-page-title);
   line-height: 1.15;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-run-launch > p {
   margin: 0;
   font-size: 13px;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-run-launch-route {
