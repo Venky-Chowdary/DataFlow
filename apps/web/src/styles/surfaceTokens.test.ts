@@ -1361,6 +1361,8 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-result-more > summary \{[\s\S]{0,160}color: #334155/);
     assert.match(ui, /\.df2-result-more\[open\] > summary \{[\s\S]{0,80}--df-surface-muted/);
     assert.doesNotMatch(ui, /\.df2-result-more\[open\] > summary \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(ui, /\.df2-quarantine-apply-suggested \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-quarantine-apply-suggested \{[\s\S]{0,160}color: #475569/);
     assert.match(ui, /\.df2-quarantine-apply-suggested code \{[\s\S]{0,80}--df-brand-muted/);
     assert.doesNotMatch(ui, /\.df2-quarantine-apply-suggested code \{[\s\S]{0,80}background: #ecfdf5/);
 

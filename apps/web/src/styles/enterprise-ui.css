@@ -6072,7 +6072,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-quarantine-apply-suggested code {
@@ -13765,7 +13765,8 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 .df2-app .df2-result-more > summary,
 .df2-app .df2-quarantine-next-copy strong,
-.df2-app .df2-quarantine-next-copy p {
+.df2-app .df2-quarantine-next-copy p,
+.df2-app .df2-quarantine-apply-suggested {
   color: var(--df-text-secondary);
 }
 
