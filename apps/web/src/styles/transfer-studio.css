@@ -4051,7 +4051,7 @@ th.df2-type-string .df2-type-badge {
 .df2-result-endpoint strong {
   font-size: 13px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4100,7 +4100,7 @@ th.df2-type-string .df2-type-badge {
 .df2-result-metric strong {
   font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4176,19 +4176,19 @@ th.df2-type-string .df2-type-badge {
   box-sizing: border-box;
 }
 .df2-result-fidelity-metrics article strong,
-.df2-data-integrity-metric strong { font-size: 22px; font-weight: 700; line-height: 1.1; color: #0f172a; }
+.df2-data-integrity-metric strong { font-size: 22px; font-weight: 700; line-height: 1.1; color: var(--df-text-primary); }
 .df2-result-fidelity-metrics article > span,
-.df2-data-integrity-metric > span { font-size: 12.5px; font-weight: 600; color: #334155; }
+.df2-data-integrity-metric > span { font-size: 12.5px; font-weight: 600; color: var(--df-text-secondary); }
 .df2-result-fidelity-metrics article small,
-.df2-data-integrity-metric small { font-size: 11.5px; line-height: 1.5; color: #64748b; }
+.df2-data-integrity-metric small { font-size: 11.5px; line-height: 1.5; color: var(--df-text-tertiary); }
 .df2-result-fidelity-metrics article.is-dropped,
 .df2-data-integrity-metric.is-dropped { border-color: #fecaca; background: var(--df-danger-bg); }
 .df2-result-fidelity-metrics article.is-dropped strong,
-.df2-data-integrity-metric.is-dropped strong { color: #b91c1c; }
+.df2-data-integrity-metric.is-dropped strong { color: var(--df-danger); }
 .df2-result-fidelity-metrics article.is-coerced,
 .df2-data-integrity-metric.is-coerced { border-color: #fde68a; background: var(--df-warning-bg); }
 .df2-result-fidelity-metrics article.is-coerced strong,
-.df2-data-integrity-metric.is-coerced strong { color: #b45309; }
+.df2-data-integrity-metric.is-coerced strong { color: var(--df-warning); }
 
 @media (max-width: 640px) {
   .df2-result-fidelity-metrics,
@@ -4211,7 +4211,7 @@ th.df2-type-string .df2-type-badge {
   gap: 6px;
   margin: 0 0 10px;
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-result-section p {
@@ -8618,8 +8618,8 @@ th.df2-type-string .df2-type-badge {
   border-color: #fde68a;
   background: var(--df-warning-bg);
 }
-.df2-repair-issues li strong { display: block; font-size: 13px; color: #0f172a; }
-.df2-repair-issues li p { margin: 4px 0 0; font-size: 12.5px; color: #475569; line-height: 1.4; }
+.df2-repair-issues li strong { display: block; font-size: 13px; color: var(--df-text-primary); }
+.df2-repair-issues li p { margin: 4px 0 0; font-size: 12.5px; color: var(--df-text-secondary); line-height: 1.4; }
 .df2-repair-actions {
   list-style: none;
   margin: 0;
@@ -8633,7 +8633,7 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid #e2e8f0;
   background: var(--df-surface-muted);
   font-size: 12.5px;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-vd-blocker-fix {
@@ -8644,7 +8644,7 @@ th.df2-type-string .df2-type-badge {
   border-radius: 8px;
   background: var(--df-surface);
   border: 1px solid #e2e8f0;
-  color: #0f766e !important;
+  color: var(--df-brand-strong) !important;
   font-weight: 600;
   width: fit-content;
 }
@@ -9812,8 +9812,8 @@ button.df2-vd-assist-toggle:focus-visible {
   gap: 8px;
   margin-bottom: 8px;
 }
-.df2-notify-strip-head .dt-nav-icon { color: #0f766e; }
-.df2-notify-strip-head strong { font-size: 13px; color: #0f172a; }
+.df2-notify-strip-head .dt-nav-icon { color: var(--df-brand-strong); }
+.df2-notify-strip-head strong { font-size: 13px; color: var(--df-text-primary); }
 .df2-notify-strip-head span {
   margin-left: auto;
   font-size: 11.5px;
@@ -9841,9 +9841,9 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-notify-kind {
   font-weight: 600;
   text-transform: capitalize;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
-.df2-notify-status { color: #475569; }
+.df2-notify-status { color: var(--df-text-secondary); }
 .df2-notify-channel {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
