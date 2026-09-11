@@ -205,6 +205,15 @@ def assess_evidence(
     covered: set[str] = set()
     for text in passage_texts:
         covered.update(content_terms(text))
+    # A passage that says ``reverse_etl`` covers the words "reverse" and "etl".
+    # Splitting here rather than in the index keeps this out of ranking, where
+    # it would add ``write`` and ``etl`` to every passage that lists a sync mode
+    # and let those outrank the section the question was about.
+    for term in tuple(covered):
+        if "_" in term:
+            covered.update(
+                normalize(part) for part in term.split("_") if len(part) > 1
+            )
 
     subjects = tuple(t for t in analysis.search_terms if is_subject_term(t))
     anchors = tuple(dict.fromkeys(subjects))

@@ -2585,7 +2585,13 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
             r"what makes|remind me|meaning of|"
-            r"do i need|is .+ dangerous|how is)\b"
+            r"do i need|how is)\b"
+            # Property and capability questions about the product. "is a green
+            # test on connectors enough to skip validation" is one of these, and
+            # matched nothing, so it collected a connector inventory instead of
+            # the sentence in the FAQ that answers it outright.
+            r"|\bis\s+.{3,48}?\s+(?:enough|the\s+same|different|safe|dangerous|"
+            r"required|optional|supported|reversible|idempotent|lossy)\b"
             # Advisory shapes. "which sync mode should I pick for a nightly
             # load" is a product question by any reading, but matched none of
             # the patterns above, so the advisory tool answered it in one line
@@ -2958,6 +2964,16 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         return True
     if re.search(
         r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    # "how many connectors do I have" is a read of the operator's own workspace,
+    # not a question about what a connector is. Without this it collected a
+    # documentation essay in front of the inventory it asked for.
+    if re.search(
+        r"\b(?:do|did|does)\s+(?:i|we)\s+(?:have|own|already\s+have)\b"
+        r"|\bmy\s+(?:connectors?|jobs?|pipelines?|schedules?|contracts?|transfers?|runs?)\b"
+        r"|\bhow\s+many\s+(?:\w+\s+){0,2}(?:do|did)\s+(?:i|we)\b",
         lower,
     ):
         return True
@@ -4528,6 +4544,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         or re.search(r":\s*select\b", lower)
     )
     agg = parse_aggregation_request(message)
+    # "How many gates are there before a write" parses as COUNT(*) over a table
+    # named ``gates``, and the tool then answers a documented question with
+    # "Connector not found". A product question with no connector and no named
+    # workspace object is not a warehouse aggregation.
+    if (
+        agg is not None
+        and not (agg.connector_name or "").strip()
+        and _looks_like_product_howto(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
     if (
         agg is not None
         and not _explicit_sql_intent
@@ -4987,7 +5014,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:connector\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     ) or re.search(
-        r"\b(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
+        # Anchored to the start of the message, because bare ``test <rest of
+        # line>`` is a noun as often as a verb: "is a green test on connectors
+        # enough to skip validation" was read as a command to test a connector
+        # literally named "on connectors enough to skip validation".
+        r"^(?:please\s+|can\s+you\s+|could\s+you\s+)?"
+        r"(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
         r"([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     )

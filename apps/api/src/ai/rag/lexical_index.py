@@ -92,6 +92,26 @@ def tokenize(text: str) -> list[str]:
     return [normalize(t) for t in _TOKEN_RE.findall(str(text or "").lower())]
 
 
+def identifier_shingles(terms: Sequence[str]) -> list[str]:
+    """Underscore-joined runs of adjacent query terms, for the corpus's own labels.
+
+    The documentation names sync modes as single ``snake_case`` tokens, so
+    "what is reverse ETL" matched neither word of the passage that defines
+    ``reverse_etl``. Joining adjacent query terms recovers the label from the
+    words. This is deliberately query-side only: splitting the identifiers in
+    the *index* instead would add ``write`` and ``etl`` to every passage that
+    mentions a sync mode, and those passages then outranked the section the
+    question was actually about.
+    """
+    out: list[str] = []
+    for size in (2, 3):
+        for start in range(len(terms) - size + 1):
+            run = terms[start : start + size]
+            if all(part and "_" not in part for part in run):
+                out.append("_".join(run))
+    return out
+
+
 def content_terms(text: str) -> list[str]:
     """Question terms that carry retrieval signal, in order, deduplicated."""
     seen: set[str] = set()

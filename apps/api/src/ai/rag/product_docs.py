@@ -79,6 +79,13 @@ RETRIEVER_WEIGHTS = {
 # stay adjustments rather than overrides.
 FUSED_RANK_SCALE = 10.0
 
+# How relevance splits between rank position and score magnitude. Rank fusion is
+# robust but, at the standard ``k=60`` on a corpus this small, nearly flat; the
+# normalized BM25 score is discriminative but sensitive to one long passage
+# repeating a term. Half of each: the rank list decides the shortlist, the score
+# decides the order within it.
+RRF_WEIGHT = 0.45
+
 # Definitional asks ("what is quarantine") must not lose to a long Procedure
 # section just because the procedure also says the word. FAQ / core-gate
 # headings are the section an operator's eye would open first.
@@ -438,30 +445,45 @@ def _rank_hits(
 ) -> list[ProductDocHit]:
     """Fuse three rankings, then apply the heading/intent priors.
 
-    The operator's own words and the expansion vocabulary are run as *separate*
-    BM25 rankings rather than concatenated into one query. Concatenating them
-    let the expansion outvote the question: "how do I connect to BigQuery"
-    expands to include ``destination``, which the preflight-gates section uses
-    heavily, and that section then outranked the connector article. Fusing
-    weighted rankings keeps the expansion as recall without letting it decide.
+    The operator's own words and the loose expansion vocabulary are run as
+    *separate* BM25 rankings rather than concatenated into one query.
+    Concatenating them let the expansion outvote the question: "how do I connect
+    to BigQuery" expands to include ``destination``, which the preflight-gates
+    section uses heavily, and that section then outranked the connector article.
+
+    Rank position and score magnitude are both used, because each is blind
+    where the other sees. Reciprocal Rank Fusion alone, with the standard
+    ``k=60``, is far too flat for a 66-passage corpus: rank 1 scores 1/61 and
+    rank 10 scores 1/70, so after normalization every candidate landed between
+    8.0 and 10.0 and the heading and intent priors decided the whole ranking.
+    Measured on "what is change data capture", five unrelated sections sat
+    within 3% of each other. Blending in the min-max normalized BM25 score
+    restores the discrimination that the rank transform threw away, while RRF
+    keeps the merge robust to one retriever's scale.
     """
     index, by_id = _index()
     depth = max(FUSION_CANDIDATES, limit * 3)
 
+    # An exact phrase expansion is the operator's own words in the corpus's
+    # spelling, so it leads the ranking with them.
+    anchor_terms = list(analysis.anchor_terms)
     typed_terms = list(analysis.terms)
-    typed_query = " ".join(typed_terms) or analysis.text
-    expansion_query = " ".join(analysis.expansions)
+    typed_query = " ".join(anchor_terms) or analysis.text
+    expansion_query = " ".join(analysis.loose_expansions)
 
     typed = index.search(typed_query, limit=depth)
     expanded = index.search(expansion_query, limit=depth) if expansion_query else []
     ngram = _ngram_index().search(analysis.expanded_text or analysis.text, limit=depth)
 
     # Grounding and matched terms are reported against the operator's own words:
-    # an expansion term the passage happens to use is not something the operator
-    # asked about, and reporting it as a matched term would misstate the evidence.
-    grounding = {hit.id: hit.grounding for hit in typed}
-    matched = {hit.id: hit.matched_terms for hit in typed}
+    # a loose expansion term the passage happens to use is not something the
+    # operator asked about, and reporting it as matched would misstate the
+    # evidence. This is a separate search from the ranking one for that reason.
+    reported = index.search(" ".join(typed_terms) or analysis.text, limit=depth)
+    grounding = {hit.id: hit.grounding for hit in reported}
+    matched = {hit.id: hit.matched_terms for hit in reported}
     bm25_score = {hit.id: hit.score for hit in typed}
+    bm25_best = max(bm25_score.values(), default=0.0) or 1.0
 
     rankings = [("bm25_typed", [h.id for h in typed])]
     if expanded:
@@ -491,8 +513,12 @@ def _rank_hits(
             # No overlap with anything the operator typed: a match on the
             # expansion vocabulary or a spelling coincidence, not evidence.
             continue
-        rank = FUSED_RANK_SCALE * (fused_hit.score / best)
-        rank += TITLE_WEIGHT * _title_coverage(chunk, typed_terms)
+        relevance = (
+            RRF_WEIGHT * (fused_hit.score / best)
+            + (1.0 - RRF_WEIGHT) * (bm25_score.get(fused_hit.id, 0.0) / bm25_best)
+        )
+        rank = FUSED_RANK_SCALE * relevance
+        rank += TITLE_WEIGHT * _title_coverage(chunk, anchor_terms)
         rank += _section_intent_bonus(chunk, analysis)
         ranked.append(
             (

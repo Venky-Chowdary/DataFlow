@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
-from .lexical_index import content_terms, normalize
+from .lexical_index import content_terms, identifier_shingles, normalize
 
 # Words that appear in operator questions and in almost every passage, so they
 # add no retrieval signal — but which, left in, make an undocumented question
@@ -127,7 +127,7 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "enumeration",
         re.compile(
-            r"\b(?:list|which|what|explain|describe|show)\s+(?:\w+\s+){0,3}"
+            r"\b(?:list|which|what|explain|describe|show|how\s+many)\s+(?:\w+\s+){0,3}"
             r"(?:modes?|options?|types?|gates?|roles?|connectors?|kinds?|"
             r"policies|policys?|phases?|steps?|permissions?|"
             r"are\s+there|do\s+you\s+support|are\s+available)\b"
@@ -351,6 +351,28 @@ class QueryAnalysis:
     terms: tuple[str, ...] = ()
     expansions: tuple[str, ...] = ()
     generic_terms: tuple[str, ...] = field(default=())
+    #: Expansions that came from an exact multi-word phrase match. These are not
+    #: guesses: "change data capture" *is* CDC, "bad rows" *are* quarantined
+    #: rows. Retrieval trusts them as much as the words the operator typed,
+    #: which single-word expansions ("slow" → "phase") have not earned.
+    phrase_expansions: tuple[str, ...] = field(default=())
+
+    @property
+    def anchor_terms(self) -> tuple[str, ...]:
+        """The operator's own words plus the phrases that restate them exactly."""
+        seen = set(self.terms)
+        out = list(self.terms)
+        for term in self.phrase_expansions:
+            if term not in seen:
+                seen.add(term)
+                out.append(term)
+        return tuple(out)
+
+    @property
+    def loose_expansions(self) -> tuple[str, ...]:
+        """Single-word expansions only — recall, not evidence."""
+        anchors = set(self.anchor_terms)
+        return tuple(t for t in self.expansions if t not in anchors)
 
     @property
     def search_terms(self) -> tuple[str, ...]:
@@ -391,12 +413,24 @@ def classify_ask(question: str) -> str:
 
 
 def expand_terms(question: str, terms: tuple[str, ...]) -> tuple[str, ...]:
-    """The documentation's vocabulary for what the operator said.
+    """The documentation's vocabulary for what the operator said."""
+    phrase, loose = expand_terms_tiered(question, terms)
+    return phrase + loose
+
+
+def expand_terms_tiered(
+    question: str,
+    terms: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Expansions split by how much they can be trusted.
 
     Phrase rules run on the raw question so "bad rows" can mean something its
-    two words do not; single-term rules then run on the normalized terms.
+    two words do not, and an exact multi-word match is strong evidence of the
+    concept. Single-term rules then run on the normalized terms and are much
+    weaker — "slow" pointing at "phase" is a useful guess, nothing more.
     """
-    out: list[str] = []
+    phrase_out: list[str] = []
+    loose_out: list[str] = []
     seen = set(terms)
     lookup = _expansion_lookup()
     for pattern, targets in _PHRASE_EXPANSIONS:
@@ -406,14 +440,14 @@ def expand_terms(question: str, terms: tuple[str, ...]) -> tuple[str, ...]:
             t = normalize(target)
             if t not in seen:
                 seen.add(t)
-                out.append(t)
+                phrase_out.append(t)
     for term in terms:
         for target in lookup.get(term, ()):
             t = normalize(target)
             if t not in seen:
                 seen.add(t)
-                out.append(t)
-    return tuple(out)
+                loose_out.append(t)
+    return tuple(phrase_out), tuple(loose_out)
 
 
 def analyze_query(question: str) -> QueryAnalysis:
@@ -429,13 +463,19 @@ def analyze_query(question: str) -> QueryAnalysis:
     # Expansion reads every term, generic ones included, so "bad" and "allowed"
     # can still point at the quarantine and role vocabulary; the dedupe below
     # keeps the generic words themselves out of the expansion set.
-    expansions = tuple(
-        t for t in expand_terms(text, tuple(raw)) if t not in generic
-    )
+    phrase, loose = expand_terms_tiered(text, tuple(raw))
+    phrase = tuple(t for t in phrase if t not in generic)
+    loose = tuple(t for t in loose if t not in generic)
+    # "reverse etl" is how an operator writes the label the corpus spells
+    # ``reverse_etl``. A shingle that names nothing simply has no document
+    # frequency, so this costs nothing when it does not apply.
+    shingles = tuple(s for s in identifier_shingles(terms) if s not in phrase)
+    phrase = phrase + shingles
     return QueryAnalysis(
         text=text,
         ask=classify_ask(text),
         terms=terms,
-        expansions=expansions,
+        expansions=phrase + loose,
         generic_terms=dropped,
+        phrase_expansions=phrase,
     )

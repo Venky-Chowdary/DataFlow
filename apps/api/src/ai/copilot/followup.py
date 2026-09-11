@@ -224,18 +224,67 @@ _ELLIPTICAL_EDIT_RE = re.compile(
 )
 
 
+# A turn carrying its own interrogative frame *and* its own subject is a
+# question, not a fragment of the previous one. Without this, "where do I find
+# the log for a run" was parsed as the SQL predicate of a remembered
+# aggregation — ``^where\b`` is genuinely how an elliptical filter starts — so
+# every knowledge question asked after a data question came back as a count of
+# the wrong table. Turns containing a coreference ("what about that one") are
+# excluded: those really do lean on the remembered subject.
+_QUESTION_FRAME = re.compile(
+    r"\bhow\s+(?:do|can|does|did|would|should)\s+(?:i|we|you|it)\b"
+    r"|\bhow\s+many\s+\w+(?:\s+\w+){0,2}\s+(?:are|is|do|does)\b"
+    r"|\bwhere\s+(?:do|can|does|is|are)\s+(?:i|we|you|it|the|a|an)\b"
+    r"|\bwhat\s+happens\b"
+    r"|\bwhat\s+(?:is|are|does|do)\s+(?:a|an|the|this|it|each|my|your)\b"
+    r"|\bwhat\s+\w+(?:\s+\w+){0,2}\s+(?:are|is)\s+there\b"
+    r"|\bwhy\s+(?:do|does|did|is|are|was|were|can'?t|cannot)\b"
+    r"|\bwho\s+can\b"
+    r"|\bdo\s+(?:you|i|we)\s+(?:support|have|need|ever)\b",
+    re.I,
+)
+
+# "how many gates are there" is existential ``there``, not the anaphoric
+# ``there`` that points at a remembered subject, so it must not count as a
+# coreference.
+_EXISTENTIAL_THERE = re.compile(r"\b(?:are|is|was|were)\s+there\b", re.I)
+
+
+def asks_its_own_question(message: str) -> bool:
+    """Whether the turn is a self-contained question about a documented subject.
+
+    Both halves are required. The frame alone would swallow data questions that
+    legitimately inherit the remembered table; the subject alone would swallow
+    "by region", which names a corpus heading word and is still elliptical.
+    """
+    text = _clean(message)
+    if not text:
+        return False
+    if _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text)):
+        return False
+    if not _QUESTION_FRAME.search(text):
+        return False
+    try:
+        from ..rag.product_docs import names_product_subject
+    except Exception:
+        return False
+    return names_product_subject(text)
+
+
 def looks_like_fresh_intent(message: str) -> bool:
     """True when the user clearly started a new request (not a slot fill / typo)."""
     reply = _clean(message)
     if not reply:
         return False
-    return bool(_FRESH_INTENT_RE.search(reply))
+    return bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply)
 
 
 def looks_like_elliptical_edit(message: str) -> bool:
     """True for follow-up edits like \"only paid ones\" / \"and by region?\"."""
     reply = _clean(message)
     if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
+        return False
+    if asks_its_own_question(reply):
         return False
     if _ELLIPTICAL_EDIT_RE.search(reply):
         return True
@@ -415,6 +464,8 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
         return False
     words = _words(text)
     if len(words) > _MAX_FOLLOWUP_WORDS:
+        return False
+    if asks_its_own_question(text):
         return False
     # Self-contained asks name their own table/connector — not elliptical.
     if re.search(
