@@ -65,7 +65,7 @@
 .df2-docs-arch-title {
   font-size: 12px;
   font-weight: 700;
-  fill: #0f172a;
+  fill: var(--df-text-primary);
 }
 
 /* Flat card overrides (enterprise-pages defines structure) */
@@ -830,7 +830,7 @@
 
 .docs-space-evidence-list strong {
   font-size: 13.5px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.4;
 }
 
@@ -896,9 +896,9 @@
   border-radius: 10px;
   display: grid;
   place-items: center;
-  background: #f0fdfa;
-  color: #0f766e;
-  border: 1px solid #ccfbf1;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+  border: 1px solid var(--df-border-brand);
 }
 
 .docs-card-icon--lg {
@@ -1112,8 +1112,8 @@
   padding: 8px 10px;
   border: 0;
   border-radius: 8px;
-  background: #f0fdfa;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
   font: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -1147,7 +1147,7 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #334155;
+  color: var(--df-text-secondary);
   font: inherit;
   font-size: 13px;
   text-align: left;
@@ -1155,12 +1155,12 @@
 }
 
 .docs-sidebar-group button:hover {
-  background: #f8fafc;
+  background: var(--df-surface);
 }
 
 .docs-sidebar-group button.is-active {
-  background: #ecfdf5;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
   font-weight: 600;
 }
 
@@ -1313,12 +1313,12 @@
   gap: 4px;
   padding: 14px 16px;
   border-radius: 12px;
-  border: 1px solid #99f6e4;
-  background: #f0fdfa;
+  border: 1px solid var(--df-border-brand);
+  background: var(--df-brand-muted);
 }
 
 .docs-callout strong {
-  color: #0f766e;
+  color: var(--df-brand-strong);
   font-size: 12px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1326,7 +1326,7 @@
 
 .docs-callout p {
   margin: 0;
-  color: #334155;
+  color: var(--df-text-secondary);
   font-size: 15px;
 }
 
@@ -1416,7 +1416,7 @@
 .df2-docs-walkthrough-steps {
   margin: 0 0 18px;
   padding-left: 22px;
-  color: #334155;
+  color: var(--df-text-secondary);
   line-height: 1.6;
 }
 
@@ -1451,8 +1451,8 @@
   display: block;
   width: 100%;
   border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  background: #f8fafc;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
   aspect-ratio: 16 / 10;
   object-fit: cover;
   object-position: top left;
@@ -1467,7 +1467,7 @@
 
 .df2-docs-shot figcaption strong {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-docs-shot figcaption span {
@@ -1526,7 +1526,7 @@
 .docs-sidebar-brand strong {
   display: block;
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .docs-sidebar-brand span {
@@ -1536,7 +1536,7 @@
 }
 
 .docs-sidebar-home.is-active {
-  background: #0f766e;
+  background: var(--df-brand);
   color: #fff;
 }
 
@@ -1559,7 +1559,7 @@
   font-size: clamp(1.65rem, 2.3vw, 2.2rem);
   letter-spacing: -0.03em;
   line-height: 1.15;
-  color: #0f172a;
+  color: var(--df-text-primary);
   max-width: 22ch;
   white-space: normal !important;
   overflow: visible !important;
@@ -1632,8 +1632,8 @@
 .docs-space-tree-group {
   padding: 14px 16px;
   border-radius: 12px;
-  border: 1px solid #e2e8f0;
-  background: #fafbfc;
+  border: 1px solid var(--df-border);
+  background: var(--df-surface-muted);
 }
 
 .docs-space-tree-group h3 {
@@ -1662,7 +1662,7 @@
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #334155;
+  color: var(--df-text-secondary);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -1681,7 +1681,7 @@
 .docs-space-tree-group button strong {
   font-size: 13px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .docs-space-tree-group button em {
@@ -1867,7 +1867,7 @@
     padding: 14px 16px;
     cursor: pointer;
     list-style: none;
-    color: #0f172a;
+    color: var(--df-text-primary);
     font-weight: 600;
     font-size: 14px;
   }
@@ -1943,7 +1943,7 @@
 }
 .docs-space-algorithm-steps strong {
   font-size: 13.5px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 .docs-space-algorithm-steps span {
   font-size: 13px;

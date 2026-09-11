@@ -13526,3 +13526,55 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-page-query .df2-query-results tbody tr:hover td {
   background: color-mix(in srgb, var(--df-brand-muted) 65%, var(--df-surface));
 }
+
+/* Help / docs leftover navy + leftover mint / paper. */
+.df2-app .df2-docs-shot figcaption strong,
+.df2-app .docs-space-page-head h1,
+.df2-app .docs-sidebar-brand strong,
+.df2-app .docs-space-tree-group button strong,
+.df2-app .docs-space-algorithm-steps strong,
+.df2-app .docs-space-evidence-list strong,
+.df2-app .docs-space-nav-mobile summary {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-docs-walkthrough-steps,
+.df2-app .docs-sidebar-group button,
+.df2-app .docs-space-tree-group button {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-docs-shot img {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+}
+
+.df2-app .docs-space-tree-group {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+}
+
+.df2-app .docs-sidebar-home,
+.df2-app .docs-sidebar-group button.is-active,
+.df2-app .docs-card-icon,
+.df2-app .docs-callout {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .docs-sidebar-home.is-active {
+  background: var(--df-brand);
+  color: #fff;
+}
+
+.df2-app .docs-sidebar-group button:hover {
+  background: var(--df-surface);
+}
+
+.df2-app .docs-callout strong {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-docs-arch-title {
+  fill: var(--df-text-primary);
+}
