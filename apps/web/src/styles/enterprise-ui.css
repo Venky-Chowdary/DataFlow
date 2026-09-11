@@ -13431,3 +13431,46 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-page-settings .df2-security-row {
   background: var(--df-surface-muted);
 }
+
+/* MCP titles, Query leftover mint chips, Validate launch leftover mint. */
+.df2-app .df2-mcp-hero-copy h2,
+.df2-app .df2-mcp-hero-status strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-mcp-hero-copy p,
+.df2-app .df2-mcp-logs-table th,
+.df2-app .df2-validate-launch p {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-mcp-logs-table th,
+.df2-app .df2-mcp-logs-table td {
+  border-bottom-color: var(--df-border);
+}
+
+.df2-app .df2-query-editor-dialect-pill,
+.df2-app .df2-qw-col-type[data-tone="text"],
+.df2-app .df2-qw-th-type[data-tone="text"] {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-mcp-tile code {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-validate-launch {
+  background: var(--df-brand-muted) !important;
+  border-color: var(--df-border-brand) !important;
+}
+
+.df2-app .df2-mcp-log-status--ok {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-mcp-log-status--err {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}

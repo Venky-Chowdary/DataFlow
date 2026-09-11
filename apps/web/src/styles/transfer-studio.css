@@ -5399,14 +5399,14 @@ th.df2-type-string .df2-type-badge {
 
 .df2-validate-launch {
   text-align: center;
-  border-color: #99f6e4 !important;
-  background: #f0fdfa !important;
+  border-color: var(--df-border-brand) !important;
+  background: var(--df-brand-muted) !important;
 }
 
 .df2-validate-launch p {
   margin: 6px 0 12px;
   font-size: 12px;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-validate-rail-actions {
