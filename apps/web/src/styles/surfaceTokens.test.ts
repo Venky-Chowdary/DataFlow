@@ -1643,4 +1643,39 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-status-metric-pill\.live \{[\s\S]{0,80}--df-brand-strong/);
     assert.match(ui, /\.df2-app \.df2-connectors-list \.df2-badge-muted \{[\s\S]{0,80}--df-surface-muted/);
   });
+
+  it("Conn-setup leftover paper and tab hover follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const platform = sheet("enterprise-platform.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-conn-setup-aside \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-conn-setup-aside \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(ui, /\.df2-auth-card:hover \{[\s\S]{0,40}--df-brand/);
+    assert.doesNotMatch(ui, /\.df2-auth-card:hover \{[\s\S]{0,40}#99f6e4/);
+    assert.match(studio, /\.df2-connection-form \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-connection-form \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(dataflow, /\.df2-label \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(dataflow, /\.df2-label \{[\s\S]{0,80}color: #334155/);
+    assert.doesNotMatch(dataflow, /\.df2-label \{[\s\S]{0,80}color: #3d463f/);
+    assert.match(dataflow, /\.df2-tab \{[\s\S]{0,280}--df-seg-ink/);
+    assert.doesNotMatch(dataflow, /\.df2-tab \{[\s\S]{0,280}color: #64748b/);
+    assert.match(dataflow, /\.df2-tab\.active \{[\s\S]{0,80}--df-seg-ink-active/);
+    assert.doesNotMatch(dataflow, /\.df2-tab\.active \{[\s\S]{0,80}color: #0f766e/);
+    assert.match(platform, /\.df2-segment button,\n\.df2-segment \.df2-btn \{[\s\S]{0,120}--df-seg-ink/);
+    assert.doesNotMatch(platform, /\.df2-segment button,\n\.df2-segment \.df2-btn \{[\s\S]{0,120}color: #475569/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-tab:hover:not\(\.active\):not\(\[aria-selected="true"\]\)/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-conn-setup-aside,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-label,/);
+    assert.match(
+      ui,
+      /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-tab:hover:not\(\.active\):not\(\[aria-selected="true"\]\)/,
+    );
+    assert.match(ui, /\.df2-app \.df2-label \{[\s\S]{0,40}--df-text-secondary/);
+  });
 });

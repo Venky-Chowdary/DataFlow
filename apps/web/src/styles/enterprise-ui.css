@@ -8124,7 +8124,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 16px;
   padding: 20px 18px;
   border-right: 1px solid var(--df-border, #e6e9ee);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   overflow-y: auto;
 }
 
@@ -8191,7 +8191,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-auth-card:hover {
-  border-color: #99f6e4;
+  border-color: var(--df-brand);
 }
 
 .df2-auth-card.is-active,
@@ -12799,10 +12799,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   box-shadow: none;
 }
 
-.df2-app .df2-tab:hover,
-.df2-app .df2-dest-mode-btn:hover,
-.df2-app .df2-segment > button:not(.df2-btn):hover {
+.df2-app .df2-tab:hover:not(.active):not([aria-selected="true"]),
+.df2-app .df2-dest-mode-btn:hover:not(.active),
+.df2-app .df2-segment > button:not(.df2-btn):hover:not(.active):not([aria-selected="true"]) {
   color: var(--df-text-primary);
+  background: var(--df-list-row-hover);
 }
 
 .df2-app .df2-tab.active,
@@ -13401,6 +13402,69 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   color: #fff;
 }
 
+/* Portaled Add/Edit connection — leftover paper / navy does not see .df2-app. */
+html[data-theme="dark"]:has(.df2-app) .df2-conn-setup-aside,
+html.df2-theme-dark:has(.df2-app) .df2-conn-setup-aside {
+  background: var(--df-surface-muted);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-label,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-label,
+html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-label,
+html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-label {
+  color: var(--df-text-secondary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-input,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-select,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-input,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-select {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-tab,
+html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-tab,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-tab,
+html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-tab {
+  color: var(--df-seg-ink);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-tab:hover:not(.active):not([aria-selected="true"]),
+html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-tab:hover:not(.active):not([aria-selected="true"]),
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-tab:hover:not(.active):not([aria-selected="true"]),
+html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-tab:hover:not(.active):not([aria-selected="true"]) {
+  color: var(--df-text-primary);
+  background: var(--df-list-row-hover);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-tab.active,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-tab[aria-selected="true"],
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-tab.active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-tab[aria-selected="true"] {
+  color: var(--df-seg-ink-active);
+  background: var(--df-seg-active);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-auth-card,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-auth-card {
+  background: var(--df-surface);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-auth-card.is-active,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-auth-card[aria-selected="true"],
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-auth-card.is-active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-auth-card[aria-selected="true"] {
+  background: var(--df-brand-muted);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-connection-form,
+html.df2-theme-dark:has(.df2-app) .df2-connection-form {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
+}
+
 /* Settings / Query / tab leftovers — leftover navy + paper. */
 .df2-app .df2-settings-summary-item strong,
 .df2-app .df2-settings-policy-row h3,
@@ -13970,4 +14034,14 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-connectors-list .df2-badge-muted {
   background: var(--df-surface-muted);
   color: var(--df-text-secondary);
+}
+
+/* Form labels leftover slate / olive — hover-invisible on dark. */
+.df2-app .df2-label {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-connection-form {
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
 }

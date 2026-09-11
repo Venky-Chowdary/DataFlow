@@ -723,7 +723,7 @@ body {
   background: none;
   font-size: 14px;
   font-weight: 500;
-  color: #64748b;
+  color: var(--df-seg-ink);
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 0.12s, border-color 0.12s;
@@ -732,8 +732,8 @@ body {
 .df2-tab:hover { color: var(--df-text-primary); }
 
 .df2-tab.active {
-  color: #0f766e;
-  border-bottom-color: #0f766e;
+  color: var(--df-seg-ink-active);
+  border-bottom-color: var(--df-brand);
   font-weight: 600;
 }
 
@@ -1509,7 +1509,7 @@ body {
 .df2-label {
   font-size: 13px;
   font-weight: 500;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-input,
@@ -5000,7 +5000,7 @@ body {
   padding: 5px;
   border: 1px solid var(--df-line);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--df-seg-track);
 }
 
 .df2-tab {
@@ -5012,10 +5012,10 @@ body {
 }
 
 .df2-tab.active {
-  color: #0f766e;
+  color: var(--df-seg-ink-active);
   background: var(--df-surface);
   border-bottom-color: transparent;
-  box-shadow: inset 0 0 0 1px #b7ebe2;
+  box-shadow: inset 0 0 0 1px var(--df-brand);
 }
 
 .df2-table th {
@@ -6077,7 +6077,7 @@ html,
 }
 
 .df2-label {
-  color: #3d463f;
+  color: var(--df-text-secondary);
   font-weight: 600;
 }
 
