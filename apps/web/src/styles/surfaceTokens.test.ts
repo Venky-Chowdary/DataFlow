@@ -1211,6 +1211,8 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-preflight\.is-compact \.df2-preflight-step-title \{[\s\S]{0,80}color: #0f172a/);
     assert.match(ui, /\.df2-preflight\.is-compact \.df2-preflight-step\.running \{[\s\S]{0,80}--df-info-bg/);
     assert.doesNotMatch(ui, /\.df2-preflight\.is-compact \.df2-preflight-step\.running \{[\s\S]{0,80}#f0f9ff/);
+    assert.match(ui, /\.df2-toolbar-gitops-toggle \{[\s\S]{0,280}--df-text-secondary/);
+    assert.doesNotMatch(ui, /\.df2-toolbar-gitops-toggle \{[\s\S]{0,280}color: #475569/);
     assert.match(ui, /\.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,80}--df-text-primary/);
     assert.doesNotMatch(ui, /\.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,80}color: #0f172a/);
     assert.match(ui, /\.df2-theater-v3-progress-copy h3 \{[\s\S]{0,80}--df-text-primary/);

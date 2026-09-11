@@ -3646,7 +3646,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-md, 8px);
   background: var(--df-surface);
-  color: #475569;
+  color: var(--df-text-secondary);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -13590,6 +13590,10 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-run-readiness-route,
 .df2-app .df2-toolbar-gitops-toggle:hover {
   color: var(--df-text-primary);
+}
+
+.df2-app .df2-toolbar-gitops-toggle {
+  color: var(--df-text-secondary);
 }
 
 .df2-app .df2-gate8-proof-lede,
