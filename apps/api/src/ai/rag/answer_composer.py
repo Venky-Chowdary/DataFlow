@@ -171,10 +171,34 @@ def split_sentences(text: str, section_title: str = "") -> list[str]:
     return [sentence for sentence, _ in _split_annotated(text, section_title)]
 
 
-def _section_bonus(ask: str, section_title: str) -> float:
+# The direct test for the shape an ask wants, where one exists. A section
+# heading only says what sentences there *tend* to be.
+_ASK_SHAPE_TEST: dict[str, re.Pattern[str]] = {
+    "definition": _DEFINITIONAL,
+    "procedure": _IMPERATIVE,
+}
+
+
+def _section_bonus(ask: str, section_title: str, sentence: str) -> float:
+    """Credit a section gives its sentences, withheld when the sentence disagrees.
+
+    Both this and ``_shape_bonus`` estimate "is this the kind of sentence the
+    question asked for", and when they disagree the sentence's own shape is
+    evidence while the heading is only a container. Asked "what is quarantine",
+    the FAQ card titled "What is quarantine?" handed its full definition credit
+    to "Open Operations → Jobs → Quarantine on the run", and the answer opened
+    with a navigation instruction instead of the definition one section over.
+
+    Negative weights stay unconditional: they say the container is wrong for
+    this ask, which the sentence cannot argue with.
+    """
     title = (section_title or "").strip().lower()
+    shape = _ASK_SHAPE_TEST.get(ask)
+    fits = shape.match(sentence) is not None if shape else True
     return sum(
-        weight for needle, weight in _ASK_SECTION_BONUS.get(ask, ()) if needle in title
+        weight
+        for needle, weight in _ASK_SECTION_BONUS.get(ask, ())
+        if needle in title and (weight < 0 or fits)
     )
 
 
@@ -239,7 +263,7 @@ def build_candidates(
                 score = (
                     match * _length_norm(len(terms))
                     + listed_credit
-                    + _section_bonus(analysis.ask, section_title)
+                    + _section_bonus(analysis.ask, section_title, sentence)
                     + _shape_bonus(analysis.ask, sentence)
                     + 0.8 * rank_prior
                 )
