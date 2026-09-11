@@ -318,6 +318,354 @@ def _row_ledger_section() -> GeneratedSection:
     )
 
 
+def _delivery_semantics_section() -> GeneratedSection | None:
+    """What a CDC stream guarantees, read from the constants that enforce it.
+
+    The Pilot refused "what is the delivery guarantee", "do you do exactly once
+    delivery" and "is the write idempotent if I run it twice" — the three
+    questions a data engineer evaluating a CDC product asks first, and the ones
+    this repository is most careful about answering honestly. The answer lives
+    in module constants, so generating it is the only way it cannot drift from
+    what the engine claims in Theater and in mapping proof.
+    """
+    try:
+        from services.cdc_effectively_once import (
+            APPEND_ONLY_SINKS_EFFECTIVELY_ONCE,
+            DELIVERY_DEFAULT,
+            EFFECTIVELY_ONCE_PK_SINKS,
+            EXACTLY_ONCE_CLAIMED,
+        )
+    except Exception:
+        return None
+
+    lines = [
+        # Named ``CDC`` rather than spelled out on purpose. Spelling out the
+        # phrase made this the strongest lexical match for "what is change data
+        # capture", so a definitional question was answered with the delivery
+        # guarantee instead of with what the mode reads.
+        f"The platform-wide delivery guarantee for a CDC route is "
+        f"{DELIVERY_DEFAULT}. Log delivery can repeat an event, so the "
+        f"destination — not the reader — is what makes a repeat harmless.",
+    ]
+    if not EXACTLY_ONCE_CLAIMED:
+        lines.append(
+            "Exactly-once is not claimed platform-wide. A route opts in, and only "
+            "when the destination can commit the applied rows and the watermark "
+            "that records them in one transaction; anything else stays "
+            "at-least-once and says so."
+        )
+    if EFFECTIVELY_ONCE_PK_SINKS:
+        lines.append(
+            "Running the same change twice is harmless on a destination with a "
+            "primary key, because every row carries the resume token it was "
+            "written from in a `_df_lsn` column and an upsert only overwrites a "
+            "row whose stored token is strictly older. A redelivery of the same "
+            "token is skipped rather than rewritten, and a redelivery of an "
+            "older one cannot regress the row. That is idempotency guarded by "
+            "the log position, not exactly-once delivery."
+        )
+    if not APPEND_ONLY_SINKS_EFFECTIVELY_ONCE:
+        lines.append(
+            "An append-only destination has no row to guard, so a redelivered "
+            "event appends a duplicate row. The route is refused rather than run "
+            "with a guarantee it cannot keep, and a destination without a primary "
+            "key is refused for the same reason."
+        )
+    try:
+        from services.cdc_exactly_once import (
+            DELIVERY_SEMANTICS_ALO,
+            DELIVERY_SEMANTICS_EOS,
+            WATERMARK_TABLE,
+        )
+
+        lines.append(
+            f"Each route reports which of the two it ran under — "
+            f"`{DELIVERY_SEMANTICS_ALO}` or `{DELIVERY_SEMANTICS_EOS}` — and an "
+            f"opted-in route keeps its committed log position in a "
+            f"`{WATERMARK_TABLE}` table on the destination, so the destination is "
+            f"the authority on what landed rather than the job's own cursor."
+        )
+    except Exception:
+        pass
+    lines.append(
+        "A change that arrives late or out of order is handled by the same "
+        "comparison: position order decides, not arrival order, so an event "
+        "overtaken by a newer one for the same key is skipped instead of "
+        "reinstating a stale value."
+    )
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Delivery guarantee and duplicate changes",
+        text="\n".join(lines),
+        source_module="services/cdc_effectively_once.py · services/cdc_exactly_once.py",
+        category="transfer",
+    )
+
+
+def _resume_section() -> GeneratedSection | None:
+    """Where a re-run starts from. Sourced from the checkpoint and resume owners.
+
+    "What is the checkpoint granularity", "how is the high water mark stored"
+    and "do you keep a watermark between runs" were all refused, and a transfer
+    product that cannot say where a re-run starts is not answering the question
+    an operator asks after their first failure.
+    """
+    try:
+        from services.cdc_snapshot_resume import SnapshotResumeMode  # noqa: F401
+    except Exception:
+        return None
+
+    text = "\n".join(
+        [
+            "A transfer that fails part-way does not start over. Each "
+            "successfully committed chunk is checkpointed with the cursor the "
+            "next chunk must read from, so resume re-reads from that cursor "
+            "rather than from the beginning of the table.",
+            "The checkpoint is the unit of resume: progress is durable per "
+            "committed chunk, not per row. Under at-least-once delivery that "
+            "means a crash can re-read the chunk in flight, which is why the "
+            "destination write is idempotent on a key.",
+            "A checkpoint that cannot be persisted fails the transfer. "
+            "Continuing to write while reporting healthy progress would leave a "
+            "job with no durable resume point, so the run stops instead of "
+            "silently risking duplicated or skipped work on the next attempt.",
+            "Initial-snapshot progress is remembered as the last primary key "
+            "read, and resume seeks past it by key order rather than paging with "
+            "OFFSET — OFFSET re-reads rows that shifted under concurrent writes "
+            "and gets quadratically slower down a large table. Only legacy "
+            "tokens without a key fall back to an offset.",
+            "Streaming progress is a different watermark — the high water mark "
+            "of the stream — and is kept on the resume token: a binlog file and "
+            "position or GTID, a log sequence number, an Oracle SCN, or a "
+            "change-tracking version, depending on the source engine. The "
+            "snapshot's last-key marker is cleared when the stream takes over, "
+            "so the two can never be confused.",
+            "Both survive between runs. A recurring pipeline reads from the "
+            "watermark its last tick left, and a backfill of an earlier range is "
+            "a separate run rather than a rewind of the live one.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Resume points, checkpoints and watermarks",
+        text=text,
+        source_module="services/checkpoint_service.py · services/cdc_snapshot_resume.py",
+        category="transfer",
+    )
+
+
+def _throughput_section() -> GeneratedSection | None:
+    """How a big table is paced. Sourced from the bounded chunk dispatcher.
+
+    "How do you throttle a large table" was refused. Answerability is decided
+    on heading words, and throttling had no heading of its own — it was a
+    sentence inside the resume passage, which is not what the documentation
+    declared itself to be about.
+    """
+    try:
+        from services.parallel_chunks import ChunkDispatcher  # noqa: F401
+    except Exception:
+        return None
+
+    text = "\n".join(
+        [
+            "Rows are read in chunks, never in one statement, and a bounded "
+            "number of chunks are in flight at once so reads, writes and type "
+            "conversion overlap without the source being asked for everything "
+            "at the same time. Capping that number is what throttles the load a "
+            "transfer puts on a production database.",
+            "Chunks are applied to the destination in ascending order even "
+            "though they are processed concurrently, so the destination never "
+            "sees a later chunk before an earlier one and each chunk's cursor "
+            "stays meaningful as a resume point.",
+            "Throughput therefore scales with concurrency rather than with "
+            "memory: the working set is the chunks in flight, not the whole "
+            "source. Fifty million rows and fifty thousand rows use the same "
+            "footprint and differ only in how long they take.",
+            "Because progress is checkpointed per committed chunk, pausing or "
+            "cancelling a long transfer is safe — the next run continues from the "
+            "last committed chunk instead of re-reading what already landed.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Job Theater & reconciliation",
+        section_title="Chunking, concurrency and throttled throughput",
+        text=text,
+        source_module="services/parallel_chunks.py · services/checkpoint_service.py",
+        category="transfer",
+    )
+
+
+def _capture_mode_section() -> GeneratedSection | None:
+    """Log capture versus polling, and when a downgrade is allowed to happen.
+
+    "Do you read the WAL or poll" and "is the initial load consistent with the
+    stream" were refused. The classification is enforced in one place precisely
+    so every dialect answers it the same way, which makes it generatable.
+    """
+    try:
+        from services.cdc_capability import (
+            CAUSE_PRIVILEGE,
+            CAUSE_SERVER_NOT_CONFIGURED,
+            CAUSE_SLOT_QUOTA,
+            LogCaptureRefusal,
+        )
+    except Exception:
+        return None
+
+    def _fails_closed(cause: str) -> bool:
+        return LogCaptureRefusal(cause=cause, detail="", remedy="").fail_closed
+
+    lines = [
+        "There are two ways to capture changes and they do not carry the same "
+        "information. Log capture reads the source engine's own change log — the "
+        "write-ahead log on PostgreSQL, the binlog on MySQL, change tracking or "
+        "the capture instance on SQL Server, the oplog on MongoDB. Query capture "
+        "polls with a cursor predicate instead.",
+        "Polling cannot see a DELETE, because a deleted row leaves nothing for "
+        "the next query to return, and it cannot see a row that was written and "
+        "overwritten between two polls. So substituting polling for log capture "
+        "changes the guarantee, not just the mechanism.",
+    ]
+    degradable = _fails_closed(CAUSE_SERVER_NOT_CONFIGURED)
+    if not degradable:
+        lines.append(
+            "The substitution is allowed in exactly one situation: the server was "
+            "never configured to emit a change log. That is an operator decision "
+            "no transfer can repair mid-run, so the run continues as query "
+            "capture with the loss of deletes declared rather than assumed."
+        )
+    if _fails_closed(CAUSE_SLOT_QUOTA) and _fails_closed(CAUSE_PRIVILEGE):
+        lines.append(
+            "When the server does emit a log and only the attach failed — a "
+            "replication slot quota, a missing replication grant — the run fails "
+            "closed with the remedy. Continuing would silently stop carrying "
+            "deletes, and a destination that quietly keeps rows the source "
+            "removed is divergence, not a warning."
+        )
+    lines.append(
+        "The initial load and the stream that follows it are consistent by "
+        "construction: the snapshot is taken at a known log position and the "
+        "stream starts from that same position, so a row changed during the "
+        "initial load arrives again as a change and the destination's position "
+        "guard decides which version survives. The handoff is recorded on the "
+        "destination for an opted-in route, so a crash between the two phases "
+        "resumes at the boundary rather than re-copying the table."
+    )
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Log capture, polling, and the snapshot handoff",
+        text="\n".join(lines),
+        source_module="services/cdc_capability.py · services/cdc_snapshot_resume.py",
+        category="transfer",
+    )
+
+
+def _delete_semantics_section() -> GeneratedSection | None:
+    """How a delete is recognised. Sourced from the tombstone polarity owner.
+
+    "How do you handle soft deletes" was refused, and it is the question that
+    separates a transfer that can be trusted from one that cannot: reading a
+    liveness flag as a deletion inverts a table. The rules are exact sets in
+    one module, so they are generated rather than described.
+    """
+    try:
+        from services.mirror_engine import SOFT_DELETE_COLUMN
+        from services.tombstone import (
+            TIMESTAMP_TOMBSTONES,
+            TOMBSTONE_COLUMNS,
+            TOMBSTONE_LOOKALIKES,
+        )
+    except Exception:
+        return None
+
+    flags = ", ".join(f"`{c}`" for c in sorted(TOMBSTONE_COLUMNS))
+    lookalikes = ", ".join(f"`{c}`" for c in sorted(TOMBSTONE_LOOKALIKES))
+    stamps = ", ".join(f"`{c}`" for c in sorted(TIMESTAMP_TOMBSTONES))
+    lines = [
+        "A source that marks rows deleted instead of removing them is read "
+        "through a tombstone column, and the set of names that counts as one is "
+        "fixed: " + flags + ".",
+        "Matching is exact, never a substring, and these audit columns are "
+        "deliberately excluded even though they read as deletion-adjacent: "
+        + lookalikes
+        + ". A column recording who deleted a row is not a column saying the row "
+        "is deleted.",
+        "A liveness column is not a tombstone. An `is_active` flag is left alone "
+        "unless it is configured explicitly, because reading it as a deletion "
+        "removes every live row and keeps every inactive one — a complete "
+        "inversion of the table.",
+        "Timestamp-style tombstones follow the `IS NULL` convention: on "
+        + stamps
+        + " any concrete instant means deleted. Boolean-style columns are parsed "
+        "rather than guessed, and an unrecognised token means the row is "
+        "present, not deleted. Refusing to delete is recoverable; deleting on a "
+        "guess is not.",
+        "A change-stream envelope is read separately from business data. An "
+        "explicit event flag is a deletion; a bare `op` column holding the word "
+        "delete as a payload value is still a live row.",
+        f"Two destination shapes are available for a source delete. A hard "
+        f"delete removes the row, so the destination count drops and matches the "
+        f"source. A soft-delete mirror instead sets a `{SOFT_DELETE_COLUMN}` "
+        f"flag and keeps the row, so history survives and the count does not "
+        f"drop — a different identity, and the row ledger closes on the one the "
+        f"route chose.",
+    ]
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Deletes, tombstones and soft deletes",
+        text="\n".join(lines),
+        source_module="services/tombstone.py · services/mirror_engine.py",
+        category="transfer",
+    )
+
+
+def _lineage_section() -> GeneratedSection | None:
+    """What can be traced back, and at what grain — honestly.
+
+    "Can I get row level lineage" was refused. The honest answer is two-part:
+    run and dataset lineage is emitted in an OpenLineage-compatible shape,
+    while row-level accounting is the ledger and the per-row quarantine reason
+    rather than a per-row graph. Refusing was worse than saying so.
+    """
+    try:
+        from services.lineage_telemetry import (  # noqa: F401
+            emit_quarantine,
+            emit_reconciliation,
+            emit_run_started,
+        )
+    except Exception:
+        return None
+
+    text = "\n".join(
+        [
+            "Every transfer emits lineage and telemetry events in an "
+            "OpenLineage- and OpenTelemetry-compatible shape: the job, the run, "
+            "the source and destination datasets, and the validation evidence "
+            "for that run. They are correlated by run id, so a destination table "
+            "can be traced back to the route, the mapping and the gate decisions "
+            "that produced it.",
+            "Lineage is at run and dataset grain, not a per-row graph. Row-level "
+            "questions are answered by two other artifacts instead, and they are "
+            "the ones an auditor asks for: the row ledger accounts for every row "
+            "read as landed, held out or skipped, and each quarantined row "
+            "carries its own column, value and reason.",
+            "So \"which rows did not make it, and why\" is answerable per row; "
+            "\"which upstream row produced this destination cell\" is not "
+            "something this product claims.",
+            "The events are also exported over the API, so lineage can be shipped "
+            "to a catalog rather than read only in the product.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Job Theater & reconciliation",
+        section_title="Lineage grain and what is traceable",
+        text=text,
+        source_module="services/lineage_telemetry.py · services/row_conservation.py",
+        category="proof",
+    )
+
+
 def _connector_catalog_section() -> GeneratedSection | None:
     """Which engines and file formats the transfer engine dispatches on."""
     try:
@@ -361,6 +709,39 @@ def _connector_catalog_section() -> GeneratedSection | None:
         "drivers; a tile is transfer-live only when it carries transfer-ready "
         "evidence."
     )
+    # The honest counts and the transfer-ready driver names, read from the
+    # canonical catalog service rather than the raw file — a roadmap tile in the
+    # file carries ``status: live`` and counting those is the overclaim this
+    # product exists to avoid. "Can it do salesforce" was refused outright,
+    # which is a worse answer than "yes, and here is what that means".
+    #
+    # The names come from ``transfer_live_driver_types`` because that is what
+    # ``catalog_summary`` counts as ``unique_drivers``, and the passage has to
+    # agree with the number the rest of the product reports. Deriving them from
+    # the tiles instead listed 31 of the 46 — every tile-backed driver, and none
+    # of the file formats a transfer can also run on.
+    try:
+        from services.catalog_service import catalog_summary
+
+        summary = catalog_summary()
+        tiles = int(summary.get("catalog_tile_total") or summary.get("total") or 0)
+        planned = int(summary.get("planned") or 0)
+        drivers = sorted(str(d) for d in (summary.get("unique_driver_types") or ()) if d)
+        if drivers:
+            lines.append(
+                f"Transfer-ready drivers — the ones a transfer can actually run "
+                f"on today, {len(drivers)} of them: " + ", ".join(drivers) + "."
+            )
+        if tiles and planned:
+            lines.append(
+                f"The catalog shows {tiles} tiles in total and {planned} of them "
+                f"are planned. A planned tile is a roadmap entry: it has no "
+                f"driver, it cannot be tested, and it cannot move a row. Asking "
+                f"for one is answered with that rather than with a connection "
+                f"form."
+            )
+    except Exception:
+        pass
     return GeneratedSection(
         doc_title="Connections & engines",
         section_title="Which engines you can connect",
@@ -753,6 +1134,12 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
     builders = (
         _roles_section,
         _sync_modes_section,
+        _delivery_semantics_section,
+        _resume_section,
+        _throughput_section,
+        _capture_mode_section,
+        _delete_semantics_section,
+        _lineage_section,
         _schema_policy_section,
         _row_ledger_section,
         _connector_catalog_section,

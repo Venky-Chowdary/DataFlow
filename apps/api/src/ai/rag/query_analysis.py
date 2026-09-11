@@ -352,6 +352,28 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
                 r"|\bhalf(?:\s|-)?(?:way\s+through|finished|written)\b", re.I),
      ("resume", "checkpoint", "partial", "retry")),
     (re.compile(r"\bget\s+started\b", re.I), ("first", "transfer", "studio", "guide")),
+    # Operator vocabulary for subjects the documentation spells differently.
+    # Each of these was refused outright: answerability is decided on whether
+    # the question names something the docs have a heading about, and "high
+    # water mark" shares no term with "Resume points, checkpoints and
+    # watermarks" once it is tokenized into three words.
+    (re.compile(r"\bhigh[\s-]?water[\s-]?marks?\b|\bhighwater\b", re.I),
+     ("watermark", "resume", "checkpoint", "cursor")),
+    (re.compile(r"\b(?:initial|first|inital)\s+(?:load|snapshot|sync|dump)\b"
+                r"|\bbackfill\s+(?:then|before)\s+stream\b", re.I),
+     ("snapshot", "handoff", "capture", "stream")),
+    # "Blast radius" is how a platform engineer asks what a failure takes down
+    # with it; the documentation answers in terms of the gate that blocked and
+    # the tick that failed.
+    (re.compile(r"\bblast\s+radius\b|\bhow\s+bad\s+is\s+it\s+if\b"
+                r"|\bwhat\s+(?:else\s+)?breaks\b", re.I),
+     ("fail", "gate", "block", "tick")),
+    (re.compile(r"\b(?:write|writing|know|need)\s+sql\b|\bno[\s-]?code\b"
+                r"|\bhand[\s-]?written\s+sql\b", re.I),
+     ("playground", "query", "studio", "mapping")),
+    (re.compile(r"\bthrottl\w*\b|\bback[\s-]?pressure\b|\brate[\s-]?limit\w*\b"
+                r"|\btoo\s+much\s+load\b", re.I),
+     ("throttle", "chunk", "concurrency", "throughput")),
 )
 
 

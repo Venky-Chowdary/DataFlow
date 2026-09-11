@@ -64,6 +64,10 @@ PARTIAL_FLOOR = 0.34
 #: is a ``snake_case`` identifier — it is covered and nothing changes.
 _MIN_OBJECT_NAME_LEN = 5
 
+#: Shortest catalog identifier worth admitting as a subject. Below this they are
+#: acronyms that collide with ordinary words (``ai``, ``box``, ``sap``).
+_MIN_CATALOG_TERM_LEN = 5
+
 # Heading words that name no subject. A heading term is the strongest available
 # signal that the documentation is *about* something, but headings also contain
 # ordinary English. Without this subtraction "write me a poem" anchors on
@@ -141,6 +145,39 @@ def subject_aliases() -> frozenset[str]:
 
         for logical in set(CANONICAL_TYPES.values()):
             extra.update(content_terms(logical.replace("_", " ")))
+    except Exception:
+        pass
+    try:
+        # The engine and format names the transfer engine dispatches on. An
+        # operator's first question is almost always "can it do <my system>",
+        # and the catalog is the product's own enum for that: the generated
+        # catalog passage lists every one of these, but they appear in its body
+        # and its heading is "Which engines you can connect", so "can it do
+        # salesforce" was read as off-subject and refused.
+        import registry
+
+        for group in ("DATABASE_TYPES", "FILE_FORMATS"):
+            for item in getattr(registry, group, ()) or ():
+                name = str(getattr(item, "value", item))
+                extra.update(content_terms(name.replace("_", " ")))
+                extra.add(normalize(name))
+    except Exception:
+        pass
+    try:
+        # Every catalog tile, so "can it do <system>" is answerable for all of
+        # them — including the roadmap ones, where the honest answer is that a
+        # tile is not a transfer-ready driver. Identifiers only: a tile's
+        # display name can be an ordinary English word ("Close", "Front",
+        # "Monday"), and admitting those would make off-subject questions look
+        # like product questions.
+        from services.catalog_service import enriched_connectors
+
+        for tile in enriched_connectors():
+            for key in ("id", "driver_type"):
+                value = str(tile.get(key) or "").strip().lower()
+                if len(value) >= _MIN_CATALOG_TERM_LEN:
+                    extra.update(content_terms(value.replace("_", " ")))
+                    extra.add(normalize(value))
     except Exception:
         pass
     try:
