@@ -1621,4 +1621,26 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
       /\.df2-app \.df2-pilot-v2 \.df2-pilot-categories button\.is-active \{[\s\S]{0,80}--df-brand-muted/,
     );
   });
+
+  it("Status-pill and connector-badge leftover paper follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-status-metric-pill \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-status-metric-pill \{[\s\S]{0,200}background: #f1f5f9/);
+    assert.match(ui, /\.df2-status-metric-pill\.ok \{[\s\S]{0,80}--df-success/);
+    assert.match(ui, /\.df2-status-metric-pill\.live \{[\s\S]{0,80}--df-brand-strong/);
+    assert.doesNotMatch(ui, /\.df2-status-metric-pill\.live \{[\s\S]{0,80}#0f766e/);
+    assert.match(ui, /\.df2-connectors-list \.df2-badge-live \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(ui, /\.df2-connectors-list \.df2-badge-live \{[\s\S]{0,80}#ecfdf5/);
+    assert.match(ui, /\.df2-connectors-list \.df2-badge-error \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-connectors-list \.df2-badge-muted \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-connectors-list \.df2-badge-muted \{[\s\S]{0,80}#f1f5f9/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-status-metric-pill \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-status-metric-pill\.live \{[\s\S]{0,80}--df-brand-strong/);
+    assert.match(ui, /\.df2-app \.df2-connectors-list \.df2-badge-muted \{[\s\S]{0,80}--df-surface-muted/);
+  });
 });
