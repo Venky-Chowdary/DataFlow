@@ -972,6 +972,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(tokens, /--df-surface-sunken:\s*var\(--df-surface-muted\)/);
     assert.match(tokens, /--df-navy-700:\s*var\(--df-text-secondary\)/);
 
+    assert.match(ui, /\.df2-contract-row \{\s*\n\s*min-height:[\s\S]{0,280}--df-surface/);
     assert.match(ui, /\.df2-contract-row-name \{[\s\S]{0,160}--df-text-primary/);
     assert.doesNotMatch(ui, /\.df2-contract-row-name \{[\s\S]{0,160}color: #0f172a/);
     assert.match(ui, /\.df2-contract-rows-head \{[\s\S]{0,280}--df-text-tertiary/);

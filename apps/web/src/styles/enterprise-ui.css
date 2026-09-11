@@ -2554,6 +2554,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background 140ms ease;
@@ -10946,6 +10948,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background 140ms ease;
@@ -13233,6 +13237,26 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /* List-row titles + column heads — leftover navy / paper made them vanish in dark. */
+.df2-app :is(
+  .df2-contract-row,
+  .df2-pipeline-row,
+  .df2-connector-row
+) {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df2-app :is(
+  .df2-contract-row.selected,
+  .df2-contract-row[aria-current="true"],
+  .df2-pipeline-row.selected,
+  .df2-pipeline-row[aria-current="true"],
+  .df2-connector-row.selected,
+  .df2-connector-row[aria-current="true"]
+) {
+  background: var(--df-brand-muted);
+}
+
 .df2-app :is(
   .df2-contract-row-name,
   .df2-pipeline-row-name,

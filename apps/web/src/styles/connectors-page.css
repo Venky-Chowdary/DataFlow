@@ -60,6 +60,8 @@
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   cursor: pointer;
   box-sizing: border-box;
   transition: background var(--df-dur-fast, 140ms) ease;
