@@ -2200,4 +2200,23 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}--df-danger-bg/);
     assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-pending \{[\s\S]{0,80}--df-warning/);
   });
+
+  it("Validate leftover paper callable and result-stat follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-callable \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-callable \{[\s\S]{0,240}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-callable strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-result-stat \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-result-stat \{[\s\S]{0,80}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-callable \{[\s\S]{0,40}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-vd-callable strong,/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}--df-danger-bg/);
+  });
 });

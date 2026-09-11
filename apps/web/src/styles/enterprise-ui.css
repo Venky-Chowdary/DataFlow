@@ -14365,6 +14365,15 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-danger);
 }
 
+.df2-app .df2-vd-callable {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-vd-callable strong,
+.df2-app .df2-result-stat {
+  color: var(--df-text-primary);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
