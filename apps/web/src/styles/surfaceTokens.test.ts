@@ -2175,4 +2175,29 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-loading \{[\s\S]{0,80}--df-surface-muted/);
     assert.match(ui, /\.df2-app \.df2-run-launch-kicker \{[\s\S]{0,80}--df-brand-muted/);
   });
+
+  it("Source leftover paper stream chips follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-source-stream-chips li \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-source-stream-chips li \{[\s\S]{0,240}background: #f1f5f9/);
+    assert.match(studio, /\.df2-source-stream-chips li \{[\s\S]{0,280}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-source-stream-chips li \{[\s\S]{0,280}color: #0f172a/);
+    assert.match(studio, /\.df2-source-stream-chips li\.is-primary \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-source-stream-chips li\.is-primary \{[\s\S]{0,80}background: #ccfbf1/);
+    assert.match(studio, /\.df2-source-stream-chips li\.is-ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-source-stream-chips li\.is-ok \{[\s\S]{0,80}background: #dcfce7/);
+    assert.match(studio, /\.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}--df-danger-bg/);
+    assert.doesNotMatch(studio, /\.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}background: #fee2e2/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-source-stream-chips li \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-primary \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}--df-danger-bg/);
+    assert.match(ui, /\.df2-app \.df2-dest-target-status\.is-pending \{[\s\S]{0,80}--df-warning/);
+  });
 });
