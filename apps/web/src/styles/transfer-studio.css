@@ -2135,17 +2135,17 @@ th.df2-type-decimal .df2-type-badge {
 .df2-structure-field-chip.df2-type-float .df2-type-badge,
 .df2-type-float .df2-type-badge,
 th.df2-type-float .df2-type-badge {
-  background: #ecfeff;
-  color: #0e7490;
-  border-color: #a5f3fc;
+  background: var(--df-info-bg);
+  color: var(--df-info);
+  border-color: var(--df-info-border);
 }
 
 .df2-structure-field-chip.df2-type-bool .df2-type-badge,
 .df2-type-bool .df2-type-badge,
 th.df2-type-bool .df2-type-badge {
-  background: #fdf2f8;
-  color: #9d174d;
-  border-color: #fbcfe8;
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+  border-color: var(--df-warning-border);
 }
 
 .df2-structure-field-chip.df2-type-temporal .df2-type-badge,
@@ -2160,8 +2160,8 @@ th.df2-type-temporal .df2-type-badge {
 .df2-type-json .df2-type-badge,
 th.df2-type-json .df2-type-badge {
   background: var(--df-brand-muted);
-  color: #5b21b6;
-  border-color: #ddd6fe;
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
 }
 
 .df2-structure-field-chip.df2-type-spatial .df2-type-badge,
