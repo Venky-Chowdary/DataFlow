@@ -3371,8 +3371,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-pilot-v2 .df2-pilot-categories .df2-tab.is-active,
 .df2-pilot-v2 .df2-pilot-categories button[aria-selected="true"],
 .df2-pilot-v2 .df2-pilot-categories button.is-active {
-  background: #f0fdfa !important;
-  color: #0f766e;
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong);
 }
 
 .df2-pilot-v2 .df2-pilot-main-inner {
@@ -13926,4 +13926,12 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 .df2-app .df2-toolbar-status::before {
   background: var(--df-brand);
+}
+
+/* Pilot leftover mint on active category tabs. */
+.df2-app .df2-pilot-v2 .df2-pilot-categories .df2-tab.is-active,
+.df2-app .df2-pilot-v2 .df2-pilot-categories button[aria-selected="true"],
+.df2-app .df2-pilot-v2 .df2-pilot-categories button.is-active {
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong);
 }
