@@ -2314,4 +2314,60 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app th\.df2-type-json \.df2-type-badge \{[\s\S]{0,40}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Studio leftover paper mint indigo fills follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-map-dialog-banner \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-map-dialog-banner \{[\s\S]{0,200}background: #f0fdfa/);
+    assert.match(studio, /\.df2-dest-step \.df2-append-hint \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-dest-step \.df2-append-hint \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.match(studio, /\.df2-result-explain \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-result-explain \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.match(studio, /\.df2-source-step \.df2-structure-table thead th \{[\s\S]{0,120}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-source-step \.df2-structure-table thead th \{[\s\S]{0,120}background: #f8fafc/);
+    assert.match(studio, /\.df2-object-combobox-toggle:hover:not\(:disabled\) \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-object-combobox-toggle:hover:not\(:disabled\) \{[\s\S]{0,80}background: #f0fdfa/);
+    assert.match(studio, /\.df2-map-band-chip\.is-ready \{[\s\S]{0,80}--df-info-bg/);
+    assert.doesNotMatch(studio, /\.df2-map-band-chip\.is-ready \{[\s\S]{0,80}background: #eff6ff/);
+    assert.match(studio, /\.df2-map-band-chip\.is-safe \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-map-band-chip\.is-safe \{[\s\S]{0,80}background: #ecfdf5/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-map-dialog-banner \{/);
+    assert.match(ui, /\.df2-app \.df2-dest-step \.df2-append-hint,/);
+    assert.match(ui, /\.df2-app \.df2-result-explain,/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+  });
+
+  it("Studio leftover launch theater and validate fills follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-run-launch-stage\.done \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-run-launch-stage\.done \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.match(studio, /\.df2-run-launch-stage\.active \{[\s\S]{0,160}--df-info-bg/);
+    assert.doesNotMatch(studio, /\.df2-run-launch-stage\.active \{[\s\S]{0,160}background: #eff6ff/);
+    assert.match(studio, /\.df2-theater-v3-live-pill\.is-live \{[\s\S]{0,160}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-live-pill\.is-live \{[\s\S]{0,160}background: #f0fdfa/);
+    assert.match(studio, /\.df2-theater-v3-live-pill\.is-done \{[\s\S]{0,160}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-live-pill\.is-done \{[\s\S]{0,160}background: #ecfdf5/);
+    assert.match(studio, /\.df2-vd-cell-preview\.is-info \{[\s\S]{0,80}--df-info-bg/);
+    assert.doesNotMatch(studio, /\.df2-vd-cell-preview\.is-info \{[\s\S]{0,80}background: #eff6ff/);
+    assert.match(studio, /\.df2-vd-recon \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-recon \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-proof-chip \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-proof-chip \{[\s\S]{0,200}background: #f8fafc/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-run-launch-stage\.done,/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-live-pill\.is-live,/);
+    assert.match(ui, /\.df2-app \.df2-vd-cell-preview\.is-info,/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
