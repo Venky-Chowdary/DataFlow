@@ -1684,7 +1684,7 @@ body {
 
 .df2-brand-name,
 .df2-breadcrumb strong {
-  color: #0f172a !important;
+  color: var(--df-text-primary) !important;
 }
 
 /* ─── Tables & cells ─── */
@@ -1696,7 +1696,7 @@ body {
 
 .df2-cell-meta,
 .df2-muted {
-  color: #64748b !important;
+  color: var(--df-text-muted) !important;
 }
 
 /* ─── Wizard & upload zones ─── */

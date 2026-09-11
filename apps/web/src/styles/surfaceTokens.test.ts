@@ -1007,4 +1007,35 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
       /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-drawer \.df2-btn:not\(\.df2-btn-primary\):not\(\.df2-btn-danger\),/,
     );
   });
+
+  it("Modals, Schedules editor, empty-state, and brand chrome follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const platform = sheet("enterprise-platform.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-modal-footer \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-modal-footer \{[\s\S]{0,200}background: #fafbfc/);
+    assert.match(ui, /\.df2-empty-state \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-empty-state \{[\s\S]{0,160}background: #fafbfc/);
+    assert.match(ui, /\.df2-jobs-v3-phase-pill \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-jobs-v3-phase-pill \{[\s\S]{0,240}background: #fafbfc/);
+    assert.match(ui, /\.df2-jobs-v3-alert \{[\s\S]{0,240}--df-surface-muted/);
+    assert.match(ui, /\.df2-sched-panel-head strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-sched-panel-head strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-sched-nextrun strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(ui, /\.df2-sched-switch-row strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(ui, /\.df2-sched-run-error p\.df2-sched-run-fix \{[\s\S]{0,80}--df-text-primary/);
+
+    assert.match(platform, /\.df2-brand-name,[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(platform, /\.df2-brand-name,[\s\S]{0,80}#0f172a/);
+    assert.match(dataflow, /\.df2-brand-name \{[\s\S]{0,120}--df-text-primary/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal-footer,/);
+    assert.match(ui, /\.df2-app \.df2-sched-panel-head strong,/);
+    assert.match(ui, /\.df2-app \.df2-empty-state,/);
+  });
 });

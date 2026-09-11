@@ -7485,7 +7485,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px;
   padding: 12px 20px 16px;
   border-top: 1px solid var(--df-border, #e6e9ee);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 @keyframes df2-modal-fade {
@@ -7824,7 +7824,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 12px;
   font-weight: 600;
   border: 1px solid var(--df-border, #e6e9ee);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   color: var(--df-text-secondary, #475569);
 }
 
@@ -7905,7 +7905,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-jobs-v3-quarantine .df2-quarantine-panel,
 .df2-theater-v3-quarantine .df2-quarantine-panel {
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-jobs-v3-quarantine .df2-quarantine-inspect,
@@ -7933,7 +7933,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 12px 14px;
   border-radius: 10px;
   border: 1px solid var(--df-border, #e6e9ee);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -8027,7 +8027,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-empty-state {
   border: 1px dashed var(--df-border-strong, #d4d9e0);
   border-radius: var(--df-radius-panel, 12px);
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-field-error-text {
@@ -10529,7 +10529,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-sched-panel-head strong {
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-sched-panel-head span {
@@ -10583,7 +10583,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 12.5px;
 }
 
-.df2-sched-nextrun strong { color: #0f172a; }
+.df2-sched-nextrun strong { color: var(--df-text-primary); }
 
 .df2-sched-preset-hint {
   margin: 8px 0 0;
@@ -10595,7 +10595,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
 }
 
 .df2-sched-sync-options {
@@ -10636,7 +10636,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px;
   margin-top: 8px;
   font-size: 12.5px;
-  color: #334155;
+  color: var(--df-text-secondary);
   cursor: pointer;
 }
 
@@ -10671,8 +10671,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 1px;
 }
 
-.df2-sched-switch-row strong { font-size: 13px; color: #0f172a; }
-.df2-sched-switch-row small { font-size: 11.5px; color: #64748b; }
+.df2-sched-switch-row strong { font-size: 13px; color: var(--df-text-primary); }
+.df2-sched-switch-row small { font-size: 11.5px; color: var(--df-text-muted); }
 
 /* Pipeline card — badges + inline history */
 .df2-pipe-card-badges {
@@ -10805,7 +10805,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-sched-run-error p.df2-sched-run-fix {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 500;
 }
 
@@ -13345,5 +13345,57 @@ html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-btn:not(.df2-btn-primary):not
 
 html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-btn-primary,
 html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-btn-primary {
+  color: #fff;
+}
+
+/* Schedules editor + empty + jobs chips — leftover navy / paper. */
+.df2-app .df2-sched-panel-head strong,
+.df2-app .df2-sched-nextrun strong,
+.df2-app .df2-sched-switch-row strong,
+.df2-app .df2-sched-run-error p.df2-sched-run-fix,
+.df2-app .df2-brand-name,
+.df2-app .df2-breadcrumb strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-empty-state,
+.df2-app .df2-jobs-v3-phase-pill,
+.df2-app .df2-jobs-v3-alert {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-jobs-v3-quarantine .df2-quarantine-panel,
+.df2-app .df2-theater-v3-quarantine .df2-quarantine-panel {
+  color: var(--df-text-primary);
+}
+
+/*
+ * Dialogs portal to <body>, same as drawers. Last-word cannot require .df2-app.
+ */
+html[data-theme="dark"]:has(.df2-app) .df2-modal,
+html.df2-theme-dark:has(.df2-app) .df2-modal {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal-title,
+html.df2-theme-dark:has(.df2-app) .df2-modal-title {
+  color: var(--df-text-primary);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal-footer,
+html.df2-theme-dark:has(.df2-app) .df2-modal-footer {
+  background: var(--df-surface-muted);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger),
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn:not(.df2-btn-primary):not(.df2-btn-danger) {
+  background: var(--df-surface-raised);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-btn-primary,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   color: #fff;
 }
