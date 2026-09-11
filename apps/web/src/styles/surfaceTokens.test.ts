@@ -1987,4 +1987,41 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-decision-path-steps li\.is-ready \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
   });
+
+  it("Validate leftover slate coerce and diff cells follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-chip\.is-static \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-chip\.is-static \{[\s\S]{0,80}background: #e2e8f0/);
+    assert.match(studio, /\.df2-vd-cell-preview-item \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-cell-preview-item \{[\s\S]{0,200}color: #334155/);
+    assert.match(studio, /\.df2-vd-xform-facts \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-xform-facts \{[\s\S]{0,160}color: #334155/);
+    assert.match(studio, /\.df2-vd-diff-table th \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-diff-table th \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-diff-table td \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-diff-table td \{[\s\S]{0,80}color: #334155/);
+    assert.match(studio, /\.df2-vd-diff-table \.df2-vd-diff-target \{[\s\S]{0,80}--df-brand-strong/);
+    assert.doesNotMatch(studio, /\.df2-vd-diff-table \.df2-vd-diff-target \{[\s\S]{0,80}color: #0f766e/);
+    assert.match(studio, /\.df2-vd-assist-narrative p \{[\s\S]{0,120}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-assist-narrative p \{[\s\S]{0,120}color: #334155/);
+    assert.match(studio, /\.df2-vd-coerce-table td \{[\s\S]{0,120}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce-table td \{[\s\S]{0,120}color: #334155/);
+    assert.match(studio, /\.df2-vd-coerce-types code \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce-types code \{[\s\S]{0,80}background: #f1f5f9/);
+    assert.match(studio, /\.df2-vd-coerce-fix \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce-fix \{[\s\S]{0,200}color: #334155/);
+    assert.match(studio, /\.df2-vd-coerce-samples td \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-coerce-samples td \{[\s\S]{0,80}color: #334155/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-xform-facts,/);
+    assert.match(ui, /\.df2-app \.df2-vd-chip\.is-static,/);
+    assert.match(ui, /\.df2-app \.df2-vd-diff-table \.df2-vd-diff-source \{[\s\S]{0,40}--df-warning/);
+    assert.match(ui, /\.df2-app \.df2-vd-diff-table \.df2-vd-diff-target \{[\s\S]{0,40}--df-brand-strong/);
+    assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
+  });
 });

@@ -14168,6 +14168,29 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-text-secondary);
 }
 
+.df2-app .df2-vd-xform-facts,
+.df2-app .df2-vd-cell-preview-item,
+.df2-app .df2-vd-assist-narrative p,
+.df2-app .df2-vd-coerce-fix,
+.df2-app .df2-vd-diff-table td {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-chip.is-static,
+.df2-app .df2-vd-diff-table th,
+.df2-app .df2-vd-coerce-types code {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-diff-table .df2-vd-diff-source {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-diff-table .df2-vd-diff-target {
+  color: var(--df-brand-strong);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
