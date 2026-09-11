@@ -2370,4 +2370,32 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-cell-preview\.is-info,/);
     assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Studio leftover brand slate ink and paper borders follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-map-step-head-compact \.is-ok \{[\s\S]{0,40}--df-success/);
+    assert.doesNotMatch(studio, /\.df2-map-step-head-compact \.is-ok \{[\s\S]{0,40}color: #0f766e/);
+    assert.match(studio, /\.df2-map-step-head-compact \.is-warn \{[\s\S]{0,40}--df-warning/);
+    assert.match(studio, /\.df2-vd-metric\.tone-approve \.df2-vd-metric-val \{[\s\S]{0,40}--df-success/);
+    assert.doesNotMatch(studio, /\.df2-vd-metric\.tone-approve \.df2-vd-metric-val \{[\s\S]{0,40}color: #0f766e/);
+    assert.match(studio, /\.df2-theater-v3-chunk \.dt-nav-icon \{[\s\S]{0,40}--df-brand-strong/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-chunk \.dt-nav-icon \{[\s\S]{0,40}color: #0f766e/);
+    assert.match(studio, /\.df2-theater-v2-log \{[\s\S]{0,200}--df-navy-900/);
+    assert.doesNotMatch(studio, /\.df2-theater-v2-log \{[\s\S]{0,200}background: #0f172a/);
+    assert.match(studio, /\.df2-live-log-head \{[\s\S]{0,200}--df-navy-900/);
+    assert.doesNotMatch(studio, /\.df2-live-log-head \{[\s\S]{0,200}background: #0f172a/);
+    assert.match(studio, /\.df2-result-banner\.success \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-result-banner\.success \{[\s\S]{0,80}#f0fdf4/);
+    assert.match(studio, /\.df2-result-banner\.error \{[\s\S]{0,80}--df-danger-bg/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-map-step-head-compact \.is-ok,/);
+    assert.match(ui, /\.df2-app \.df2-theater-v2-log,/);
+    assert.match(ui, /\.df2-app \.df2-live-log-head \{[\s\S]{0,40}--df-navy-900/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
