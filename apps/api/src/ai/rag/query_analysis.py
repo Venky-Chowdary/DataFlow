@@ -430,6 +430,41 @@ class QueryAnalysis:
         return " ".join(self.search_terms)
 
 
+# Words that are the frame of a question only in the company they keep, so the
+# global stopword list cannot hold them. Each entry is a pattern and the words
+# it consumes; when the pattern matches, those words stop counting as subject
+# terms. The pattern is what carries the meaning instead — every frame here has
+# a ``_PHRASE_EXPANSIONS`` entry that names the subject in the documentation's
+# own vocabulary, so nothing is lost by dropping the operator's spelling of it.
+#
+# ``limit`` is the measured case. Asked "can I limit who sees a connector", the
+# highest-scoring sentence in the whole corpus was "**Beta** — works with known
+# limits" — a connector maturity label — because the verb of restriction and the
+# noun of limitation stem to the same token, and the label says it in a short
+# sentence that normalizes well. It outscored "Every role is one of viewer,
+# operator, editor or admin" by more than two to one, so no relevance floor
+# could have removed it: it was not padding below the answer, it *was* the lead.
+#
+# Kept deliberately narrow. ``limit`` is dropped only next to who/access, where
+# it cannot be the noun; asked "what are the limits of the free tier" it is
+# still the subject, and asked "does it rate limit" it is still the subject.
+_FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (
+        re.compile(r"\b(?:limit|restrict|control)\s+(?:who|access|which\s+\w+\s+can)\b", re.I),
+        ("limit", "restrict", "control"),
+    ),
+)
+
+
+def frame_words(question: str) -> frozenset[str]:
+    """Words this question uses to frame its subject rather than to name it."""
+    out: set[str] = set()
+    for pattern, words in _FRAME_PHRASES:
+        if pattern.search(question or ""):
+            out.update(normalize(w) for w in words)
+    return frozenset(out)
+
+
 def classify_ask(question: str) -> str:
     """What kind of answer the question wants.
 
@@ -494,8 +529,12 @@ def analyze_query(question: str) -> QueryAnalysis:
     text = (question or "").strip()
     raw = content_terms(text)
     generic = _generic_and_stop()
-    kept = tuple(t for t in raw if t not in generic)
-    dropped = tuple(t for t in raw if t in generic)
+    # Frame words join the generic ones for this question only. They land in
+    # ``generic_terms`` so the evidence policy does not demand a passage cover
+    # a word the question was not really about.
+    frame = frame_words(text)
+    kept = tuple(t for t in raw if t not in generic and t not in frame)
+    dropped = tuple(t for t in raw if t in generic or t in frame)
     # A question made only of discourse words ("what does it do") still has to
     # retrieve something, so fall back to the raw terms rather than nothing.
     terms = kept or tuple(raw)

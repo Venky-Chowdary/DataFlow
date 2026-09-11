@@ -39,6 +39,7 @@ from src.ai.rag.product_docs import (  # noqa: E402
     product_doc_search,
     spoken_doc_excerpt,
 )
+from src.ai.rag.query_analysis import analyze_query  # noqa: E402
 from src.ai.rag.retriever import RetrievalResult  # noqa: E402
 
 DOCUMENTED_QUESTIONS = [
@@ -636,3 +637,29 @@ def test_suggest_transforms_does_not_invent_parse_date_or_iso_from_a_date_name()
     assert "standardize_iso8601" not in out.transformations
     assert out.transformations == []
     assert "identity" in out.answer.lower() or "no invented parse" in out.answer.lower()
+
+
+def test_restriction_verb_is_the_frame_not_the_subject():
+    """``limit`` means two different things and the stemmer cannot tell them apart.
+
+    "Can I limit who sees a connector" was answered with the four connector
+    maturity labels, because "**Beta** — works with known limits" matches the
+    noun sense in a short sentence that normalizes well. It outscored "Every
+    role is one of viewer, operator, editor or admin" by more than two to one,
+    so it was the lead rather than padding — no relevance floor could remove it.
+
+    Next to who/access the word cannot be the noun, so it stops counting as a
+    subject term there and the permissions vocabulary carries the question.
+    """
+    answer = compose_product_answer(
+        retrieve_product_answer("can I limit who sees a connector")
+    ).lower()
+    assert "viewer" in answer
+    assert "catalog presence only" not in answer
+    assert "transfer-ready" not in answer
+
+
+def test_the_noun_sense_of_limit_is_still_a_subject_term():
+    """The frame rule is scoped to the restriction sense, not to the word."""
+    assert "limit" in analyze_query("what are the limits of a beta connector").terms
+    assert "limit" not in analyze_query("can I limit who sees a connector").terms
