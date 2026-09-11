@@ -158,6 +158,13 @@ def resolve_table_coreference_tools(
         return None
     if not _COREFERENCE_RE.search(message or ""):
         return None
+    # "what schema change policies are there" carries the product's own subject
+    # and an existential ``there``, not a pointer at the remembered table. This
+    # layer runs ahead of ordinary routing, so without the guard it took the
+    # turn away from a correct documentation plan and introspected the last
+    # table the operator happened to count.
+    if asks_its_own_question(message or ""):
+        return None
     low = (message or "").lower()
     args: dict[str, Any] = {"table": focus.table}
     if focus.connector_name:
@@ -621,6 +628,40 @@ def inherit_focus_slots(
             merged["where"] = focus.where
         out.append((name, merged))
     return out
+
+
+# Tools whose subject is the platform itself — its jobs, connectors, schedules,
+# contracts and datasets. The remembered warehouse table is never a candidate
+# reading of a turn that resolved one of these, so the ellipsis layer must leave
+# such a plan alone. Documentation tools are deliberately absent: "by region"
+# and "how many rows" both fall back to ``explain_product`` and genuinely do
+# need the remembered subject.
+_OWN_SUBJECT_TOOLS = frozenset({
+    "list_jobs",
+    "get_job",
+    "open_job",
+    "list_connectors",
+    "search_connectors",
+    "list_schedules",
+    "get_schedule",
+    "open_schedule",
+    "run_schedule_now",
+    "list_contracts",
+    "list_datasets",
+    "get_preflight_run",
+    "brief_workspace",
+})
+
+
+def names_its_own_subject(planned: list[tuple[str, dict[str, Any]]]) -> bool:
+    """Whether routing already found a subject the working memory cannot supply.
+
+    "How many jobs ran today" is a bare metric phrase, so the elliptical gate
+    fires — but it resolves ``list_jobs``, which means the turn said what it was
+    about. Rewriting it as an edit of the remembered aggregation answered it
+    with a row count of an unrelated table.
+    """
+    return any(name in _OWN_SUBJECT_TOOLS for name, _ in planned or ())
 
 
 _CONNECTOR_SCOPED_TOOLS = frozenset({

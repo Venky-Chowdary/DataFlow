@@ -461,6 +461,48 @@ def _render_aggregate(o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: A tool error that is really a request for the one input the operator left
+#: out. These sentences already read as an answer, so wrapping them in an
+#: apology makes Pilot look like it failed at something it simply has not been
+#: told yet.
+_ASKS_FOR_INPUT = re.compile(
+    r"^(?:i\s+need\b|which\b|name\s+(?:a|the)\b|give\s+(?:me\s+)?(?:a|the)\b|"
+    r"pick\b|tell\s+me\b|choose\b)",
+    re.I,
+)
+
+#: Tools that *do* something. "Lookup" is the wrong word for a failed create.
+_ACTION_TOOL_NAMES = frozenset(
+    {
+        "create_connector",
+        "create_schedule",
+        "run_schedule_now",
+        "start_transfer",
+        "plan_transfer",
+        "plan_transfer_route",
+        "start_transfer_studio",
+        "remediate_validation",
+    }
+)
+
+
+def _failure_reply(failed: list[Any]) -> str:
+    """What to say when every tool that ran failed, in the register of the ask."""
+    errors = [str(getattr(tr, "error", "") or "").strip() for tr in failed]
+    errors = [e for e in errors if e]
+    if not errors:
+        return "I could not complete that."
+    if all(_ASKS_FOR_INPUT.match(e) for e in errors):
+        # Nothing went wrong — Pilot is missing one input and is asking for it.
+        return errors[0] if len(errors) == 1 else "\n".join(f"• {e}" for e in errors)
+    head = (
+        "I could not complete that:"
+        if any(getattr(tr, "name", "") in _ACTION_TOOL_NAMES for tr in failed)
+        else "I couldn't complete that lookup:"
+    )
+    return "\n".join([head, *(f"• {e}" for e in errors)])
+
+
 def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     """Honest fallback when no tool matched — never pretend the question was answered.
 
@@ -481,73 +523,78 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     src_ex = conn_names[0] if conn_names else example_connector_name(ctx)
     dst_ex = example_dest_connector_name(ctx, source_hint=src_ex)
 
-    suggestions: list[str] = []
+    # Each entry is (headline, what to do about it). The headline matters as
+    # much as the suggestion: "run a transfer from orders to orders_warehouse"
+    # is perfectly understood — the operator named tables where connectors go —
+    # and answering it with "I'm not sure how to do that yet" reads as a pilot
+    # that cannot do transfers at all. Name the missing input instead.
+    options: list[tuple[str, str]] = []
     if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
-        suggestions.append(
-            f'I can\'t export files yet — sample the table and use **Query** to pull '
-            f'larger result sets: "sample orders on {src_ex}".'
-        )
+        options.append((
+            "Writing files out is not something I can do yet.",
+            f'Sample the table and use **Query** to pull larger result sets: '
+            f'"sample orders on {src_ex}".',
+        ))
     if _looks_like_live_data_fetch(lower) or re.search(
         r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
         lower,
     ):
         on_conn = f" on {src_ex}"
-        suggestions.append(
-            f'To pull live rows, name the table and a saved connector: '
-            f'"sample users{on_conn}" or "show orders from {dst_ex}".'
-        )
+        options.append((
+            "I can read that live — I need the table and which saved connector holds it.",
+            f'For example: "sample users{on_conn}" or "show orders from {dst_ex}".',
+        ))
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
-        suggestions.append(
-            'I can plan a transfer and stage a start — nothing moves until you Confirm. '
-            f'Try: "plan transfer of orders from {src_ex} to {dst_ex}" or '
-            f'"transfer orders from {src_ex} to {dst_ex} as upsert".'
-        )
+        options.append((
+            "I can run that transfer once I know which saved connector is on each "
+            "side — those names are connectors, not tables.",
+            'Nothing moves until you Confirm. Try: "plan transfer of orders from '
+            f'{src_ex} to {dst_ex}" or "transfer orders from {src_ex} to {dst_ex} '
+            'as upsert".',
+        ))
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
-        suggestions.append(
-            "I only run read-only actions and confirmed connector creates — "
-            "deletes have to be done in the UI so they can't be triggered by a prompt."
-        )
+        options.append((
+            "Deletes are deliberately not something a prompt can trigger.",
+            "I run read-only actions and confirmed connector creates; destructive "
+            "changes have to be made in the UI.",
+        ))
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
-        suggestions.append(
-            'I can create, list and trigger pipelines: "schedule users from '
-            'Local PG to Warehouse daily at 02:00 UTC", "show my pipelines", or '
-            '"run schedule <name> now".'
-        )
+        options.append((
+            "I can do that as a pipeline — I need the route and the cadence.",
+            'For example: "schedule users from Local PG to Warehouse daily at '
+            '02:00 UTC", "show my pipelines", or "run schedule <name> now".',
+        ))
     if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
-        suggestions.append(
-            'For a failed run, paste the job id or say "fix bad data" and I\'ll open '
-            "the remediation path for that transfer."
-        )
-    if not suggestions and any(
+        options.append((
+            "I can open the remediation path — I need to know which run.",
+            'Paste the job id, or say "fix bad data" after selecting the job.',
+        ))
+    if not options and any(
         w in lower for w in ("count", "sum", "average", "avg", "total", "how many", "top ")
     ):
-        suggestions.append(
-            'For live totals name the table and connector: '
-            f'"count of orders by status on {src_ex}" or '
-            f'"average price in products on {src_ex}".'
-        )
-    if not suggestions:
+        options.append((
+            "I can compute that against the live table — name the table and the connector.",
+            f'For example: "count of orders by status on {src_ex}" or '
+            f'"average price in products on {src_ex}".',
+        ))
+    if not options:
         on_conn = f" on {src_ex}" if src_ex and src_ex != "your connector" else ""
-        suggestions.append(
+        options.append((
+            "I did not catch a specific action in that message.",
             "I can count / sum / average live tables, sample and profile rows, "
             "introspect schemas, map columns, list jobs and pipelines, and open "
-            "the right screen."
-        )
-        suggestions.append(
+            "the right screen.",
+        ))
+        options.append((
+            "",
             f'Try: "how many rows in airports{on_conn}", '
             f'"schema of airports{on_conn}", '
-            '"show my jobs", or "what can you do?".'
-        )
+            '"show my jobs", or "what can you do?".',
+        ))
 
-    quoted = (message or "").strip()
-    if len(quoted) > 120:
-        quoted = quoted[:117] + "…"
-    head = (
-        f'I\'m not sure how to do “{quoted}” yet.'
-        if quoted
-        else "I didn't catch a specific action in that message."
-    )
-    return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
+    head = options[0][0] or "I did not catch a specific action in that message."
+    body = [text for _, text in options[:3] if text]
+    return head + "\n\n" + "\n".join(f"• {s}" for s in body)
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
@@ -1485,6 +1532,7 @@ Draft answer:
             looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
+            names_its_own_subject,
             pending_from_assistant_clarification,
             resolve_followup,
             resolve_pending_answer,
@@ -1537,7 +1585,7 @@ Draft answer:
         planned = infer_tools_from_message(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
-        if focus and looks_like_followup(message, focus):
+        if focus and looks_like_followup(message, focus) and not names_its_own_subject(planned):
             low = message.lower().strip()
             # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
             for name, args in planned:
@@ -2696,10 +2744,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
         # Surface failures in plain language — never name internal tools.
         failed = [tr for tr in turn.tool_results if not tr.success and tr.error]
         if failed and not parts:
-            lines = ["I couldn't complete that lookup:"]
-            for tr in failed[:4]:
-                lines.append(f"• {tr.error}")
-            parts.append("\n".join(lines))
+            parts.append(_failure_reply(failed[:4]))
         elif failed and parts:
             # Mixed success+failure: keep connector/clarification errors visible.
             for tr in failed:
