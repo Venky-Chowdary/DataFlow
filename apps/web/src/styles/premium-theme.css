@@ -422,7 +422,7 @@
 
 .df2-tab.active {
   background: var(--df-surface);
-  color: #0f766e;
+  color: var(--df-seg-ink-active);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
 }

@@ -4519,9 +4519,9 @@ th.df2-type-string .df2-type-badge {
   flex-direction: column;
   gap: 12px;
   padding: 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-connection-form .df2-form-row {
@@ -4537,7 +4537,7 @@ th.df2-type-string .df2-type-badge {
   margin-bottom: 4px;
   font-size: 12px;
   font-weight: 600;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .df2-connection-form .df2-input,
