@@ -13206,6 +13206,26 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-text-primary);
 }
 
+.df2-app .df2-pilot-msg.assistant {
+  background: var(--df-surface-muted) !important;
+  color: var(--df-text-primary) !important;
+}
+
+.df2-app .df2-pilot-composer,
+.df2-app .df2-pilot-composer-sticky {
+  background: var(--df-surface) !important;
+}
+
+.df2-app .df2-pilot-tool-log {
+  background: var(--df-surface-muted) !important;
+}
+
+.df2-app .df2-pilot-composer textarea,
+.df2-app .df2-pilot-composer-sticky textarea,
+.df2-app .df2-pilot-tool-log code {
+  color: var(--df-text-primary) !important;
+}
+
 .df2-app .df2-pilot-session-row.active {
   background: var(--df-brand-muted);
   color: var(--df-text-primary);
