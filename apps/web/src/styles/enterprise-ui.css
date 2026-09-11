@@ -13894,3 +13894,20 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   color: var(--df-brand-strong);
   background: var(--df-brand-muted);
 }
+
+/* Dest leftover navy / paper !important flatteners. */
+.df2-app .df2-page-transfer-studio .df2-dest-connector-card-name,
+.df2-app .df2-page-transfer-studio .df2-dest-engine-search input,
+.df2-app .df2-page-transfer-studio .df2-dest-engine-search-clear:hover {
+  color: var(--df-text-primary) !important;
+}
+
+.df2-app .df2-page-transfer-studio .df2-dest-engine-panel,
+.df2-app .df2-page-transfer-studio .df2-dest-right-empty,
+.df2-app .df2-page-transfer-studio .df2-dest-engine-search-clear:hover {
+  background: var(--df-surface-muted) !important;
+}
+
+.df2-app .df2-page-transfer-studio .df2-dest-right-empty {
+  color: var(--df-text-secondary) !important;
+}
