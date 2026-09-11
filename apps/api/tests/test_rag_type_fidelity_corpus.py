@@ -52,6 +52,33 @@ def test_type_carriers_come_from_the_ddl_table() -> None:
             assert ddl in text, f"{engine} {logical} carrier {ddl!r} not in the passage"
 
 
+def test_every_logical_type_the_engines_can_create_is_documented() -> None:
+    """The *set* of types comes from ``DDL_TYPES``, only the order is authored.
+
+    A hand-written set fell behind it and omitted ``string`` and ``text`` — the
+    two most common column types there are — so "what string type is created on
+    postgres" was answered with the carrier for a time column.
+    """
+    from services.type_system import DDL_TYPES
+
+    from src.ai.rag.product_facts import _CARRIER_ENGINES
+
+    text = _section("Destination type for each logical type").text
+    expected: set[str] = set()
+    for engine in _CARRIER_ENGINES:
+        expected.update(DDL_TYPES.get(engine) or {})
+    for logical in expected:
+        assert f"{logical} column is created as" in text, f"{logical} undocumented"
+
+
+def test_a_string_question_reaches_the_string_carrier() -> None:
+    from services.type_system import DDL_TYPES
+
+    answer = retrieve_product_answer("what string type is created on postgres")
+    joined = " ".join(hit.chunk.text for hit in answer.hits)
+    assert f"A string column is created as postgresql {DDL_TYPES['postgresql']['string']}" in joined
+
+
 def test_the_mysql_timestamp_window_is_the_one_the_policy_enforces() -> None:
     from services.timezone_policy import MYSQL_TIMESTAMP_RANGE_TEXT
 

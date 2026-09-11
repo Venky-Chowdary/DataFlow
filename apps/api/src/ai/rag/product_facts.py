@@ -370,23 +370,6 @@ def _connector_catalog_section() -> GeneratedSection | None:
     )
 
 
-#: Logical types worth naming in an answer about type fidelity, in the order an
-#: operator meets them. The destination carrier for each is never written here —
-#: it is read out of the table the DDL builder renders from.
-_DOCUMENTED_LOGICAL_TYPES: tuple[str, ...] = (
-    "boolean",
-    "integer",
-    "decimal",
-    "float",
-    "date",
-    "datetime",
-    "time",
-    "uuid",
-    "json",
-    "array",
-    "binary",
-)
-
 #: Engines to show the carrier for. Naming a handful keeps the passage readable;
 #: the rule it states is the same for every engine in ``DDL_TYPES``.
 _CARRIER_ENGINES: tuple[str, ...] = (
@@ -397,6 +380,38 @@ _CARRIER_ENGINES: tuple[str, ...] = (
     "bigquery",
     "mongodb",
 )
+
+#: Order to read the carrier grid in — the order an operator meets the types.
+#: This is presentation only: the *set* of logical types comes from ``DDL_TYPES``
+#: so the list cannot fall behind it. A hand-written set did, and omitted
+#: ``string`` and ``text`` — the two most common column types there are — so
+#: "what string type is created on postgres" was answered with the carrier for
+#: a time column.
+_TYPE_READING_ORDER: tuple[str, ...] = (
+    "string",
+    "text",
+    "boolean",
+    "integer",
+    "decimal",
+    "float",
+    "date",
+    "datetime",
+    "time",
+    "interval",
+    "uuid",
+    "json",
+    "array",
+    "binary",
+)
+
+
+def _logical_types(ddl_types: dict[str, dict[str, str]]) -> list[str]:
+    """Every logical type the carrier engines can create, in reading order."""
+    known: set[str] = set()
+    for engine in _CARRIER_ENGINES:
+        known.update(ddl_types.get(engine) or {})
+    ordered = [t for t in _TYPE_READING_ORDER if t in known]
+    return ordered + sorted(known - set(ordered))
 
 
 def _type_carrier_section() -> GeneratedSection | None:
@@ -421,7 +436,7 @@ def _type_carrier_section() -> GeneratedSection | None:
         "destination as that engine's carrier for it, so the same source column "
         "lands as the closest native type rather than as text everywhere.",
     ]
-    for logical in _DOCUMENTED_LOGICAL_TYPES:
+    for logical in _logical_types(DDL_TYPES):
         carriers = []
         for engine in _CARRIER_ENGINES:
             ddl = (DDL_TYPES.get(engine) or {}).get(logical) or DEFAULT_DDL.get(engine)

@@ -3031,6 +3031,23 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         lower,
     ):
         return True
+    # An imperative aimed at the operator's own objects is a read, whatever the
+    # ask classifier makes of it. "List my connectors" is graded an
+    # *enumeration* — true of "what are the sync modes", not of this — so the
+    # how-to branch led the reply with a documentation essay about audit logs
+    # and BYOK and put the inventory the operator asked for underneath it.
+    #
+    # The leading imperative is what makes this safe where a bare possessive is
+    # not: "can I keep my pipelines in git" asks about the GitOps export.
+    if re.search(
+        r"^(?:please\s+)?(?:list|show|display|give\s+me|fetch|get)\s+"
+        r"(?:me\s+)?(?:all\s+(?:of\s+)?|the\s+)?(?:my|our\s+)?\s*"
+        r"(?:saved\s+|existing\s+|current\s+)?"
+        r"(?:connectors?|connections?|jobs?|transfers?|runs?|pipelines?|"
+        r"schedules?|contracts?|datasets?|tables?|collections?)\b",
+        lower,
+    ):
+        return True
     return False
 
 
