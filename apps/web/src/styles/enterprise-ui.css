@@ -822,15 +822,15 @@
 }
 
 .df2-job-row:hover {
-  border-color: var(--df-brand, #0f766e);
-  background: #f0fdfa;
+  border-color: var(--df-brand);
+  background: var(--df-brand-muted);
 }
 
 .df2-job-row.is-active,
 .df2-job-row.is-active:hover {
-  border-color: var(--df-brand, #0f766e);
-  background: #ccfbf1;
-  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e);
+  border-color: var(--df-brand);
+  background: var(--df-brand-soft);
+  box-shadow: inset 3px 0 0 var(--df-brand);
 }
 
 .df2-job-row.is-live {
@@ -847,15 +847,15 @@
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   flex-shrink: 0;
 }
 
-.df2-job-row-status.is-completed { background: #dcfce7; color: #16a34a; }
-.df2-job-row-status.is-failed { background: #fee2e2; color: #dc2626; }
+.df2-job-row-status.is-completed { background: var(--df-success-bg); color: var(--df-success); }
+.df2-job-row-status.is-failed { background: var(--df-danger-bg); color: var(--df-danger); }
 .df2-job-row-status.is-running,
-.df2-job-row-status.is-pending { background: #ccfbf1; color: #0f766e; }
+.df2-job-row-status.is-pending { background: var(--df-brand-muted); color: var(--df-brand-strong); }
 
 .df2-job-row-main {
   min-width: 0;
@@ -937,7 +937,7 @@
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #0f766e, #14b8a6);
+  background: var(--df-brand);
   transition: width 360ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -13778,4 +13778,35 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-quarantine-apply-suggested code {
   background: var(--df-brand-muted);
   color: var(--df-brand-strong);
+}
+
+/* Job-row leftover mint / paper on hover, status chips, and bar. */
+.df2-app .df2-job-row:hover:not(.is-active) {
+  background: var(--df-brand-muted);
+  border-color: var(--df-brand);
+}
+
+.df2-app .df2-job-row-status {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-job-row-status.is-completed {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-job-row-status.is-failed {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-job-row-status.is-running,
+.df2-app .df2-job-row-status.is-pending {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-job-row-bar > i {
+  background: var(--df-brand);
 }
