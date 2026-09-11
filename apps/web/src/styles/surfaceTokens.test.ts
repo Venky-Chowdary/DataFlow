@@ -1721,6 +1721,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-connector-tile-name,/);
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-search input,/);
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-chip,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-catalog-nav button\.active,/);
     assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.dt-modal-title,/);
   });
 });

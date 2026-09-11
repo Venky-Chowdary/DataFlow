@@ -13473,6 +13473,12 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-catalog-meta {
   color: var(--df-text-secondary) !important;
 }
 
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-catalog-nav button.active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-catalog-nav button.active {
+  color: var(--df-brand-strong) !important;
+  background: var(--df-brand-muted) !important;
+}
+
 html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search input,
 html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search input {
   background: var(--df-surface) !important;
