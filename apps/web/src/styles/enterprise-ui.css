@@ -2646,8 +2646,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-pipeline-row:hover .df2-pipeline-row-open,
 .df2-pipeline-row.selected .df2-pipeline-row-open {
-  color: #0f766e;
-  background: #f0fdfa;
+  color: var(--df-brand-strong);
+  background: var(--df-brand-muted);
 }
 
 @media (max-width: 1280px) {
@@ -13886,4 +13886,11 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 
 .df2-app .df2-job-timeline-item.is-warning strong {
   color: var(--df-warning);
+}
+
+/* Pipeline-row leftover mint on hover/selected open control. */
+.df2-app .df2-pipeline-row:hover .df2-pipeline-row-open,
+.df2-app .df2-pipeline-row.selected .df2-pipeline-row-open {
+  color: var(--df-brand-strong);
+  background: var(--df-brand-muted);
 }

@@ -1482,4 +1482,34 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-count\.block \{[\s\S]{0,40}--df-danger-bg/);
     assert.match(ui, /\.df2-app \.df2-vd-count\.skip \{[\s\S]{0,40}--df-surface-muted/);
   });
+
+  it("Pipeline-row leftover mint open control follows tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(
+      ui,
+      /\.df2-pipeline-row:hover \.df2-pipeline-row-open,\n\.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}--df-brand-strong/,
+    );
+    assert.match(
+      ui,
+      /\.df2-pipeline-row:hover \.df2-pipeline-row-open,\n\.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}--df-brand-muted/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-pipeline-row:hover \.df2-pipeline-row-open,\n\.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}#f0fdfa/,
+    );
+    assert.doesNotMatch(
+      ui,
+      /\.df2-pipeline-row:hover \.df2-pipeline-row-open,\n\.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}#0f766e/,
+    );
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-pipeline-row:hover \.df2-pipeline-row-open,/);
+    assert.match(
+      ui,
+      /\.df2-app \.df2-pipeline-row\.selected \.df2-pipeline-row-open \{[\s\S]{0,80}--df-brand-muted/,
+    );
+  });
 });
