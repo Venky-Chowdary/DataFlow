@@ -14545,6 +14545,46 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   background: var(--df-surface);
 }
 
+.df2-app .df2-map-step-head-compact .is-ok,
+.df2-app .df2-vd-metric.tone-approve .df2-vd-metric-val {
+  color: var(--df-success);
+}
+
+.df2-app .df2-map-step-head-compact .is-warn,
+.df2-app .df2-result-metric.is-warn strong,
+.df2-app .df2-vd-metric.tone-review .df2-vd-metric-val {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-metric.tone-block .df2-vd-metric-val {
+  color: var(--df-danger);
+}
+
+.df2-app .df2-theater-v3-chunk .dt-nav-icon,
+.df2-app .df2-vd-rules-head .dt-nav-icon,
+.df2-app .df2-preflight-compact-score {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-vd-hero-ring.tone-live .df2-vd-hero-fill {
+  stroke: var(--df-brand-strong);
+}
+
+.df2-app .df2-theater-v2-log,
+.df2-app .df2-live-log-head {
+  background: var(--df-navy-900);
+}
+
+.df2-app .df2-result-banner.success {
+  background: var(--df-success-bg);
+  border-color: var(--df-success-border);
+}
+
+.df2-app .df2-result-banner.error {
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger-border);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
