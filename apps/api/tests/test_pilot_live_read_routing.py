@@ -158,3 +158,59 @@ def test_reconcile_asked_in_general_stays_a_documentation_question():
     """No run is named, so there is nothing to fetch — explain the proof."""
     assert "list_jobs" not in _tools("show me the reconcile proof")
     assert "list_jobs" not in _tools("what does checksum MATCH prove")
+
+
+# --- the verb needs something to group ---------------------------------------
+#
+# Teaching the aggregation parser the grouping verbs an operator actually types
+# ("break down orders by region", "roll up revenue by month") made it also
+# claim the question *about* the clause: "what does group by do" parsed as an
+# aggregation and answered a documentation question with a connector error —
+# the same way "what does quarantine mean" once did. A verb followed directly
+# by ``by`` is not a verb at all, it is the name of the SQL clause.
+#
+# Parsing only, so these belong here rather than beside the live-Postgres
+# aggregate matrix, which skips whole-module when the server is unreachable.
+
+CLAUSE_QUESTIONS = [
+    "what does group by do",
+    "what is group by",
+    "what is a group by clause",
+    "explain group by",
+    "how does group by work",
+    "what does grouped by mean",
+]
+
+GROUPING_VERBS = [
+    ("break down orders by region on Demo Orders", "region"),
+    ("breakdown of orders by status on Demo Orders", "status"),
+    ("bucket orders by region on Demo Orders", "region"),
+    ("segment orders by region on Demo Orders", "region"),
+    ("split orders by region on Demo Orders", "region"),
+    ("tally orders by region on Demo Orders", "region"),
+    ("roll up orders by region on Demo Orders", "region"),
+]
+
+
+@pytest.mark.parametrize("question", CLAUSE_QUESTIONS)
+def test_a_question_about_the_clause_is_not_parsed_as_an_aggregation(question):
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    assert parse_aggregation_request(question) is None, question
+
+
+@pytest.mark.parametrize("question", CLAUSE_QUESTIONS)
+def test_a_question_about_the_clause_is_not_a_live_read(question):
+    assert not _is_read(question), f"{question!r} classified as a live read"
+
+
+@pytest.mark.parametrize(("question", "group_by"), GROUPING_VERBS)
+def test_a_grouping_verb_with_an_object_still_parses(question, group_by):
+    """The guard is a lookahead on ``by``, not a retreat from the vocabulary."""
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    parsed = parse_aggregation_request(question)
+    assert parsed is not None, question
+    assert parsed.metric == "count", parsed
+    assert parsed.group_by == group_by, parsed
+

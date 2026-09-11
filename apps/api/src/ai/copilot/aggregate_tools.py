@@ -131,6 +131,23 @@ _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
     (r"(?:maximum|max|highest|largest|biggest|latest)(?: of)?", "max"),
+    # A breakdown that names no measure is a count per group: "break down orders
+    # by region" asks how many orders each region has. Without this the parser
+    # returned None, the turn was still recognised as a read of the operator's
+    # table, and it reached no tool at all — so the reply was a refusal to a
+    # question the engine can answer exactly. Last in the list so a stated
+    # measure keeps its metric: "sum amount by region" is still a sum.
+    # The verb needs something to group. Followed directly by ``by`` it is not a
+    # verb at all but the name of the SQL clause, and "what does group by do" is
+    # a question about the clause — it parsed as an aggregation and answered a
+    # documentation question with a connector error, the same way "what does
+    # quarantine mean" once did.
+    (
+        r"(?:break(?:\s+\w+)?\s+down|breakdown|group(?:ed)?|"
+        r"bucket(?:ed)?|segment(?:ed)?|split|roll(?:ed)?\s*up|tally)"
+        r"(?!\s+by\b)",
+        "count",
+    ),
 )
 
 _ASCENDING_HINTS = ("ascending", "lowest", "smallest", "bottom", "least", "fewest")
