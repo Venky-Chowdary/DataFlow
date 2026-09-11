@@ -107,15 +107,22 @@ def normalize(token: str) -> str:
 # Deliberately small: only words that carry no retrieval signal in operator
 # questions. Domain words ("job", "run", "map") stay — they are the subject here.
 #
-# The last line is the frame of "how do I use X" and "can I bring my own X".
-# Each of those words is also how the shipped corpus opens a sentence about
-# something else — "Use this path whenever Validate shows a red gate", "rotate
-# their own password", "Pilot and MCP bring the same governed engine" — so read
-# as subject terms they made every such sentence a candidate for every question
-# that used the frame: "how do I use the API" was answered from the preflight
-# procedure, and "can I use my own encryption key" from a sync mode. Checked
-# against the corpus: ``own`` occurs ten times and is a possessive intensifier
-# in all ten. "Bring your own key" still reaches BYOK, as a phrase expansion.
+# ``use used using own bring`` is the frame of "how do I use X" and "can I
+# bring my own X". Each of those words is also how the shipped corpus opens a
+# sentence about something else — "Use this path whenever Validate shows a red
+# gate", "rotate their own password", "Pilot and MCP bring the same governed
+# engine" — so read as subject terms they made every such sentence a candidate
+# for every question that used the frame: "how do I use the API" was answered
+# from the preflight procedure, and "can I use my own encryption key" from a
+# sync mode. Checked against the corpus: ``own`` occurs ten times and is a
+# possessive intensifier in all ten. "Bring your own key" still reaches BYOK,
+# as a phrase expansion.
+#
+# ``up`` and ``cannot`` are rare enough in the corpus to look like subjects —
+# IDF 3.68 and 2.34, above ``schedule`` and ``quarantine`` — while carrying
+# none of what the question is about. ``up`` is only ever "set up", "up to 38"
+# or "open up"; ``cannot`` only ever negates the verb beside it, and that verb
+# is the subject term.
 _STOPWORD_WORDS = """
     a an the and or but if then than that this these those there here
     i me my we our you your it its is are was were be been being am
@@ -126,6 +133,7 @@ _STOPWORD_WORDS = """
     not no nor so too very just also only
     please tell show explain mean means help
     use used using own bring
+    up cannot
     """.split()
 STOPWORDS = frozenset(_STOPWORD_WORDS) | frozenset(normalize(w) for w in _STOPWORD_WORDS)
 

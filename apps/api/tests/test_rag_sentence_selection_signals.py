@@ -19,6 +19,7 @@ from src.ai.rag.answer_composer import (
     build_candidates,
     select_sentences,
     split_sentences,
+    subject_words,
     term_weights,
 )
 from src.ai.rag.lexical_index import (
@@ -353,3 +354,160 @@ def test_a_list_the_question_only_brushes_is_not_vouched_for() -> None:
     listed = [c for c in candidates if c.list_item]
     assert listed, "expected the labels to be recognised as list items"
     assert not any(c.list_vouched for c in listed)
+
+
+# --------------------------------------------------------------------------
+# The lead names the subject
+# --------------------------------------------------------------------------
+
+def _idf(known: dict[str, float]):
+    """Corpus IDF for the words under test; anything else is average."""
+    return lambda term: known.get(term, 1.0)
+
+
+def _opening(question: str, sections: list[tuple[str, str, str, str]], **kw) -> str:
+    """The sentence the operator actually reads first."""
+    chosen = select_sentences(build_candidates(analyze_query(question), sections, **kw))
+    assert chosen, f"no sentence selected for {question!r}"
+    return chosen[0].text
+
+
+_MODE_SECTION = ("What each sync mode does", "Sync modes → What each sync mode does", "#/help/sync-modes")
+
+
+def test_the_lead_names_what_the_question_is_about() -> None:
+    """"What does mirror mode do to deleted rows" opened on upsert.
+
+    Scores are a sum, so the upsert sentence won on ``mode``, ``rows`` and its
+    repeated ``keys`` while never saying ``mirror`` — the one word that made
+    the question specific. The operator asked about deletes and read a
+    paragraph about inserts and updates.
+    """
+    text = (
+        "What each sync mode does\n"
+        "Upsert mode writes rows key-idempotently: new keys insert, known keys "
+        "update, and no rows are removed in this mode.\n"
+        "Mirror makes the destination match the source.\n"
+    )
+    opening = _opening(
+        "what does mirror mode do to deleted rows",
+        [(*_MODE_SECTION, text)],
+        idf=_idf({"mirror": 4.2, "mode": 1.0, "rows": 0.9, "delet": 2.0}),
+    )
+    assert opening.startswith("Mirror makes the destination match the source")
+
+
+def test_among_subject_naming_sentences_the_score_still_decides() -> None:
+    """This reorders the shortlist; it does not replace the ranking."""
+    text = (
+        "What each sync mode does\n"
+        "Mirror is one of the five modes.\n"
+        "Mirror mode deletes rows at the destination that the source no longer has.\n"
+    )
+    opening = _opening(
+        "what does mirror mode do to deleted rows",
+        [(*_MODE_SECTION, text)],
+        idf=_idf({"mirror": 4.2, "mode": 1.0, "rows": 0.9, "delet": 2.0}),
+    )
+    assert opening.startswith("Mirror mode deletes rows at the destination")
+
+
+def test_nothing_naming_the_subject_leaves_the_ranking_alone() -> None:
+    """The rule never asks for a lead that was not retrieved.
+
+    The anchor is the rarest word the operator typed *that some retrieved
+    sentence uses*, so a passage answering entirely in its own vocabulary still
+    leads with its best sentence instead of with whatever says the rarest word.
+    """
+    text = (
+        "What each sync mode does\n"
+        "Upsert mode writes rows key-idempotently: new keys insert, known keys "
+        "update, and no rows are removed in this mode.\n"
+        "Append mode adds rows and removes nothing.\n"
+    )
+    opening = _opening(
+        "what does mirror mode do to deleted rows",
+        [(*_MODE_SECTION, text)],
+        idf=_idf({"mirror": 4.2, "mode": 1.0, "rows": 0.9, "delet": 2.0}),
+    )
+    assert opening.startswith("Upsert mode writes rows key-idempotently")
+
+
+def test_a_list_the_question_asked_for_still_leads() -> None:
+    """"What are the preflight gates" opens on G1, not on prose about gates.
+
+    Preferring a subject-naming prose sentence unconditionally is how this
+    stopped happening: the section heading says ``gates`` and no single gate
+    says ``preflight``, so every item scored as naming nothing.
+    """
+    sections = [
+        (
+            "Core gates (before write)",
+            "Preflight gates → Core gates",
+            "#/help/preflight",
+            "Core gates (before write)\n"
+            "G1 Source readable — the source connector connects and the table reads.\n"
+            "G2 Destination write access — the destination is reachable and writable.\n",
+        ),
+    ]
+    assert _opening("what are the preflight gates", sections).startswith("G1 Source readable")
+
+
+def test_the_rarest_word_the_question_typed_is_its_subject() -> None:
+    """``subject_words`` reads the anchor off corpus IDF, not off word order."""
+    analysis = analyze_query("what does mirror mode do to deleted rows")
+    available = frozenset({"mirror", "mode", "rows", "delet"})
+    subject = subject_words(analysis, available, _idf({"mirror": 4.2, "delet": 2.0}))
+    assert "mirror" in subject
+    assert "mode" not in subject and "rows" not in subject
+
+
+def test_a_phrase_expansion_counts_as_the_subject_named_in_the_corpus_spelling() -> None:
+    """"What is change data capture" is answered by sentences saying ``cdc``.
+
+    The corpus never spells the phrase out, so on the typed anchor alone the
+    answer left the sync-mode passage to find a sentence using ``capture``.
+    """
+    analysis = analyze_query("what is change data capture")
+    assert "cdc" in analysis.phrase_expansions
+    subject = subject_words(analysis, frozenset(analysis.terms), _idf({}))
+    assert "cdc" in subject
+
+
+def test_a_loose_expansion_is_recall_not_subject() -> None:
+    """Loose expansions are a guess for recall, and often a rarer guess.
+
+    "How do I see the logs" expands to ``theater``, which the corpus uses in
+    far fewer places than ``logs``. Counted as the subject it would decide the
+    lead, so the answer would open on whichever sentence names the page rather
+    than on the one that says where the log is.
+    """
+    analysis = analyze_query("how do I see the logs")
+    assert "theater" in analysis.loose_expansions
+    subject = subject_words(
+        analysis,
+        frozenset({*analysis.terms, "theater"}),
+        _idf({"logs": 2.0, "theater": 5.0}),
+    )
+    assert subject == frozenset({"logs"})
+
+
+def test_an_idf_tie_breaks_toward_the_head_of_the_noun_phrase() -> None:
+    """English puts the head last, so a tie resolves to the last word.
+
+    "How is this different from writing ETL scripts" scores ``writ``, ``etl``
+    and ``script`` at exactly 4.19 each. Taking the first made the question
+    about *writing*, and the answer opened on "writing one into an instant
+    column" from the timestamp passage.
+    """
+    analysis = analyze_query("how is this different from writing ETL scripts")
+    available = frozenset(analysis.terms)
+    subject = subject_words(analysis, available, _idf(dict.fromkeys(analysis.terms, 4.19)))
+    assert "script" in subject
+    assert "writ" not in subject
+
+
+def test_no_corpus_statistic_means_no_subject_rule() -> None:
+    """Without IDF there is no basis for calling one typed word the subject."""
+    analysis = analyze_query("what does mirror mode do to deleted rows")
+    assert subject_words(analysis, frozenset(analysis.terms), None) == frozenset()

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .lexical_index import adjacent_shingles, content_terms
 from .query_analysis import QueryAnalysis
@@ -193,6 +193,10 @@ class Candidate:
     #: and Connect-only with it: four sentences about transfer-readiness
     #: appended to a correct answer about roles.
     list_vouched: bool = False
+    #: True when this sentence uses one of the words the question is *about* —
+    #: its rarest typed word, or a phrase expansion restating it in the
+    #: corpus's own spelling. See ``subject_words``.
+    names_subject: bool = False
 
 
 def _split_annotated(text: str, section_title: str = "") -> list[tuple[str, bool]]:
@@ -331,6 +335,52 @@ def term_weights(
     return {t: (v / mean if v > 0 else 1.0) for t, v in raw.items()}
 
 
+def subject_words(
+    analysis: QueryAnalysis,
+    available: frozenset[str],
+    idf: Callable[[str], float] | None,
+) -> frozenset[str]:
+    """The words a sentence has to use to be *about* this question.
+
+    Sentence scores are a sum, so a sentence can win by matching several
+    ordinary words of the question while never mentioning the one word that
+    made it specific. Measured across the audit fixture, 26% of answers that
+    contained the right material did not *lead* with it, and this is why: asked
+    "what happens to primary keys" the answer opened from the Redis
+    destination-key section, which says ``key`` but never ``primary``; asked
+    "how do I connect a postgres database" it opened with the MCP server entry;
+    asked "what does mirror mode do to deleted rows" it opened with ``upsert``.
+
+    Two things count. First the **head anchor**: the rarest word the operator
+    actually typed, restricted to words some retrieved sentence uses, so this
+    never asks for a lead that does not exist. Rarest by corpus IDF, the same
+    statistic ranking already trusts.
+
+    Second, the phrase expansions, because they are the operator's own words in
+    the corpus's spelling — a sentence using one is on subject even when it
+    never uses theirs. Asked "what is change data capture" the corpus answers
+    with ``cdc`` and never spells out the phrase, and on the anchor alone the
+    answer left the sync-mode passage to find a sentence saying ``capture``.
+
+    The loose single-word expansions are excluded. They are a guess for recall
+    and they hijack a lead: asked "what does checksum MATCH prove" they
+    contribute ``reconcile``, rarer than anything typed, which is not what the
+    operator asked about.
+    """
+    if idf is None:
+        return frozenset()
+    typed = [t for t in analysis.terms if t in available]
+    if not typed:
+        return frozenset()
+    # Ties are broken toward the last word, because an English noun phrase puts
+    # its head last. "How is this different from writing ETL scripts" scores
+    # ``writ``, ``etl`` and ``script`` at exactly 4.19 each; taking the first
+    # made the question about *writing*, and the answer opened on "writing one
+    # into an instant column" from the timestamp passage.
+    anchor = max(enumerate(typed), key=lambda pair: (float(idf(pair[1])), pair[0]))[1]
+    return frozenset({anchor, *analysis.phrase_expansions})
+
+
 def build_candidates(
     analysis: QueryAnalysis,
     sections: Sequence[tuple[str, str, str, str]],
@@ -353,6 +403,11 @@ def build_candidates(
     # pair would be a guess about a phrase, which is not what this credit is for.
     phrases = adjacent_shingles(analysis.text)
     candidates: list[Candidate] = []
+    # The prose view of each candidate, aligned with ``candidates``. Subject
+    # naming is judged on prose for the same reason matching is: the corpus
+    # writes fixture names as literals, and `sample-orders.csv` is not a
+    # sentence about orders.
+    prose: list[frozenset[str]] = []
     order = 0
     top_score = max((s for s in (scores or ()) if s > 0), default=0.0)
     for rank, (section_title, citation, href, text) in enumerate(sections):
@@ -371,6 +426,7 @@ def build_candidates(
             rank_prior *= share
         anchor_bar = HEADING_ANCHOR_TOP if share >= 1.0 else HEADING_ANCHOR
         heading_match = _heading_match(citation or section_title, typed)
+        heading_terms = frozenset(content_terms(citation or section_title))
         # An enumeration ask is a request for a list, whichever passage holds
         # it; otherwise the heading has to speak for its items.
         list_vouched = analysis.ask == "enumeration" or heading_match >= anchor_bar
@@ -379,9 +435,8 @@ def build_candidates(
             terms = frozenset(sentence_terms)
             # Scored on prose; ``terms`` keeps the literals, because redundancy
             # and length are properties of the whole sentence either way.
-            hit_terms = terms & typed & frozenset(
-                content_terms(_CODE_SPAN.sub(" ", sentence))
-            )
+            prose_terms = frozenset(content_terms(_CODE_SPAN.sub(" ", sentence)))
+            hit_terms = terms & typed & prose_terms
             typed_hits = (
                 sum(weights.get(t, 1.0) for t in hit_terms)
                 if weights
@@ -405,6 +460,7 @@ def build_candidates(
                 LIST_ITEM_CREDIT * heading_match if is_list_item else 0.0
             )
             match = typed_hits + EXPANSION_WEIGHT * expanded_hits
+            subject_view = prose_terms
             if match or listed_credit or phrase_hits:
                 score = (
                     match * _length_norm(len(terms))
@@ -415,6 +471,14 @@ def build_candidates(
                     + 0.8 * rank_prior
                 )
             elif heading_match >= anchor_bar:
+                # This sentence is here on its heading's word, so the heading
+                # speaks for what it is about as well. "How is this different
+                # from writing ETL scripts" is answered by the body of the FAQ
+                # card of that name, which lists the differences without using
+                # one word of the question; judged on its own wording it named
+                # no subject, and the answer opened on "writing one into an
+                # instant column" from the timestamp passage instead.
+                subject_view = heading_terms
                 # The same argument as for list items, one level weaker. "Do
                 # you have webhooks" is answered by "Subscribe to job.completed,
                 # job.failed and pipeline.quarantine_threshold events", which
@@ -441,7 +505,17 @@ def build_candidates(
                     list_vouched=is_list_item and list_vouched,
                 )
             )
+            prose.append(subject_view)
             order += 1
+
+    subject = subject_words(
+        analysis, frozenset().union(*prose) if prose else frozenset(), idf
+    )
+    if subject:
+        candidates = [
+            replace(cand, names_subject=bool(words & subject))
+            for cand, words in zip(candidates, prose)
+        ]
     candidates.sort(key=lambda c: (c.score, -c.order), reverse=True)
     return candidates
 
@@ -456,7 +530,13 @@ def select_sentences(
     pool = list(candidates)
     if not pool:
         return []
-    best = max(pool, key=lambda c: c.score)
+    # The lead is decided first and then seeds everything else, because every
+    # other decision here is relative to the sentence that answers: the
+    # relevance floor is a share of it, and marginal relevance is diversity
+    # away from it. Choosing it last — as the highest score among whatever
+    # survived — let a sentence that never mentions the question's subject both
+    # set the floor and open the answer.
+    best = _lead(pool)
     chosen.append(best)
     pool.remove(best)
 
@@ -485,15 +565,34 @@ def select_sentences(
     # purely by source order opened "what is quarantine" with "Open Operations →
     # Jobs → Quarantine on the run", because that section ranked first — an
     # answer has to start with the answer.
-    # A list item is never hoisted: pulling G5 to the front leaves the gates
-    # reading G5, G1, G2, G3 …
-    leadable = [c for c in chosen if not c.list_item]
-    if not leadable:
+    if best.list_item:
+        # A list item is never hoisted: pulling G5 to the front leaves the
+        # gates reading G5, G1, G2, G3 …
         chosen.sort(key=lambda c: c.order)
         return chosen
-    lead = max(leadable, key=lambda c: c.score)
-    rest = sorted((c for c in chosen if c is not lead), key=lambda c: c.order)
-    return [lead, *rest]
+    rest = sorted((c for c in chosen if c is not best), key=lambda c: c.order)
+    return [best, *rest]
+
+
+def _lead(pool: Sequence[Candidate]) -> Candidate:
+    """The sentence to open with: names the subject if anything does.
+
+    Preferring the highest score alone is how "what does mirror mode do to
+    deleted rows" opened on ``upsert`` — a sum over ``mode`` and ``rows`` beat
+    the sentence that says ``mirror`` — and how "how do I connect a postgres
+    database" opened on the MCP server entry. Among sentences that do name the
+    subject the score still decides, so this reorders the shortlist rather than
+    replacing the ranking.
+
+    A list the question asked for is exempt. When the strongest candidate is a
+    vouched list item the list *is* the answer, and hoisting a prose sentence
+    over it is how "what are the preflight gates" stopped opening on G1.
+    """
+    top = max(pool, key=lambda c: c.score)
+    if top.list_vouched:
+        return top
+    named = [c for c in pool if c.names_subject and not c.list_item]
+    return max(named, key=lambda c: c.score) if named else top
 
 
 def _complete_lists(
