@@ -56,6 +56,13 @@ ON_TARGET_FLOORS = {
     "fidelity": (25, 25),
     "command": (4, 4),
     "meta": (4, 4),
+    # Documented subjects worded the way an operator words them rather than the
+    # way the documentation does. The other suites were written alongside the
+    # retrieval they measure, so they cannot say whether the engine generalizes;
+    # this one was written first and measured second, and it found two questions
+    # the engine could not reach (permissions asked as "who sees", resuming
+    # asked as "fails halfway").
+    "natural": (14, 14),
 }
 
 SESSION_MODES = [

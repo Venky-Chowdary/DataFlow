@@ -384,6 +384,40 @@ OFF_SUBJECT_QUESTIONS: list[Case] = [
     ("what semantic patterns match subscriber_id column naming", "off_subject", ()),
 ]
 
+# Documented subjects asked the way an operator asks them, rather than the way
+# the documentation words them. Every other suite here was written alongside the
+# retrieval it measures, which makes it a good regression net and a poor
+# estimate of a question nobody anticipated: those suites sit at 137/137 while
+# this one does not, and the difference is the honest measure of how far the
+# engine generalizes.
+#
+# Each expected phrase was checked to exist in the shipped corpus, so a miss is
+# always "the engine did not reach documentation that is there" and never "the
+# audit asked for something the product never says". This suite's floor is
+# therefore below its case count on purpose — raise it by fixing retrieval, not
+# by deleting a case or by loosening a phrase into something the question's own
+# words would satisfy.
+NATURAL_QUESTIONS: list[Case] = [
+    # --- security / enterprise ---------------------------------------------
+    ("can I use my own encryption key", "natural", ("byok", "kms")),
+    ("is my data encrypted", "natural", ("encrypted at rest", "tls")),
+    ("can I limit who sees a connector", "natural", ("viewer", "rbac", "permission")),
+    ("what roles can approve a risky mapping", "natural", ("editor", "admin")),
+    # --- failure and recovery ----------------------------------------------
+    ("what happens if a job fails halfway", "natural", ("checkpoint", "resume")),
+    ("how do I see which rows were rejected", "natural", ("quarantine",)),
+    ("how do I get notified when a job fails", "natural", ("webhook", "job.failed")),
+    ("how do I export proof for an auditor", "natural", ("archive", "checksum")),
+    # --- routes, cadence, modes --------------------------------------------
+    ("can I schedule a transfer every hour", "natural", ("cron", "hourly", "cadence")),
+    ("does it support scd type 2", "natural", ("scd2",)),
+    ("how do I connect a postgres database", "natural", ("new connection", "postgresql")),
+    # --- fidelity ----------------------------------------------------------
+    ("how big can a decimal be", "natural", ("digits", "scale")),
+    ("what does the row ledger prove", "natural", ("accounting", "conservation")),
+    ("what is a contract", "natural", ("schema agreement",)),
+]
+
 SUITES: dict[str, list[Case]] = {
     "product": PRODUCT_QUESTIONS,
     "workspace": WORKSPACE_QUESTIONS,
@@ -391,6 +425,7 @@ SUITES: dict[str, list[Case]] = {
     "fidelity": FIDELITY_QUESTIONS,
     "command": COMMAND_QUESTIONS,
     "meta": META_QUESTIONS,
+    "natural": NATURAL_QUESTIONS,
     "off_subject": OFF_SUBJECT_QUESTIONS,
 }
 

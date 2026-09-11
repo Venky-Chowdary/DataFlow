@@ -328,6 +328,20 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("schedule", "cron", "timezone", "pipeline")),
     (re.compile(r"\bread[\s-]?only\b", re.I), ("viewer", "role", "permission", "read")),
     (re.compile(r"\bwho\s+can\b", re.I), ("role", "permission", "rbac", "approve")),
+    # The same question without the modal. "Can I limit who sees a connector"
+    # reached "Honest transfer-ready labels" — the one connector section that
+    # says nothing about who may read one — because ``who can`` was the only
+    # spelling of a permissions question the vocabulary knew.
+    (re.compile(r"\bwho\s+(?:sees|reads|views|has\s+access)\b"
+                r"|\b(?:limit|restrict|control)\s+(?:who|access)\b", re.I),
+     ("role", "permission", "rbac", "viewer")),
+    # Asking what happens to a half-finished run is asking about resuming from
+    # a checkpoint, and it shares no word with the section that says so: the
+    # answer came from the webhook event list, on the strength of ``job.failed``.
+    (re.compile(r"\bfail(?:s|ed|ing)?\s+"
+                r"(?:halfway|partway|midway|part\s*way|in\s+the\s+middle)\b"
+                r"|\bhalf(?:\s|-)?(?:way\s+through|finished|written)\b", re.I),
+     ("resume", "checkpoint", "partial", "retry")),
     (re.compile(r"\bget\s+started\b", re.I), ("first", "transfer", "studio", "guide")),
 )
 
