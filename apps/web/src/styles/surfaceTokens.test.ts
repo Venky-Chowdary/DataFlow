@@ -1303,4 +1303,36 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-adv-suggest-chip,/);
     assert.match(ui, /\.df2-app \.df2-adv-behavior-callout \{[\s\S]{0,80}--df-surface-muted/);
   });
+
+  it("Theater leftover navy, paper, and mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-theater-v3-endpoint strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-endpoint strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-theater-v3-arrow \{[\s\S]{0,40}--df-brand-strong/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-arrow \{[\s\S]{0,40}color: #0f766e/);
+    assert.match(ui, /\.df2-theater-v3-metric strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-metric strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-theater-lineage summary \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-theater-lineage summary \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-theater-v3-stream \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-stream \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(ui, /\.df2-theater-v3-stream strong \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /\.df2-theater-pop-strip \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-theater-pop-strip \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(ui, /\.df2-theater-v3-phase\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-phase\.active \{[\s\S]{0,80}background: #ccfbf1/);
+    assert.match(ui, /\.df2-theater-cdc-chip \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-theater-cdc-chip \{[\s\S]{0,160}background: #f1f5f9/);
+    assert.match(ui, /\.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-theater-v3-next-copy strong \{[\s\S]{0,40}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-theater-v3-endpoint strong,/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-arrow \{[\s\S]{0,40}--df-brand-strong/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-phase\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-theater-cdc-chip,/);
+  });
 });
