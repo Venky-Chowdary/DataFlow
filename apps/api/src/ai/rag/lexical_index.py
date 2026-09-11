@@ -74,6 +74,39 @@ def _undouble(stem: str) -> str:
     return stem[:-1]
 
 
+#: Shortest word to drop a silent ``-e`` from. Below this the two forms are
+#: already the same token, because ``_stem`` leaves short words alone
+#: (``mode``/``modes``, ``role``/``roles``, ``type``/``typed``), and dropping it
+#: would merge unrelated short words instead.
+_MIN_SILENT_E = 5
+
+
+def _drop_silent_e(token: str) -> str:
+    """``delete`` → ``delet``, meeting the form ``-ed`` and ``-ing`` already reach.
+
+    English drops a silent ``-e`` before those suffixes, so stripping the suffix
+    alone leaves two tokens for one word. Measured across this corpus that split
+    most of the product's own verbs from their own past tense: ``quarantine`` and
+    ``quarantined``, ``validate`` and ``validated``, ``create`` and ``created``,
+    ``schedule`` and ``scheduled``, ``reconcile`` and ``reconciled``, ``store``
+    and ``stored``, ``write`` and ``writing``. Asked "what does mirror mode do to
+    deleted rows" the sentence saying mirror "is upsert plus deletion — rows the
+    source no longer has are removed" shared not one term with ``delet``.
+
+    The shorter form wins because that is what the suffix rules already produce,
+    so this only has to move the base form to meet them.
+
+    A vowel before the ``-e`` is left alone: ``value`` and ``queue`` are not a
+    consonant stem with a silent ending, and ``values`` already reaches
+    ``value``.
+    """
+    if len(token) < _MIN_SILENT_E or not token.endswith("e"):
+        return token
+    if token[-2] in "aeiou":
+        return token
+    return token[:-1]
+
+
 def _stem(token: str) -> str:
     """Strip the few English suffixes that split a term from its own documentation.
 
@@ -92,15 +125,25 @@ def _stem(token: str) -> str:
                 return f"{token[:-3]}y"
             if suffix == "es":
                 stem = token[:-2]
-                return stem if stem.endswith(_SIBILANT_TAILS) else token[:-1]
+                if stem.endswith(_SIBILANT_TAILS):
+                    return stem
+                return _drop_silent_e(token[:-1])
             if suffix in ("ing", "ed"):
                 return _undouble(token[: -len(suffix)])
-            return token[: -len(suffix)]
-    return token
+            return _drop_silent_e(token[: -len(suffix)])
+    return _drop_silent_e(token)
 
 
 def normalize(token: str) -> str:
-    """Canonical index/query form of one token."""
+    """Canonical index/query form of one token.
+
+    A ``snake_case`` identifier is normalized part by part, because the query
+    side reaches it by joining the stems of the words the operator typed. The
+    corpus label ``reverse_etl`` stemmed as one word while "what is reverse ETL"
+    produced ``revers_etl``, so the shingle built to find that label could not.
+    """
+    if "_" in token:
+        return "_".join(normalize(part) if part else part for part in token.split("_"))
     return ALIASES.get(token, _stem(token))
 
 
@@ -118,6 +161,13 @@ def normalize(token: str) -> str:
 # possessive intensifier in all ten. "Bring your own key" still reaches BYOK,
 # as a phrase expansion.
 #
+# ``see`` and ``handle`` are the same kind of frame — "how do you handle X",
+# "who sees X" — and worse, because the question's rarest remaining word decides
+# which sentence opens the answer. "Can I limit who sees a connector" anchored
+# on ``sees`` and opened on "the destination never sees a later chunk before an
+# earlier one"; "how do you handle very large decimals" anchored on ``handle``.
+# Neither verb names anything: what the question is about is its object.
+#
 # ``up`` and ``cannot`` are rare enough in the corpus to look like subjects —
 # IDF 3.68 and 2.34, above ``schedule`` and ``quarantine`` — while carrying
 # none of what the question is about. ``up`` is only ever "set up", "up to 38"
@@ -133,6 +183,7 @@ _STOPWORD_WORDS = """
     not no nor so too very just also only
     please tell show explain mean means help
     use used using own bring
+    see sees seen handle handles handled
     up cannot
     """.split()
 STOPWORDS = frozenset(_STOPWORD_WORDS) | frozenset(normalize(w) for w in _STOPWORD_WORDS)

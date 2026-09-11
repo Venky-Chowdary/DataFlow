@@ -99,7 +99,7 @@ def test_a_comparison_frame_carries_no_subject_signal():
         assert normalize(word) in GENERIC_QUESTION_WORDS
 
     terms = analyze_query("what is the difference between jobs and pipelines").terms
-    assert set(terms) == {"jobs", "pipeline"}
+    assert set(terms) == {normalize("jobs"), normalize("pipeline")}
 
 
 def test_expansion_is_tiered_so_a_phrase_is_trusted_and_a_word_is_not():
@@ -126,7 +126,7 @@ def test_generic_words_still_trigger_expansion_but_never_anchor():
     """"Bad" is useless as an anchor and useful as a pointer at "quarantine"."""
     analysis = analyze_query("what happens to bad rows")
     assert "bad" not in analysis.terms
-    assert "quarantine" in analysis.expansions
+    assert normalize("quarantine") in analysis.expansions
 
 
 def test_query_side_shingles_recover_the_corpus_own_labels():
@@ -136,10 +136,17 @@ def test_query_side_shingles_recover_the_corpus_own_labels():
     ``write`` and ``etl`` into every sync-mode passage and broke "how is this
     different from writing ETL scripts".
     """
-    assert identifier_shingles(("reverse", "etl")) == ["reverse_etl"]
-    assert "reverse_etl" in analyze_query("what is reverse ETL").phrase_expansions
+    # Both sides are stemmed, so the assertion is that they agree rather than
+    # that they are spelled any particular way.
+    assert identifier_shingles((normalize("reverse"), normalize("etl"))) == [
+        normalize("reverse_etl")
+    ]
+    assert (
+        normalize("reverse_etl")
+        in analyze_query("what is reverse ETL").phrase_expansions
+    )
     # A term that is already an identifier is not re-joined.
-    assert identifier_shingles(("reverse_etl", "mode")) == []
+    assert identifier_shingles((normalize("reverse_etl"), "mode")) == []
 
 
 # --- retrieval passages -----------------------------------------------------

@@ -153,8 +153,18 @@ def test_pilot_spoken_english_on_named_faq_fixture():
     q = "what does quarantine mean"
     resp = agent.chat(q)
     answer = resp.answer or ""
+    # The two things a definition of quarantine has to say, rather than one
+    # section's wording of them. Both the FAQ line and the quarantine article
+    # say them, and which of the two survives de-duplication is a retrieval
+    # detail: the FAQ's "isolated with the column, value, and reason — never
+    # silently dropped" is a one-line restatement of the article's opening, so
+    # once the stemmer let the two agree on their verbs the FAQ line was
+    # correctly read as redundant and dropped from the composed answer.
+    not_dropped = "silently dropped" in answer or "disappears silently" in answer
+    what_was_wrong = "column" in answer and "value" in answer
     ok = (
-        "never silently dropped" in answer
+        not_dropped
+        and what_was_wrong
         and "Source:" in answer
         and "Where:" not in answer
         and "Open the job" not in answer

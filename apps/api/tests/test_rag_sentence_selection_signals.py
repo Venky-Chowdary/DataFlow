@@ -26,6 +26,7 @@ from src.ai.rag.lexical_index import (
     adjacent_shingles,
     content_terms,
     identifier_shingles,
+    normalize,
 )
 from src.ai.rag.query_analysis import analyze_query
 
@@ -114,9 +115,10 @@ def test_filler_breaks_a_phrase_instead_of_being_squeezed_out() -> None:
     Shingling the sentence after filler removal invented it, and a feature-list
     sentence then outranked the section that explains a low confidence score.
     """
-    assert "map_confidence" in identifier_shingles(["map", "confidence"])
-    assert "map_confidence" not in adjacent_shingles("semantic mapping with confidence")
-    assert "map_confidence" in adjacent_shingles("why is my mapping confidence low")
+    label = normalize("map_confidence")
+    assert label in identifier_shingles([normalize("map"), normalize("confidence")])
+    assert label not in adjacent_shingles("semantic mapping with confidence")
+    assert label in adjacent_shingles("why is my mapping confidence low")
 
 
 def test_the_phrase_matches_either_spelling_of_an_aspect() -> None:

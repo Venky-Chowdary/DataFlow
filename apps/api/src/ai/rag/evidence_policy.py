@@ -235,11 +235,14 @@ def assess_evidence(
     # Splitting here rather than in the index keeps this out of ranking, where
     # it would add ``write`` and ``etl`` to every passage that lists a sync mode
     # and let those outrank the section the question was about.
+    # The parts are already normalized: ``normalize`` stems a ``snake_case``
+    # identifier part by part, so splitting one yields canonical tokens. Stemming
+    # them a second time eroded them — ``revers_etl`` split to ``rever``, which
+    # is not what the question side produces — because a suffix stripper is a
+    # single pass, not a rule that converges.
     for term in tuple(covered):
         if "_" in term:
-            covered.update(
-                normalize(part) for part in term.split("_") if len(part) > 1
-            )
+            covered.update(part for part in term.split("_") if len(part) > 1)
 
     subjects = tuple(t for t in analysis.search_terms if is_subject_term(t))
     anchors = tuple(dict.fromkeys(subjects))

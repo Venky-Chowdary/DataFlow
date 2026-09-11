@@ -236,5 +236,5 @@ def test_splitting_never_cuts_a_line_in_half() -> None:
 
 def test_headings_still_describe_the_corpus() -> None:
     """``product_subjects`` reads authored sections, which stay unsplit."""
-    assert "quarantine" in product_subjects()
-    assert "connector" in product_subjects()
+    assert normalize("quarantine") in product_subjects()
+    assert normalize("connector") in product_subjects()

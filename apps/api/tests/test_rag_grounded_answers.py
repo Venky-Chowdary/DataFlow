@@ -98,8 +98,22 @@ def test_generated_chunks_extend_the_help_corpus_without_replacing_it():
 def test_short_names_normalize_onto_the_documented_spelling():
     assert normalize("postgres") == "postgresql"
     assert normalize("mongo") == "mongodb"
-    assert tokenize("Postgres tables") == ["postgresql", "table"]
+    assert tokenize("Postgres tables") == ["postgresql", normalize("table")]
+    assert tokenize("tables") == tokenize("table")
     assert tokenize("batches") == tokenize("batch")
+    # English drops a silent -e before -ed/-ing, so the base form has to meet
+    # the stem those suffixes already produce or the product's own verbs never
+    # find their own past tense.
+    for base, inflected in (
+        ("delete", "deleted"),
+        ("quarantine", "quarantined"),
+        ("validate", "validated"),
+        ("schedule", "scheduling"),
+        ("reconcile", "reconciled"),
+        ("store", "stored"),
+        ("write", "writing"),
+    ):
+        assert tokenize(base) == tokenize(inflected), base
     assert tokenize("policies") == tokenize("policy")
     assert "full_refresh" in tokenize("use full_refresh here")
 
