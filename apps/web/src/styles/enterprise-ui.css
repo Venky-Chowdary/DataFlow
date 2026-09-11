@@ -4700,7 +4700,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-validate-rail-details > summary {
   font-size: 12px;
   font-weight: 600;
-  color: #475569;
+  color: var(--df-text-secondary);
   padding: 4px 0;
 }
 
@@ -13955,6 +13955,46 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 
 .df2-app .df2-vd-blocker-fix {
   color: var(--df-brand-strong) !important;
+}
+
+.df2-app .df2-validate-footer-status strong,
+.df2-app .df2-run-footer-status strong,
+.df2-app .df2-map-footer-status strong,
+.df2-app .df2-map-blocker-list > li > strong,
+.df2-app .df2-mapping-accuracy-stat strong,
+.df2-app .df2-validate-rail-metric strong,
+.df2-app .df2-validate-rail-outcome,
+.df2-app .df2-validate-rail-runid code,
+.df2-app .df2-validate-rail-contract-hint strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-validate-rail-details > summary {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-validate-rail-score strong {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-validate-footer-status .is-ok,
+.df2-app .df2-map-footer-status .is-ok,
+.df2-app .df2-validate-rail-panel.passed .df2-validate-rail-outcome {
+  color: var(--df-success);
+}
+
+.df2-app .df2-validate-footer-status .is-warn,
+.df2-app .df2-map-footer-status .is-warn,
+.df2-app .df2-validate-rail-panel.review .df2-validate-rail-outcome {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-validate-rail-panel.blocked .df2-validate-rail-outcome {
+  color: var(--df-danger);
+}
+
+.df2-app .df2-validate-rail-runid code {
+  background: var(--df-surface-muted);
 }
 
 .df2-app .df2-result-more > summary,

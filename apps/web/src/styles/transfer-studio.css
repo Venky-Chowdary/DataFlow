@@ -3855,7 +3855,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-run-footer-status strong {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
   margin-right: 4px;
 }
@@ -4800,7 +4800,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-mapping-accuracy-stat strong {
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-mapping-accuracy-stat.ok { color: #059669; }
@@ -5210,17 +5210,17 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-validate-footer-status strong {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
   margin-right: 4px;
 }
 
 .df2-validate-footer-status .is-warn {
-  color: #b45309;
+  color: var(--df-warning);
 }
 
 .df2-validate-footer-status .is-ok {
-  color: #0f766e;
+  color: var(--df-success);
 }
 
 .df2-validate-footer-actions {
@@ -5276,8 +5276,8 @@ th.df2-type-string .df2-type-badge {
   font-family: var(--df-font-mono, ui-monospace, monospace);
   font-size: 11px;
   font-weight: 700;
-  color: #0f172a;
-  background: #f1f5f9;
+  color: var(--df-text-primary);
+  background: var(--df-surface-muted);
   border-radius: 4px;
   padding: 1px 6px;
 }
@@ -5312,7 +5312,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-validate-rail-score strong {
   font-size: 28px;
-  color: #0f766e;
+  color: var(--df-brand-strong);
   display: block;
   line-height: 1;
 }
@@ -5326,20 +5326,20 @@ th.df2-type-string .df2-type-badge {
   margin: 8px 0 0;
   font-size: 13px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.35;
 }
 
 .df2-validate-rail-panel.blocked .df2-validate-rail-outcome {
-  color: #991b1b;
+  color: var(--df-danger);
 }
 
 .df2-validate-rail-panel.passed .df2-validate-rail-outcome {
-  color: #0f766e;
+  color: var(--df-success);
 }
 
 .df2-validate-rail-panel.review .df2-validate-rail-outcome {
-  color: #92400e;
+  color: var(--df-warning);
 }
 
 .df2-validate-rail-panel.review .df2-validate-rail-score strong {
@@ -5374,7 +5374,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-validate-rail-metric strong {
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-validate-rail-blockers {
@@ -5477,7 +5477,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-validate-rail-contract-hint strong {
-  color: #334155;
+  color: var(--df-text-primary);
   font-weight: 700;
 }
 
@@ -9050,19 +9050,19 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-map-blocker-list > li > strong {
   display: inline;
   margin: 0;
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
 }
 .df2-map-footer-status strong {
-  color: #0f172a;
+  color: var(--df-text-primary);
   font-weight: 600;
   margin-right: 4px;
 }
 .df2-map-footer-status .is-warn {
-  color: #b45309;
+  color: var(--df-warning);
 }
 .df2-map-footer-status .is-ok {
-  color: #0f766e;
+  color: var(--df-success);
 }
 .df2-map-footer-pk-suggest {
   border: none;
