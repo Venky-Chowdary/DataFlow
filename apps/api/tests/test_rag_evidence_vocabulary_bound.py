@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.ai.rag.evidence_policy import assess_evidence
+from src.ai.rag.evidence_policy import PARTIAL_FLOOR, assess_evidence
 from src.ai.rag.product_docs import retrieve_product_answer
 from src.ai.rag.query_analysis import analyze_query
 
@@ -57,6 +57,31 @@ def test_the_bound_is_the_whole_corpus_not_the_retrieved_passages() -> None:
     )
     assert everything_known.outcome in {"answer", "partial"}
     assert nothing_known.outcome == "refuse"
+
+
+def test_an_uncovered_expansion_does_not_veto_the_escape() -> None:
+    """The escape asks about the subjects the operator typed, not every anchor.
+
+    Coverage is deliberately measured on typed words so the expansion table
+    cannot talk a question into an answer. Requiring every *anchor* to be
+    covered let it talk one out of an answer instead, which is the same defect
+    facing the other way: "truncated unmapped nonsense decimals" expands
+    ``truncated`` to the ``overwrite`` sync mode, a passage about decimals does
+    not mention overwriting, and a question whose own subject was fully covered
+    was refused over a word nobody typed.
+    """
+    analysis = analyze_query("how do you handle truncated unmapped nonsense decimals")
+    passages = ["A decimal column is created as the NUMERIC type on postgresql."]
+    verdict = assess_evidence(analysis, passages, in_vocabulary=lambda _term: True)
+    assert verdict.coverage < PARTIAL_FLOOR, "the escape is only reached below the floor"
+
+    expansion_anchors = set(verdict.anchors) - set(analysis.terms)
+    assert expansion_anchors - set(verdict.covered_anchors), (
+        "fixture no longer has an uncovered expansion anchor; "
+        f"anchors={verdict.anchors} covered={verdict.covered_anchors}"
+    )
+    assert not verdict.uncovered_subjects
+    assert verdict.outcome in {"answer", "partial"}, verdict.reason
 
 
 def test_omitting_the_vocabulary_leaves_the_policy_as_it_was() -> None:

@@ -291,12 +291,16 @@ def assess_evidence(
     # outright. Anchor coverage is the stronger signal, so it wins; the floor
     # still applies whenever an anchor is missing or the remainder points
     # somewhere the documentation does not go.
-    all_anchors_covered = (
-        len(covered_anchors) == len(anchors)
-        and not uncovered_subjects
-        and not foreign
-    )
-    if coverage < partial_floor and not all_anchors_covered:
+    #
+    # ``uncovered_subjects`` is read off the typed terms, so the escape asks only
+    # that the subjects the *operator* named are covered. Requiring it of every
+    # anchor let the expansion table talk the answer down the way the coverage
+    # ratio above forbids it to talk one up: "truncated unmapped nonsense
+    # decimals" expands ``truncated`` to the ``overwrite`` sync mode, and a
+    # passage about decimals does not mention overwriting, so a question whose
+    # own subject was covered was refused over a word nobody typed.
+    all_subjects_covered = not uncovered_subjects and not foreign
+    if coverage < partial_floor and not all_subjects_covered:
         return EvidenceVerdict(
             outcome="refuse",
             coverage=coverage,
