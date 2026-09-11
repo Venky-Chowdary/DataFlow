@@ -604,7 +604,7 @@
 }
 
 .df2-page-query .df2-query-results tbody tr:hover td {
-  background: color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 65%, #fff);
+  background: color-mix(in srgb, var(--df-brand-muted) 65%, var(--df-surface));
 }
 
 .df2-page-query .df2-query-error {
@@ -960,13 +960,25 @@
 /* Type family colouring — a migration console must make a width or class
    change visible at a glance, not bury it in identical grey text. */
 .df2-qw-col-type[data-tone="number"],
-.df2-qw-th-type[data-tone="number"] { background: #eff6ff; color: #1d4ed8; }
+.df2-qw-th-type[data-tone="number"] {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
 .df2-qw-col-type[data-tone="time"],
-.df2-qw-th-type[data-tone="time"] { background: #f5f3ff; color: #6d28d9; }
+.df2-qw-th-type[data-tone="time"] {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
 .df2-qw-col-type[data-tone="bool"],
-.df2-qw-th-type[data-tone="bool"] { background: #fefce8; color: #a16207; }
+.df2-qw-th-type[data-tone="bool"] {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
 .df2-qw-col-type[data-tone="struct"],
-.df2-qw-th-type[data-tone="struct"] { background: #fdf4ff; color: #a21caf; }
+.df2-qw-th-type[data-tone="struct"] {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
 .df2-qw-col-type[data-tone="binary"],
 .df2-qw-th-type[data-tone="binary"] { background: var(--df-surface-muted); color: var(--df-text-secondary); }
 .df2-qw-col-type[data-tone="text"],

@@ -13497,3 +13497,32 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-toolbar .df2-tab {
   color: var(--df-seg-ink) !important;
 }
+
+/* Query leftover pastel type chips + leftover #fff hover mix. */
+.df2-app .df2-qw-col-type[data-tone="number"],
+.df2-app .df2-qw-th-type[data-tone="number"] {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
+
+.df2-app .df2-qw-col-type[data-tone="time"],
+.df2-app .df2-qw-th-type[data-tone="time"] {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-qw-col-type[data-tone="bool"],
+.df2-app .df2-qw-th-type[data-tone="bool"] {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-qw-col-type[data-tone="struct"],
+.df2-app .df2-qw-th-type[data-tone="struct"] {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-page-query .df2-query-results tbody tr:hover td {
+  background: color-mix(in srgb, var(--df-brand-muted) 65%, var(--df-surface));
+}
