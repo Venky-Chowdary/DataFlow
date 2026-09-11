@@ -13910,6 +13910,9 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-theater-lineage summary,
 .df2-app .df2-theater-lineage code,
 .df2-app .df2-theater-v3-stream strong,
+.df2-app .df2-theater-v3-sla-card strong,
+.df2-app .df2-theater-v2-metrics strong,
+.df2-app .df2-theater-v3-endpoint-copy strong,
 .df2-app .df2-theater-v3-next-copy strong {
   color: var(--df-text-primary);
 }
@@ -13946,6 +13949,38 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-theater-v3-phase.failed {
   background: var(--df-danger-bg);
   color: var(--df-danger);
+}
+
+.df2-app .df2-theater-v3-sla-card.is-warn strong {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-theater-v2-metrics div {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-theater-phase {
+  background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
+}
+
+.df2-app .df2-theater-phase.done {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-theater-phase.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-theater-phase.failed {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-theater-phase-dot {
+  background: var(--df-surface);
 }
 
 /* Result leftover navy / paper / mint on title, metric, quarantine. */
