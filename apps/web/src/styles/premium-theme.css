@@ -912,11 +912,11 @@
 }
 
 .df2-connector-tile.is-live {
-  border-color: #a7f3d0;
+  border-color: var(--df-brand);
 }
 
 .df2-connector-tile.is-live:hover {
-  border-color: #0f766e;
+  border-color: var(--df-brand-strong);
   box-shadow: 0 4px 16px rgba(15, 118, 110, 0.12);
 }
 
@@ -937,7 +937,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-connector-tile {
@@ -946,7 +946,7 @@
 
 .df2-catalog-meta {
   font-size: 13px;
-  color: #64748b;
+  color: var(--df-text-secondary);
   margin: 0 0 16px;
 }
 

@@ -13465,6 +13465,87 @@ html.df2-theme-dark:has(.df2-app) .df2-connection-form {
   border-color: var(--df-border);
 }
 
+/* Portaled catalog pick — leftover navy names / paper chips never see .df2-app. */
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-catalog-nav button,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-catalog-nav button,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-catalog-meta,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-catalog-meta {
+  color: var(--df-text-secondary) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-catalog-nav button.active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-catalog-nav button.active {
+  color: var(--df-brand-strong) !important;
+  background: var(--df-brand-muted) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search input,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search input {
+  background: var(--df-surface) !important;
+  color: var(--df-text-primary) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-chip,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-chip {
+  background: var(--df-surface) !important;
+  color: var(--df-text-secondary) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-chip.active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-chip.active {
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-connector-tile-icon,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-connector-tile-icon,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search-result-icon,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search-result-icon {
+  background: var(--df-surface-muted) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-connector-tile-name,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-connector-tile-name,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search-result-body strong,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search-result-body strong,
+html[data-theme="dark"]:has(.df2-app) .dt-modal-title,
+html.df2-theme-dark:has(.df2-app) .dt-modal-title {
+  color: var(--df-text-primary) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .dt-modal-subtitle,
+html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-subtitle {
+  color: var(--df-text-secondary) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .dt-modal-header .df2-btn-ghost,
+html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-header .df2-btn-ghost {
+  color: var(--df-text-secondary) !important;
+  background: var(--df-surface) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .dt-modal-header .df2-btn-ghost:hover,
+html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-header .df2-btn-ghost:hover {
+  color: var(--df-text-primary) !important;
+  background: var(--df-surface-muted) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search-result:hover,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search-result:hover,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-search-result.active,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-search-result.active {
+  background: var(--df-list-row-hover) !important;
+}
+
+html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-modal-xl .dt-modal-body,
+html.df2-theme-dark:has(.df2-app) .df2-modal .df2-modal-xl .dt-modal-body,
+html[data-theme="dark"]:has(.df2-app) .df2-modal.df2-modal-xl .dt-modal-body,
+html.df2-theme-dark:has(.df2-app) .df2-modal.df2-modal-xl .dt-modal-body,
+html[data-theme="dark"]:has(.df2-app) .df2-modal .dt-modal-footer,
+html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
+  background: var(--df-surface-muted) !important;
+}
+
 /* Settings / Query / tab leftovers — leftover navy + paper. */
 .df2-app .df2-settings-summary-item strong,
 .df2-app .df2-settings-policy-row h3,
@@ -14044,4 +14125,50 @@ html.df2-theme-dark:has(.df2-app) .df2-connection-form {
 .df2-app .df2-connection-form {
   background: var(--df-surface-muted);
   border-color: var(--df-border);
+}
+
+/* Catalog pick leftover navy / paper — tiles vanish on dark. */
+.df2-app .df2-connector-tile-name {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-connector-tile-icon,
+.df2-app .df2-search-result-icon {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-search input {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-chip {
+  background: var(--df-surface);
+  color: var(--df-text-secondary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-chip.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+  border-color: var(--df-brand);
+}
+
+.df2-app .df2-catalog-nav button {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-search-result:hover,
+.df2-app .df2-search-result.active {
+  background: var(--df-list-row-hover);
+}
+
+.df2-app .dt-modal-title,
+.df2-app .df2-search-result-body strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .dt-modal-subtitle {
+  color: var(--df-text-secondary);
 }

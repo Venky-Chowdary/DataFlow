@@ -929,7 +929,7 @@ body {
   background: transparent;
   font-size: 13px;
   font-weight: 500;
-  color: #64748b;
+  color: var(--df-text-secondary);
   text-align: left;
   cursor: pointer;
 }
@@ -947,19 +947,19 @@ body {
   height: var(--df-toolbar-h, 36px);
   min-height: var(--df-toolbar-h, 36px);
   padding: 0 14px 0 40px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 9px;
   font-size: 13px;
-  background: #fff;
-  color: #0f172a;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
   box-shadow: none;
   box-sizing: border-box;
 }
 
 .df2-search input:focus {
   outline: none;
-  border-color: #0f766e;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 3px var(--df-brand-soft);
 }
 
 .df2-search-icon {
@@ -967,7 +967,7 @@ body {
   left: 14px;
   top: 50%;
   transform: translateY(-50%);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   pointer-events: none;
 }
 
@@ -980,19 +980,19 @@ body {
 
 .df2-chip {
   padding: 5px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 999px;
-  background: #fff;
+  background: var(--df-surface);
   font-size: 12px;
   font-weight: 500;
-  color: #64748b;
+  color: var(--df-text-secondary);
   cursor: pointer;
 }
 
 .df2-chip.active {
-  background: #f0fdfa;
-  border-color: #0f766e;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  border-color: var(--df-brand);
+  color: var(--df-brand-strong);
 }
 
 .df2-connector-grid {
@@ -1019,7 +1019,7 @@ body {
 }
 
 .df2-connector-tile:hover {
-  border-color: #0f766e;
+  border-color: var(--df-brand);
   box-shadow: 0 4px 12px rgba(15, 118, 110, 0.1);
 }
 
@@ -1030,13 +1030,13 @@ body {
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-connector-tile-name {
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.25;
   overflow-wrap: anywhere;
   display: -webkit-box;
@@ -1049,7 +1049,7 @@ body {
 
 .df2-connector-tile-desc {
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   line-height: 1.35;
   display: -webkit-box;
   -webkit-line-clamp: 2;

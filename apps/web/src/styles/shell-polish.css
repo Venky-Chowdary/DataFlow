@@ -1515,7 +1515,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-search-result:hover,
 .df2-search-result.active {
-  background: #f0fdfa;
+  background: var(--df-list-row-hover);
 }
 
 .df2-search-result-icon {
@@ -1525,7 +1525,7 @@ textarea.df2-pilot-composer textarea {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   flex-shrink: 0;
 }
 
@@ -3579,7 +3579,7 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--df-text-primary);
   letter-spacing: -0.01em;
 }
 
@@ -3588,7 +3588,7 @@ textarea.df2-pilot-composer textarea {
   margin: 4px 0 0;
   font-size: 13px;
   line-height: 1.5;
-  color: #64748b;
+  color: var(--df-text-secondary);
   max-width: 62ch;
 }
 
@@ -3603,12 +3603,12 @@ textarea.df2-pilot-composer textarea {
   border-radius: 9px;
   border: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface);
-  color: #64748b;
+  color: var(--df-text-secondary);
 }
 
 .dt-modal-header .df2-btn-ghost:hover {
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
 }
 
 .df2-app .dt-modal-body,
@@ -3621,7 +3621,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-modal-xl .dt-modal-body {
   max-height: none;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 /* Compact catalog inside the modal: full width, multi-column tiles */
@@ -3649,7 +3649,7 @@ textarea.df2-pilot-composer textarea {
   gap: 10px;
   padding: 16px 24px;
   border-top: 1px solid var(--df-border, #eef2f6);
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 /* Form rhythm inside the configure step */
@@ -3674,7 +3674,7 @@ textarea.df2-pilot-composer textarea {
 .dt-modal-body .df2-label {
   font-size: 12px;
   font-weight: 600;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 
 .dt-modal-body .df2-input {
@@ -3683,20 +3683,20 @@ textarea.df2-pilot-composer textarea {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 9px;
   font-size: 14px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   background: var(--df-surface);
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
 .dt-modal-body .df2-input:focus {
   outline: none;
-  border-color: #0f766e;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+  border-color: var(--df-brand);
+  box-shadow: 0 0 0 3px var(--df-brand-soft);
 }
 
 .dt-modal-body .df2-input:disabled {
   background: var(--df-surface-muted);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 @media (max-width: 640px) {
