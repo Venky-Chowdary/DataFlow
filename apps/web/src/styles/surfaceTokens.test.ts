@@ -1678,4 +1678,49 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     );
     assert.match(ui, /\.df2-app \.df2-label \{[\s\S]{0,40}--df-text-secondary/);
   });
+
+  it("Catalog pick leftover navy / paper follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const dataflow = sheet("dataflow-ui.css");
+    const premium = sheet("premium-theme.css");
+    const polish = sheet("shell-polish.css");
+
+    assert.match(dataflow, /\.df2-catalog-nav button \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(dataflow, /\.df2-catalog-nav button \{[\s\S]{0,200}color: #64748b/);
+    assert.match(dataflow, /\.df2-search input \{[\s\S]{0,400}--df-surface/);
+    assert.match(dataflow, /\.df2-search input \{[\s\S]{0,400}--df-text-primary/);
+    assert.doesNotMatch(dataflow, /\.df2-search input \{[\s\S]{0,400}background: #fff/);
+    assert.doesNotMatch(dataflow, /\.df2-search input \{[\s\S]{0,400}color: #0f172a/);
+    assert.match(dataflow, /\.df2-chip \{[\s\S]{0,200}--df-surface/);
+    assert.doesNotMatch(dataflow, /\.df2-chip \{[\s\S]{0,200}background: #fff/);
+    assert.match(dataflow, /\.df2-chip\.active \{[\s\S]{0,120}--df-brand-muted/);
+    assert.doesNotMatch(dataflow, /\.df2-chip\.active \{[\s\S]{0,120}#f0fdfa/);
+    assert.match(dataflow, /\.df2-connector-tile-icon \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(dataflow, /\.df2-connector-tile-icon \{[\s\S]{0,160}background: #f8fafc/);
+    assert.match(dataflow, /\.df2-connector-tile-name \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(dataflow, /\.df2-connector-tile-name \{[\s\S]{0,80}color: #0f172a/);
+
+    assert.match(premium, /\.df2-connector-tile\.is-live \{[\s\S]{0,80}--df-brand/);
+    assert.doesNotMatch(premium, /\.df2-connector-tile\.is-live \{[\s\S]{0,80}#a7f3d0/);
+    assert.match(premium, /\.df2-catalog-meta \{[\s\S]{0,80}--df-text-secondary/);
+    assert.doesNotMatch(premium, /\.df2-catalog-meta \{[\s\S]{0,80}color: #64748b/);
+
+    assert.match(polish, /\.df2-search-result:hover,\n\.df2-search-result\.active \{[\s\S]{0,80}--df-list-row-hover/);
+    assert.doesNotMatch(polish, /\.df2-search-result:hover,\n\.df2-search-result\.active \{[\s\S]{0,80}#f0fdfa/);
+    assert.match(polish, /\.df2-search-result-icon \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-search-result-icon \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(polish, /\.df2-modal-xl \.dt-modal-body \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-modal-xl \.dt-modal-body \{[\s\S]{0,80}background: #f8fafc/);
+    assert.match(polish, /\.dt-modal-footer \{[\s\S]{0,200}--df-surface-muted/);
+    assert.match(polish, /\.dt-modal-title \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(polish, /\.dt-modal-title \{[\s\S]{0,120}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-connector-tile-name \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-connector-tile-name,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-search input,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.df2-modal \.df2-chip,/);
+    assert.match(ui, /html\[data-theme="dark"\]:has\(\.df2-app\) \.dt-modal-title,/);
+  });
 });
