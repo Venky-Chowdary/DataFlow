@@ -2087,4 +2087,35 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-map-blocker-bar-head \{[\s\S]{0,40}--df-text-primary/);
     assert.match(ui, /\.df2-app \.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Validate leftover paper scope-chip and decision-path badge follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-scope-chip \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-scope-chip \{[\s\S]{0,280}background: #f1f5f9/);
+    assert.match(studio, /\.df2-vd-scope-chip\.cov-sample \{[\s\S]{0,80}--df-warning/);
+    assert.doesNotMatch(studio, /\.df2-vd-scope-chip\.cov-sample \{[\s\S]{0,80}color: #9a3412/);
+    assert.match(studio, /\.df2-vd-scope-chip\.cov-full_schema \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-vd-scope-chip\.cov-full_schema \{[\s\S]{0,80}background: #ecfdf5/);
+    assert.match(studio, /\.df2-vd-scope-chip\.cov-pending \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(studio, /\.df2-vd-scope-chip\.cov-pending \{[\s\S]{0,80}background: #fef3c7/);
+    assert.match(studio, /\.df2-vd-decision-path-badge \{[\s\S]{0,240}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-badge \{[\s\S]{0,240}background: #e2e8f0/);
+    assert.match(studio, /\.df2-vd-decision-path-badge\.is-proven \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-badge\.is-proven \{[\s\S]{0,80}background: #ccfbf1/);
+    assert.match(studio, /\.df2-repair-summary p \{[\s\S]{0,120}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-repair-summary p \{[\s\S]{0,120}color: #334155/);
+    assert.match(studio, /\.df2-vd-chip \{[\s\S]{0,280}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-chip \{[\s\S]{0,280}color: #1e293b/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-scope-chip,/);
+    assert.match(ui, /\.df2-app \.df2-vd-decision-path-badge\.is-proven \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-vd-chip \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-vd-chip\.is-static,/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
