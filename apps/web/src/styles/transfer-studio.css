@@ -8233,7 +8233,7 @@ th.df2-type-string .df2-type-badge {
   gap: 8px;
   padding: 11px 16px;
   border-bottom: 1px solid #e2e8f0;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 .df2-vd-decision-path.is-blocked .df2-vd-decision-path-head {
   border-bottom-color: #fde68a;
@@ -8259,7 +8259,7 @@ th.df2-type-string .df2-type-badge {
   padding: 10px 16px 4px;
   font-size: 12.5px;
   line-height: 1.45;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 .df2-vd-decision-path-steps {
   list-style: none;
@@ -8286,13 +8286,13 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-decision-path-steps li.is-locked {
   border-color: #e2e8f0;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
   opacity: 0.85;
 }
 .df2-vd-decision-path-steps li.is-unlocked,
 .df2-vd-decision-path-steps li.is-ready {
   border-color: #99f6e4;
-  background: #f0fdfa;
+  background: var(--df-brand-muted);
 }
 .df2-vd-decision-path-step-label {
   font-size: 11px;
@@ -8303,7 +8303,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-decision-path-step-summary {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.4;
 }
 .df2-vd-decision-path-step-detail {
@@ -8315,7 +8315,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-honesty {
   border: 1px solid #cbd5e1;
   border-radius: 14px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   overflow: hidden;
   margin-bottom: 14px;
 }
@@ -8325,7 +8325,7 @@ th.df2-type-string .df2-type-badge {
   gap: 8px;
   padding: 11px 16px;
   border-bottom: 1px solid #e2e8f0;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 .df2-vd-honesty-head strong { font-size: 13px; flex: 1; }
 .df2-vd-honesty-note {
@@ -8333,7 +8333,7 @@ th.df2-type-string .df2-type-badge {
   padding: 10px 16px 4px;
   font-size: 12.5px;
   line-height: 1.45;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 .df2-vd-honesty-list {
   list-style: none;
@@ -8354,7 +8354,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-honesty-list span {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.4;
 }
 .df2-vd-hs-metric {
@@ -8391,17 +8391,17 @@ th.df2-type-string .df2-type-badge {
   color: #ecfdf5;
 }
 .df2-vd-hs-metric.is-unmeasured .df2-vd-hs-badge {
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 .df2-vd-hs-headline {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.4;
 }
 .df2-vd-hs-counts {
   font-size: 12px;
-  color: #475569;
+  color: var(--df-text-secondary);
 }
 .df2-vd-honesty-toggle {
   display: flex;
@@ -8409,7 +8409,7 @@ th.df2-type-string .df2-type-badge {
   align-items: flex-start;
   padding: 0 16px 12px;
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   cursor: pointer;
 }
 .df2-vd-honesty-toggle input {
