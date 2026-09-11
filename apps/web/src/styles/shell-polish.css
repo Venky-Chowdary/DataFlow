@@ -1641,7 +1641,7 @@ textarea.df2-pilot-composer textarea {
   padding: 14px 16px;
   border: 2px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
-  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
+  background: var(--df-surface);
   cursor: pointer;
   text-align: left;
   color: inherit;
@@ -1650,14 +1650,14 @@ textarea.df2-pilot-composer textarea {
 
 .df2-cadence-tile:hover {
   transform: translateY(-2px);
-  border-color: #99f6e4;
+  border-color: var(--df-brand);
   box-shadow: 0 6px 18px rgba(13, 148, 136, 0.08);
 }
 
 .df2-cadence-tile.active {
-  border-color: var(--df-brand, #0f766e);
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.1);
+  border-color: var(--df-brand);
+  background: var(--df-brand-muted);
+  box-shadow: 0 0 0 3px var(--df-brand-soft);
 }
 
 .df2-cadence-tile strong {
@@ -1707,7 +1707,7 @@ textarea.df2-pilot-composer textarea {
   padding: 18px 20px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 14px;
-  background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
+  background: var(--df-surface);
   box-shadow: none;
   transition: border-color 0.2s ease;
 }
@@ -1719,13 +1719,13 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pipeline-card.active {
-  border-color: #99f6e4;
-  background: linear-gradient(180deg, #f0fdfa 0%, #fff 100%);
+  border-color: var(--df-brand);
+  background: var(--df-brand-muted);
 }
 
 .df2-pipeline-card.paused {
   opacity: 0.92;
-  background: #fafafa;
+  background: var(--df-surface-muted);
 }
 
 .df2-pipeline-card-head {
@@ -1791,8 +1791,8 @@ textarea.df2-pilot-composer textarea {
   width: 32px;
   height: 32px;
   border-radius: 999px;
-  background: #f0fdfa;
-  color: var(--df-brand, #0f766e);
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
   flex-shrink: 0;
 }
 
