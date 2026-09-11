@@ -27,6 +27,7 @@ here as a regression rather than as progress.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -42,18 +43,62 @@ for _p in (str(_API_ROOT / "src"), str(_API_ROOT)):
 sys.path.insert(0, str(_API_ROOT / "src"))
 sys.path.insert(0, str(_API_ROOT))
 
-os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
-os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pilot-audit-"))
 
 # The operation suite asks Pilot to read and count real rows, so the audit owns
 # its workspace instead of measuring whatever connectors happen to be saved on
-# the machine. Both stores are redirected into a temp directory *before* any
-# product module is imported; the operator's own connectors are never touched,
-# and the numbers are reproducible on any checkout.
-_FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pilot-audit-"))
-os.environ["DATAFLOW_CONNECTOR_STORE"] = str(_FIXTURE_DIR / "connectors.json")
-os.environ["DATAFLOW_PILOT_MEMORY_PATH"] = str(_FIXTURE_DIR / "pilot_memory.json")
-os.environ["DATAFLOW_SEED_DEMO"] = "0"
+# the machine: both stores live in a temp directory, the operator's own
+# connectors are never touched, and the numbers are reproducible on any
+# checkout. The file backend is named rather than sniffed so a reachable Mongo
+# cannot change what the audit measures.
+_ISOLATED_ENV = {
+    "DATAFLOW_JOB_STORE": "memory",
+    "DATAFLOW_DISABLE_OBJECT_STORE": "1",
+    "DATAFLOW_CONNECTOR_STORE": str(_FIXTURE_DIR / "connectors.json"),
+    "DATAFLOW_CONNECTOR_STORE_BACKEND": "file",
+    "DATAFLOW_PILOT_MEMORY_PATH": str(_FIXTURE_DIR / "pilot_memory.json"),
+    "DATAFLOW_SEED_DEMO": "0",
+}
+
+
+@contextlib.contextmanager
+def isolated_stores():
+    """Redirect the stores for the duration of a run, then put them back.
+
+    This was applied at import time, which is wrong in the one place it matters
+    most: ``tests/test_pilot_answer_audit_eval.py`` imports this module so CI
+    holds the measured floors, and pytest imports every test module while
+    *collecting*, before running any test. So the redirect landed on the whole
+    session from the first moment, and two suites that had nothing to do with
+    the pilot — BYOK connector-secret wrapping and the quarantine API — built
+    connectors in one store and read them back from another. Both passed alone
+    and failed in the suite, which is the signature of exactly this.
+
+    Every other store override in the test tree goes through
+    ``monkeypatch.setenv`` and is therefore undone; this is the same contract
+    for a module that also has to work as a standalone script.
+    """
+    previous = {key: os.environ.get(key) for key in _ISOLATED_ENV}
+    os.environ.update(_ISOLATED_ENV)
+    # The chosen backend is cached on first resolution, so a session that
+    # already picked one would keep it and ignore the environment above. Looked
+    # up again on the way out because the module is imported lazily and may
+    # arrive during the run.
+    store = sys.modules.get("services.connector_store")
+    cached = getattr(store, "_backend_choice", None) if store is not None else None
+    if store is not None:
+        store._backend_choice = None
+    try:
+        yield
+    finally:
+        store = sys.modules.get("services.connector_store")
+        if store is not None:
+            store._backend_choice = cached
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 FIXTURE_CONNECTOR = "Audit SQLite"
 FIXTURE_TABLE = "orders"
@@ -493,10 +538,6 @@ def run(suite: str, *, fresh_session: bool = False) -> list[dict]:
     up. ``fresh_session`` isolates each question instead, so a retrieval defect
     can be told apart from a follow-up-resolution defect.
     """
-    from src.ai.copilot.pilot_agent import DataPilotAgent, carries_evidence
-
-    seed_fixture_workspace()
-    agent = DataPilotAgent()
     cases: list[Case] = []
     if suite == "all":
         for name in SUITES:
@@ -505,45 +546,54 @@ def run(suite: str, *, fresh_session: bool = False) -> list[dict]:
         cases = SUITES[suite]
 
     rows: list[dict] = []
-    for index, (question, subject, must_include) in enumerate(cases):
-        session = f"audit-{index}" if fresh_session else "audit"
-        try:
-            res = agent.chat(question, [], data_context={"pilot_session_id": session})
-            tools = list(getattr(res, "tools_used", None) or [])
-            answer = (res.answer or "").strip()
-            rows.append(
-                {
-                    "question": question,
-                    "subject": subject,
-                    "outcome": classify(
-                        answer,
-                        grounded=carries_evidence(res),
-                        clarification=getattr(res, "needs_clarification", "") or "",
-                        tools=tools,
-                    ),
-                    "on_target": on_target(answer, must_include),
-                    "echo_only": echoes_the_question(question, answer, must_include),
-                    "expected": list(must_include),
-                    "intent": res.intent,
-                    "method": res.method,
-                    "confidence": round(float(res.confidence or 0), 3),
-                    "grounded": carries_evidence(res),
-                    "sources": [str(s.get("title") or "") for s in (res.sources or [])][:3],
-                    "tools": [t.get("name") for t in tools],
-                    "answer": answer,
-                }
-            )
-        except Exception as exc:  # noqa: BLE001 — an exception is itself a finding
-            rows.append(
-                {
-                    "question": question,
-                    "subject": subject,
-                    "outcome": "error",
-                    "on_target": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "answer": "",
-                }
-            )
+    with isolated_stores():
+        from src.ai.copilot.pilot_agent import DataPilotAgent, carries_evidence
+
+        seed_fixture_workspace()
+        agent = DataPilotAgent()
+        for index, (question, subject, must_include) in enumerate(cases):
+            session = f"audit-{index}" if fresh_session else "audit"
+            try:
+                res = agent.chat(
+                    question, [], data_context={"pilot_session_id": session}
+                )
+                tools = list(getattr(res, "tools_used", None) or [])
+                answer = (res.answer or "").strip()
+                rows.append(
+                    {
+                        "question": question,
+                        "subject": subject,
+                        "outcome": classify(
+                            answer,
+                            grounded=carries_evidence(res),
+                            clarification=getattr(res, "needs_clarification", "") or "",
+                            tools=tools,
+                        ),
+                        "on_target": on_target(answer, must_include),
+                        "echo_only": echoes_the_question(question, answer, must_include),
+                        "expected": list(must_include),
+                        "intent": res.intent,
+                        "method": res.method,
+                        "confidence": round(float(res.confidence or 0), 3),
+                        "grounded": carries_evidence(res),
+                        "sources": [
+                            str(s.get("title") or "") for s in (res.sources or [])
+                        ][:3],
+                        "tools": [t.get("name") for t in tools],
+                        "answer": answer,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 — an exception is itself a finding
+                rows.append(
+                    {
+                        "question": question,
+                        "subject": subject,
+                        "outcome": "error",
+                        "on_target": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "answer": "",
+                    }
+                )
     return rows
 
 

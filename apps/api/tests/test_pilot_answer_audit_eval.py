@@ -116,3 +116,35 @@ def test_no_question_in_the_fixture_raises() -> None:
     rows = audit.run("all")
     errors = [r for r in rows if r["outcome"] == "error"]
     assert not errors, "\n".join(f"  {r['question']}: {r['error']}" for r in errors)
+
+
+def test_the_audit_leaves_the_process_stores_alone() -> None:
+    """Importing and running the audit must not reconfigure anything else.
+
+    The audit owns a temp connector store so it measures its own fixture rather
+    than whatever is saved on the machine. That redirect used to be applied at
+    import time, and pytest imports every test module while collecting — so
+    from the first moment of the session every test saw the audit's store.
+    Two suites with nothing to do with the pilot failed on it: BYOK
+    connector-secret wrapping and the quarantine API, both passing alone and
+    failing in the suite.
+    """
+    import os
+
+    watched = (
+        "DATAFLOW_CONNECTOR_STORE",
+        "DATAFLOW_CONNECTOR_STORE_BACKEND",
+        "DATAFLOW_PILOT_MEMORY_PATH",
+        "DATAFLOW_SEED_DEMO",
+        "DATAFLOW_JOB_STORE",
+    )
+    before = {key: os.environ.get(key) for key in watched}
+    audit.run("meta")
+    assert {key: os.environ.get(key) for key in watched} == before
+
+    # And the redirect is real while the run is in flight, otherwise the
+    # numbers would depend on the machine's saved connectors.
+    with audit.isolated_stores():
+        assert os.environ["DATAFLOW_CONNECTOR_STORE"] != (
+            before["DATAFLOW_CONNECTOR_STORE"] or ""
+        )
