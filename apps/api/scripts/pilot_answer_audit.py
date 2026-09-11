@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -112,7 +113,7 @@ PRODUCT_QUESTIONS: list[Case] = [
     ("where do rejected rows go and can I replay them", "quarantine", ("replay", "quarantine")),
     ("do you ever drop rows silently", "quarantine", ("never silently dropped", "no row disappears", "quarantine")),
     ("how do I get the list of rows that failed", "quarantine", ("quarantine", "csv", "export")),
-    ("what is a dead letter table", "quarantine", ("dead-letter", "dead letter")),
+    ("what is a dead letter table", "quarantine", ("dead-letter", "quarantine")),
     # --- preflight gates ----------------------------------------------------
     ("explain the preflight gates", "preflight", ("g1", "g9")),
     ("what are the preflight gates", "preflight", ("g1", "g9")),
@@ -122,7 +123,7 @@ PRODUCT_QUESTIONS: list[Case] = [
     ("do scheduled runs skip preflight", "preflight", ("same validate gates", "same gate engine", "reuses the same")),
     ("is a green test on connectors enough to skip validation", "preflight", ("does **not** skip preflight", "does not skip preflight")),
     # --- reconcile / proof --------------------------------------------------
-    ("what does checksum MATCH prove", "reconcile", ("match", "checksum")),
+    ("what does checksum MATCH prove", "reconcile", ("proof of the load", "row fidelity")),
     ("how do I prove the row counts matched after a transfer", "reconcile", ("checksum", "match", "reconcil")),
     ("what is a row ledger", "reconcile", ("row accounting", "ledger")),
     ("can the ledger be closed on writer ack", "reconcile", ("refuses", "writer ack")),
@@ -130,10 +131,10 @@ PRODUCT_QUESTIONS: list[Case] = [
     # --- sync modes ---------------------------------------------------------
     ("what sync modes do you support", "sync_modes", ("full_refresh", "incremental", "upsert")),
     ("which sync mode should I pick for a nightly load", "sync_modes", ("full_refresh_overwrite", "incremental_append", "incremental_deduped", "upsert")),
-    ("what is the difference between append and overwrite", "sync_modes", ("append", "overwrite")),
+    ("what is the difference between append and overwrite", "sync_modes", ("insert-only", "replaces the destination")),
     ("what is SCD type 2", "sync_modes", ("scd2", "validity window", "history")),
     ("what does mirror mode do to deleted rows", "sync_modes", ("removed", "deletion", "mirror")),
-    ("does upsert need a primary key", "sync_modes", ("primary key", "key")),
+    ("does upsert need a primary key", "sync_modes", ("reliable key", "updates existing")),
     ("what is reverse ETL", "sync_modes", ("reverse_etl", "warehouse back")),
     ("which modes are refused for a stored procedure source", "sync_modes", ("cdc", "mirror", "scd2", "refused")),
     # --- CDC ----------------------------------------------------------------
@@ -155,7 +156,7 @@ PRODUCT_QUESTIONS: list[Case] = [
     # --- contracts ----------------------------------------------------------
     ("what is a data contract", "contracts", ("signed schema agreement", "contract")),
     ("how do I make a pipeline fail closed if the schema drifts", "contracts", ("require signed", "signed contract", "fail closed")),
-    ("what is the difference between a draft and a signed contract", "contracts", ("draft", "signed")),
+    ("what is the difference between a draft and a signed contract", "contracts", ("schema agreement",)),
     # --- permissions --------------------------------------------------------
     ("who can approve a PII gate", "permissions", ("job.run", "operator", "editor", "admin")),
     ("what does the viewer role let me do", "permissions", ("read", "viewer")),
@@ -189,12 +190,12 @@ PRODUCT_QUESTIONS: list[Case] = [
     ("how do I connect Cursor to this", "mcp", ("mcp", "server entry", "cursor")),
     ("do agents get my destination passwords", "mcp", ("no raw destination passwords", "inherit workspace rbac", "rbac")),
     # --- gitops -------------------------------------------------------------
-    ("how do I export a schedule as YAML", "gitops", ("export yaml", "yaml")),
+    ("how do I export a schedule as YAML", "gitops", ("detail drawer", "gitops")),
     ("can I keep my pipelines in git", "gitops", ("yaml", "export", "import")),
     # --- enterprise ---------------------------------------------------------
     ("how do I set up SSO", "enterprise", ("sso", "saml", "settings")),
     ("is my data encrypted", "enterprise", ("encrypted at rest", "tls", "byok")),
-    ("what is BYOK", "enterprise", ("byok", "keys", "encryption")),
+    ("what is BYOK", "enterprise", ("kms", "encrypted at rest")),
     # --- product / positioning ---------------------------------------------
     ("what is Datawrap", "product", ("universal data transfer", "transfer studio")),
     ("how is this different from writing ETL scripts", "product", ("semantic mapping", "quarantine", "checksum")),
@@ -218,8 +219,8 @@ WORKSPACE_QUESTIONS: list[Case] = [
 
 # Commands — the operator asking Pilot to do the work.
 COMMAND_QUESTIONS: list[Case] = [
-    ("open jobs", "navigate", ("jobs",)),
-    ("take me to connectors", "navigate", ("connectors",)),
+    ("open jobs", "navigate", ("opening",)),
+    ("take me to connectors", "navigate", ("opening",)),
     ("go to the schedules page", "navigate", ("pipelines", "schedules")),
     ("show me the proofs screen", "navigate", ("proof",)),
 ]
@@ -258,7 +259,7 @@ OPERATION_QUESTIONS: list[Case] = [
         "transfer",
         ("source and destination", "nothing to move", "plan"),
     ),
-    ("start a transfer in transfer studio", "transfer", ("transfer studio",)),
+    ("start a transfer in transfer studio", "transfer", ("open transfer studio",)),
     # advisory
     (
         "which sync mode should I use for a nightly load",
@@ -293,6 +294,76 @@ OPERATION_QUESTIONS: list[Case] = [
     ),
 ]
 
+# Type fidelity — the product's core wedge, and the subject it was least able to
+# talk about: 12 of these 25 were refused outright because the type space was
+# documented only in the enforcing modules. The expectations are the carrier,
+# the bound or the rule that module makes true, never a paraphrase.
+FIDELITY_QUESTIONS: list[Case] = [
+    ("what happens to null values", "null", ("not null", "quarantined")),
+    (
+        "what happens to a not null column with empty values",
+        "null",
+        ("not null", "quarantined", "coerced-null"),
+    ),
+    ("how do you handle empty strings versus null", "null", ("null", "coerced")),
+    ("how do you handle timezones", "timezone", ("instant", "offset label")),
+    ("what timezone are timestamps stored in", "timezone", ("utc", "offset label")),
+    (
+        "what happens to a timestamp without timezone",
+        "timezone",
+        ("wall clock", "wall-clock", "utc_invented_from_naive"),
+    ),
+    ("what happens to dates before 1970", "timezone", ("1970", "out of range")),
+    ("how do you handle booleans across databases", "carrier", ("boolean",)),
+    ("how do you handle arrays", "carrier", ("jsonb", "variant", "native only")),
+    ("how do you handle binary blobs", "carrier", ("bytea", "longblob", "bytes")),
+    ("what happens to json columns", "carrier", ("jsonb", "variant")),
+    ("how do you handle unsigned integers", "carrier", ("unsigned", "decimal")),
+    ("how are floats rounded", "carrier", ("re-rounded", "lossy coercion")),
+    ("how is decimal precision preserved", "carrier", ("numeric", "bignumeric", "38")),
+    (
+        "how do you handle very large decimals",
+        "carrier",
+        ("digits", "precision", "bignumeric"),
+    ),
+    # Deliberately keyed on a carrier *pairing*: the word "text" alone appears
+    # in "rather than as text everywhere", which is not an answer to this.
+    (
+        "what string type is created on postgres",
+        "carrier",
+        ("postgresql text", "text"),
+    ),
+    (
+        "what happens if a numeric overflows the destination type",
+        "carrier",
+        ("preflight finding", "lossy", "capacity"),
+    ),
+    ("what character encoding do you use", "encoding", ("unicode", "utf8")),
+    (
+        "what happens to a character the destination cannot store",
+        "encoding",
+        ("quarantined", "unsupported"),
+    ),
+    ("what happens to primary keys", "aspect", ("primary key", "carried")),
+    (
+        "how do you handle identity columns",
+        "aspect",
+        ("identity", "auto_increment"),
+    ),
+    ("what about generated columns", "aspect", ("generated", "unsupported")),
+    ("do you preserve column order", "aspect", ("carried", "certificate")),
+    (
+        "what happens to case sensitivity in table names",
+        "aspect",
+        ("name case", "case folding", "deterministic suffix"),
+    ),
+    (
+        "what happens to duplicate primary keys",
+        "aspect",
+        ("primary key", "uniqueness", "unique"),
+    ),
+]
+
 # Conversational / meta — a chatbot has to hold these without falling over.
 META_QUESTIONS: list[Case] = [
     ("who are you", "meta", ("pilot",)),
@@ -317,6 +388,7 @@ SUITES: dict[str, list[Case]] = {
     "product": PRODUCT_QUESTIONS,
     "workspace": WORKSPACE_QUESTIONS,
     "operation": OPERATION_QUESTIONS,
+    "fidelity": FIDELITY_QUESTIONS,
     "command": COMMAND_QUESTIONS,
     "meta": META_QUESTIONS,
     "off_subject": OFF_SUBJECT_QUESTIONS,
@@ -356,6 +428,28 @@ def on_target(answer: str, must_include: tuple[str, ...]) -> bool | None:
     return any(phrase.lower() in low for phrase in must_include)
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def echoes_the_question(
+    question: str, answer: str, must_include: tuple[str, ...]
+) -> bool:
+    """Whether every phrase that matched is built only from the question's words.
+
+    A measurement that can be satisfied by quoting the question back is not a
+    measurement. "What about generated columns" expected ``generated`` and was
+    scored a pass by the error string ``Could not read the schema of
+    'generated'`` — the routing defect underneath it stayed invisible for a
+    whole run. Expectations flagged here must be restated in words only a
+    correct answer would use.
+    """
+    low = (answer or "").lower()
+    asked = _words(question)
+    matched = [p for p in must_include if p.lower() in low]
+    return bool(matched) and all(_words(p) <= asked for p in matched)
+
+
 def run(suite: str, *, fresh_session: bool = False) -> list[dict]:
     """Run one suite.
 
@@ -393,6 +487,7 @@ def run(suite: str, *, fresh_session: bool = False) -> list[dict]:
                         tools=tools,
                     ),
                     "on_target": on_target(answer, must_include),
+                    "echo_only": echoes_the_question(question, answer, must_include),
                     "expected": list(must_include),
                     "intent": res.intent,
                     "method": res.method,
@@ -469,6 +564,11 @@ def main() -> int:
             f"on_target={len(hits)}/{len(scored)} "
             f"({len(hits) * 100 // len(scored)}%)  off_target={len(misses)}"
         )
+    echoes = [r for r in hits if r.get("echo_only")]
+    if echoes:
+        print(f"WEAK: {len(echoes)} pass(es) matched only the question's own words:")
+        for row in echoes:
+            print(f"       {row['question']!r} expected one of {row['expected']}")
 
     if args.json:
         Path(args.json).write_text(

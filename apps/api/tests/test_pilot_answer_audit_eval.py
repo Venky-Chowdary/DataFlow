@@ -53,6 +53,7 @@ ON_TARGET_FLOORS = {
     "product": (77, 77),
     "workspace": (8, 8),
     "operation": (19, 19),
+    "fidelity": (25, 25),
     "command": (4, 4),
     "meta": (4, 4),
 }
