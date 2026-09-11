@@ -48,6 +48,31 @@ ALIASES = {
 
 _SIBILANT_TAILS = ("s", "x", "z", "ch", "sh")
 
+# English doubles a final consonant before ``-ing``/``-ed`` — except these,
+# which are doubled in the base word itself (``install``, ``process``, ``fizz``).
+_NEVER_DOUBLED = ("l", "s", "z")
+
+# Undoing the doubling must not eat a letter the base word has: ``adding`` is
+# not ``ad``. Three characters is the shortest stem in this corpus that the
+# rule has to reach (``map``, ``run``, ``log``).
+_MIN_UNDOUBLED = 3
+
+
+def _undouble(stem: str) -> str:
+    """``mapp`` → ``map``, the consonant English doubles before ``-ing``/``-ed``.
+
+    Without this a question saying "mapping" reached ``mapp`` while every
+    passage saying "map" reached ``map``, so the two never met — measured on
+    "why is my mapping confidence low", which covered a third of its own terms
+    against the section that answers it.
+    """
+    if len(stem) <= _MIN_UNDOUBLED:
+        return stem
+    tail = stem[-1]
+    if tail != stem[-2] or not tail.isalpha() or tail in _NEVER_DOUBLED:
+        return stem
+    return stem[:-1]
+
 
 def _stem(token: str) -> str:
     """Strip the few English suffixes that split a term from its own documentation.
@@ -56,6 +81,11 @@ def _stem(token: str) -> str:
     it drops the ``s`` alone, so ``tables`` and ``table`` reach the same term instead
     of stemming to ``tabl`` and ``table``.
     """
+    # No English plural ends ``-ss``. Without this, ``process`` was read as a
+    # plural and stemmed to ``proces`` while ``processing`` stemmed to
+    # ``process``, so one word could not find itself.
+    if token.endswith("ss"):
+        return token
     for suffix in ("ies", "ing", "ed", "es", "s"):
         if len(token) > len(suffix) + 3 and token.endswith(suffix):
             if suffix == "ies":
@@ -63,6 +93,8 @@ def _stem(token: str) -> str:
             if suffix == "es":
                 stem = token[:-2]
                 return stem if stem.endswith(_SIBILANT_TAILS) else token[:-1]
+            if suffix in ("ing", "ed"):
+                return _undouble(token[: -len(suffix)])
             return token[: -len(suffix)]
     return token
 
