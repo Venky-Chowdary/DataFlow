@@ -13418,9 +13418,10 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 }
 
 .df2-app .df2-settings-nav button.active,
+.df2-app .df2-settings-nav-item.active,
 .df2-app .df2-catalog-nav button.active {
-  background: var(--df-brand-muted);
-  color: var(--df-brand-strong);
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong) !important;
 }
 
 .df2-app .df2-settings-section-footer,

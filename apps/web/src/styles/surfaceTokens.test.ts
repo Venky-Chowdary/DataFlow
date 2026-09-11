@@ -1073,5 +1073,10 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
 
     assert.match(ui, /\.df2-app \.df2-settings-section-footer,/);
     assert.match(ui, /\.df2-app \.df2-settings-nav button:hover,/);
+    assert.match(ui, /\.df2-app \.df2-settings-nav-item\.active,/);
+
+    const polish = sheet("shell-polish.css");
+    assert.match(polish, /\.df2-settings-nav button\.active \{[\s\S]{0,120}--df-brand-muted/);
+    assert.doesNotMatch(polish, /\.df2-settings-nav button\.active \{[\s\S]{0,120}#f0fdfa !important/);
   });
 });

@@ -609,8 +609,8 @@
 
 .df2-settings-nav button.active,
 .df2-settings-nav button:hover {
-  background: #f0fdfa;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
 }
 
 /* ─── MCP + pipeline card height consistency ─── */
@@ -1129,8 +1129,8 @@ textarea.df2-pilot-composer textarea {
 
 /* ─── Settings: light model ops + security ─── */
 .df2-settings-nav button.active {
-  background: #f0fdfa !important;
-  color: var(--df-brand, #0f766e) !important;
+  background: var(--df-brand-muted) !important;
+  color: var(--df-brand-strong) !important;
 }
 
 .df2-model-ops {
