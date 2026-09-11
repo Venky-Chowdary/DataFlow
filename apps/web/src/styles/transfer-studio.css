@@ -642,13 +642,14 @@
   padding: 0.8rem 0.95rem;
   border-radius: 8px;
   border: 1px solid #94a3b855;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 14px;
 }
 
 .df2-vd-callable strong {
   display: block;
   margin-bottom: 0.15rem;
+  color: var(--df-text-primary);
 }
 
 .df2-vd-callable p {
@@ -922,7 +923,7 @@
 .df2-result-stat {
   font-weight: 600;
   margin: 0 0 4px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-result-meta {
