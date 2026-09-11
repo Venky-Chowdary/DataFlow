@@ -5,8 +5,29 @@ conversions: column-mapping material with no sentence about quarantine, CDC setu
 preflight gates or proof. So "what does quarantine mean" retrieved column noise at
 0.3 similarity and an answer was narrated over it. This module makes the shipped
 operator help (``help_corpus.json``, generated from ``apps/web/src/lib/helpDocs.ts``)
-the retrievable corpus for those questions, and returns citations with every hit so
-an answer can be checked against the article it came from.
+plus passages generated from the product's own enforcing modules
+(``product_facts``) the retrievable corpus for those questions, and returns
+citations with every hit so an answer can be checked against its source.
+
+Retrieval runs in four stages, each owned by its own module so the failure can be
+attributed:
+
+``query_analysis``   understands the question — what kind of answer it wants, its
+                     content terms with discourse filler removed, and the
+                     documentation's vocabulary for what the operator said.
+``Bm25Index`` +
+``CharNgramIndex``   two retrievers over the same passages: term statistics for
+                     exact terminology, character n-grams for spelling and
+                     morphology the stemmer cannot reach.
+``fusion``           Reciprocal Rank Fusion into one ranking, so neither
+                     retriever's score scale has to be calibrated.
+``evidence_policy``  whether the fused set can answer, as ``answer`` / ``partial``
+                     / ``refuse``.
+
+The previous single absolute floor — one passage covering 55% of the question's
+IDF mass — refused 14 of 30 ordinary operator questions on this corpus, including
+"what happens to bad rows" and "how do I connect to BigQuery". See
+``evidence_policy`` for why that measure was the wrong one.
 """
 
 from __future__ import annotations
@@ -18,23 +39,45 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from .lexical_index import Bm25Index, LexicalHit, content_terms
+from .char_ngram_index import CharNgramIndex
+from .evidence_policy import EvidenceVerdict, assess_evidence
+from .fusion import reciprocal_rank_fusion
+from .lexical_index import Bm25Index, content_terms
+from .query_analysis import QueryAnalysis, analyze_query
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
 
-# A passage must cover this share of the question's informative terms before it is
-# offered as evidence. Below it, the honest answer is "the documentation does not
-# cover this" — never a fluent paragraph built from the best of the noise.
-# 0.34 admitted "capital of France" → Redis destination keys (grounding 0.50).
-# Real documented asks in the Help corpus land at ≥ 0.9. 0.55 is the fail-closed
-# floor: a passing mention is not evidence.
-GROUNDING_FLOOR = 0.55
+# Retained for callers that still read it. Per-hit term coverage is reported on
+# every hit as ``grounding``, but it is no longer what decides answerability:
+# coverage of a *single* passage falls as a question gets longer, so it refused
+# questions the corpus plainly answers. ``evidence_policy`` owns that decision.
+GROUNDING_FLOOR = 0.2
 
 # BM25 alone ranks a passing mention in a short FAQ above the section written about
 # the feature, because length normalization rewards brevity. A heading that names the
 # question's terms is the strongest signal an operator's own eye uses, so ranking
 # blends it in — and down-weights hits that cover little of the question.
 TITLE_WEIGHT = 3.0
+
+# How many passages the fusion stage considers before the evidence policy judges
+# them. Wider than the answer needs: a question answered by the third-ranked
+# section is ordinary, and the policy measures coverage over the whole set.
+FUSION_CANDIDATES = 14
+
+# BM25 over the operator's own words leads the fusion. The expansion vocabulary
+# and the n-gram retriever are there for recall, not precision, so they carry
+# less than half the vote each — enough to rescue a question whose wording missed
+# the corpus, never enough to outvote the words the operator actually typed.
+RETRIEVER_WEIGHTS = {
+    "bm25_typed": 1.0,
+    "bm25_expanded": 0.4,
+    "char_ngram": 0.45,
+}
+
+# Scale the normalized fused relevance onto the same range the heading and
+# section-intent priors use, so relevance stays the dominant term and the priors
+# stay adjustments rather than overrides.
+FUSED_RANK_SCALE = 10.0
 
 # Definitional asks ("what is quarantine") must not lose to a long Procedure
 # section just because the procedure also says the word. FAQ / core-gate
@@ -58,7 +101,13 @@ _UI_CAPTION = re.compile(
 
 @dataclass(frozen=True)
 class ProductDocChunk:
-    """One help-article section, the unit that is retrieved and cited."""
+    """One retrievable section — a help article's, or one generated from a module.
+
+    ``source_module`` is set only on generated passages. A generated passage has
+    no Help page to open, so it cites the module that makes it true instead; that
+    keeps every claim checkable without shipping a second copy of the rule as
+    prose.
+    """
 
     id: str
     doc_id: str
@@ -68,6 +117,11 @@ class ProductDocChunk:
     section_id: str
     section_title: str
     text: str
+    source_module: str = ""
+
+    @property
+    def generated(self) -> bool:
+        return bool(self.source_module)
 
     @property
     def citation(self) -> str:
@@ -88,7 +142,7 @@ class ProductDocHit:
     matched_terms: tuple[str, ...]
 
     def as_source(self) -> dict[str, object]:
-        return {
+        source: dict[str, object] = {
             "title": self.chunk.citation,
             "doc": self.chunk.doc_title,
             "section": self.chunk.section_title,
@@ -99,11 +153,14 @@ class ProductDocHit:
             "matched_terms": list(self.matched_terms),
             "type": "product_doc",
         }
+        if self.chunk.source_module:
+            source["source_module"] = self.chunk.source_module
+        return source
 
 
 @lru_cache(maxsize=1)
-def load_product_doc_chunks() -> tuple[ProductDocChunk, ...]:
-    """Load the generated help corpus; an absent corpus yields no evidence, not a crash."""
+def load_help_corpus_chunks() -> tuple[ProductDocChunk, ...]:
+    """The shipped help articles; an absent corpus yields no evidence, not a crash."""
     if not HELP_CORPUS_PATH.exists():
         return ()
     with HELP_CORPUS_PATH.open(encoding="utf-8") as fh:
@@ -129,10 +186,74 @@ def load_product_doc_chunks() -> tuple[ProductDocChunk, ...]:
 
 
 @lru_cache(maxsize=1)
+def load_generated_chunks() -> tuple[ProductDocChunk, ...]:
+    """Passages generated from the product's own enforcing modules."""
+    from .product_facts import FACT_DOC_SLUG, generated_sections
+
+    chunks: list[ProductDocChunk] = []
+    for index, section in enumerate(generated_sections()):
+        chunks.append(
+            ProductDocChunk(
+                id=f"fact-{index}-{section.section_id}",
+                doc_id=FACT_DOC_SLUG,
+                doc_slug=FACT_DOC_SLUG,
+                doc_title=section.doc_title,
+                category=section.category,
+                section_id=section.section_id,
+                section_title=section.section_title,
+                text=section.text,
+                source_module=section.source_module,
+            )
+        )
+    return tuple(chunks)
+
+
+@lru_cache(maxsize=1)
+def load_product_doc_chunks() -> tuple[ProductDocChunk, ...]:
+    """Every retrievable passage: shipped help first, generated facts after."""
+    return load_help_corpus_chunks() + load_generated_chunks()
+
+
+@lru_cache(maxsize=1)
 def _index() -> tuple[Bm25Index, dict[str, ProductDocChunk]]:
     chunks = load_product_doc_chunks()
     by_id = {c.id: c for c in chunks}
     return Bm25Index([(c.id, f"{c.doc_title}\n{c.text}") for c in chunks]), by_id
+
+
+@lru_cache(maxsize=1)
+def _ngram_index() -> CharNgramIndex:
+    """Character n-gram index over the same passages, headings included.
+
+    Headings are repeated into the indexed text because a heading names the
+    subject, and an n-gram match on the subject is the signal worth most here.
+    """
+    return CharNgramIndex(
+        [
+            (c.id, f"{c.doc_title} {c.section_title} {c.doc_title} {c.section_title}\n{c.text}")
+            for c in load_product_doc_chunks()
+        ]
+    )
+
+
+def _covers(term: str, heading: set[str]) -> bool:
+    """Whether a heading names this term, allowing for a morphological tail.
+
+    ``connect`` and ``connectors`` are the same subject to an operator, but the
+    stemmer only closes a fixed set of English suffixes, so exact term equality
+    scored the connector article 0 for "how do I connect to BigQuery". A shared
+    prefix of at least four characters is the same allowance the n-gram
+    retriever makes, applied to the heading prior.
+    """
+    if term in heading:
+        return True
+    if len(term) < 4:
+        return False
+    return any(
+        h.startswith(term) or term.startswith(h)
+        for h in heading
+        if len(h) >= 4
+    )
 
 
 def _title_coverage(chunk: ProductDocChunk, terms: Sequence[str]) -> float:
@@ -140,24 +261,77 @@ def _title_coverage(chunk: ProductDocChunk, terms: Sequence[str]) -> float:
     if not terms:
         return 0.0
     heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))
-    return sum(1 for t in terms if t in heading) / len(terms)
+    return sum(1 for t in terms if _covers(t, heading)) / len(terms)
 
 
-def _section_intent_bonus(chunk: ProductDocChunk, query: str) -> float:
-    """Prefer a definition / core-gate card over a procedure dump for FAQ asks."""
+_DEFINITIONAL_TITLE = (
+    "what is",
+    "what are",
+    "what a ",
+    "what the",
+    "what each",
+    "what happens",
+)
+
+
+def _section_intent_bonus(
+    chunk: ProductDocChunk,
+    analysis: QueryAnalysis,
+) -> float:
+    """Prefer the section shape the question asked for, when it is on subject.
+
+    Two things were wrong with judging this on the heading's form alone. It fired
+    off subject — "What is Datawrap?" outranked "What the row ledger proves" for
+    *"what is a row ledger"* purely for being phrased as a definition. And it
+    always penalized ``Procedure:`` sections, including for "how do I schedule a
+    pipeline every hour", where the procedure *is* the answer; there was no ask
+    classifier to consult, so a definition prior was applied to every question.
+
+    The form of a heading is therefore worth nothing unless the heading names a
+    subject the question is about, and what it is worth depends on the ask.
+    """
+    from .evidence_policy import is_subject_term
+
     title = (chunk.section_title or "").strip().lower()
+    heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))
+    on_subject = any(
+        is_subject_term(term) and _covers(term, heading)
+        for term in analysis.search_terms
+    )
+    if not on_subject:
+        return 0.0
+
+    is_procedure = title.startswith("procedure:")
+    definitional = title.startswith(_DEFINITIONAL_TITLE)
+    core_gates = "core gates" in title
+    ask = analysis.ask
+
     bonus = 0.0
-    if title.startswith("procedure:"):
-        bonus -= 2.8
-    if title.startswith(("what is", "what are", "do ")):
-        bonus += 3.2
-    if "core gates" in title:
-        bonus += 3.0
-    if _DEFINITIONAL_QUERY.search(query or ""):
-        if title.startswith("procedure:"):
-            bonus -= 1.5
-        if "core gates" in title or title.startswith("what is"):
+    if ask == "procedure":
+        if is_procedure:
+            bonus += 3.0
+        if definitional:
+            bonus -= 1.2
+    elif ask == "diagnosis":
+        # "Procedure: fix a blocked gate" is what an operator with a red gate
+        # wants, not the definition of a gate.
+        if is_procedure:
+            bonus += 1.6
+    elif ask == "enumeration":
+        if core_gates:
+            bonus += 3.0
+        if definitional:
             bonus += 1.5
+        if is_procedure:
+            bonus -= 1.5
+    else:
+        # definition · comparison · capability · other
+        if definitional:
+            bonus += 3.2
+        if core_gates:
+            bonus += 3.0
+        if is_procedure:
+            bonus -= 2.8
     return bonus
 
 
@@ -215,36 +389,171 @@ def spoken_doc_excerpt(text: str, section_title: str = "", *, max_sentences: int
     return out
 
 
-def product_doc_search(
-    query: str,
-    limit: int = 5,
-    grounding_floor: float = GROUNDING_FLOOR,
+@dataclass(frozen=True)
+class ProductAnswer:
+    """The retrieval result and the answerability decision made on it."""
+
+    query: str
+    analysis: QueryAnalysis
+    hits: tuple[ProductDocHit, ...]
+    verdict: EvidenceVerdict
+
+    @property
+    def answerable(self) -> bool:
+        return self.verdict.answerable and bool(self.hits)
+
+    @property
+    def partial(self) -> bool:
+        return self.answerable and self.verdict.partial
+
+    @property
+    def sources(self) -> list[dict[str, object]]:
+        return [hit.as_source() for hit in self.hits]
+
+    @property
+    def caveat(self) -> str:
+        """The sentence that names what the documentation does not cover.
+
+        Only rendered for a partial answer. Saying it after the answer is what
+        lets an operator act: a refusal tells them nothing, and a silent partial
+        answer lets them believe the missing part was covered.
+        """
+        if not self.partial:
+            return ""
+        missing = [t for t in self.verdict.uncovered_subjects if len(t) > 2][:4]
+        if not missing:
+            return ""
+        listed = ", ".join(f"“{t}”" for t in missing)
+        return (
+            f"The documentation I can cite does not cover {listed}, so that part "
+            f"is not answered here — ask me to read your live workspace if it is "
+            f"a question about your own jobs or tables."
+        )
+
+
+def _rank_hits(
+    analysis: QueryAnalysis,
+    limit: int,
+    grounding_floor: float,
 ) -> list[ProductDocHit]:
-    """Documentation sections that actually cover the question, best first."""
+    """Fuse three rankings, then apply the heading/intent priors.
+
+    The operator's own words and the expansion vocabulary are run as *separate*
+    BM25 rankings rather than concatenated into one query. Concatenating them
+    let the expansion outvote the question: "how do I connect to BigQuery"
+    expands to include ``destination``, which the preflight-gates section uses
+    heavily, and that section then outranked the connector article. Fusing
+    weighted rankings keeps the expansion as recall without letting it decide.
+    """
     index, by_id = _index()
-    terms = content_terms(query)
-    hits: list[LexicalHit] = index.search(query, limit=max(limit * 4, 12))
+    depth = max(FUSION_CANDIDATES, limit * 3)
+
+    typed_terms = list(analysis.terms)
+    typed_query = " ".join(typed_terms) or analysis.text
+    expansion_query = " ".join(analysis.expansions)
+
+    typed = index.search(typed_query, limit=depth)
+    expanded = index.search(expansion_query, limit=depth) if expansion_query else []
+    ngram = _ngram_index().search(analysis.expanded_text or analysis.text, limit=depth)
+
+    # Grounding and matched terms are reported against the operator's own words:
+    # an expansion term the passage happens to use is not something the operator
+    # asked about, and reporting it as a matched term would misstate the evidence.
+    grounding = {hit.id: hit.grounding for hit in typed}
+    matched = {hit.id: hit.matched_terms for hit in typed}
+    bm25_score = {hit.id: hit.score for hit in typed}
+
+    rankings = [("bm25_typed", [h.id for h in typed])]
+    if expanded:
+        rankings.append(("bm25_expanded", [h.id for h in expanded]))
+    if ngram:
+        rankings.append(("char_ngram", [h.id for h in ngram]))
+
+    fused = reciprocal_rank_fusion(
+        rankings,
+        weights=RETRIEVER_WEIGHTS,
+        limit=depth,
+    )
+    if not fused:
+        return []
+
+    # Normalize the fused score so the heading and intent priors keep the weight
+    # they were calibrated with, whatever absolute values fusion produced.
+    best = max(h.score for h in fused) or 1.0
+
     ranked: list[tuple[float, ProductDocHit]] = []
-    for hit in hits:
-        chunk = by_id.get(hit.id)
-        if chunk is None or hit.grounding < grounding_floor:
+    for fused_hit in fused:
+        chunk = by_id.get(fused_hit.id)
+        if chunk is None:
             continue
-        rank = hit.score * (0.4 + 0.6 * hit.grounding)
-        rank += TITLE_WEIGHT * _title_coverage(chunk, terms)
-        rank += _section_intent_bonus(chunk, query)
+        hit_grounding = grounding.get(fused_hit.id, 0.0)
+        if hit_grounding < grounding_floor and fused_hit.rank_in("bm25_typed") is None:
+            # No overlap with anything the operator typed: a match on the
+            # expansion vocabulary or a spelling coincidence, not evidence.
+            continue
+        rank = FUSED_RANK_SCALE * (fused_hit.score / best)
+        rank += TITLE_WEIGHT * _title_coverage(chunk, typed_terms)
+        rank += _section_intent_bonus(chunk, analysis)
         ranked.append(
             (
                 rank,
                 ProductDocHit(
                     chunk=chunk,
-                    score=hit.score,
-                    grounding=hit.grounding,
-                    matched_terms=hit.matched_terms,
+                    score=bm25_score.get(fused_hit.id, 0.0),
+                    grounding=hit_grounding,
+                    matched_terms=matched.get(fused_hit.id, ()),
                 ),
             )
         )
     ranked.sort(key=lambda pair: pair[0], reverse=True)
     return [hit for _, hit in ranked[:limit]]
+
+
+def retrieve_product_answer(
+    query: str,
+    limit: int = 5,
+    grounding_floor: float = GROUNDING_FLOOR,
+) -> ProductAnswer:
+    """Retrieve for one question and decide whether the result can answer it.
+
+    This is the entry point callers should use: it exposes the verdict, so a
+    question the documentation half covers can be answered with a caveat instead
+    of refused.
+    """
+    analysis = analyze_query(query)
+    hits = _rank_hits(analysis, limit=limit, grounding_floor=grounding_floor)
+    # Headings are evidence of coverage too. Judging on body text alone reported
+    # "column" as uncovered for a question answered out of three sections of
+    # "Semantic column mapping", because the sections say "field" and "edge" in
+    # their prose and put the word in the title.
+    verdict = assess_evidence(
+        analysis,
+        [
+            f"{hit.chunk.doc_title} {hit.chunk.section_title} {hit.chunk.text}"
+            for hit in hits
+        ],
+    )
+    if not verdict.answerable:
+        hits = []
+    return ProductAnswer(
+        query=query,
+        analysis=analysis,
+        hits=tuple(hits),
+        verdict=verdict,
+    )
+
+
+def product_doc_search(
+    query: str,
+    limit: int = 5,
+    grounding_floor: float = GROUNDING_FLOOR,
+) -> list[ProductDocHit]:
+    """Documentation sections that actually cover the question, best first.
+
+    Empty when the evidence policy refuses the question, so a caller that only
+    checks for emptiness still fails closed on an off-subject ask.
+    """
+    return list(retrieve_product_answer(query, limit=limit, grounding_floor=grounding_floor).hits)
 
 
 @lru_cache(maxsize=1)
@@ -257,12 +566,20 @@ def corpus_vocabulary() -> frozenset[str]:
 
 
 def names_product_subject(query: str) -> bool:
-    """Whether the question names anything the product documentation talks about.
+    """Whether the question names a subject this product documents.
 
-    Keyword intent scoring fired on contentless phrases like "how do i", so
-    "how do I cook rice" scored as product help and got a transfer blurb.
+    Intersecting the question with the whole corpus *vocabulary* was too loose in
+    one direction: every passage contains ordinary English, so "what is the
+    capital of France" named a product subject because one passage happens to
+    use the word ``capital``. The test that holds is whether the question names
+    something the documentation has a heading about, or one of the product's own
+    enum values — after the operator's words are translated into the
+    documentation's vocabulary.
     """
-    return bool(set(content_terms(query)) & corpus_vocabulary())
+    from .evidence_policy import is_subject_term
+
+    analysis = analyze_query(query)
+    return any(is_subject_term(term) for term in analysis.search_terms)
 
 
 def nearest_articles(query: str, limit: int = 3) -> list[str]:
@@ -281,7 +598,12 @@ def nearest_articles(query: str, limit: int = 3) -> list[str]:
 
 
 def compose_documented_answer(hits: Sequence[ProductDocHit], max_sections: int = 2) -> str:
-    """Spoken answer quoted from the cited sections — definition, not the procedure dump."""
+    """Spoken answer quoted from the cited sections — definition, not the procedure dump.
+
+    Section-lead form, used where no question is available to select against.
+    Prefer :func:`compose_product_answer`, which selects the sentences that
+    answer the question across the whole retrieved set.
+    """
     parts: list[str] = []
     for hit in hits[:max_sections]:
         chunk = hit.chunk
@@ -293,6 +615,39 @@ def compose_documented_answer(hits: Sequence[ProductDocHit], max_sections: int =
     if cited:
         parts.append(f"Source: {cited} (Help)")
     return "\n\n".join(parts)
+
+
+def compose_product_answer(answer: ProductAnswer) -> str:
+    """The answer to *this* question, selected across every retrieved section.
+
+    Falls back to the section-lead form when sentence selection finds nothing —
+    a short section whose only sentence was filtered as a caption still has to
+    produce an answer rather than an empty bubble.
+    """
+    from .answer_composer import compose_answer
+
+    if not answer.hits:
+        return ""
+    sections = [
+        (
+            hit.chunk.section_title,
+            hit.chunk.citation,
+            f"{hit.chunk.href}#{hit.chunk.section_id}",
+            hit.chunk.text,
+        )
+        for hit in answer.hits
+    ]
+    composed = compose_answer(
+        answer.analysis,
+        sections,
+        partial_caveat=answer.caveat,
+    )
+    if composed:
+        return composed
+    legacy = compose_documented_answer(list(answer.hits))
+    if legacy and answer.caveat:
+        return f"{legacy}\n\n{answer.caveat}"
+    return legacy
 
 
 def product_doc_documents() -> tuple[list[str], list[dict], list[str]]:
@@ -311,6 +666,7 @@ def product_doc_documents() -> tuple[list[str], list[dict], list[str]]:
                 "section_id": chunk.section_id,
                 "section_title": chunk.section_title,
                 "category": chunk.category,
+                "source_module": chunk.source_module,
             }
         )
         ids.append(f"doc_{chunk.id}")

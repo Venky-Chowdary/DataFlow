@@ -30,6 +30,8 @@ from src.ai.rag.lexical_index import Bm25Index, content_terms, normalize, tokeni
 from src.ai.rag.product_docs import (  # noqa: E402
     HELP_CORPUS_PATH,
     compose_documented_answer,
+    load_generated_chunks,
+    load_help_corpus_chunks,
     load_product_doc_chunks,
     nearest_articles,
     product_doc_search,
@@ -59,13 +61,33 @@ OFF_TOPIC_QUESTIONS = [
 
 def test_help_corpus_is_present_and_self_consistent():
     payload = json.loads(HELP_CORPUS_PATH.read_text(encoding="utf-8"))
-    chunks = load_product_doc_chunks()
+    help_chunks = load_help_corpus_chunks()
     assert payload["chunk_count"] == len(payload["chunks"])
-    assert len(chunks) == payload["chunk_count"]
-    assert chunks, "an empty corpus means Pilot can answer nothing from documentation"
-    for chunk in chunks:
+    assert len(help_chunks) == payload["chunk_count"]
+    assert help_chunks, "an empty corpus means Pilot can answer nothing from documentation"
+    for chunk in help_chunks:
         assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
         assert chunk.href.startswith("#/help/")
+
+
+def test_generated_chunks_extend_the_help_corpus_without_replacing_it():
+    """Facts generated from the enforcing modules are additive and attributed.
+
+    They exist because whole subjects the product *has* — the role table, the
+    sync-mode grid, the row ledger — had no retrievable passage, and writing
+    prose copies of them would let the documentation drift from the code that
+    enforces them.
+    """
+    help_chunks = load_help_corpus_chunks()
+    generated = load_generated_chunks()
+    every = load_product_doc_chunks()
+
+    assert generated, "generated product facts must not be empty"
+    assert len(every) == len(help_chunks) + len(generated)
+    assert {c.id for c in help_chunks}.isdisjoint({c.id for c in generated})
+    for chunk in generated:
+        assert chunk.generated and chunk.source_module
+        assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
 
 
 # --- lexical index ----------------------------------------------------------

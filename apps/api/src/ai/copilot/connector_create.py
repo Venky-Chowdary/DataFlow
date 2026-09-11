@@ -156,8 +156,37 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
     return out
 
 
+#: Words that only appear when the operator is handing over an endpoint to save.
+_CONNECTION_DETAIL = re.compile(
+    r"://|\bhost(?:name)?\b|\bport\b|\buser(?:name)?\b|\bpassword\b|\bpwd\b|"
+    r"\bdatabase\b|\bdbname\b|\baccount\b|\bnamed\b|\bcalled\b|"
+    r"\b\d{1,3}(?:\.\d{1,3}){3}\b|\b[\w-]+\.[\w.-]+\.[a-z]{2,}\b",
+    re.I,
+)
+
+_HOW_TO_QUESTION = re.compile(
+    r"\bhow\s+(?:do|can|would|should)\s+(?:i|we|you)\b"
+    r"|\bhow\s+to\b"
+    r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
+    r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
+    r"|\bwalk\s+me\s+through\b",
+    re.I,
+)
+
+
 def wants_create_connector(message: str) -> bool:
-    lower = (message or "").lower()
+    """Whether the operator handed over an endpoint for Pilot to save.
+
+    "Connect to" and "add a postgres" are also how an operator *asks about* the
+    procedure, so "how do I connect to BigQuery" reached the create tool and was
+    answered "I need a host (or a full connection URL)" — a request for
+    credentials the operator never offered, in place of the documented steps. A
+    how-to question with no endpoint detail in it is a question, not a handover.
+    """
+    text = message or ""
+    if _HOW_TO_QUESTION.search(text) and not _CONNECTION_DETAIL.search(text):
+        return False
+    lower = text.lower()
     verbs = (
         "create connector",
         "add connector",

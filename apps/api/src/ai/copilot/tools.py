@@ -11,10 +11,12 @@ from typing import Any, Callable
 from services.value_serializer import json_default
 
 from ..rag.product_docs import (
-    compose_documented_answer,
+    compose_product_answer,
     names_product_subject,
     product_doc_search,
+    retrieve_product_answer,
 )
+from ..rag.query_analysis import classify_ask
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -1608,13 +1610,15 @@ class DataPilotTools:
             None,
         )
 
-        # The shipped operator documentation, retrieved lexically with a grounding
-        # floor. Documentation leads even when a curated definition matched: the
-        # curated prose carries no citation, so answering from it alone gave the
-        # operator a confident paragraph they could not trace to any page.
-        doc_hits = product_doc_search(query, limit=3)
-        if doc_hits:
-            documented = compose_documented_answer(doc_hits)
+        # The shipped operator documentation plus the passages generated from the
+        # product's own enforcing modules, retrieved hybrid and judged by the
+        # evidence policy. Documentation leads even when a curated definition
+        # matched: the curated prose carries no citation, so answering from it
+        # alone gave the operator a confident paragraph they could not trace to
+        # any page.
+        retrieved = retrieve_product_answer(query, limit=4)
+        if retrieved.answerable:
+            documented = compose_product_answer(retrieved)
             return ToolResult(
                 name="explain_product",
                 success=True,
@@ -1627,9 +1631,13 @@ class DataPilotTools:
                     # No navigate action: the citations below are the control that
                     # opens the article, and a second one only competes with them.
                     "actions": [],
-                    "sources": [hit.as_source() for hit in doc_hits],
+                    "sources": retrieved.sources,
                     "grounded": True,
                     "source": "product_documentation",
+                    # A partial answer is reported as partial so the caller can
+                    # tell an answer with a documented gap from a complete one.
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
                 },
             )
 
@@ -1675,14 +1683,14 @@ class DataPilotTools:
         # Shipped operator documentation answers first, with citations. Embedding
         # similarity alone returned readable-looking fragments the operator could
         # not trace back to any page, so a documented answer looked like a guess.
-        doc_hits = product_doc_search(query, limit=3)
-        if doc_hits:
+        retrieved = retrieve_product_answer(query, limit=4)
+        if retrieved.answerable:
             return ToolResult(
                 name="search_knowledge",
                 success=True,
                 output={
                     "query": query,
-                    "answer": compose_documented_answer(doc_hits),
+                    "answer": compose_product_answer(retrieved),
                     "hits": [
                         {
                             "text": hit.chunk.text[:600],
@@ -1690,13 +1698,15 @@ class DataPilotTools:
                             "type": "product_doc",
                             "summary": hit.chunk.citation,
                         }
-                        for hit in doc_hits
+                        for hit in retrieved.hits
                     ],
-                    "count": len(doc_hits),
+                    "count": len(retrieved.hits),
                     "empty": False,
-                    "sources": [hit.as_source() for hit in doc_hits],
+                    "sources": retrieved.sources,
                     "grounded": True,
                     "source": "product_documentation",
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
                 },
             )
 
@@ -2557,6 +2567,14 @@ def _is_meta_pilot_question(lower: str) -> bool:
     return False
 
 
+# Ask types that can only be answered from the documentation. ``definition`` and
+# ``procedure`` are deliberately absent: their patterns overlap with imperative
+# requests ("create a connector", "set up a transfer from A to B") that have
+# their own handlers, and the keyword patterns below already cover the question
+# forms of both.
+_KNOWLEDGE_ASKS = frozenset({"enumeration", "comparison"})
+
+
 def _looks_like_product_howto(lower: str) -> bool:
     """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
     text = (lower or "").strip()
@@ -2567,23 +2585,51 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
             r"what makes|remind me|meaning of|"
-            r"do i need|is .+ dangerous|how is)\b",
+            r"do i need|is .+ dangerous|how is)\b"
+            # Advisory shapes. "which sync mode should I pick for a nightly
+            # load" is a product question by any reading, but matched none of
+            # the patterns above, so the advisory tool answered it in one line
+            # with no citation at all.
+            r"|which\s+[\w\s]{0,24}\bshould\s+i\b"
+            r"|what\s+should\s+i\s+(?:use|pick|choose|do)\b"
+            r"|when\s+should\s+i\b"
+            r"|do\s+you\s+support\b"
+            r"|is\s+it\s+possible\b"
+            r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
+            r"|what\s+happens\s+(?:to|when|if)\b"
+            r"|who\s+can\b",
             text,
         )
     )
+    # The retrieval layer already decides what kind of answer a question wants,
+    # and it recognises shapes no keyword list here did: "which preflight gate
+    # blocks a lossy type change" is an enumeration over a documented set.
+    # Sharing that classifier is also how the two surfaces stay in agreement.
+    if not howto and classify_ask(text) in _KNOWLEDGE_ASKS:
+        howto = True
+    # A question shape plus a live-data fetch is still a fetch: "show me the
+    # failed jobs" must answer from Jobs, not from an article about jobs.
+    if howto and _looks_like_live_data_fetch(text):
+        howto = False
+    # Competitor and vendor names, and the phrases about this assistant itself,
+    # are not subjects the documentation has a heading for — they stay listed.
     product = bool(
         re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|data transfer|transfer studio|preflight|"
-            r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
-            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
+            r"\b(?:dataflow|datawrap|datatransfer|data transfer|gdpr|hipaa|"
+            r"airbyte|fivetran|move (?:my |the )?data|sync data|"
             r"schema types?|semantic types?|type system|logical types?|"
-            r"transfers?|pilot|openai|anthropic|"
-            r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate|mcp|contracts?|reconcile)\b",
+            r"openai|anthropic|ollama|api key|accurate)\b",
             text,
         )
     )
-    if howto and product:
+    # Everything else asks the same corpus-derived subject model the retrieval
+    # layer uses. A hand-maintained keyword list was the second reason ordinary
+    # questions went unanswered: retrieval could answer "what happens to bad
+    # rows" and "what does the viewer role let me do", but the router never
+    # planned a knowledge tool for them because ``row``, ``role`` and
+    # ``checksum`` were not on the list. One subject model, derived from the
+    # corpus, cannot drift from what is retrievable.
+    if howto and (product or names_product_subject(text)):
         return True
     # Bare product identity questions (legacy DataFlow + current Datawrap brand)
     if re.search(r"\bwhat is data(?:flow|wrap|transfer)\b", text):
@@ -2621,6 +2667,25 @@ def _looks_like_product_howto(lower: str) -> bool:
     if re.search(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s*run|9\s+gates|nine\s+gates)\b", text):
         return True
     return False
+
+
+def _asks_about_the_product(message: str) -> bool:
+    """Whether an otherwise unroutable message is a question about this product.
+
+    The gate for the knowledge fallback. It has to be strict about *kind* of
+    message — a live-data fetch, a mutation or a question about the assistant
+    itself each have their own handler and must not be diverted into
+    documentation — but it delegates "is this about the product" to the corpus
+    so it cannot fall behind what the corpus can answer.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower) or _has_explicit_workspace_subject(lower):
+        return False
+    return names_product_subject(message)
 
 
 def _has_explicit_workspace_subject(lower: str) -> bool:
@@ -2789,11 +2854,44 @@ def _summarize_knowledge_hit(text: str) -> str:
     return text[:280]
 
 
+_EXPLANATORY_QUESTION = re.compile(
+    r"\bhow\s+(?:do|can|would|should)\s+(?:i|we|you)\b"
+    r"|\bhow\s+to\b"
+    r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
+    r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
+    r"|\bwalk\s+me\s+through\b"
+    r"|\bexplain\s+how\b",
+    re.I,
+)
+
+# Exporting a *schedule* as YAML is a shipped feature (the GitOps manifest the
+# CLI validates and applies). Exporting *rows* to a file is not something Pilot
+# does. The refusal list keyed on the bare word ``export``, so "how do I export a
+# schedule as YAML" was answered with "I can't export files yet" — a documented
+# capability denied.
+_SUPPORTED_EXPORT = re.compile(
+    r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract)\b"
+    r"|\b(?:schedule|pipeline|manifest|contract)\b[^.?!]{0,40}\bas\s+ya?ml\b"
+    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest)\b",
+    re.I,
+)
+
+
 def _looks_like_unsupported_mutation(lower: str) -> bool:
     """True when the operator asked for delete / export / create-schedule we refuse.
 
     These must never fall into RAG — synonym dumps look like we can do the action.
+
+    A *how-to question* about one of them is not a request to perform it: the
+    honest answer to "how do I delete a connector" is the documented procedure,
+    not a refusal to do something the operator never asked us to do. Capability
+    questions ("can I export rows to CSV") are still refused, because the answer
+    is genuinely no.
     """
+    if _SUPPORTED_EXPORT.search(lower):
+        return False
+    if _EXPLANATORY_QUESTION.search(lower) and names_product_subject(lower):
+        return False
     if any(
         w in lower
         for w in (
@@ -2979,6 +3077,30 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "analyze_result",
     "filter_result",
     "list_connector_objects",
+})
+
+# Tools that answer from the documentation rather than from workspace state.
+_KNOWLEDGE_TOOLS = frozenset({
+    "explain_product",
+    "search_knowledge",
+    "describe_pilot",
+    "explain_mapping_assurance",
+})
+
+# Tools that need the operator to have named a specific object, and that report
+# "not found" when they were planned off a generic question instead.
+_NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
+    "open_schedule",
+    "get_schedule",
+    "run_schedule_now",
+    "open_job",
+    "get_job",
+    "get_preflight_run",
+    "sample_connector_object",
+    "list_connector_objects",
+    "introspect_connector_schema",
+    "aggregate_data",
+    "analyze_dataset",
 })
 
 
@@ -4916,6 +5038,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
             "run_schedule_now", "create_schedule", "introspect_connector_schema",
+            # Advisory tools answer in one line with no citation. "which sync
+            # mode should I pick for a nightly load" got the recommendation and
+            # nothing else — the documentation that justifies it was dropped
+            # because the tool was not on this list.
+            "recommend_sync_mode",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4935,6 +5062,29 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned = [(n, a) for n, a in planned if n != "explain_product"]
     elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
+    elif not planned and _asks_about_the_product(message):
+        # Last resort for a question about a documented subject that matched no
+        # verb pattern: "what happens to bad rows" and "who can approve a PII
+        # gate" planned nothing at all and were answered with "I'm not sure how
+        # to do that yet", while the documentation covered both. Reaching the
+        # knowledge tool is always better than an empty plan — the tool refuses
+        # on its own evidence if the retrieval turns out not to cover it.
+        planned.append(("explain_product", {"query": message[:240]}))
+
+    # "How do I pause a schedule" is a question about the procedure, not a
+    # request to pause a particular schedule. Object-lookup tools ran anyway,
+    # found nothing to look up, and led the reply with "Schedule not found. Ask
+    # for the pipeline name from Pipelines." — error noise in front of a
+    # perfectly good documented answer. Drop them when the ask is explanatory
+    # and names no live object; keep them the moment one is named.
+    if (
+        _EXPLANATORY_QUESTION.search(lower)
+        and not _has_explicit_workspace_subject(lower)
+        and any(n in _KNOWLEDGE_TOOLS for n, _ in planned)
+    ):
+        planned = [
+            (n, a) for n, a in planned if n not in _NAMED_OBJECT_LOOKUP_TOOLS
+        ]
 
     # A stated transfer is the request; inventory/advice tools that merely share
     # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
@@ -4954,7 +5104,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Off-topic / general-web asks must not become product RAG. Vocabulary
     # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
     # an explicit knowledge search is.
-    if _act == "general":
+    #
+    # Scoped to a plan that is *only* knowledge: when another tool recognised
+    # the message ("suggest improvements for my data" plans quality profiling),
+    # the message is not an off-topic general-web ask and the knowledge search
+    # is a companion to it, not the answer standing alone.
+    if _act == "general" and {n for n, _ in planned} <= _KNOWLEDGE_TOOLS:
         from ..rag.evidence import names_identifier
 
         explicit_knowledge = bool(
