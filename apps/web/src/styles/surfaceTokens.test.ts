@@ -1876,7 +1876,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
 
     assert.match(ui, /\.df2-app \.df2-cadence-tile \{\n  background: var\(--df-surface\)/);
     assert.match(ui, /\.df2-app \.df2-cadence-tile\.active \{\n  background: var\(--df-brand-muted\)/);
-    assert.match(ui, /\.df2-app \.df2-pipeline-card\.active \{\n  background: var\(--df-brand-muted\)/);
+    assert.match(ui, /\.df2-app \.df2-pipeline-card\.active \{\n  background: var\(--df-brand-muted\) !important/);
     assert.match(ui, /\.df2-app \.df2-pipeline-card-arrow \{\n  background: var\(--df-brand-muted\)/);
   });
 });

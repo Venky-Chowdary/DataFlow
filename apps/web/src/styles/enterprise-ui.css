@@ -8735,12 +8735,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-app .df2-pipeline-card.active {
-  background: var(--df-brand-muted);
-  border-color: var(--df-brand);
+  background: var(--df-brand-muted) !important;
+  border-color: var(--df-brand) !important;
 }
 
 .df2-app .df2-pipeline-card.paused {
-  background: var(--df-surface-muted);
+  background: var(--df-surface-muted) !important;
 }
 
 .df2-app .df2-pipeline-card-arrow {
