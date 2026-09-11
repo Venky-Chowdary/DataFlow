@@ -2119,16 +2119,16 @@ button.df2-map-band-chip:hover {
 .df2-structure-field-chip.df2-type-int .df2-type-badge,
 .df2-type-int .df2-type-badge,
 th.df2-type-int .df2-type-badge {
-  background: #eff6ff;
-  color: #1e40af;
-  border-color: #bfdbfe;
+  background: var(--df-info-bg);
+  color: var(--df-info);
+  border-color: var(--df-info-border);
 }
 
 .df2-structure-field-chip.df2-type-decimal .df2-type-badge,
 .df2-type-decimal .df2-type-badge,
 th.df2-type-decimal .df2-type-badge {
-  background: #f8fafc;
-  color: #334155;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   border-color: #cbd5e1;
 }
 
@@ -2183,16 +2183,16 @@ th.df2-type-uuid .df2-type-badge {
 .df2-structure-field-chip.df2-type-binary .df2-type-badge,
 .df2-type-binary .df2-type-badge,
 th.df2-type-binary .df2-type-badge {
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   border-color: #cbd5e1;
 }
 
 .df2-structure-field-chip.df2-type-string .df2-type-badge,
 .df2-type-string .df2-type-badge,
 th.df2-type-string .df2-type-badge {
-  background: #f0fdfa;
-  color: #115e59;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
   border-color: #99f6e4;
 }
 
