@@ -88,3 +88,95 @@ def test_omitting_the_vocabulary_leaves_the_policy_as_it_was() -> None:
     analysis = analyze_query("how do you handle very large decimals")
     passages = ["A decimal column is created as NUMERIC on postgresql."]
     assert assess_evidence(analysis, passages).outcome in {"answer", "partial"}
+
+
+# --------------------------------------------------------------------------
+# A concept the documentation spells differently
+# --------------------------------------------------------------------------
+#
+# The bound above is what keeps nonsense refused. Read literally it also
+# refuses a real question asked in a real synonym: "explain aggregation" and
+# "what does a breakdown show me" scored 0% against a passage that defines a
+# grouped aggregate, because ``aggregation`` does not stem to ``aggregat`` and
+# ``breakdown`` written as one word shares no token with "break down". A word
+# the corpus has never used cannot be absent from a passage *informatively* —
+# its absence is guaranteed — so counting it as a gap measures the spelling,
+# not the evidence.
+
+
+def test_a_synonym_a_phrase_rule_names_is_not_a_gap_in_its_own_answer() -> None:
+    analysis = analyze_query("explain aggregation")
+    assert "aggregation" in analysis.terms, analysis.terms
+    passages = [
+        "A grouped aggregate is one measure per distinct value of a column: "
+        "group by splits the rows of a table into groups on one column."
+    ]
+    verdict = assess_evidence(
+        analysis, passages, in_vocabulary=lambda term: term != "aggregation"
+    )
+    assert verdict.outcome in {"answer", "partial"}, verdict.reason
+    assert "aggregation" not in verdict.uncovered_terms
+
+
+def test_the_credit_reaches_only_the_words_inside_the_matched_phrase() -> None:
+    """The rule spoke for ``aggregation``. It has nothing to say about ``zzqq``.
+
+    Crediting every typed word once any phrase rule fires is how the expansion
+    table would talk itself into an answer, which is what coverage is measured
+    on typed words to prevent.
+    """
+    analysis = analyze_query("aggregation zzqqxx nonsense")
+    passages = [
+        "A grouped aggregate is one measure per distinct value of a column."
+    ]
+    verdict = assess_evidence(
+        analysis, passages, in_vocabulary=lambda term: term == "group"
+    )
+    assert verdict.outcome == "refuse", verdict.reason
+    assert "zzqqxx" in verdict.uncovered_terms
+
+
+def test_a_phrase_rule_whose_meaning_is_absent_earns_nothing() -> None:
+    """The credit is the rule's reading being borne out by the evidence.
+
+    Firing is the rule's claim; its targets appearing in the retrieved set is
+    the evidence for that claim. Without them the passage is about something
+    else and the operator's word is a genuine gap.
+    """
+    analysis = analyze_query("explain aggregation")
+    passages = ["Settings → Audit Logs lists mapping decisions and job runs."]
+    verdict = assess_evidence(
+        analysis, passages, in_vocabulary=lambda term: term != "aggregation"
+    )
+    assert verdict.outcome == "refuse", verdict.reason
+
+
+def test_a_loose_expansion_still_cannot_buy_coverage() -> None:
+    """Only the phrase tier is trusted; the single-word guesses are not.
+
+    ``slow`` pointing at ``phase`` is a useful guess for recall and no evidence
+    at all, and the distinction already exists in ``QueryAnalysis``. This holds
+    the policy to the same tier boundary retrieval uses.
+    """
+    analysis = analyze_query("why is my transfer slow")
+    assert analysis.loose_expansions, "fixture no longer has a loose expansion"
+    loose = set(analysis.loose_expansions)
+    passages = [" ".join(sorted(loose))]
+    verdict = assess_evidence(
+        analysis, passages, in_vocabulary=lambda term: term not in {"slow"}
+    )
+    assert "slow" in verdict.uncovered_terms, verdict
+
+
+def test_phrase_evidence_reports_the_words_it_ate_and_what_they_mean() -> None:
+    from src.ai.rag.query_analysis import phrase_evidence
+
+    fired = dict(
+        (consumed, targets)
+        for consumed, targets in phrase_evidence("what is change data capture")
+    )
+    assert fired, "the CDC phrase rule no longer fires"
+    consumed = {term for words in fired for term in words}
+    # Stemmed, because the terms are the ones coverage is measured on.
+    assert {"chang", "data", "captur"} <= consumed, consumed
+    assert not phrase_evidence("what is a connector")

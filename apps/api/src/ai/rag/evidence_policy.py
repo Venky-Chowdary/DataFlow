@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 from .lexical_index import content_terms, normalize
-from .query_analysis import GENERIC_QUESTION_WORDS, QueryAnalysis
+from .query_analysis import GENERIC_QUESTION_WORDS, QueryAnalysis, phrase_evidence
 
 #: Share of the question's content terms the retrieved set must account for
 #: before the answer is offered without a caveat.
@@ -288,8 +288,35 @@ def assess_evidence(
     # Coverage is measured on what the operator actually typed. Expansion terms
     # widen retrieval; letting them also satisfy coverage would mean the
     # expansion table could talk itself into an answer.
-    hit = [t for t in question_terms if t in covered]
-    uncovered = tuple(t for t in question_terms if t not in covered)
+    #
+    # One exception, and only because the alternative is measuring nothing. A
+    # word the corpus has *never* used cannot be absent from a passage
+    # informatively — its absence is guaranteed, so counting it as a gap says
+    # only that the documentation spells the concept differently. Measured:
+    # "explain aggregation" and "what does a breakdown show me" were refused at
+    # 0% coverage against a passage that defines a grouped aggregate, because
+    # ``aggregation`` does not stem to ``aggregat`` and ``breakdown`` written as
+    # one word shares no token with "break down".
+    #
+    # Conservative on both axes so the expansion table still cannot argue
+    # itself into an answer: the credit reaches only corpus-foreign terms a
+    # *phrase* rule consumed — the tier that matches an exact spelling and is
+    # already trusted for retrieval, never the single-word guesses — and only
+    # when every one of that rule's targets is in the evidence. A rule whose
+    # targets are too broad for that to hold earns nothing, which is the right
+    # direction for a policy whose job is to refuse.
+    spoken_for: set[str] = set()
+    if in_vocabulary is not None:
+        for consumed, targets in phrase_evidence(analysis.text):
+            if not targets or not all(t in covered for t in targets):
+                continue
+            spoken_for.update(
+                t for t in consumed if t not in covered and not in_vocabulary(t)
+            )
+    hit = [t for t in question_terms if t in covered or t in spoken_for]
+    uncovered = tuple(
+        t for t in question_terms if t not in covered and t not in spoken_for
+    )
     uncovered_subjects = tuple(t for t in uncovered if is_subject_term(t))
     coverage = len(hit) / len(question_terms)
 

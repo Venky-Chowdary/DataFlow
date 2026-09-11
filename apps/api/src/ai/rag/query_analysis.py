@@ -392,6 +392,16 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bthrottl\w*\b|\bback[\s-]?pressure\b|\brate[\s-]?limit\w*\b"
                 r"|\btoo\s+much\s+load\b", re.I),
      ("throttle", "chunk", "concurrency", "throughput")),
+    # The operator's nouns for the one analytical operation the Pilot can
+    # actually execute, none of which reach the passage that documents it.
+    # ``aggregation`` does not stem to ``aggregat`` the way ``aggregates``
+    # does, and ``breakdown`` written as one word shares no token with "break
+    # down", so "explain aggregation" and "what does a breakdown show me" were
+    # both refused as outside the documentation while "break down orders by
+    # region" ran a real GROUP BY one module over.
+    (re.compile(r"\baggregat\w*\b|\bbreak\s*downs?\b"
+                r"|\bgroup(?:ed|ing)?\s+by\b|\bper\s+(?:group|bucket)\b", re.I),
+     ("group", "aggregate", "measure")),
 )
 
 
@@ -562,6 +572,39 @@ def expand_terms_tiered(
                 seen.add(t)
                 loose_out.append(t)
     return tuple(phrase_out), tuple(loose_out)
+
+
+def phrase_evidence(
+    question: str,
+) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:
+    """For each phrase rule this question fires: the words it ate, and what they mean.
+
+    A phrase rule is a hand-written assertion that a span of the operator's own
+    words names a documented concept, which is why retrieval trusts its targets
+    as much as the typed words — see ``QueryAnalysis.phrase_expansions``. The
+    evidence policy needs that same assertion read the other way round: *which
+    typed terms the rule spoke for*, so that a concept the documentation spells
+    differently is not then counted as a hole in its own answer.
+
+    Only the terms inside the matched span are returned, not every word of the
+    question. "What is change data capture zzqq" fires the CDC rule, and the
+    rule has nothing to say about ``zzqq``.
+
+    Kept per rule rather than merged into one set, because the credit is earned
+    one rule at a time: it is that rule's targets which have to be in the
+    evidence for its reading of the operator's words to be borne out.
+    """
+    text = question or ""
+    out: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    for pattern, targets in _PHRASE_EXPANSIONS:
+        consumed: list[str] = []
+        for match in pattern.finditer(text):
+            for term in content_terms(match.group(0)):
+                if term not in consumed:
+                    consumed.append(term)
+        if consumed:
+            out.append((tuple(consumed), tuple(normalize(t) for t in targets)))
+    return tuple(out)
 
 
 def analyze_query(question: str) -> QueryAnalysis:
