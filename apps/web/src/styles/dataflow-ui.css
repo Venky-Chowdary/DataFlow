@@ -2384,13 +2384,13 @@ body {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 500;
-  background: #f1f5f9;
-  color: #94a3b8;
+  background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
 }
 
-.df2-theater-phase.done { background: #ecfdf5; color: #059669; }
-.df2-theater-phase.active { background: #f0fdfa; color: #0f766e; }
-.df2-theater-phase.failed { background: #fef2f2; color: #dc2626; }
+.df2-theater-phase.done { background: var(--df-success-bg); color: var(--df-success); }
+.df2-theater-phase.active { background: var(--df-brand-muted); color: var(--df-brand-strong); }
+.df2-theater-phase.failed { background: var(--df-danger-bg); color: var(--df-danger); }
 
 .df2-theater-phase-dot {
   width: 18px;
@@ -2399,7 +2399,7 @@ body {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--df-surface);
 }
 
 /* Migration pipeline animation */
