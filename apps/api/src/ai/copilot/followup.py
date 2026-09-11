@@ -23,6 +23,7 @@ column, it only reuses one the user already confirmed by asking about it.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from .aggregate_tools import (
@@ -248,7 +249,13 @@ _ELLIPTICAL_EDIT_RE = re.compile(
 _QUESTION_FRAME = re.compile(
     r"\bhow\s+(?:do|can|does|did|would|should)\s+(?:i|we|you|it)\b"
     r"|\bhow\s+many\s+\w+(?:\s+\w+){0,2}\s+(?:are|is|do|does)\b"
-    r"|\bwhere\s+(?:do|can|does|is|are)\s+(?:i|we|you|it|the|a|an)\b"
+    # An auxiliary verb straight after ``where`` is enough on its own: a SQL
+    # predicate puts a column there, so "where do rejected rows go" is asking a
+    # question however its noun phrase is spelled. Requiring a pronoun or
+    # determiner next left that turn looking elliptical, and with a sampled
+    # table in focus it was answered as a filter over those rows —
+    # "I couldn't complete that lookup: Provide a column to filter on."
+    r"|\bwhere\s+(?:do|does|did|can|could|should|would|will|is|are|was|were)\b"
     r"|\bwhat\s+happens\b"
     r"|\bwhat\s+(?:is|are|does|do)\s+(?:a|an|the|this|it|each|my|your)\b"
     r"|\bwhat\s+\w+(?:\s+\w+){0,2}\s+(?:are|is)\s+there\b"
@@ -281,13 +288,78 @@ def has_own_question_frame(text: str) -> bool:
 
 
 def asks_its_own_question(message: str) -> bool:
-    """``has_own_question_frame``, unless the turn points at a remembered subject."""
+    """``has_own_question_frame``, unless the turn points at a remembered subject.
+
+    A pronoun only points *outside* the turn when nothing inside it came first.
+    "Where do rejected rows go and can I replay them" opens its own question and
+    then refers back to the rows it just named; read as a coreference it looked
+    elliptical, and with a sampled table in focus it was answered as a query
+    over those rows instead of from the quarantine documentation.
+    """
     text = _clean(message)
     if not text:
         return False
-    if _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text)):
+    frame = _QUESTION_FRAME.search(text)
+    coref = _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text))
+    if coref and not (frame and frame.start() <= coref.start()):
         return False
     return has_own_question_frame(text)
+
+
+# A leading ``where`` is a SQL predicate in "where region = east" and an English
+# interrogative in "where do rejected rows go and can I replay them". The opener
+# cannot tell them apart, and reading it as a predicate routed the second one to
+# ``filter_result`` over whatever table was last sampled, so a documented
+# question about quarantine was answered "I couldn't complete that lookup:
+# Provide a column to filter on."
+_PREDICATE_OPENER = re.compile(r"^(?:filter|where)\b", re.I)
+
+# A predicate puts a column straight after ``where``; an auxiliary verb there
+# means a question. ``filter`` is an imperative and is never interrogative.
+_INTERROGATIVE_PREDICATE = re.compile(
+    r"^where\s+(?:do|does|did|is|are|was|were|can|could|should|would|will|shall"
+    r"|may|might|must|am|have|has|had)\b",
+    re.I,
+)
+
+# What a predicate looks like once the opener is stripped: a comparison, a SQL
+# predicate keyword, or the "column is value" shape of "filter where status is
+# paid".
+_PREDICATE_SHAPE = re.compile(
+    r"[<>]=?|!=|<>|="
+    r"|\bis\s*n[o']?t\b|\bisn'?t\b|\bnot\b"
+    r"|\b(?:is|are)\s+\S+"
+    r"|\b(?:like|between|in|null|empty|blank)\b"
+    r"|\b(?:contains?|starts?\s+with|ends?\s+with|equals?|matches?)\b"
+    r"|\b(?:greater|less|more|fewer|higher|lower)\s+than\b"
+    r"|\bat\s+(?:least|most)\b",
+    re.I,
+)
+
+#: A bare imperative is this long at most. "Filter" or "filter this result" is
+#: an under-specified command, and the tool asking which column is the right
+#: answer to it — unlike a sentence, which has to look like a predicate.
+_BARE_PREDICATE_WORDS = 3
+
+
+def opens_a_row_predicate(message: str, columns: Sequence[str] = ()) -> bool:
+    """Whether a leading ``where``/``filter`` filters stored rows or asks a question.
+
+    ``columns`` are the stored result's own column names when they are known,
+    which settles the cases no general shape can: "where region east" is a
+    predicate precisely because the sampled rows have a ``region``.
+    """
+    text = _clean(message)
+    if not _PREDICATE_OPENER.match(text):
+        return False
+    if _INTERROGATIVE_PREDICATE.match(text):
+        return False
+    if len(_words(text)) <= _BARE_PREDICATE_WORDS:
+        return True
+    if _PREDICATE_SHAPE.search(_PREDICATE_OPENER.sub("", text, count=1)):
+        return True
+    named = {c.strip().lower() for c in columns if c and c.strip()}
+    return bool(named & set(_words(text)))
 
 
 def looks_like_fresh_intent(message: str) -> bool:
@@ -533,7 +605,7 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     # "only paid ones" / "just pending" — filter the remembered subject.
     if re.match(r"^(?:only|just)\s+\S+", text, re.I):
         return True
-    if re.match(r"^(?:where|filter)\b", text, re.I):
+    if opens_a_row_predicate(text, focus.columns or ()):
         return True
     # "no grouping" / "drop the group by" removes a slot without naming a subject.
     if _extract_edit_group_by(text)[1]:

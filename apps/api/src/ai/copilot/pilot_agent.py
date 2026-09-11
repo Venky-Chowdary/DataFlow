@@ -1536,6 +1536,7 @@ Draft answer:
             looks_like_followup,
             looks_like_fresh_intent,
             names_its_own_subject,
+            opens_a_row_predicate,
             pending_from_assistant_clarification,
             resolve_followup,
             resolve_pending_answer,
@@ -1600,7 +1601,7 @@ Draft answer:
                 if explicit_table and (args or {}).get("connector_name"):
                     return planned
             # Stored-sample row filters stay on filter_result, not a new aggregate.
-            if focus.result_id and re.match(r"^(?:filter|where)\b", low):
+            if focus.result_id and opens_a_row_predicate(low, focus.columns or ()):
                 if planned and any(n == "filter_result" for n, _ in planned):
                     return inherit_focus_slots(planned, focus)
                 return [("filter_result", {"result_id": focus.result_id})]
@@ -1623,7 +1624,7 @@ Draft answer:
                     "analyze that", "analyze this", "profile that", "summarize that",
                 }:
                     return [("analyze_result", {"result_id": focus.result_id})]
-                if re.match(r"^(?:filter|where)\b", low):
+                if opens_a_row_predicate(low, focus.columns or ()):
                     return [("filter_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 

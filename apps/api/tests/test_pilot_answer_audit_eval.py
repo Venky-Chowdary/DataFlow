@@ -148,3 +148,28 @@ def test_the_audit_leaves_the_process_stores_alone() -> None:
         assert os.environ["DATAFLOW_CONNECTOR_STORE"] != (
             before["DATAFLOW_CONNECTOR_STORE"] or ""
         )
+
+
+def test_the_audit_starts_every_conversation_from_nothing() -> None:
+    """A remembered focus must not survive into the run, or out of it.
+
+    Working memory resolves its file once and keeps it, so a process that had
+    already built it against a real data directory kept that one. The shared
+    ``audit`` session then inherited a table sampled by an earlier run of this
+    script, and "where do rejected rows go and can I replay them" came back as
+    "I couldn't complete that lookup: Provide a column to filter on."
+    """
+    from src.ai.copilot import working_memory as wm
+
+    outer = wm.get_working_memory()
+    outer.remember_focus(
+        "audit", wm.PilotFocus(connector_name="Leftover", table="orders")
+    )
+
+    with audit.isolated_stores():
+        inner = wm.get_working_memory()
+        assert inner is not outer
+        assert inner.get_focus("audit") is None
+
+    assert wm.get_working_memory() is outer
+    assert outer.get_focus("audit") is not None

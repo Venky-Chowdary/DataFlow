@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import itertools
 import json
 import os
 import re
@@ -44,6 +45,7 @@ sys.path.insert(0, str(_API_ROOT / "src"))
 sys.path.insert(0, str(_API_ROOT))
 
 _FIXTURE_DIR = Path(tempfile.mkdtemp(prefix="pilot-audit-"))
+_RUN_SEQUENCE = itertools.count()
 
 # The operation suite asks Pilot to read and count real rows, so the audit owns
 # its workspace instead of measuring whatever connectors happen to be saved on
@@ -56,6 +58,7 @@ _ISOLATED_ENV = {
     "DATAFLOW_DISABLE_OBJECT_STORE": "1",
     "DATAFLOW_CONNECTOR_STORE": str(_FIXTURE_DIR / "connectors.json"),
     "DATAFLOW_CONNECTOR_STORE_BACKEND": "file",
+    # Replaced per entry: see ``isolated_stores``.
     "DATAFLOW_PILOT_MEMORY_PATH": str(_FIXTURE_DIR / "pilot_memory.json"),
     "DATAFLOW_SEED_DEMO": "0",
 }
@@ -80,20 +83,38 @@ def isolated_stores():
     """
     previous = {key: os.environ.get(key) for key in _ISOLATED_ENV}
     os.environ.update(_ISOLATED_ENV)
-    # The chosen backend is cached on first resolution, so a session that
-    # already picked one would keep it and ignore the environment above. Looked
-    # up again on the way out because the module is imported lazily and may
-    # arrive during the run.
+    # One conversation per run. A shared session within a run is the point —
+    # it is what a real conversation looks like — but carrying it between runs
+    # makes the result depend on which suite ran first, and the suites are one
+    # parametrized test each.
+    os.environ["DATAFLOW_PILOT_MEMORY_PATH"] = str(
+        _FIXTURE_DIR / f"pilot_memory_{next(_RUN_SEQUENCE)}.json"
+    )
+    # Two module-level singletons resolve their location once and would
+    # otherwise keep it, ignoring the environment above. Both are looked up by
+    # module name because they are imported lazily and may arrive mid-run.
     store = sys.modules.get("services.connector_store")
     cached = getattr(store, "_backend_choice", None) if store is not None else None
     if store is not None:
         store._backend_choice = None
+    # Working memory holds the conversation's focus, so a stale one is worse
+    # than a stale path: run after anything that had already built it against a
+    # real data directory, the shared ``audit`` session inherited a sampled
+    # table from a previous run of this script and "where do rejected rows go
+    # and can I replay them" was answered as a filter over those rows.
+    memory = sys.modules.get("src.ai.copilot.working_memory")
+    held = getattr(memory, "_memory", None) if memory is not None else None
+    if memory is not None:
+        memory._memory = None
     try:
         yield
     finally:
         store = sys.modules.get("services.connector_store")
         if store is not None:
             store._backend_choice = cached
+        memory = sys.modules.get("src.ai.copilot.working_memory")
+        if memory is not None:
+            memory._memory = held
         for key, value in previous.items():
             if value is None:
                 os.environ.pop(key, None)
