@@ -14295,6 +14295,56 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-brand-strong);
 }
 
+.df2-app .df2-dest-target-status {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-dest-target-status svg {
+  color: var(--df-text-tertiary);
+}
+
+.df2-app .df2-dest-target-status.is-existing {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-dest-target-status.is-existing svg {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-dest-target-status.is-create {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-dest-target-status.is-create svg {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-dest-target-status.is-pending {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-dest-target-status.is-pending svg {
+  color: var(--df-warning);
+}
+
+.df2-app .df2-dest-target-status.is-loading {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-dest-target-status.is-loading .dt-brand-loader,
+.df2-app .df2-dest-target-status.is-loading svg {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-dest-target-status code {
+  background: var(--df-surface);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);
