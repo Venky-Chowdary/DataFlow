@@ -14345,6 +14345,26 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   background: var(--df-surface);
 }
 
+.df2-app .df2-source-stream-chips li {
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-source-stream-chips li.is-primary {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-source-stream-chips li.is-ok {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-source-stream-chips li.is-error {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);

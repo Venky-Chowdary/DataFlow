@@ -515,29 +515,29 @@
   gap: 6px;
   padding: 4px 10px;
   border-radius: 999px;
-  background: #f1f5f9;
+  background: var(--df-surface-muted);
   border: 1px solid #e2e8f0;
   font-size: 12px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-source-stream-chips li.is-primary {
-  background: #ccfbf1;
+  background: var(--df-brand-muted);
   border-color: #99f6e4;
-  color: #0f766e;
+  color: var(--df-brand-strong);
 }
 
 .df2-source-stream-chips li.is-ok {
-  background: #dcfce7;
+  background: var(--df-success-bg);
   border-color: #bbf7d0;
-  color: #15803d;
+  color: var(--df-success);
 }
 
 .df2-source-stream-chips li.is-error {
-  background: #fee2e2;
+  background: var(--df-danger-bg);
   border-color: #fecaca;
-  color: #b91c1c;
+  color: var(--df-danger);
 }
 
 .df2-source-stream-chips li em {
