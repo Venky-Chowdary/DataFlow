@@ -3270,13 +3270,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 
-.df2-status-metric-pill.ok { background: var(--df-success-bg); color: #059669; }
-.df2-status-metric-pill.warn { background: var(--df-danger-bg); color: #dc2626; }
-.df2-status-metric-pill.live { background: var(--df-brand-muted); color: #0f766e; }
+.df2-status-metric-pill.ok { background: var(--df-success-bg); color: var(--df-success); }
+.df2-status-metric-pill.warn { background: var(--df-danger-bg); color: var(--df-danger); }
+.df2-status-metric-pill.live { background: var(--df-brand-muted); color: var(--df-brand-strong); }
 
 .df2-status-popover-actions {
   display: flex;
@@ -3418,18 +3418,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-connectors-list .df2-badge-live {
-  background: #ecfdf5;
-  color: #059669;
+  background: var(--df-success-bg);
+  color: var(--df-success);
 }
 
 .df2-connectors-list .df2-badge-error {
-  background: #fef2f2;
-  color: #dc2626;
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
 .df2-connectors-list .df2-badge-muted {
-  background: #f1f5f9;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 
 .df2-page-jobs .df2-jobs-v3-layout {
@@ -13934,4 +13934,40 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-pilot-v2 .df2-pilot-categories button.is-active {
   background: var(--df-brand-muted) !important;
   color: var(--df-brand-strong);
+}
+
+/* Status-pill / connector-badge leftover paper. Do not flatten ok/live/error. */
+.df2-app .df2-status-metric-pill {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-status-metric-pill.ok {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-status-metric-pill.warn {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-status-metric-pill.live {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-connectors-list .df2-badge-live {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-connectors-list .df2-badge-error {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-connectors-list .df2-badge-muted {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
