@@ -14246,6 +14246,36 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   color: var(--df-brand-strong);
 }
 
+.df2-app .df2-vd-scope-chip,
+.df2-app .df2-vd-decision-path-badge {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-scope-chip.cov-full_schema {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-vd-scope-chip.cov-pending,
+.df2-app .df2-vd-scope-chip.cov-sample {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-decision-path-badge.is-proven {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-repair-summary p {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-chip {
+  color: var(--df-text-primary);
+}
+
 .df2-app .df2-vd-remediation-log li,
 .df2-app .df2-vd-explain-issues p {
   color: var(--df-text-secondary);

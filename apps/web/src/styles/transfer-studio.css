@@ -7613,13 +7613,13 @@ th.df2-type-string .df2-type-badge {
   font-size: 10px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  background: #f1f5f9;
-  color: #334155;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 
-.df2-vd-scope-chip.cov-sample { background: var(--df-warning-bg); color: #9a3412; }
-.df2-vd-scope-chip.cov-full_schema { background: #ecfdf5; color: #047857; }
-.df2-vd-scope-chip.cov-pending { background: #fef3c7; color: #92400e; }
+.df2-vd-scope-chip.cov-sample { background: var(--df-warning-bg); color: var(--df-warning); }
+.df2-vd-scope-chip.cov-full_schema { background: var(--df-success-bg); color: var(--df-success); }
+.df2-vd-scope-chip.cov-pending { background: var(--df-warning-bg); color: var(--df-warning); }
 
 .df2-vd-coerce-frame.is-collapse {
   color: var(--df2-danger, #b91c1c);
@@ -8247,12 +8247,12 @@ th.df2-type-string .df2-type-badge {
   text-transform: uppercase;
   padding: 3px 8px;
   border-radius: 6px;
-  background: #e2e8f0;
-  color: #334155;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 .df2-vd-decision-path-badge.is-proven {
-  background: #ccfbf1;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
 }
 .df2-vd-decision-path-note {
   margin: 0;
@@ -8593,7 +8593,7 @@ th.df2-type-string .df2-type-badge {
 .df2-repair-summary p {
   margin: 0 0 6px;
   font-size: 13px;
-  color: #334155;
+  color: var(--df-text-secondary);
   line-height: 1.45;
 }
 .df2-repair-section { display: grid; gap: 8px; }
@@ -9264,7 +9264,7 @@ button.df2-vd-assist-toggle:focus-visible {
   border-radius: 999px;
   border: 1px solid #cbd5e1;
   background: var(--df-surface);
-  color: #1e293b;
+  color: var(--df-text-primary);
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
