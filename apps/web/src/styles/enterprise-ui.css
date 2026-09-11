@@ -14370,8 +14370,18 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 }
 
 .df2-app .df2-vd-callable strong,
+.df2-app .df2-object-combobox-option,
+.df2-app .df2-dest-engine-search input,
+.df2-app .df2-dest-engine-select,
+.df2-app .df2-preflight-progress .df2-mapping-progress-meta span,
+.df2-app .df2-theater-v3-ring strong,
 .df2-app .df2-result-stat {
   color: var(--df-text-primary);
+}
+
+.df2-app .df2-object-combobox-option:hover,
+.df2-app .df2-object-combobox-option.is-active {
+  background: var(--df-brand-muted);
 }
 
 .df2-app .df2-vd-remediation-log li,

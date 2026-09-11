@@ -2219,4 +2219,30 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
     assert.match(ui, /\.df2-app \.df2-source-stream-chips li\.is-error \{[\s\S]{0,80}--df-danger-bg/);
   });
+
+  it("Studio leftover navy dest pickers and theater ring follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-object-combobox-option \{[\s\S]{0,280}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-object-combobox-option \{[\s\S]{0,280}color: #0f172a/);
+    assert.match(studio, /\.df2-object-combobox-option\.is-active \{[\s\S]{0,40}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-object-combobox-option\.is-active \{[\s\S]{0,40}background: #f0fdfa/);
+    assert.match(studio, /\.df2-dest-engine-search input \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-dest-engine-search input \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(studio, /\.df2-dest-engine-select \{[\s\S]{0,240}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-dest-engine-select \{[\s\S]{0,240}color: #0f172a/);
+    assert.match(studio, /\.df2-preflight-progress \.df2-mapping-progress-meta span \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-preflight-progress \.df2-mapping-progress-meta span \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-theater-v3-ring strong \{[\s\S]{0,240}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-theater-v3-ring strong \{[\s\S]{0,240}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-object-combobox-option,/);
+    assert.match(ui, /\.df2-app \.df2-object-combobox-option\.is-active \{[\s\S]{0,40}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-ring strong,/);
+    assert.match(ui, /\.df2-app \.df2-result-stat \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
