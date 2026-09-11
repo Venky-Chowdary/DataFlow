@@ -144,14 +144,14 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 8px;
-  border-right: 1px solid #eef2f6 !important;
-  background: #fafbfc;
+  border-right: 1px solid var(--df-border) !important;
+  background: var(--df-surface-muted);
 }
 
 .df2-pilot-v2 .df2-pilot-aside.is-collapsed {
   padding: 8px 0;
   align-items: center;
-  background: #fff;
+  background: var(--df-surface);
 }
 
 .df2-pilot-aside-toolbar {
@@ -194,14 +194,14 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #64748b;
+  color: var(--df-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .df2-pilot-aside-icon-btn:hover {
-  background: #f1f5f9;
-  color: #0f766e;
+  background: var(--df-surface-muted);
+  color: var(--df-brand-strong);
 }
 
 .df2-pilot-aside-expand {
@@ -256,7 +256,7 @@
 }
 
 .df2-pilot-v2 .df2-pilot-session-row.active .df2-pilot-session {
-  color: #0f766e;
+  color: var(--df-brand-strong);
   font-weight: 600;
   background: transparent !important;
 }
@@ -272,20 +272,20 @@
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   cursor: pointer;
   opacity: 1;
 }
 
 .df2-pilot-session-delete:hover {
-  background: #fee2e2;
-  color: #b91c1c;
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
 .df2-pilot-recent-empty {
   margin: 4px 2px 10px;
   padding: 0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -294,8 +294,8 @@
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   font-size: 10px;
   font-weight: 700;
 }
@@ -313,16 +313,16 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
 }
 
 .df2-pilot-pending-label {
   flex: 1 1 140px;
   font-size: 12.5px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-pilot-followups {
@@ -333,19 +333,19 @@
 }
 
 .df2-pilot-followup {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 999px;
-  background: #fff;
-  color: #334155;
+  background: var(--df-surface);
+  color: var(--df-text-secondary);
   font-size: 12px;
   padding: 5px 10px;
   cursor: pointer;
 }
 
 .df2-pilot-followup:hover {
-  border-color: #99f6e4;
-  background: #f0fdfa;
-  color: #0f766e;
+  border-color: var(--df-brand);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
 }
 
 .df2-pilot-v2 .df2-pilot-aside-scroll {
@@ -364,7 +364,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: transparent;
 }
 
@@ -373,7 +373,7 @@
   padding: 6px 8px;
   border: none;
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 11px;
 }
 
@@ -13627,4 +13627,50 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-preflight.is-compact .df2-preflight-step.running {
   background: var(--df-info-bg) !important;
   border-color: var(--df-info-border) !important;
+}
+
+/* Pilot leftover paper / navy / mint on aside, pending, followup, tool log. */
+.df2-app .df2-pilot-v2 .df2-pilot-aside {
+  background: var(--df-surface-muted);
+  border-right-color: var(--df-border);
+}
+
+.df2-app .df2-pilot-v2 .df2-pilot-aside.is-collapsed {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-pilot-aside-icon-btn {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-pilot-aside-icon-btn:hover {
+  background: var(--df-surface-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-pilot-session-count {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-pilot-pending-row,
+.df2-app .df2-pilot-v2 .df2-pilot-tool-log {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-pilot-pending-label {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-pilot-followup {
+  background: var(--df-surface);
+  color: var(--df-text-secondary);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-pilot-followup:hover {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+  border-color: var(--df-brand);
 }

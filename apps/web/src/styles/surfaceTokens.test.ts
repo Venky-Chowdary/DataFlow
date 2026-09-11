@@ -1225,4 +1225,38 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-validate-stage-core h3,/);
     assert.match(ui, /\.df2-app \.df2-toolbar-gitops-toggle:hover \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Pilot leftover paper, navy, and mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-aside \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-pilot-v2 \.df2-pilot-aside \{[\s\S]{0,280}background: #fafbfc/);
+    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-aside\.is-collapsed \{[\s\S]{0,80}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-pilot-v2 \.df2-pilot-aside\.is-collapsed \{[\s\S]{0,80}background: #fff/);
+    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-session-row\.active \.df2-pilot-session \{[\s\S]{0,80}--df-brand-strong/);
+    assert.doesNotMatch(
+      ui,
+      /\.df2-pilot-v2 \.df2-pilot-session-row\.active \.df2-pilot-session \{[\s\S]{0,80}color: #0f766e/,
+    );
+    assert.match(ui, /\.df2-pilot-session-count \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-pilot-session-count \{[\s\S]{0,80}background: #f1f5f9/);
+    assert.match(ui, /\.df2-pilot-pending-row \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-pilot-pending-row \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(ui, /\.df2-pilot-pending-label \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(ui, /\.df2-pilot-pending-label \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(ui, /\.df2-pilot-followup \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(ui, /\.df2-pilot-followup \{[\s\S]{0,160}background: #fff;/);
+    assert.match(ui, /\.df2-pilot-followup:hover \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(ui, /\.df2-pilot-followup:hover \{[\s\S]{0,80}background: #f0fdfa/);
+    assert.match(ui, /\.df2-pilot-v2 \.df2-pilot-tool-log \{[\s\S]{0,160}--df-surface-muted/);
+    assert.doesNotMatch(ui, /\.df2-pilot-v2 \.df2-pilot-tool-log \{[\s\S]{0,160}background: #f8fafc/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-pilot-pending-label \{/);
+    assert.match(ui, /\.df2-app \.df2-pilot-followup \{/);
+    assert.match(ui, /\.df2-app \.df2-pilot-followup:hover \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-pilot-pending-row,/);
+  });
 });
