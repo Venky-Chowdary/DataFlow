@@ -2380,17 +2380,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #f1f5f9;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   z-index: 1;
 }
 
-.df2-job-timeline-item.is-done .df2-job-timeline-dot { background: #dcfce7; color: #16a34a; }
-.df2-job-timeline-item.is-failed .df2-job-timeline-dot { background: #fee2e2; color: #dc2626; }
-.df2-job-timeline-item.is-active .df2-job-timeline-dot { background: #ccfbf1; color: #0f766e; }
-.df2-job-timeline-item.is-skipped .df2-job-timeline-dot { background: #fef3c7; color: #b45309; }
-.df2-job-timeline-item.is-warning .df2-job-timeline-dot { background: #fef3c7; color: #d97706; }
-.df2-job-timeline-item.is-warning strong { color: #b45309; }
+.df2-job-timeline-item.is-done .df2-job-timeline-dot { background: var(--df-success-bg); color: var(--df-success); }
+.df2-job-timeline-item.is-failed .df2-job-timeline-dot { background: var(--df-danger-bg); color: var(--df-danger); }
+.df2-job-timeline-item.is-active .df2-job-timeline-dot { background: var(--df-brand-muted); color: var(--df-brand-strong); }
+.df2-job-timeline-item.is-skipped .df2-job-timeline-dot { background: var(--df-warning-bg); color: var(--df-warning); }
+.df2-job-timeline-item.is-warning .df2-job-timeline-dot { background: var(--df-warning-bg); color: var(--df-warning); }
+.df2-job-timeline-item.is-warning strong { color: var(--df-warning); }
 
 .df2-job-timeline-body { flex: 1; min-width: 0; padding-top: 1px; }
 
@@ -13837,4 +13837,35 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-vd-count.block,
 .df2-app .df2-vd-count.block strong {
   color: var(--df-danger);
+}
+
+/* Job-timeline leftover paper / mint / status pastels on dots. */
+.df2-app .df2-job-timeline-dot {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-job-timeline-item.is-done .df2-job-timeline-dot {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-job-timeline-item.is-failed .df2-job-timeline-dot {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+}
+
+.df2-app .df2-job-timeline-item.is-active .df2-job-timeline-dot {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-job-timeline-item.is-skipped .df2-job-timeline-dot,
+.df2-app .df2-job-timeline-item.is-warning .df2-job-timeline-dot {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-job-timeline-item.is-warning strong {
+  color: var(--df-warning);
 }
