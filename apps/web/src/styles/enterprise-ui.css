@@ -14131,12 +14131,39 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-vd-diff-head strong,
 .df2-app .df2-vd-assist-copy strong,
 .df2-app .df2-vd-run-id code,
+.df2-app .df2-vd-decision-path-head,
+.df2-app .df2-vd-decision-path-step-summary,
+.df2-app .df2-vd-honesty-head,
+.df2-app .df2-vd-honesty-list span,
+.df2-app .df2-vd-hs-headline,
+.df2-app .df2-vd-honesty-toggle,
 .df2-app .df2-vd-explain-issues strong {
   color: var(--df-text-primary);
 }
 
 .df2-app .df2-vd-enterprise-trust,
-.df2-app .df2-vd-sync-contract {
+.df2-app .df2-vd-sync-contract,
+.df2-app .df2-vd-honesty {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-decision-path-note,
+.df2-app .df2-vd-honesty-note,
+.df2-app .df2-vd-hs-counts {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-decision-path-steps li.is-locked {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-vd-decision-path-steps li.is-unlocked,
+.df2-app .df2-vd-decision-path-steps li.is-ready {
+  background: var(--df-brand-muted);
+}
+
+.df2-app .df2-vd-hs-metric.is-unmeasured .df2-vd-hs-badge {
   background: var(--df-surface-muted);
   color: var(--df-text-secondary);
 }

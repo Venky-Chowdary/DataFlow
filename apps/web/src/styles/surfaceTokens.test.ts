@@ -1948,4 +1948,43 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-vd-run-id code,/);
     assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
   });
+
+  it("Validate leftover navy honesty and decision-path follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-decision-path-head \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-head \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-decision-path-note \{[\s\S]{0,160}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-note \{[\s\S]{0,160}color: #475569/);
+    assert.match(studio, /\.df2-vd-decision-path-steps li\.is-locked \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-steps li\.is-locked \{[\s\S]{0,80}background: #f1f5f9/);
+    assert.match(studio, /\.df2-vd-decision-path-steps li\.is-ready \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-steps li\.is-ready \{[\s\S]{0,80}background: #f0fdfa/);
+    assert.match(studio, /\.df2-vd-decision-path-step-summary \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-decision-path-step-summary \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-honesty \{[\s\S]{0,120}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-honesty \{[\s\S]{0,120}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-honesty-head \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-honesty-head \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-honesty-note \{[\s\S]{0,160}--df-text-secondary/);
+    assert.match(studio, /\.df2-vd-honesty-list span \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-honesty-list span \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-hs-headline \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-hs-headline \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-hs-counts \{[\s\S]{0,80}--df-text-secondary/);
+    assert.match(studio, /\.df2-vd-honesty-toggle \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-honesty-toggle \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-hs-metric\.is-unmeasured \.df2-vd-hs-badge \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-hs-metric\.is-unmeasured \.df2-vd-hs-badge \{[\s\S]{0,80}background: #e2e8f0/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-decision-path-head,/);
+    assert.match(ui, /\.df2-app \.df2-vd-honesty-list span,/);
+    assert.match(ui, /\.df2-app \.df2-vd-honesty \{/);
+    assert.match(ui, /\.df2-app \.df2-vd-decision-path-steps li\.is-ready \{[\s\S]{0,80}--df-brand-muted/);
+    assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
+  });
 });
