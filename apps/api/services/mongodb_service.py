@@ -186,21 +186,37 @@ class MongoDBService:
         self.db_name = "datatransfer"
 
     def connect(self) -> bool:
-        """Establish connection to MongoDB"""
+        """Establish connection to MongoDB.
+
+        The client is published to ``self.client`` only once it has answered a
+        ping. Callers read a non-``None`` client as proof the store is reachable
+        and skip their file fallback on the strength of it — ``audit_log``
+        does — so publishing one mid-handshake hands them an object that then
+        blocks for a full server-selection window. An unverified client is a
+        local until it has earned the attribute.
+        """
+        client = None
         try:
             # Fail hung sockets instead of freezing the asyncio event loop
             # when sync pymongo is called from request handlers.
-            self.client = MongoClient(
+            client = MongoClient(
                 self.connection_string,
                 serverSelectionTimeoutMS=5000,
                 socketTimeoutMS=20000,
                 connectTimeoutMS=5000,
                 waitQueueTimeoutMS=10000,
             )
-            self.client.admin.command('ping')
+            client.admin.command('ping')
+            self.client = client
             return True
         except Exception as e:
             print(f"[ERROR] MongoDB connection failed: {e}")
+            if client is not None:
+                # Release the monitor threads the unverified client started.
+                try:
+                    client.close()
+                except Exception:
+                    pass
             self.client = None
             return False
 
