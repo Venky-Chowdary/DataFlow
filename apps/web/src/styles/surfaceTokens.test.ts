@@ -1911,4 +1911,41 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-transfer-step-panel \.df2-card-title,/);
     assert.match(ui, /\.df2-app \.df2-multistream-preview-head h4 \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Validate leftover navy hero and proof titles follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-hero-ring-label strong \{[\s\S]{0,160}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-hero-ring-label strong \{[\s\S]{0,160}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-hero-head h3 \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-hero-head h3 \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-enterprise-trust \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-enterprise-trust \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-enterprise-trust strong \{[\s\S]{0,120}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-enterprise-trust strong \{[\s\S]{0,120}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-metric-val \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-metric-val \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-sync-contract \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-sync-contract \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(studio, /\.df2-vd-sync-contract strong \{[\s\S]{0,120}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-map-proof-card-head strong \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-ring-val \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-ring-val \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(studio, /\.df2-vd-ring-copy strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-diff-head strong \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-assist-copy strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.match(studio, /\.df2-vd-run-id code \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-vd-run-id code \{[\s\S]{0,200}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-hero-ring-label strong,/);
+    assert.match(ui, /\.df2-app \.df2-vd-hero-head h3,/);
+    assert.match(ui, /\.df2-app \.df2-vd-enterprise-trust,/);
+    assert.match(ui, /\.df2-app \.df2-vd-metric-val,/);
+    assert.match(ui, /\.df2-app \.df2-vd-run-id code,/);
+    assert.match(ui, /\.df2-app \.df2-vd-explain-issues strong \{[\s\S]{0,80}--df-text-primary/);
+  });
 });

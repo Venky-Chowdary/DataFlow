@@ -14120,8 +14120,25 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
 .df2-app .df2-vd-assist-summary,
 .df2-app .df2-vd-coerce-head strong,
 .df2-app .df2-vd-coerce-col strong,
+.df2-app .df2-vd-hero-ring-label strong,
+.df2-app .df2-vd-hero-head h3,
+.df2-app .df2-vd-enterprise-trust strong,
+.df2-app .df2-vd-metric-val,
+.df2-app .df2-vd-sync-contract strong,
+.df2-app .df2-vd-map-proof-card-head strong,
+.df2-app .df2-vd-ring-val,
+.df2-app .df2-vd-ring-copy strong,
+.df2-app .df2-vd-diff-head strong,
+.df2-app .df2-vd-assist-copy strong,
+.df2-app .df2-vd-run-id code,
 .df2-app .df2-vd-explain-issues strong {
   color: var(--df-text-primary);
+}
+
+.df2-app .df2-vd-enterprise-trust,
+.df2-app .df2-vd-sync-contract {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
 }
 
 .df2-app .df2-vd-remediation-log li,
