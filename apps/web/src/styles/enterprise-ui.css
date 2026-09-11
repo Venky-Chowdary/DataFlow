@@ -13435,7 +13435,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-modal .df2-tab:hover:not(.active):not
 html[data-theme="dark"]:has(.df2-app) .df2-drawer .df2-tab:hover:not(.active):not([aria-selected="true"]),
 html.df2-theme-dark:has(.df2-app) .df2-modal .df2-tab:hover:not(.active):not([aria-selected="true"]),
 html.df2-theme-dark:has(.df2-app) .df2-drawer .df2-tab:hover:not(.active):not([aria-selected="true"]) {
-  color: var(--df-text-primary);
+  color: var(--df-text-primary) !important;
   background: var(--df-list-row-hover);
 }
 
