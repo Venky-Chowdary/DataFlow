@@ -1098,6 +1098,12 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(mcp, /\.df2-mcp-log-status--err \{[\s\S]{0,80}--df-danger/);
     assert.match(mcp, /\.df2-mcp-tile code \{[\s\S]{0,160}--df-brand-strong/);
     assert.doesNotMatch(mcp, /\.df2-mcp-tile code \{[\s\S]{0,160}color: #0f766e/);
+    assert.match(mcp, /\.df2-mcp-panel-head h2 \{[\s\S]{0,120}--df-text-primary/);
+
+    assert.match(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}--df-success/);
+    assert.doesNotMatch(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}#047857/);
+    assert.doesNotMatch(ui, /\.df2-mcp-status-pill\.is-online \{[\s\S]{0,120}#a7f3d0/);
+    assert.match(ui, /\.df2-mcp-status-pill\.is-offline \{[\s\S]{0,120}--df-warning/);
 
     assert.match(query, /\.df2-query-editor-dialect-pill \{[\s\S]{0,200}--df-brand-muted/);
     assert.doesNotMatch(query, /\.df2-query-editor-dialect-pill \{[\s\S]{0,200}#f0fdfa/);
