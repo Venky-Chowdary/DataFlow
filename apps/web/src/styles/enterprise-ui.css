@@ -3734,7 +3734,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 3px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-md, 8px);
-  background: #f1f5f9;
+  background: var(--df-seg-track);
   overflow-x: auto;
   overflow-y: hidden;
   box-sizing: border-box;
@@ -3785,7 +3785,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-filter-bar-inline .df2-filter-tabs:not(:last-child) {
   margin-right: 4px !important;
   padding-right: 8px !important;
-  border-right: 1px solid #dbe3ec !important;
+  border-right: 1px solid var(--df-border) !important;
 }
 
 .df2-filter-bar .df2-tabs:last-child,
@@ -3815,7 +3815,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 600 !important;
   line-height: 1 !important;
   white-space: nowrap;
-  color: #475569 !important;
+  color: var(--df-seg-ink) !important;
   background: transparent !important;
   box-shadow: none !important;
 }
@@ -13486,4 +13486,14 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
 .df2-app .df2-mcp-log-status--err {
   background: var(--df-danger-bg);
   color: var(--df-danger);
+}
+
+.df2-app .df2-filter-bar {
+  background: var(--df-seg-track);
+  border-color: var(--df-border);
+}
+
+.df2-app .df2-filter-bar .df2-tab,
+.df2-app .df2-toolbar .df2-tab {
+  color: var(--df-seg-ink) !important;
 }

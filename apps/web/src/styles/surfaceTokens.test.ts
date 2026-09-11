@@ -1119,5 +1119,8 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-query-editor-dialect-pill,/);
     assert.match(ui, /\.df2-app \.df2-mcp-tile code \{[\s\S]{0,80}--df-brand-strong/);
     assert.match(ui, /\.df2-app \.df2-validate-launch \{[\s\S]{0,120}--df-brand-muted/);
+    assert.match(ui, /\.df2-filter-bar \{[\s\S]{0,360}--df-seg-track/);
+    assert.doesNotMatch(ui, /\.df2-filter-bar \{[\s\S]{0,360}background: #f1f5f9/);
+    assert.match(ui, /\.df2-app \.df2-filter-bar \{[\s\S]{0,80}--df-seg-track/);
   });
 });
