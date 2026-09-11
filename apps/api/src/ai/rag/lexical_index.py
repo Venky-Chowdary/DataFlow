@@ -144,6 +144,30 @@ def identifier_shingles(terms: Sequence[str]) -> list[str]:
     return out
 
 
+def adjacent_shingles(text: str) -> set[str]:
+    """Shingles of words that are *literally* adjacent, filler breaking the run.
+
+    ``identifier_shingles`` joins content terms after filler is removed, which
+    is what recovers ``reverse_etl`` from "reverse ETL". Applied to running
+    prose it invents phrases instead: "semantic mapping with confidence"
+    yielded ``map_confidence``, so a feature-list sentence was credited with
+    having said "mapping confidence" and outranked the section that explains
+    what a low confidence score means.
+    """
+    out: set[str] = set()
+    run: list[str] = []
+    for token in tokenize(text):
+        if token in STOPWORDS or len(token) < 2:
+            if len(run) > 1:
+                out.update(identifier_shingles(run))
+            run = []
+            continue
+        run.append(token)
+    if len(run) > 1:
+        out.update(identifier_shingles(run))
+    return out
+
+
 def content_terms(text: str) -> list[str]:
     """Question terms that carry retrieval signal, in order, deduplicated."""
     seen: set[str] = set()

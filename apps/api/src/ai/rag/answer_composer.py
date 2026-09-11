@@ -30,14 +30,26 @@ same evidence and discarded if it drifts (see ``generator._narrate``).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .lexical_index import content_terms
+from .lexical_index import adjacent_shingles, content_terms
 from .query_analysis import QueryAnalysis
 
 # How much an expansion term counts relative to a word the operator typed.
 EXPANSION_WEIGHT = 0.45
+
+# What it is worth for a sentence to contain a whole phrase of the question,
+# rather than its words scattered. Sentence scoring was unigram-only, so
+# "column order" was two independent words: asked whether column order is
+# preserved, the answer opened with a tutorial line reading "5 columns:
+# order_id, customer_email, order_amt" — both words, neither meaning.
+#
+# Deliberately added *outside* length normalization. That discount exists
+# because a long sentence accumulates incidental single-word matches; an exact
+# phrase is not incidental, and the sentence that has to enumerate all 26
+# certificate aspects is long for a reason.
+PHRASE_CREDIT = 2.0
 
 # Redundancy penalty for maximal-marginal-relevance selection. 0.7 keeps the
 # answer from restating one definition three times while still allowing a second
@@ -71,6 +83,15 @@ HEADING_CREDIT = 0.9
 # two, and a section about MCP answered a question about database engines.
 HEADING_ANCHOR = 1.0
 
+# …except in the passage retrieval scored highest, where a majority is enough.
+# "How is this different from writing ETL scripts" is answered by the FAQ
+# section of that name, whose body sentence lists the differences without
+# repeating a single word of the question; its heading carries two terms of
+# three. Under the flat bar that passage contributed nothing at all and the
+# answer was composed from a timezone passage that scored a quarter as well,
+# purely because one of its sentences contained the word "writing".
+HEADING_ANCHOR_TOP = 0.6
+
 # A list answers a question as a whole or not at all, so once one item is
 # selected its siblings come with it. Nine is the number of preflight gates —
 # the longest enumeration the shipped documentation contains.
@@ -85,6 +106,14 @@ _UI_CAPTION = re.compile(
     r"Schedules|Proofs|Evidence) — ",
 )
 _CODE_LINE = re.compile(r"^\s*(?:\{|\[|GET |POST |PUT |PATCH |DELETE |curl |\$ )")
+
+# Sentences about the documentation rather than the product: "Every screenshot
+# is from the live application — not a marketing mock", "Markers on each
+# screenshot match the live product UI". True, and never an answer. Asked how
+# to create a recurring sync, the pilot led with the caption "Screenshots are
+# from the live Create recurring sync form" — it contains the phrase the
+# operator typed and nothing they can act on.
+_DOC_META = re.compile(r"\b(?:screenshots?|markers on)\b", re.I)
 _IMPERATIVE = re.compile(
     r"^(?:Open|Click|Pick|Choose|Select|Set|Enter|Type|Paste|Copy|Add|Create|"
     r"Review|Return|Expand|Fix|Remediate|Use|Run|Press|Confirm|Approve|Sign|"
@@ -104,7 +133,11 @@ _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
     "enumeration": (("mode", 1.6), ("core gate", 1.6), ("role", 1.2), ("procedure:", -1.0)),
     "diagnosis": (("phas", 1.2), ("checksum", 1.2), ("quarantine", 1.2), ("drift", 1.2)),
     "comparison": (("mode", 1.8), ("what is", 0.8)),
-    "capability": (("what is", 1.0), ("support", 1.4)),
+    # "Do you preserve column order" asks what the product guarantees, and a
+    # wizard step cannot answer that. Unpenalized, the sample-transfer tutorial
+    # answered it with "wait until the file chip shows Sample-Orders.csv" —
+    # a sentence that matches only because the demo fixture is named orders.
+    "capability": (("what is", 1.0), ("support", 1.4), ("procedure:", -1.2)),
 }
 
 
@@ -151,6 +184,8 @@ def _split_annotated(text: str, section_title: str = "") -> list[tuple[str, bool
         for piece in _SENTENCE_SPLIT.split(line):
             piece = piece.strip()
             if not piece or piece.startswith(_SKIP_PREFIX) or piece.endswith(":"):
+                continue
+            if _DOC_META.search(piece):
                 continue
             if len(piece) < 12:
                 continue
@@ -229,27 +264,94 @@ def _shape_bonus(ask: str, sentence: str) -> float:
     return 0.0
 
 
+def term_weights(
+    terms: Sequence[str],
+    idf: Callable[[str], float] | None,
+) -> dict[str, float]:
+    """How much each of the question's words is worth, relative to its average.
+
+    Counting matched words equally is how "what about generated columns" tied
+    three sentences at exactly 1.80: one contained ``generated``, which appears
+    in a single passage of the corpus, and the others contained ``column``,
+    which appears in dozens. Ranking already knows the difference — it is the
+    IDF the BM25 index computed — and sentence selection was throwing it away.
+
+    Normalized by the mean so the weights average 1.0, which keeps every other
+    constant in this module on the scale it was tuned against.
+    """
+    if not idf:
+        return {}
+    raw = {t: max(0.0, float(idf(t))) for t in terms}
+    positive = [v for v in raw.values() if v > 0]
+    if not positive:
+        return {}
+    mean = sum(positive) / len(positive)
+    if mean <= 0:
+        return {}
+    # A term the corpus never uses scores 0 IDF, which would make it free to
+    # miss. It is the most distinctive word in the question, so it keeps the
+    # average weight rather than none.
+    return {t: (v / mean if v > 0 else 1.0) for t, v in raw.items()}
+
+
 def build_candidates(
     analysis: QueryAnalysis,
     sections: Sequence[tuple[str, str, str, str]],
+    *,
+    scores: Sequence[float] | None = None,
+    idf: Callable[[str], float] | None = None,
 ) -> list[Candidate]:
     """Score every sentence in the retrieved sections against the question.
 
     ``sections`` is ``(section_title, citation, href, text)`` in fused rank
-    order; earlier sections carry a small rank prior so a tie resolves toward
-    the passage retrieval preferred.
+    order; earlier sections carry a rank prior so a tie resolves toward the
+    passage retrieval preferred. ``scores`` are those passages' retrieval
+    scores, which turn the prior from an ordering into a margin. ``idf`` is the
+    corpus term statistic, so a matched word counts for what it distinguishes.
     """
     typed = set(analysis.terms)
+    weights = term_weights(analysis.terms, idf)
     expanded = set(analysis.expansions) - typed
+    # Only phrases the operator actually typed, adjacent as typed. An expansion
+    # pair would be a guess about a phrase, which is not what this credit is for.
+    phrases = adjacent_shingles(analysis.text)
     candidates: list[Candidate] = []
     order = 0
+    top_score = max((s for s in (scores or ()) if s > 0), default=0.0)
     for rank, (section_title, citation, href, text) in enumerate(sections):
         rank_prior = 1.0 / (1.0 + rank)
+        # An ordinal prior treats "retrieval preferred this one" and "retrieval
+        # preferred this one four times over" as the same fact. Asked how the
+        # product differs from ETL scripts, the FAQ section written about that
+        # scored 10.9 and a timezone passage scored 2.8 — and the answer opened
+        # from the timezone passage, because one of its sentences happened to
+        # contain the word "writing". Scaling the prior by the passage's share
+        # of the best score keeps a weak passage available as support without
+        # letting it speak first.
+        share = 1.0
+        if top_score > 0 and scores is not None and rank < len(scores):
+            share = max(0.0, float(scores[rank])) / top_score
+            rank_prior *= share
+        anchor_bar = HEADING_ANCHOR_TOP if share >= 1.0 else HEADING_ANCHOR
         heading_match = _heading_match(citation or section_title, typed)
         for sentence, is_list_item in _split_annotated(text, section_title):
-            terms = frozenset(content_terms(sentence))
-            typed_hits = len(terms & typed)
+            sentence_terms = content_terms(sentence)
+            terms = frozenset(sentence_terms)
+            hit_terms = terms & typed
+            typed_hits = (
+                sum(weights.get(t, 1.0) for t in hit_terms)
+                if weights
+                else len(hit_terms)
+            )
             expanded_hits = len(terms & expanded)
+            # Both spellings count: the corpus writes an aspect as prose
+            # ("column order") and as the identifier the certificate records
+            # (``column_order``), and the question may have named either.
+            phrase_hits = (
+                len(phrases & (terms | adjacent_shingles(sentence)))
+                if phrases
+                else 0
+            )
             # A list item rarely repeats the word that names the list. "G3
             # Schema contract — source and target schemas are compatible" scores
             # nothing against "what are the preflight gates", so all nine gates
@@ -259,15 +361,16 @@ def build_candidates(
                 LIST_ITEM_CREDIT * heading_match if is_list_item else 0.0
             )
             match = typed_hits + EXPANSION_WEIGHT * expanded_hits
-            if match or listed_credit:
+            if match or listed_credit or phrase_hits:
                 score = (
                     match * _length_norm(len(terms))
+                    + PHRASE_CREDIT * phrase_hits
                     + listed_credit
                     + _section_bonus(analysis.ask, section_title, sentence)
                     + _shape_bonus(analysis.ask, sentence)
                     + 0.8 * rank_prior
                 )
-            elif heading_match >= HEADING_ANCHOR:
+            elif heading_match >= anchor_bar:
                 # The same argument as for list items, one level weaker. "Do
                 # you have webhooks" is answered by "Subscribe to job.completed,
                 # job.failed and pipeline.quarantine_threshold events", which
@@ -382,6 +485,8 @@ def compose_answer(
     analysis: QueryAnalysis,
     sections: Sequence[tuple[str, str, str, str]],
     *,
+    scores: Sequence[float] | None = None,
+    idf: Callable[[str], float] | None = None,
     partial_caveat: str = "",
     limit: int = MAX_SENTENCES,
 ) -> str:
@@ -392,7 +497,7 @@ def compose_answer(
     an operator can act on "here is what is documented, this part is not" and
     cannot act on a refusal.
     """
-    candidates = build_candidates(analysis, sections)
+    candidates = build_candidates(analysis, sections, scores=scores, idf=idf)
     chosen = select_sentences(candidates, limit=limit)
     if not chosen:
         return ""
