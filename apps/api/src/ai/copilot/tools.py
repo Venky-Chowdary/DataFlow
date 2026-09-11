@@ -2593,7 +2593,12 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
+            # "how do you handle booleans" is the same product question as "how
+            # does Datawrap handle booleans", and the list held every other
+            # person: ``how do i``, ``how does``. Asking the product about
+            # itself in the second person reached no knowledge tool at all.
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how do you|how do we|"
+            r"how does|how to|how are|how is|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
             r"what makes|remind me|meaning of|"
             r"do i need|how is)\b"
@@ -3623,6 +3628,19 @@ _SAMPLE_ROWS_RE = re.compile(
 )
 
 
+# A question *about* something, as opposed to a request to do something.
+# "Can you pause the nightly sync" is a request; "what happens to duplicate
+# primary keys" is not, and the schedule-management verbs include words that are
+# also ordinary adjectives — so that question was planned as "clone the pipeline
+# named primary keys" and answered with "Schedule not found" before the
+# documentation it actually wanted.
+_ASKS_ABOUT_SOMETHING = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|when|where|which|who|whose|how)\b",
+    re.IGNORECASE,
+)
+
+
 def _asks_whether_any_exist(lower: str, *objects: str) -> bool:
     """"Do I have any contracts", "are there any pipelines" — an inventory ask.
 
@@ -4171,7 +4189,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if not re.search(
         r"\b(?:change\s+data\s+capture|cdc|sync\s+mode|write\s+mode|upsert|append)\b",
         lower,
-    ):
+    ) and not _ASKS_ABOUT_SOMETHING.match(lower):
         manage_sched = re.search(
             r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
             r"(?:the\s+)?(?:schedule|pipeline)\s+(.+?)\s*$",
@@ -5293,6 +5311,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         )
         if not keep_rag:
             planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    # A question about something this product documents must never leave here
+    # with nothing planned. "What string type is created on postgres" named an
+    # engine, so the workspace-subject guard kept the documentation branch from
+    # firing — and no live tool claimed it either, so an answerable question
+    # got the generic capability list. The guard is right to protect ops tools;
+    # it is only wrong when nothing else took the turn.
+    if not planned and _INTERROGATIVE.search(message or "") and names_product_subject(message):
+        planned = [("explain_product", {"query": message[:240]})]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

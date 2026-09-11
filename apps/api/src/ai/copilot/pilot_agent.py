@@ -587,8 +587,11 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         ))
         options.append((
             "",
-            f'Try: "how many rows in airports{on_conn}", '
-            f'"schema of airports{on_conn}", '
+            # The examples used to name a fixture table, so the suggestion was
+            # a command the operator's workspace could not run. Listing a
+            # connector's tables is the one live read that always works.
+            f'Try: "list tables{on_conn}", '
+            f'"how many rows in <your table>{on_conn}", '
             '"show my jobs", or "what can you do?".',
         ))
 
@@ -2962,9 +2965,12 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
 
             ex = example_connector_name()
             if ex and ex != "your connector":
-                prompts.append(f"How many rows in airports on {ex}?")
+                # Naming a table here meant suggesting a command against an
+                # object the workspace may not hold. Listing a connector's
+                # tables works on every connector.
+                prompts.append(f"List tables on {ex}")
             else:
-                prompts.append("How many rows in airports on your connector?")
+                prompts.append("Show my connectors")
         except Exception:
             prompts.append("Show my connectors")
         prompts.append("What can you do?")
@@ -3000,8 +3006,8 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             ex = example_connector_name()
             if ex and ex != "your connector":
                 prompts.extend([
-                    f"How many rows in airports on {ex}?",
-                    f"Count of orders by status on {ex}",
+                    f"List tables on {ex}",
+                    f"Give me a workspace briefing",
                 ])
             else:
                 prompts.extend([

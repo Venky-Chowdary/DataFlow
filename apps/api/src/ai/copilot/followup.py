@@ -437,18 +437,38 @@ def _extract_edit_metric(message: str) -> tuple[str, str]:
     return "", ""
 
 
+# Where a named slot value ends: the next edit clause, punctuation, or the end
+# of the turn. A table switch states the table *last* ("same for products",
+# "what about the invoices table"), so anything else trailing the candidate
+# means the candidate was a modifier and not the subject: the noun in "what
+# about generated columns" was being dropped and its adjective introspected as
+# a table. ``_extract_edit_group_by`` deliberately keeps a shorter tail — ``by``
+# and ``per`` introduce *its* value rather than ending one.
+_VALUE_TAIL = (
+    r"(?=\s+(?:instead|rather|now|too|also|please|and|but|"
+    r"by|per|group(?:ed)?\s+by|from|in|on|for|with|"
+    r"only|just|where|filter|top|bottom|limit)\b"
+    r"|[.,;?!]|$)"
+)
+
+
 def _extract_edit_table(message: str) -> str:
     """"same for products", "now do orders", "what about the invoices table"."""
     m = re.search(
         r"\b(?:same\s+(?:for|on|with)|now\s+(?:do|try|for)|what\s+about|how\s+about|switch\s+to)\s+"
         r"(?:the\s+)?([A-Za-z_][A-Za-z0-9_.]{1,48})"
-        r"(?:\s+(?:table|collection))?\b",
+        r"(?:\s+(?:table|collection))?" + _VALUE_TAIL,
         message,
         re.I,
     )
     if not m:
         return ""
     table = _clean(m.group(1))
+    # "what about it" / "same for that" point at the remembered table; they do
+    # not name a new one. Left to the parser they became a lookup of a table
+    # literally called ``it``.
+    if _COREFERENCE_RE.fullmatch(table):
+        return ""
     banned = _PLATFORM_NOUNS | set(_TEMPORAL_GRAINS) | {
         "average", "avg", "mean", "sum", "total", "count", "min", "max",
         "minimum", "maximum", "distinct", "unique", "amount", "price",
