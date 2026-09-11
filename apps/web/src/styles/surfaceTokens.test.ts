@@ -1123,4 +1123,33 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.doesNotMatch(ui, /\.df2-filter-bar \{[\s\S]{0,360}background: #f1f5f9/);
     assert.match(ui, /\.df2-app \.df2-filter-bar \{[\s\S]{0,80}--df-seg-track/);
   });
+
+  it("Query leftover pastel type chips follow tokens", () => {
+    const query = sheet("query-playground.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(query, /\.df2-qw-th-type\[data-tone="number"\] \{[\s\S]{0,80}--df-info-bg/);
+    assert.doesNotMatch(query, /\.df2-qw-th-type\[data-tone="number"\] \{[\s\S]{0,80}#eff6ff/);
+    assert.match(query, /\.df2-qw-th-type\[data-tone="time"\] \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(query, /\.df2-qw-th-type\[data-tone="time"\] \{[\s\S]{0,80}#f5f3ff/);
+    assert.match(query, /\.df2-qw-th-type\[data-tone="bool"\] \{[\s\S]{0,80}--df-warning-bg/);
+    assert.doesNotMatch(query, /\.df2-qw-th-type\[data-tone="bool"\] \{[\s\S]{0,80}#fefce8/);
+    assert.match(query, /\.df2-qw-th-type\[data-tone="struct"\] \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(query, /\.df2-qw-th-type\[data-tone="struct"\] \{[\s\S]{0,80}#fdf4ff/);
+    assert.match(
+      query,
+      /\.df2-page-query \.df2-query-results tbody tr:hover td \{[\s\S]{0,160}--df-surface/,
+    );
+    assert.doesNotMatch(
+      query,
+      /\.df2-page-query \.df2-query-results tbody tr:hover td \{[\s\S]{0,160}#fff/,
+    );
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-qw-col-type\[data-tone="number"\],/);
+    assert.match(ui, /\.df2-app \.df2-qw-col-type\[data-tone="bool"\],/);
+    assert.match(ui, /\.df2-app \.df2-page-query \.df2-query-results tbody tr:hover td \{[\s\S]{0,160}--df-surface/);
+  });
 });
