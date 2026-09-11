@@ -1852,4 +1852,31 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-jobs-now-bar \{[\s\S]{0,80}--df-surface-muted/);
     assert.match(ui, /\.df2-app \.df2-jobs-now-bar i \{[\s\S]{0,80}--df-brand/);
   });
+
+  it("Cadence and pipeline-card leftover mint follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const polish = sheet("shell-polish.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(polish, /\.df2-cadence-tile \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-cadence-tile \{[\s\S]{0,280}#f8fafc/);
+    assert.doesNotMatch(polish, /\.df2-cadence-tile \{[\s\S]{0,280}#fff 0%/);
+    assert.match(polish, /\.df2-cadence-tile\.active \{[\s\S]{0,120}--df-brand-muted/);
+    assert.doesNotMatch(polish, /\.df2-cadence-tile\.active \{[\s\S]{0,120}#f0fdfa/);
+    assert.match(polish, /\.df2-pipeline-card \{[\s\S]{0,280}--df-surface/);
+    assert.doesNotMatch(polish, /\.df2-pipeline-card \{[\s\S]{0,280}#fff 0%/);
+    assert.match(polish, /\.df2-pipeline-card\.active \{[\s\S]{0,80}--df-brand-muted/);
+    assert.doesNotMatch(polish, /\.df2-pipeline-card\.active \{[\s\S]{0,80}#f0fdfa/);
+    assert.match(polish, /\.df2-pipeline-card\.paused \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(polish, /\.df2-pipeline-card\.paused \{[\s\S]{0,80}#fafafa/);
+    assert.match(polish, /\.df2-pipeline-card-arrow \{[\s\S]{0,200}--df-brand-muted/);
+    assert.doesNotMatch(polish, /\.df2-pipeline-card-arrow \{[\s\S]{0,200}#f0fdfa/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-cadence-tile \{\n  background: var\(--df-surface\)/);
+    assert.match(ui, /\.df2-app \.df2-cadence-tile\.active \{\n  background: var\(--df-brand-muted\)/);
+    assert.match(ui, /\.df2-app \.df2-pipeline-card\.active \{\n  background: var\(--df-brand-muted\)/);
+    assert.match(ui, /\.df2-app \.df2-pipeline-card-arrow \{\n  background: var\(--df-brand-muted\)/);
+  });
 });

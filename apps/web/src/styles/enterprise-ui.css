@@ -8717,6 +8717,37 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   box-shadow: none !important;
 }
 
+.df2-app .df2-cadence-tile {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-cadence-tile:hover {
+  border-color: var(--df-brand);
+}
+
+.df2-app .df2-cadence-tile.active {
+  background: var(--df-brand-muted);
+  border-color: var(--df-brand);
+}
+
+.df2-app .df2-pipeline-card {
+  background: var(--df-surface);
+}
+
+.df2-app .df2-pipeline-card.active {
+  background: var(--df-brand-muted);
+  border-color: var(--df-brand);
+}
+
+.df2-app .df2-pipeline-card.paused {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-pipeline-card-arrow {
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
+}
+
 .df2-app .df2-card-elevated:hover,
 .df2-app .df2-transfer-panel.df2-card-elevated:hover {
   transform: none;
