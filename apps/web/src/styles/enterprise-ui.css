@@ -1626,15 +1626,15 @@
   font-weight: 600;
   padding: 4px 10px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #334155;
-  border: 1px solid #e2e8f0;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+  border: 1px solid var(--df-border);
 }
 
 .df2-theater-cdc-chip.is-ok {
-  background: #ecfdf5;
-  border-color: #a7f3d0;
-  color: #065f46;
+  background: var(--df-success-bg);
+  border-color: var(--df-success-border, var(--df-success));
+  color: var(--df-success);
 }
 
 .df2-result-cdc-strip {
@@ -4978,13 +4978,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-theater-v3-endpoint span {
   display: block;
   font-size: 10px;
-  color: #64748b;
+  color: var(--df-text-tertiary);
 }
 
 .df2-theater-v3-endpoint strong {
   display: block;
   font-size: 12.5px;
-  color: #0f172a;
+  color: var(--df-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4992,7 +4992,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-arrow {
-  color: #0f766e;
+  color: var(--df-brand-strong);
   flex-shrink: 0;
 }
 
@@ -5156,7 +5156,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-right: 8px;
   font-size: 11.5px;
   font-weight: 600;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-theater-v3-bar {
@@ -5195,7 +5195,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-theater-v3-metric strong {
   display: block;
   font-size: 13px !important;
-  color: #0f172a;
+  color: var(--df-text-primary);
   line-height: 1.2;
 }
 
@@ -5222,11 +5222,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 10px 16px;
   margin: 0 0 10px;
   padding: 8px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 12px;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-theater-pop-strip span {
@@ -5320,7 +5320,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-theater-lineage ol {
@@ -5341,7 +5341,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-lineage code {
   font-size: 11px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-theater-v3-bar-legend .is-warn {
@@ -5366,15 +5366,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px 12px;
   align-items: baseline;
   padding: 6px 8px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--df-surface-muted);
   font-size: 12px;
-  color: #334155;
+  color: var(--df-text-secondary);
 }
 
 .df2-theater-v3-stream strong {
-  color: #0f172a;
+  color: var(--df-text-primary);
   min-width: 7rem;
 }
 
@@ -5391,25 +5391,25 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   height: 22px;
   padding: 0 8px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #64748b;
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
   font-size: 10.5px;
   font-weight: 600;
 }
 
 .df2-theater-v3-phase.done {
-  background: #dcfce7;
-  color: #15803d;
+  background: var(--df-success-bg);
+  color: var(--df-success);
 }
 
 .df2-theater-v3-phase.active {
-  background: #ccfbf1;
-  color: #0f766e;
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
 }
 
 .df2-theater-v3-phase.failed {
-  background: #fee2e2;
-  color: #b91c1c;
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
 
 .df2-theater-v3-phase-dot {
@@ -5512,7 +5512,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-v3-next-copy strong {
   font-size: 13px;
-  color: #0f172a;
+  color: var(--df-text-primary);
 }
 
 .df2-theater-v3-next-copy span {
@@ -13706,4 +13706,48 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   background: var(--df-brand-muted);
   color: var(--df-brand-strong);
   border-color: var(--df-brand);
+}
+
+/* Theater leftover navy / paper / mint on endpoint, metric, lineage, stream. */
+.df2-app .df2-theater-v3-endpoint strong,
+.df2-app .df2-theater-v3-metric strong,
+.df2-app .df2-theater-lineage summary,
+.df2-app .df2-theater-lineage code,
+.df2-app .df2-theater-v3-stream strong,
+.df2-app .df2-theater-v3-next-copy strong {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-theater-v3-count,
+.df2-app .df2-theater-v3-chunk,
+.df2-app .df2-theater-pop-strip,
+.df2-app .df2-theater-v3-stream {
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-theater-v3-arrow {
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-theater-cdc-chip,
+.df2-app .df2-theater-pop-strip,
+.df2-app .df2-theater-v3-stream,
+.df2-app .df2-theater-v3-phase {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-theater-cdc-chip.is-ok,
+.df2-app .df2-theater-v3-phase.done {
+  background: var(--df-success-bg);
+  color: var(--df-success);
+}
+
+.df2-app .df2-theater-v3-phase.active {
+  background: var(--df-brand-muted);
+  color: var(--df-brand-strong);
+}
+
+.df2-app .df2-theater-v3-phase.failed {
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
 }
