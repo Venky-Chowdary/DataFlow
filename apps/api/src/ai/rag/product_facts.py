@@ -370,6 +370,287 @@ def _connector_catalog_section() -> GeneratedSection | None:
     )
 
 
+#: Logical types worth naming in an answer about type fidelity, in the order an
+#: operator meets them. The destination carrier for each is never written here —
+#: it is read out of the table the DDL builder renders from.
+_DOCUMENTED_LOGICAL_TYPES: tuple[str, ...] = (
+    "boolean",
+    "integer",
+    "decimal",
+    "float",
+    "date",
+    "datetime",
+    "time",
+    "uuid",
+    "json",
+    "array",
+    "binary",
+)
+
+#: Engines to show the carrier for. Naming a handful keeps the passage readable;
+#: the rule it states is the same for every engine in ``DDL_TYPES``.
+_CARRIER_ENGINES: tuple[str, ...] = (
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "snowflake",
+    "bigquery",
+    "mongodb",
+)
+
+
+def _type_carrier_section() -> GeneratedSection | None:
+    """Which destination type each logical type is created as.
+
+    Read out of ``DDL_TYPES``, the same table the create-new DDL builder renders
+    from, so "how do you handle booleans across databases" is answered with the
+    column the product would actually create.
+    """
+    try:
+        from services.type_system import (
+            DDL_TYPES,
+            DEFAULT_DDL,
+            SIGNED_BIGINT_SAFE_PRECISION,
+            _DECIMAL_CAPS,
+        )
+    except Exception:
+        return None
+
+    lines = [
+        "Every column travels as a logical type and is created on the "
+        "destination as that engine's carrier for it, so the same source column "
+        "lands as the closest native type rather than as text everywhere.",
+    ]
+    for logical in _DOCUMENTED_LOGICAL_TYPES:
+        carriers = []
+        for engine in _CARRIER_ENGINES:
+            ddl = (DDL_TYPES.get(engine) or {}).get(logical) or DEFAULT_DDL.get(engine)
+            if ddl:
+                carriers.append(f"{engine} {ddl}")
+        if carriers:
+            article = "An" if logical[0] in "aeiou" else "A"
+            lines.append(
+                f"{article} {logical} column is created as {', '.join(carriers)}."
+            )
+
+    caps = ", ".join(
+        f"{engine} {precision} digits with scale up to {scale}"
+        for engine, (precision, scale) in sorted(_DECIMAL_CAPS.items())
+        if engine in _CARRIER_ENGINES
+    )
+    if caps:
+        lines.append(
+            f"Decimal capacity is bounded by the destination engine: {caps}. A "
+            "value that does not fit the destination's precision is a preflight "
+            "finding, not a silent round."
+        )
+    lines.append(
+        "MySQL BIGINT UNSIGNED and UINT64 travel as decimal rather than as "
+        "integer, because the top of the unsigned range does not fit a signed "
+        f"64-bit column; zero-scale numerics up to {SIGNED_BIGINT_SAFE_PRECISION} "
+        "digits are the ones that still fit a signed BIGINT."
+    )
+    lines.append(
+        "Arrays are native only on the PostgreSQL family; elsewhere an array is "
+        "carried in that engine's document type (JSON, VARIANT) and the element "
+        "type is declared so the shape is not lost."
+    )
+    lines.append(
+        "Floats are carried as the destination's widest binary float rather than "
+        "re-rounded, and a decimal is never quietly turned into a float: losing "
+        "exactness is reported as a lossy coercion instead."
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="Destination type for each logical type",
+        text="\n".join(lines),
+        source_module="services/type_system.py",
+        category="transfer",
+    )
+
+
+def _timezone_section() -> GeneratedSection | None:
+    """What timezone fidelity means here. Sourced from services/timezone_policy.py."""
+    text = "\n".join(
+        [
+            "Timestamp and timezone fidelity is two separate guarantees, and "
+            "conflating them is how a pipeline shifts instants without saying so. "
+            "The instant is the point on the UTC timeline; the offset label is the "
+            "originating wall-clock offset such as +05:30.",
+            "Only DATETIMEOFFSET and TIMESTAMP WITH TIME ZONE carriers store the "
+            "offset label. PostgreSQL TIMESTAMPTZ does not store it — it "
+            "normalizes to UTC — so a PostgreSQL source never had a label to lose.",
+            "A naive wall-clock timestamp is never given a UTC meaning it did not "
+            "have: writing one into an instant column is the utc_invented_from_naive "
+            "policy, which needs an explicit operator contract rather than a silent "
+            "conversion. A timestamp without a time zone stays a wall clock unless "
+            "you ask for that contract.",
+            "The same timezone policy is resolved at Validate and at Execute, so a "
+            "route cannot pass preflight under one policy and write under another.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="Timestamps and time zones",
+        text=text,
+        source_module="services/timezone_policy.py",
+        category="transfer",
+    )
+
+
+def _timestamp_range_section() -> GeneratedSection | None:
+    """Which engines' TIMESTAMP is an instant, and how far it reaches.
+
+    Kept apart from the concept section on purpose: one section per question an
+    operator asks, so a passage about the 2038 bound cannot be retrieved as the
+    answer to "how do you handle timezones".
+    """
+    try:
+        from services.timezone_policy import (
+            INSTANT_TIMESTAMP_DIALECTS,
+            MYSQL_TIMESTAMP_RANGE_TEXT,
+        )
+    except Exception:
+        return None
+
+    instant = ", ".join(sorted(INSTANT_TIMESTAMP_DIALECTS))
+    text = "\n".join(
+        [
+            f"A bare TIMESTAMP stores an instant on {instant} and a wall clock "
+            "everywhere else, so the same token means different things by engine "
+            "and the route's policy is resolved rather than assumed.",
+            f"A MySQL-family TIMESTAMP column can only hold {MYSQL_TIMESTAMP_RANGE_TEXT}, "
+            "so a value before 1970 or after 2038 is out of range for that carrier "
+            "and is reported before the write rather than capped.",
+            "MySQL DATETIME covers the years 1000 to 9999 but is a wall clock with "
+            "no polarity marker, so it can only carry an instant under an explicit "
+            "UTC-normalize contract that a downstream reader has to know about.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="Timestamp range and instant carriers",
+        text=text,
+        source_module="services/timezone_policy.py",
+        category="transfer",
+    )
+
+
+def _encoding_section() -> GeneratedSection:
+    """Character encoding capacity. Sourced from services/encoding_capacity.py."""
+    text = "\n".join(
+        [
+            "Character encoding is treated as physical capacity for Unicode "
+            "scalar values, not as a charset name, because the standard names "
+            "lie: MySQL utf8 is three-byte and holds only the Basic Multilingual "
+            "Plane, MySQL latin1 is really cp1252, and Oracle UTF8 is CESU-8.",
+            "Values are decoded to Unicode scalars before they are bound. CESU-8 "
+            "six-byte sequences and surrogate pairs that leaked into a string are "
+            "recomposed; an unpaired surrogate or ill-formed UTF-8 raises rather "
+            "than becoming a replacement character.",
+            "A cell the destination cannot encode is quarantined. There is no "
+            "latin-1 fallback, no replacement-character substitution, and no "
+            "companion binary column the operator did not approve — which is what "
+            "makes a checksum over the destination meaningful.",
+            "Encoding is a certified fidelity aspect: a supplementary-plane "
+            "character into utf8mb4 is carried, and the same character into a "
+            "three-byte utf8 column is reported as unsupported before the write.",
+            "Capacity is certified by reading the destination back with the "
+            "engine's own byte-length function, not by re-encoding the value in "
+            "the transfer process.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="Character encoding and Unicode",
+        text=text,
+        source_module="services/encoding_capacity.py",
+        category="transfer",
+    )
+
+
+def _schema_aspect_section() -> GeneratedSection | None:
+    """What a create-new reproduces and what it certifies as unsupported."""
+    text = "\n".join(
+        [
+            "When the destination table is created for you, each part of the "
+            "source schema is either carried or explicitly reported as "
+            "unsupported or skipped. Silence about an aspect is treated as a bug, "
+            "so the certificate lists every one of them either way.",
+            "NOT NULL is one of those carried aspects, so a required column stays "
+            "required on the destination and a row whose value will not convert is "
+            "quarantined instead of landing as a NULL. Where a null is written "
+            "under an approved coercion the row is counted as a coerced-null row, "
+            "which is why the ledger does not treat it as a hold-out.",
+            "Primary keys, unique constraints, CHECK predicates, simple defaults, "
+            "identity columns — IDENTITY, SERIAL and AUTO_INCREMENT generators — "
+            "collation and secondary indexes are carried on a create-new. "
+            "Foreign keys on a single-table create, views, triggers, generated "
+            "expressions, partial and expression indexes and comments are "
+            "certified as unsupported rather than quietly omitted.",
+            "Column order and name case are aspects too: a name that collides "
+            "after case folding or length truncation is resolved with a "
+            "deterministic suffix that the certificate records.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="What a create-new carries",
+        text=text,
+        source_module="services/schema_fidelity.py",
+        category="transfer",
+    )
+
+
+def _certificate_aspect_section() -> GeneratedSection | None:
+    """The roll of aspects every certificate answers for, read from the list.
+
+    Kept apart from the prose about *what* is carried. Held together, the
+    26-name enumeration was the only sentence in the passage matching any
+    single aspect, and its term mass both crowded out the sentence that
+    actually answered and lengthened the passage enough to cost it the BM25
+    ranking it had won — "do you preserve column order" fell back to a CSV
+    tutorial that says "in order".
+    """
+    try:
+        from services.schema_fidelity import REQUIRED_ASPECTS
+    except Exception:
+        return None
+
+    # Both spellings of every aspect. A reader needs the words; retrieval needs
+    # the identifier, because a question's strongest signal is the exact phrase
+    # it names ("column order" shingles to ``column_order``) and that can only
+    # match a passage that spells the aspect the way the certificate does.
+    aspects = ", ".join(
+        a.replace("_", " ") if "_" not in a else f"{a.replace('_', ' ')} ({a})"
+        for a in REQUIRED_ASPECTS
+    )
+    # The lead-in states the rule in the same sentence as the roll, because an
+    # extractive answer can only use a sentence that shares a word with the
+    # question: for an aspect the prose does not discuss by name, this is the
+    # one sentence that both matches it and says what becomes of it.
+    text = "\n".join(
+        [
+            "Every migration certificate accounts for each of these aspects, "
+            "recording it as carried, unsupported, skipped or unknown: "
+            f"{aspects}.",
+            "Carried means the aspect was reproduced on the destination. "
+            "Unsupported means the destination cannot express it and the "
+            "certificate says so instead of omitting it. Skipped means the "
+            "source was read and does not have it. Unknown means the source "
+            "catalog was never read for that aspect, which is never presented "
+            "as proof that the source does not have it.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="Every aspect a migration certificate answers for",
+        text=text,
+        source_module="services/schema_fidelity.py",
+        category="transfer",
+    )
+
+
 def _quarantine_section() -> GeneratedSection:
     """Where refused rows go. Sourced from the quarantine / DLQ write path."""
     text = "\n".join(
@@ -463,6 +744,12 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _quarantine_section,
         _job_phase_section,
         _gitops_section,
+        _type_carrier_section,
+        _timezone_section,
+        _timestamp_range_section,
+        _encoding_section,
+        _schema_aspect_section,
+        _certificate_aspect_section,
     )
     out: list[GeneratedSection] = []
     for build in builders:

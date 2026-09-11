@@ -215,6 +215,10 @@ MAX_SECTION_CHARS = 1200
 # Two steps is the minimum that makes splitting meaningful.
 MIN_STEPS_TO_SPLIT = 2
 
+# A section with fewer lines than this is one paragraph, and cutting a paragraph
+# in the middle would leave a passage that does not read as a statement.
+MIN_LINES_TO_SPLIT = 4
+
 _STEP_TRAILER = ("Where:", "Tip:", "Note:")
 
 
@@ -253,11 +257,36 @@ def _split_procedure(text: str) -> list[tuple[str, str]]:
     return out if len(out) > MIN_STEPS_TO_SPLIT else []
 
 
+def _split_paragraphs(text: str) -> list[tuple[str, str]]:
+    """A long reference section as passages of whole lines under the char limit.
+
+    The splitter only knew how to divide a *procedure*, by its ``Where:``
+    breadcrumbs. A reference grid — one fact per line, which is how the
+    generated sections are written — stayed one long passage and paid the same
+    length penalty: "do you preserve column order" ranked a CSV tutorial that
+    says "in order" four times above the section that states the rule. Lines are
+    the corpus's own unit here, so a group of them is a real boundary rather
+    than a guess, and no line is ever cut in half.
+    """
+    lines = [line.rstrip() for line in (text or "").splitlines() if line.strip()]
+    if len(lines) < MIN_LINES_TO_SPLIT:
+        return []
+    groups: list[list[str]] = [[]]
+    width = 0
+    for line in lines:
+        if groups[-1] and width + len(line) > MAX_SECTION_CHARS:
+            groups.append([])
+            width = 0
+        groups[-1].append(line)
+        width += len(line)
+    return [("", "\n".join(group)) for group in groups if group]
+
+
 def _as_step_chunks(chunk: ProductDocChunk) -> list[ProductDocChunk]:
     """``chunk`` split into its steps when it is long enough to need it."""
     if len(chunk.text) <= MAX_SECTION_CHARS:
         return [chunk]
-    steps = _split_procedure(chunk.text)
+    steps = _split_procedure(chunk.text) or _split_paragraphs(chunk.text)
     if not steps:
         return [chunk]
     out: list[ProductDocChunk] = []
@@ -706,6 +735,7 @@ def retrieve_product_answer(
             f"{hit.chunk.doc_title} {hit.chunk.section_title} {hit.chunk.text}"
             for hit in hits
         ],
+        in_vocabulary=lambda term: _index()[0].idf(term) > 0,
     )
     if not verdict.answerable:
         hits = []
@@ -814,6 +844,8 @@ def compose_product_answer(answer: ProductAnswer) -> str:
     composed = compose_answer(
         answer.analysis,
         sections,
+        scores=[hit.score for hit in answer.hits],
+        idf=_index()[0].idf,
         partial_caveat=answer.caveat,
     )
     if composed:

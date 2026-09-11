@@ -45,6 +45,8 @@ GENERIC_QUESTION_WORDS = frozenset(
     normalize(w)
     for w in """
     happen happens occur occurs work works working worked
+    handle handles handled handling deal deals dealt
+    treat treats treated support supports supported
     get gets getting got see seeing seen look looking
     want wants need needs needed like likes
     know knows knowing find finds finding
@@ -233,6 +235,19 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "lossy": ("lossy", "type", "narrow", "risk", "contract"),
     "narrowing": ("lossy", "narrow", "type", "risk"),
     "datatype": ("type", "schema", "column"),
+    # An operator writes "timezone" as one word; the documentation's heading
+    # words are "time" and "zone", so the single token matched no subject and a
+    # question the timezone policy answers in detail was refused outright.
+    "timezone": ("timestamp", "zone", "instant", "offset", "temporal", "utc"),
+    "tz": ("timestamp", "zone", "instant", "offset", "utc"),
+    "utc": ("timestamp", "zone", "instant", "offset", "utc"),
+    "timestamp": ("timestamp", "zone", "instant", "datetime", "temporal"),
+    "null": ("null", "nullable", "empty", "missing", "coerced"),
+    "nullable": ("null", "nullable", "empty", "missing"),
+    "encoding": ("encoding", "charset", "unicode", "utf8", "capacity"),
+    "unicode": ("encoding", "charset", "unicode", "utf8"),
+    "charset": ("encoding", "charset", "unicode", "utf8"),
+    "collation": ("collation", "charset", "encoding", "sort"),
     "schema": ("schema", "column", "type", "drift"),
     "drift": ("drift", "schema", "policy", "detection"),
     # Gates / validation

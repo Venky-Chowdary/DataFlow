@@ -39,7 +39,7 @@ covered — not a blanket refusal.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -131,6 +131,27 @@ def subject_aliases() -> frozenset[str]:
         extra.update(normalize(r) for r in role_names())
     except Exception:
         extra.update({"viewer", "editor", "operator", "admin"})
+    try:
+        # The logical type space is an enum the engine dispatches on, so a
+        # question about booleans, arrays, decimals or binary names a subject
+        # the product documents by doing it. Heading words alone missed all of
+        # them: the generated section is titled "Destination type for each
+        # logical type", so "how do you handle booleans" was read as off-subject.
+        from services.type_system import CANONICAL_TYPES
+
+        for logical in set(CANONICAL_TYPES.values()):
+            extra.update(content_terms(logical.replace("_", " ")))
+    except Exception:
+        pass
+    try:
+        # The schema aspects every migration certificate has to account for —
+        # not null, default, collation, encoding, offset label, partitioning.
+        from services.schema_fidelity import REQUIRED_ASPECTS
+
+        for aspect in REQUIRED_ASPECTS:
+            extra.update(content_terms(aspect.replace("_", " ")))
+    except Exception:
+        pass
     return frozenset(extra - GENERIC_QUESTION_WORDS - _NON_SUBJECT_HEADING_WORDS)
 
 
@@ -188,11 +209,16 @@ def assess_evidence(
     *,
     coverage_floor: float = COVERAGE_FLOOR,
     partial_floor: float = PARTIAL_FLOOR,
+    in_vocabulary: Callable[[str], bool] | None = None,
 ) -> EvidenceVerdict:
     """Decide whether ``passage_texts`` can answer ``analysis``.
 
     ``passage_texts`` is the fused top-k, judged as one body of evidence — an
     answer composed from three sections is a normal answer, not a stretch.
+
+    ``in_vocabulary`` answers whether the *whole corpus* has ever used a term,
+    which is what distinguishes a question carrying ordinary English the
+    documentation also uses from one carrying words it has never seen.
     """
     question_terms = tuple(analysis.terms)
     if not question_terms:
@@ -242,7 +268,32 @@ def assess_evidence(
             ),
         )
 
-    if coverage < partial_floor:
+    # Words the documentation has never used anywhere, not merely absent from
+    # the passages that ranked. They are the difference between a question
+    # phrased in this product's English and a question about something else:
+    # "how do you handle very large decimals" leaves "large" uncovered and the
+    # corpus does say "large", while "unmapped nonsense query zzqq" leaves
+    # words the corpus has never seen and must stay refused.
+    foreign = (
+        tuple(t for t in uncovered if not in_vocabulary(t))
+        if in_vocabulary is not None
+        else ()
+    )
+
+    # Every subject the question names is covered, nothing left over names
+    # anything else this product documents, and nothing left over is foreign to
+    # the corpus. The coverage ratio is then measuring ordinary English — "how
+    # do you *handle* *very* *large* decimals" is one part subject and three
+    # parts framing — and refusing on it declined a question the corpus answers
+    # outright. Anchor coverage is the stronger signal, so it wins; the floor
+    # still applies whenever an anchor is missing or the remainder points
+    # somewhere the documentation does not go.
+    all_anchors_covered = (
+        len(covered_anchors) == len(anchors)
+        and not uncovered_subjects
+        and not foreign
+    )
+    if coverage < partial_floor and not all_anchors_covered:
         return EvidenceVerdict(
             outcome="refuse",
             coverage=coverage,
