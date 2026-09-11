@@ -13839,6 +13839,24 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .df2-btn-primary {
   color: var(--df-danger);
 }
 
+/* Validate leftover paper / slate on vd-count chips. Do not flatten ok/block. */
+.df2-app .df2-vd-count {
+  background: var(--df-surface-muted);
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-vd-count.ok {
+  background: var(--df-success-bg);
+}
+
+.df2-app .df2-vd-count.block {
+  background: var(--df-danger-bg);
+}
+
+.df2-app .df2-vd-count.skip {
+  background: var(--df-surface-muted);
+}
+
 /* Job-timeline leftover paper / mint / status pastels on dots. */
 .df2-app .df2-job-timeline-dot {
   background: var(--df-surface-muted);

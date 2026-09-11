@@ -1458,4 +1458,28 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-job-timeline-item\.is-active \.df2-job-timeline-dot \{[\s\S]{0,80}--df-brand-muted/);
     assert.match(ui, /\.df2-app \.df2-job-timeline-item\.is-warning strong \{[\s\S]{0,40}--df-warning/);
   });
+
+  it("Validate leftover paper vd-count chips follow tokens", () => {
+    const studio = sheet("transfer-studio.css");
+    const ui = sheet("enterprise-ui.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-vd-count \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-count \{[\s\S]{0,200}background: #f1f5f9/);
+    assert.match(studio, /\.df2-vd-count \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-vd-count \{[\s\S]{0,200}color: #475569/);
+    assert.match(studio, /\.df2-vd-count\.ok \{[\s\S]{0,80}--df-success-bg/);
+    assert.doesNotMatch(studio, /\.df2-vd-count\.ok \{[\s\S]{0,80}#f0fdf4/);
+    assert.match(studio, /\.df2-vd-count\.block \{[\s\S]{0,80}--df-danger-bg/);
+    assert.doesNotMatch(studio, /\.df2-vd-count\.block \{[\s\S]{0,80}#fef2f2/);
+    assert.match(studio, /\.df2-vd-count\.skip \{[\s\S]{0,80}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-vd-count\.skip \{[\s\S]{0,80}#f8fafc/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-vd-count \{[\s\S]{0,80}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-vd-count\.ok \{[\s\S]{0,40}--df-success-bg/);
+    assert.match(ui, /\.df2-app \.df2-vd-count\.block \{[\s\S]{0,40}--df-danger-bg/);
+    assert.match(ui, /\.df2-app \.df2-vd-count\.skip \{[\s\S]{0,40}--df-surface-muted/);
+  });
 });
