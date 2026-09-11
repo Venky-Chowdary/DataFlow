@@ -13983,6 +13983,26 @@ html.df2-theme-dark:has(.df2-app) .df2-modal .dt-modal-footer {
   background: var(--df-surface);
 }
 
+.df2-app .df2-bad-data-sample {
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-bad-data-options article,
+.df2-app .df2-map-identity-chip {
+  background: var(--df-surface-muted);
+}
+
+.df2-app .df2-bad-data-options h4,
+.df2-app .df2-map-identity-chip-meta strong,
+.df2-app .df2-map-blocker-bar-head {
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-map-identity-chip-meta {
+  color: var(--df-text-secondary);
+}
+
 /* Result leftover navy / paper / mint on title, metric, quarantine. */
 .df2-app .df2-result-title,
 .df2-app .df2-result-proof-head,

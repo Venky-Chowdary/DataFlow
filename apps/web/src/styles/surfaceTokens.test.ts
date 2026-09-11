@@ -2058,4 +2058,33 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(ui, /\.df2-app \.df2-theater-v3-sla-card\.is-warn strong \{[\s\S]{0,40}--df-warning/);
     assert.match(ui, /\.df2-app \.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
   });
+
+  it("Bad-data and map-identity leftover navy and paper follow tokens", () => {
+    const ui = sheet("enterprise-ui.css");
+    const studio = sheet("transfer-studio.css");
+    const premium = sheet("premium-theme.css");
+
+    assert.match(studio, /\.df2-bad-data-sample \{[\s\S]{0,160}--df-surface/);
+    assert.doesNotMatch(studio, /\.df2-bad-data-sample \{[\s\S]{0,160}background: #0f172a/);
+    assert.match(studio, /\.df2-bad-data-options article \{[\s\S]{0,200}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-bad-data-options article \{[\s\S]{0,200}background: #f8fafc/);
+    assert.match(studio, /\.df2-bad-data-options h4 \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-bad-data-options h4 \{[\s\S]{0,200}color: #0f172a/);
+    assert.match(studio, /\.df2-map-identity-chip \{[\s\S]{0,280}--df-surface-muted/);
+    assert.doesNotMatch(studio, /\.df2-map-identity-chip \{[\s\S]{0,280}background: #f8fafc/);
+    assert.match(studio, /\.df2-map-identity-chip-meta \{[\s\S]{0,200}--df-text-secondary/);
+    assert.doesNotMatch(studio, /\.df2-map-identity-chip-meta \{[\s\S]{0,200}color: #334155/);
+    assert.match(studio, /\.df2-map-identity-chip-meta strong \{[\s\S]{0,80}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-map-identity-chip-meta strong \{[\s\S]{0,80}color: #0f172a/);
+    assert.match(studio, /\.df2-map-blocker-bar-head \{[\s\S]{0,200}--df-text-primary/);
+    assert.doesNotMatch(studio, /\.df2-map-blocker-bar-head \{[\s\S]{0,200}color: #0f172a/);
+
+    assert.match(premium, /\.df2-login-card \{[\s\S]{0,160}background: #fff;/);
+
+    assert.match(ui, /\.df2-app \.df2-bad-data-sample \{[\s\S]{0,80}--df-surface/);
+    assert.match(ui, /\.df2-app \.df2-bad-data-options article,/);
+    assert.match(ui, /\.df2-app \.df2-map-identity-chip \{[\s\S]{0,40}--df-surface-muted/);
+    assert.match(ui, /\.df2-app \.df2-map-blocker-bar-head \{[\s\S]{0,40}--df-text-primary/);
+    assert.match(ui, /\.df2-app \.df2-theater-v3-next-copy strong \{[\s\S]{0,40}--df-text-primary/);
+  });
 });
