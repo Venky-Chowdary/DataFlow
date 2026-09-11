@@ -4671,6 +4671,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:tables|tbls|collections|objects|schemas)\s+(?:from|on|in|for|of)\s+(.+)$",
         lower,
     ) or re.search(
+        # The copula may sit between the object and its scope: "what tables are
+        # on Audit SQLite" is "tables on Audit SQLite" asked as a question.
+        # Without this the alternatives below had to enumerate every way of
+        # saying it — "do we have", "exist", "are there", "are available" — and
+        # plain "are" is the one they missed, so the turn answered with how a
+        # datetime column is created on each engine.
+        r"(?:tables|tbls|collections|objects|schemas)\s+"
+        r"(?:are|is|live|lives|exist|exists)\s+"
+        r"(?:from|on|in|for|of)\s+(.+)$",
+        lower,
+    ) or re.search(
         r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
         r"(?:pull|get|fetch|grab|show|list)\s+(?:the\s+)?"
         r"(?:table\s+list|list\s+of\s+tables)\s+(?:from|on|in|for)\s+(.+)$",

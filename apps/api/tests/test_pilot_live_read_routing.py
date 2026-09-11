@@ -214,3 +214,27 @@ def test_a_grouping_verb_with_an_object_still_parses(question, group_by):
     assert parsed.metric == "count", parsed
     assert parsed.group_by == group_by, parsed
 
+
+
+# --- the copula may sit between the object and its scope ---------------------
+
+COPULA_READS = [
+    "what tables are on Demo Orders",
+    "which collections are in Demo Orders",
+    "what objects exist on Demo Orders",
+    "which tables live in Demo Orders",
+]
+
+
+@pytest.mark.parametrize("question", COPULA_READS)
+def test_a_copula_between_the_object_and_its_scope_still_reads_the_table(question):
+    """"What tables are on X" is "tables on X" asked as a question.
+
+    Without it the alternatives had to enumerate every way of saying this —
+    "do we have", "exist", "are there", "are available" — and plain "are" is
+    the one they missed, so the turn answered with how a datetime column is
+    created on each engine.
+    """
+    assert "list_connector_objects" in _tools(question), (
+        f"{question!r} planned {_tools(question)}"
+    )
