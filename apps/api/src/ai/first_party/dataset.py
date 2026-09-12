@@ -69,6 +69,20 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you open an ssh tunnel to postgres", "does datawrap open ssh tunnels"),
     ("can I connect through a bastion host", "does datawrap open ssh tunnels"),
     ("do you support ssh tunnels", "does datawrap open ssh tunnels"),
+    ("do you embed debezium", "does datawrap embed debezium"),
+    ("are you a kafka connect replacement", "does datawrap embed debezium"),
+    ("do you support flink cdc", "does datawrap embed debezium"),
+    ("can I manage pipelines with terraform", "does datawrap have a terraform provider"),
+    ("do I have to confirm before a transfer starts", "does a transfer start without confirm"),
+    ("can I connect through aws privatelink", "does datawrap use aws privatelink"),
+    ("can airflow trigger a transfer", "does datawrap run airflow or spark jobs"),
+    ("do you run spark jobs", "does datawrap run airflow or spark jobs"),
+    ("do you support oracle goldengate", "does datawrap embed oracle goldengate"),
+    ("can I use kafka as a source", "can I use kafka as a source"),
+    ("do you have salesforce", "do you have salesforce"),
+    ("can I bring iceberg with a glue catalog", "can I use an iceberg glue catalog"),
+    ("what about snowflake sharing", "does datawrap use snowflake secure sharing"),
+    ("is there a schema registry", "does datawrap include a schema registry"),
 )
 
 

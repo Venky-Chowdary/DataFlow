@@ -552,8 +552,46 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bturn\s+off\b"
                 r"|\bdisable\s+(?:a\s+|the\s+)?(?:pipeline|schedule|sync|nightly)\b", re.I),
      ("pause", "pipeline", "schedule")),
-    (re.compile(r"\b(?:airbyte|fivetran|estuary|debezium)\b", re.I),
+    (re.compile(r"\b(?:airbyte|fivetran|estuary)\b", re.I),
      ("semantic", "mapping", "quarantine", "checksum")),
+    (re.compile(
+        r"\bdebezium\b"
+        r"|\bkafka\s+connect\b"
+        r"|\bflink\s+cdc\b",
+        re.I,
+    ),
+     ("debezium", "kafka", "bridge", "cdc")),
+    (re.compile(r"\bterraform\b|\bterraform\s+provider\b", re.I),
+     ("terraform", "yaml", "gitops", "provider")),
+    (re.compile(
+        r"\bprivate\s*link\b|\bprivatelink\b|\bvpc\s+peering\b",
+        re.I,
+    ),
+     ("privatelink", "vpc")),
+    (re.compile(r"\bairflow\b|\bspark\s+jobs?\b", re.I),
+     ("airflow", "spark", "job")),
+    (re.compile(r"\bgolden\s*gate\b", re.I),
+     ("goldengate", "oracle")),
+    (re.compile(r"\bschema\s+registry\b", re.I),
+     ("registry", "kafka", "schema")),
+    (re.compile(
+        r"\bsnowflake\s+(?:secure\s+)?shar(?:e|ing)\b"
+        r"|\bsecure\s+data\s+shar",
+        re.I,
+    ),
+     ("share", "snowflake")),
+    (re.compile(
+        r"\bconfirm\s+before\b"
+        r"|\bwithout\s+confirm\b"
+        r"|\bhave\s+to\s+confirm\b"
+        r"|\bpress\s+confirm\b",
+        re.I,
+    ),
+     ("confirm", "requires_confirm")),
+    (re.compile(r"\bkafka\s+as\s+a\s+source\b|\bsource\s+from\s+kafka\b", re.I),
+     ("kafka", "source", "driver")),
+    (re.compile(r"\bglue\s+catalog\b|\biceberg\s+catalog\b", re.I),
+     ("glue", "iceberg", "catalog")),
     (re.compile(
         r"\b(?:chat\s*gpt|chatgpt|openai|anthropic|"
         r"third[\s-]?party\s+(?:llm|model|engine)|"

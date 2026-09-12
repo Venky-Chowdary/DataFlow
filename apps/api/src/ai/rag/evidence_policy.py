@@ -156,6 +156,13 @@ def subject_aliases() -> frozenset[str]:
             "dbt",
             "ssh",
             "bastion",
+            "debezium",
+            "terraform",
+            "privatelink",
+            "airflow",
+            "goldengate",
+            "glue",
+            "confirm",
         }
     )
     try:

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from src.ai.first_party.capability_contract import (
+    capability_cards,
     dbt_card,
     dbt_cloud_shipped,
+    debezium_card,
     postgres_connect_accepts_tunnel,
     ssh_tunnel_card,
+    transfer_requires_confirm,
 )
 from src.ai.rag.product_docs import compose_product_answer, retrieve_product_answer
 from src.ai.rag.product_facts import generated_sections
@@ -25,8 +28,25 @@ def test_enforcing_modules_do_not_ship_dbt_cloud_or_ssh_tunnels() -> None:
 
 def test_generated_sections_include_the_capability_cards() -> None:
     titles = {section.section_title for section in generated_sections()}
-    assert "Does Datawrap run dbt Cloud" in titles
-    assert "Does Datawrap open SSH tunnels" in titles
+    for title in (
+        "Does Datawrap run dbt Cloud",
+        "Does Datawrap open SSH tunnels",
+        "Does Datawrap embed Debezium",
+        "Does Datawrap have a Terraform provider",
+        "Does a transfer start without Confirm",
+        "Does Datawrap use AWS PrivateLink",
+        "Does Datawrap run Airflow or Spark jobs",
+        "Can I use Kafka as a source",
+        "Do you have Salesforce",
+        "Can I use an Iceberg Glue catalog",
+    ):
+        assert title in titles, title
+    assert transfer_requires_confirm() is True
+    assert debezium_card() is not None
+    assert {c.title for c in capability_cards()} >= {
+        "Does Datawrap embed Debezium",
+        "Does a transfer start without Confirm",
+    }
 
 
 def test_dbt_and_ssh_leads_do_not_steal_cdc_or_studio() -> None:

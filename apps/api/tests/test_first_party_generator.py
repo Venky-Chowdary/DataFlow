@@ -14,6 +14,7 @@ from src.ai.first_party.claims import claims_are_grounded, invented_claims
 from src.ai.first_party.dataset import align_pairs, gold_questions
 from src.ai.first_party.dual_encoder import DualEncoder, nearest_gold
 from src.ai.first_party.engine import (
+    drops_distinctive_subjects,
     introduces_unrelated_subjects,
     narrate_answer,
     reset_model_cache,
@@ -77,6 +78,17 @@ def test_infonce_pulls_a_paraphrase_toward_its_gold() -> None:
     assert history[-1] <= history[0] + 1e-6
     assert after > before or after > 0.5
     assert after > rice
+
+
+def test_glue_catalog_is_not_rewritten_to_a_generic_iceberg_heading() -> None:
+    assert drops_distinctive_subjects(
+        "can I bring Iceberg with a Glue catalog",
+        "which iceberg catalogs can I use",
+    )
+    assert drops_distinctive_subjects(
+        "can I bring Iceberg with a Glue catalog",
+        "does iceberg upsert use merge-on-read",
+    )
 
 
 def test_rice_is_an_unrelated_subject() -> None:

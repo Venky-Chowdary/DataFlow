@@ -62,6 +62,12 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"replica", "identity", "tombston", "delet"}),
     frozenset({"dbt", "complement", "export"}),
     frozenset({"ssh", "tunnel", "bastion", "jump"}),
+    frozenset({"debezium", "kafka", "flink", "connect", "bridge"}),
+    frozenset({"terraform", "gitops", "yaml", "provider"}),
+    frozenset({"privatelink", "vpc", "peering"}),
+    frozenset({"airflow", "spark", "orchestrat"}),
+    frozenset({"glue", "iceberg", "catalog", "nessie"}),
+    frozenset({"confirm", "requires_confirm"}),
 )
 
 
@@ -146,6 +152,21 @@ def _lexical_variant(new_term: str, src_terms: set[str]) -> bool:
     return False
 
 
+def drops_distinctive_subjects(source: str, gold: str) -> bool:
+    """Whether snapping to ``gold`` would drop a subject the operator named.
+
+    ``can I bring Iceberg with a Glue catalog`` must not become a generic
+    Iceberg question — that is how merge-on-read stole the Glue catalog
+    lead after a high-cosine snap.
+    """
+    src = _subject_terms(source)
+    if not src:
+        return False
+    kept = _subject_terms(gold) | _src_closure(gold)
+    lost = (src - kept) - _GENERIC_OK_NEW
+    return bool(lost)
+
+
 def introduces_unrelated_subjects(source: str, gold: str) -> bool:
     """Whether snapping to ``gold`` would name a new product subject.
 
@@ -199,6 +220,8 @@ def semantic_rewrite(question: str) -> str | None:
     if gold.strip().lower() == text.lower():
         return None
     if introduces_unrelated_subjects(text, gold):
+        return None
+    if drops_distinctive_subjects(text, gold):
         return None
     return gold
 
