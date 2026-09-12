@@ -109,6 +109,14 @@ def _names(question: str) -> list[str]:
         "do you support Anthos",
         "do you support Azure IoT Hub",
         "do you support Merchant Center",
+        "do you support Translation API as a destination",
+        "do you support Recommendations AI",
+        "do you support Google Optimize",
+        "do you support Confidential VM",
+        "do you support Azure Stack Hub",
+        "can I write to Translation API",
+        "do you support Microsoft Copilot as a destination",
+        "do you support Cloud Deploy",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

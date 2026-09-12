@@ -3370,6 +3370,90 @@ def merchant_center_shipped() -> bool:
     return bool(_transfer_ready_drivers() & {"merchant_center", "gmc"})
 
 
+def google_voice_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gvoice", "google_voice"})
+
+
+def google_pay_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gpay", "google_pay"})
+
+
+def google_optimize_shipped() -> bool:
+    return False
+
+
+def translation_api_shipped() -> bool:
+    return False
+
+
+def recommendations_ai_shipped() -> bool:
+    return False
+
+
+def vertex_ai_workbench_shipped() -> bool:
+    return False
+
+
+def azure_health_data_shipped() -> bool:
+    return False
+
+
+def azure_video_indexer_shipped() -> bool:
+    return False
+
+
+def cloud_ids_shipped() -> bool:
+    return False
+
+
+def cloud_deploy_shipped() -> bool:
+    return False
+
+
+def cloud_source_repos_shipped() -> bool:
+    return False
+
+
+def cloud_workstations_shipped() -> bool:
+    return False
+
+
+def artifact_analysis_shipped() -> bool:
+    return False
+
+
+def confidential_vm_shipped() -> bool:
+    return False
+
+
+def azure_stack_hub_shipped() -> bool:
+    return False
+
+
+def azure_stack_hci_shipped() -> bool:
+    return False
+
+
+def dicom_shipped() -> bool:
+    return False
+
+
+def microsoft_copilot_dest_shipped() -> bool:
+    return False
+
+
+def backup_for_gke_shipped() -> bool:
+    return False
+
+
+def connected_sheets_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"connected_sheets"})
+
+
+def looker_embedded_shipped() -> bool:
+    return False
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -6120,6 +6204,300 @@ def merchant_center_card() -> CapabilityCard | None:
     )
 
 
+def google_voice_card() -> CapabilityCard | None:
+    if google_voice_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Voice as a source",
+        text=(
+            "Datawrap does not ship Google Voice as a transfer-ready source "
+            "(google_voice is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_pay_card() -> CapabilityCard | None:
+    if google_pay_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Pay as a source",
+        text=(
+            "Datawrap does not ship Google Pay as a transfer-ready source "
+            "(google_pay is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_optimize_card() -> CapabilityCard | None:
+    if google_optimize_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Optimize",
+        text=(
+            "Datawrap does not ship Google Optimize as a transfer-ready "
+            "source (google_optimize is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def translation_api_card() -> CapabilityCard | None:
+    if translation_api_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Translation API as a destination",
+        text=(
+            "Datawrap does not ship Cloud Translation API as a transfer "
+            "destination (translation_api is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def recommendations_ai_card() -> CapabilityCard | None:
+    if recommendations_ai_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Recommendations AI",
+        text=(
+            "Datawrap does not ship Recommendations AI as a transfer "
+            "destination (recommendations_ai is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def vertex_ai_workbench_card() -> CapabilityCard | None:
+    if vertex_ai_workbench_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Vertex AI Workbench",
+        text=(
+            "Datawrap does not ship Vertex AI Workbench "
+            "(vertex_ai_workbench is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_health_data_card() -> CapabilityCard | None:
+    if azure_health_data_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Health Data Services",
+        text=(
+            "Datawrap does not ship Azure Health Data Services "
+            "(azure_health_data is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_video_indexer_card() -> CapabilityCard | None:
+    if azure_video_indexer_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Video Indexer",
+        text=(
+            "Datawrap does not ship Azure Video Indexer "
+            "(azure_video_indexer is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_ids_card() -> CapabilityCard | None:
+    if cloud_ids_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud IDS",
+        text=(
+            "Datawrap does not ship Cloud IDS as a connect option "
+            "(cloud_ids is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_deploy_card() -> CapabilityCard | None:
+    if cloud_deploy_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Deploy",
+        text=(
+            "Datawrap does not ship Cloud Deploy as a transfer destination "
+            "(cloud_deploy is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_source_repos_card() -> CapabilityCard | None:
+    if cloud_source_repos_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Source Repositories",
+        text=(
+            "Datawrap does not ship Cloud Source Repositories "
+            "(cloud_source_repos is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_workstations_card() -> CapabilityCard | None:
+    if cloud_workstations_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Workstations",
+        text=(
+            "Datawrap does not ship Cloud Workstations "
+            "(cloud_workstations is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def artifact_analysis_card() -> CapabilityCard | None:
+    if artifact_analysis_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Artifact Analysis",
+        text=(
+            "Datawrap does not ship Artifact Analysis "
+            "(artifact_analysis is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def confidential_vm_card() -> CapabilityCard | None:
+    if confidential_vm_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Confidential VM",
+        text=(
+            "Datawrap does not ship Confidential VM as a connect option "
+            "(confidential_vm is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_stack_hub_card() -> CapabilityCard | None:
+    if azure_stack_hub_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Stack Hub",
+        text=(
+            "Datawrap does not ship Azure Stack Hub "
+            "(azure_stack_hub is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_stack_hci_card() -> CapabilityCard | None:
+    if azure_stack_hci_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Stack HCI",
+        text=(
+            "Datawrap does not ship Azure Stack HCI "
+            "(azure_stack_hci is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def dicom_card() -> CapabilityCard | None:
+    if dicom_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support DICOM as a destination",
+        text=(
+            "Datawrap does not ship DICOM as a transfer destination "
+            "(dicom is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_copilot_dest_card() -> CapabilityCard | None:
+    if microsoft_copilot_dest_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Copilot as a destination",
+        text=(
+            "Datawrap does not ship Microsoft Copilot as a transfer "
+            "destination (microsoft_copilot is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def backup_for_gke_card() -> CapabilityCard | None:
+    if backup_for_gke_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Backup for GKE",
+        text=(
+            "Datawrap does not ship Backup for GKE as a transfer destination "
+            "(backup_for_gke is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def connected_sheets_card() -> CapabilityCard | None:
+    if connected_sheets_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Connected Sheets",
+        text=(
+            "Datawrap does not ship Connected Sheets as a transfer destination "
+            "(connected_sheets is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def looker_embedded_card() -> CapabilityCard | None:
+    if looker_embedded_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Looker Embedded",
+        text=(
+            "Datawrap does not ship Looker Embedded as a transfer destination "
+            "(looker_embedded is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -6446,6 +6824,27 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         anthos_card,
         iot_hub_card,
         merchant_center_card,
+        google_voice_card,
+        google_pay_card,
+        google_optimize_card,
+        translation_api_card,
+        recommendations_ai_card,
+        vertex_ai_workbench_card,
+        azure_health_data_card,
+        azure_video_indexer_card,
+        cloud_ids_card,
+        cloud_deploy_card,
+        cloud_source_repos_card,
+        cloud_workstations_card,
+        artifact_analysis_card,
+        confidential_vm_card,
+        azure_stack_hub_card,
+        azure_stack_hci_card,
+        dicom_card,
+        microsoft_copilot_dest_card,
+        backup_for_gke_card,
+        connected_sheets_card,
+        looker_embedded_card,
     ):
         card = builder()
         if card is not None:

@@ -259,6 +259,21 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Anthos",
         "Do you support Azure IoT Hub",
         "Do you support Merchant Center",
+        "Do you support Google Voice as a source",
+        "Do you support Google Optimize",
+        "Do you support Translation API as a destination",
+        "Do you support Recommendations AI",
+        "Do you support Vertex AI Workbench",
+        "Do you support Azure Health Data Services",
+        "Do you support Azure Video Indexer",
+        "Do you support Cloud IDS",
+        "Do you support Confidential VM",
+        "Do you support Azure Stack Hub",
+        "Do you support DICOM as a destination",
+        "Do you support Microsoft Copilot as a destination",
+        "Do you support Backup for GKE",
+        "Do you support Connected Sheets",
+        "Do you support Looker Embedded",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

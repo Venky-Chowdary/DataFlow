@@ -573,6 +573,14 @@ def _section_intent_bonus(
             "logical type" in title or "carrier" in title
         ):
             return -8.0
+        if re.search(r"\btranslation\s+api\b|\bwrite\s+to\s+translation\b", analysis.text, re.I) and (
+            "rest api" in title or "github actions" in title
+        ):
+            return -8.0
+        if re.search(r"\brecommendations?\s+ai\b", analysis.text, re.I) and (
+            "azure openai" in title or "hybrid" in title
+        ):
+            return -8.0
         # The gate cards still have to pay the off-ask cost when they ranked
         # here on a body word. "Which destinations can I write to" does not
         # name a gate, so "Core gates (before write)" is not on subject — and
@@ -1138,7 +1146,9 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bcloud\s+vpn\b", analysis.text, re.I) else -3.2
     if re.search(
         r"\bcloud\s+armor\b|\bcloud\s+interconnect\b|\bcloud\s+vpn\b"
-        r"|\bcloud\s+nat\b|\bcloud\s+iap\b|\bcloud\s+hsm\b",
+        r"|\bcloud\s+nat\b|\bcloud\s+iap\b|\bcloud\s+hsm\b"
+        r"|\bcloud\s+ids\b|\bcloud\s+deploy\b|\bsource\s+repositor"
+        r"|\bcloud\s+workstations?\b",
         analysis.text,
         re.I,
     ) and "cloud run" in title:
@@ -1614,6 +1624,78 @@ def _section_intent_bonus(
         bonus -= 6.0
     if "merchant center" in title:
         bonus += 6.0 if re.search(r"\bmerchant\s+center\b", analysis.text, re.I) else -3.2
+    if "google voice" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+voice\b", analysis.text, re.I) else -3.2
+    if "google pay" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+pay\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+voice\b|\bgoogle\s+pay\b", analysis.text, re.I) and (
+        "google workspace" in title or "google ads" in title
+    ):
+        bonus -= 6.0
+    if "google optimize" in title:
+        bonus += 6.0 if re.search(r"\boptimize\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+optimize\b|\b(?:support|have)\s+optimize\b", analysis.text, re.I) and "retail api" in title:
+        bonus -= 6.0
+    if "translation api" in title:
+        bonus += 6.0 if re.search(r"\btranslation\s+api\b|\bwrite\s+to\s+translation\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btranslation\s+api\b|\bwrite\s+to\s+translation\b", analysis.text, re.I) and (
+        "rest api" in title or "github actions" in title
+    ):
+        bonus -= 6.0
+    if "recommendations ai" in title:
+        bonus += 6.0 if re.search(r"\brecommendations?\s+ai\b", analysis.text, re.I) else -3.2
+    if "vertex ai workbench" in title:
+        bonus += 6.0 if re.search(r"\bworkbench\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bworkbench\b", analysis.text, re.I) and "vertex ai search" in title:
+        bonus -= 6.0
+    if "health data services" in title:
+        bonus += 6.0 if re.search(r"\bhealth\s+data\s+services\b", analysis.text, re.I) else -3.2
+    if "video indexer" in title:
+        bonus += 6.0 if re.search(r"\bvideo\s+indexer\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bvideo\s+indexer\b", analysis.text, re.I) and "display & video 360" in title:
+        bonus -= 6.0
+    if "cloud ids" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+ids\b", analysis.text, re.I) else -3.2
+    if "cloud deploy" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+deploy\b", analysis.text, re.I) else -3.2
+    if "source repositories" in title:
+        bonus += 6.0 if re.search(r"\bsource\s+repositor", analysis.text, re.I) else -3.2
+    if "cloud workstations" in title:
+        bonus += 6.0 if re.search(r"\bworkstations?\b", analysis.text, re.I) else -3.2
+    if "artifact analysis" in title:
+        bonus += 6.0 if re.search(r"\bartifact\s+analysis\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bartifact\s+analysis\b", analysis.text, re.I) and "artifact registry" in title:
+        bonus -= 6.0
+    if "confidential vm" in title:
+        bonus += 6.0 if re.search(r"\bconfidential\s+vm\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bconfidential\s+vm\b", analysis.text, re.I) and "confidential ledger" in title:
+        bonus -= 6.0
+    if "stack hub" in title:
+        bonus += 6.0 if re.search(r"\bstack\s+hub\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bstack\s+hub\b", analysis.text, re.I) and "iot hub" in title:
+        bonus -= 6.0
+    if "stack hci" in title:
+        bonus += 6.0 if re.search(r"\bstack\s+hci\b", analysis.text, re.I) else -3.2
+    if title.startswith("do you support dicom"):
+        bonus += 6.0 if re.search(r"\bdicom\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdicom\b", analysis.text, re.I) and "bigquery ml" in title:
+        bonus -= 6.0
+    if "microsoft copilot" in title:
+        bonus += 6.0 if re.search(r"\bmicrosoft\s+copilot\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmicrosoft\s+copilot\b", analysis.text, re.I) and "copilot studio" in title:
+        bonus -= 6.0
+    if "backup for gke" in title:
+        bonus += 6.0 if re.search(r"\bbackup\s+for\s+gke\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbackup\s+for\s+gke\b", analysis.text, re.I) and "gke as a destination" in title:
+        bonus -= 6.0
+    if "connected sheets" in title:
+        bonus += 6.0 if re.search(r"\bconnected\s+sheets\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bconnected\s+sheets\b", analysis.text, re.I) and "google sheets" in title:
+        bonus -= 6.0
+    if "looker embedded" in title:
+        bonus += 6.0 if re.search(r"\blooker\s+embedded\b", analysis.text, re.I) else -3.2
+    if re.search(r"\blooker\s+embedded\b", analysis.text, re.I) and title.startswith("do you support looker") and "embedded" not in title:
+        bonus -= 6.0
     iceberg_ready_ask = bool(
         re.search(r"\biceberg\b", analysis.text, re.I)
         and not re.search(r"\b(?:data\s+)?catalog\b|\bglue\b", analysis.text, re.I)

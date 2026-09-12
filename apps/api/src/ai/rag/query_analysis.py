@@ -1331,6 +1331,37 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\banthos\b", re.I), ("anthos",)),
     (re.compile(r"\biot\s+hub\b", re.I), ("iot_hub",)),
     (re.compile(r"\bmerchant\s+center\b", re.I), ("merchant_center",)),
+    (re.compile(r"\bgoogle\s+voice\b", re.I), ("google_voice",)),
+    (re.compile(r"\bgoogle\s+pay\b", re.I), ("google_pay",)),
+    (re.compile(
+        r"\bgoogle\s+optimize\b"
+        r"|\b(?:support|have)\s+optimize\b",
+        re.I,
+    ),
+     ("google_optimize",)),
+    (re.compile(
+        r"\btranslation\s+api\b"
+        r"|\bwrite\s+to\s+translation\b",
+        re.I,
+    ),
+     ("translation_api",)),
+    (re.compile(r"\brecommendations?\s+ai\b", re.I), ("recommendations_ai",)),
+    (re.compile(r"\bvertex\s+ai\s+workbench\b|\bworkbench\b", re.I), ("vertex_ai_workbench",)),
+    (re.compile(r"\bhealth\s+data\s+services\b", re.I), ("azure_health_data",)),
+    (re.compile(r"\bvideo\s+indexer\b", re.I), ("azure_video_indexer",)),
+    (re.compile(r"\bcloud\s+ids\b", re.I), ("cloud_ids",)),
+    (re.compile(r"\bcloud\s+deploy\b", re.I), ("cloud_deploy",)),
+    (re.compile(r"\bsource\s+repositor", re.I), ("cloud_source_repos",)),
+    (re.compile(r"\bcloud\s+workstations?\b", re.I), ("cloud_workstations",)),
+    (re.compile(r"\bartifact\s+analysis\b", re.I), ("artifact_analysis",)),
+    (re.compile(r"\bconfidential\s+vm\b", re.I), ("confidential_vm",)),
+    (re.compile(r"\bstack\s+hub\b", re.I), ("azure_stack_hub",)),
+    (re.compile(r"\bstack\s+hci\b", re.I), ("azure_stack_hci",)),
+    (re.compile(r"\bdicom\b", re.I), ("dicom",)),
+    (re.compile(r"\bmicrosoft\s+copilot\b", re.I), ("microsoft_copilot",)),
+    (re.compile(r"\bbackup\s+for\s+gke\b", re.I), ("backup_for_gke",)),
+    (re.compile(r"\bconnected\s+sheets\b", re.I), ("connected_sheets",)),
+    (re.compile(r"\blooker\s+embedded\b", re.I), ("looker_embedded",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2840,6 +2871,74 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\biot\s+hub\b", re.I),
         ("iot_central",),
+    ),
+    (
+        re.compile(r"\bgoogle\s+voice\b|\bgoogle\s+pay\b", re.I),
+        ("google_workspace", "google_ads"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+optimize\b|\b(?:support|have)\s+optimize\b", re.I),
+        ("retail_api",),
+    ),
+    (
+        re.compile(r"\btranslation\s+api\b|\bwrite\s+to\s+translation\b", re.I),
+        ("rest", "api", "bearer", "github", "actions"),
+    ),
+    (
+        re.compile(r"\brecommendations?\s+ai\b", re.I),
+        ("azure_openai", "hybrid"),
+    ),
+    (
+        re.compile(r"\bvertex\s+ai\s+workbench\b|\bworkbench\b", re.I),
+        ("vertex_ai_search",),
+    ),
+    (
+        re.compile(r"\bhealth\s+data\s+services\b", re.I),
+        ("service_bus", "bus"),
+    ),
+    (
+        re.compile(r"\bvideo\s+indexer\b", re.I),
+        ("dv360",),
+    ),
+    (
+        re.compile(
+            r"\bcloud\s+ids\b|\bcloud\s+deploy\b|\bsource\s+repositor"
+            r"|\bcloud\s+workstations?\b",
+            re.I,
+        ),
+        ("cloud_run",),
+    ),
+    (
+        re.compile(r"\bartifact\s+analysis\b", re.I),
+        ("artifact_registry",),
+    ),
+    (
+        re.compile(r"\bconfidential\s+vm\b", re.I),
+        ("confidential_ledger",),
+    ),
+    (
+        re.compile(r"\bstack\s+hub\b", re.I),
+        ("iot_hub",),
+    ),
+    (
+        re.compile(r"\bdicom\b", re.I),
+        ("bigquery_ml",),
+    ),
+    (
+        re.compile(r"\bmicrosoft\s+copilot\b", re.I),
+        ("copilot_studio",),
+    ),
+    (
+        re.compile(r"\bbackup\s+for\s+gke\b", re.I),
+        ("gke",),
+    ),
+    (
+        re.compile(r"\bconnected\s+sheets\b", re.I),
+        ("google_sheets",),
+    ),
+    (
+        re.compile(r"\blooker\s+embedded\b", re.I),
+        ("looker",),
     ),
     # Bare Private Link is not Job Theater.
     (
