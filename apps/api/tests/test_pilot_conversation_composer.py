@@ -297,6 +297,30 @@ def test_infer_tools_briefing_and_general():
     ]
     assert "recommend_sync_mode" not in names
 
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "gotta have logical wal for pg cdc right?"
+        )
+    ]
+    assert "explain_product" in names
+    assert "recommend_sync_mode" not in names
+
+    from src.ai.copilot.followup import resolve_knowledge_engine_followup
+
+    assert (
+        resolve_knowledge_engine_followup(
+            "and for mongo?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Postgres CDC uses the pgoutput plugin.",
+                }
+            ],
+        )
+        == "does Mongo CDC need change-stream pre-images"
+    )
+
 
 def test_brief_workspace_is_permissioned_like_other_reads():
     assert "brief_workspace" in {d["name"] for d in TOOL_DEFINITIONS}

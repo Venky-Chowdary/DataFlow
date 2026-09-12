@@ -712,6 +712,103 @@ def frame_words(question: str) -> frozenset[str]:
     return frozenset(out)
 
 
+# ChatGPT's first move is to hear the question the operator meant, not the
+# tokens they typed. We do the same deterministically: strip chat filler,
+# expand slang, and repair the misspellings routing already knew about. The
+# rewrite never invents a product claim — it only changes how the question
+# is spelled so retrieval can find the sentence that already exists.
+_CHAT_PREFIX = re.compile(
+    r"^\s*(?:hey|hi|hello|yo|sup|so|ok(?:ay)?|um+|uh+|well|"
+    r"listen|look|quick(?:\s+question)?|question|"
+    r"pls|please|just\s+wondering|kinda\s+confused|"
+    r"real(?:ly)?\s+quick|real\s+talk)[,:]?\s+",
+    re.I,
+)
+_CHAT_SUFFIX = re.compile(
+    r"[\s,]+(?:right|yeah|yes|no|pls|please|thanks|thx|lol|lmk|idk)\s*[?.!]*\s*$",
+    re.I,
+)
+_PLAIN_ENGLISH = re.compile(
+    r"\b(?:explain\s+like\s+(?:i(?:'?| a)?m\s+)?(?:5|five)|"
+    r"eli5|in\s+(?:plain|simple)\s+(?:english|terms)|"
+    r"in\s+one\s+sentence|tldr|tl;dr|simply\s+put|"
+    r"in\s+layman'?s?\s+terms)\s*[:\-–,]?\s*",
+    re.I,
+)
+_SLANG_FRAMES: tuple[tuple[str, str], ...] = (
+    (r"\bgotta\s+have\b", "do I need"),
+    (r"\bdo\s+i\s+gotta\b", "do I need"),
+    (r"\bgotta\s+flip\b", "need"),
+    (r"\bgotta\b", "need"),
+    (r"\bgonna\b", "going to"),
+    (r"\bwanna\b", "want to"),
+    (r"\bdunno\b", "do not know"),
+    (r"\b(?:what's|whats|wut'?s|wat'?s)\b", "what is"),
+    (r"\b(?:how'd|howd)\b", "how do"),
+    (r"\b(?:where's|wheres)\b", "where is"),
+    (r"\b(?:who's|whos)\b", "who is"),
+    (r"\b(?:can't|cant)\b", "cannot"),
+    (r"\b(?:don't|dont)\b", "do not"),
+    (r"\b(?:doesn't|doesnt)\b", "does not"),
+    (r"\bu\s+sure\b", "are you sure"),
+    (r"\bur\b", "your"),
+    (r"\bcuz\b|\bcoz\b", "because"),
+    (r"\bdo\s+i\s+need\s+to\s+flip\b", "do I need"),
+    (r"\blogical\s+wal\b|\bwal\s+to\s+logical\b|\bwal\s+is\s+logical\b",
+     "wal_level logical"),
+    (r"\bbinlog\s+is\s+statement\b|\bstatement(?:\s+based)?\s+binlog\b",
+     "binlog_format STATEMENT"),
+    (r"\bdownload\s+(?:the\s+)?(?:pipeline\s+|schedule\s+)?ya?ml\b",
+     "export yaml"),
+    (r"\bpeek\s+at\b", "see"),
+    (r"\b93\s+percent\b", "93%"),
+    (r"\bcan\s+viewers\b", "can a viewer"),
+    (r"\bcan\s+editors\b", "can an editor"),
+    (r"\bcan\s+admins\b", "can an admin"),
+    (r"\breplciation\b|\breplicaton\b", "replication"),
+    (r"\bvalidte\b|\bvaildate\b", "validate"),
+    (r"\bquarentine\b", "quarantine"),
+    (r"\bbinnlog\b", "binlog"),
+    # High-frequency operator misspellings. Moved here so retrieval and
+    # routing share one rewrite — "tranfer" is still a transfer.
+    (r"\btra?ns?fe?r\b", "transfer"),
+    (r"\btrasfer\b", "transfer"),
+    (r"\bmigra?te?\b", "migrate"),
+    (r"\bschdule\b", "schedule"),
+    (r"\bmny\b", "many"),
+    (r"\btbls?\b", "tables"),
+    (r"\bcnt\b", "count"),
+    (r"\bconnectorz\b", "connectors"),
+    (r"\bdbs\b", "databases"),
+    (r"\bpostgress?ql\b", "postgresql"),
+    (r"\bposgres\b", "postgres"),
+)
+
+
+def rewrite_operator_question(question: str) -> str:
+    """The wording the operator meant, before retrieval or tool routing.
+
+    ChatGPT does this inside the model. We do it as an explicit rewrite so
+    every ask type, expansion and tool regex sees the same cleaned question.
+    Off-subject slang still expands to nothing: only discourse and known
+    product misspellings change.
+    """
+    text = (question or "").strip()
+    if not text:
+        return ""
+    text = _PLAIN_ENGLISH.sub("", text)
+    for _ in range(3):
+        nxt = _CHAT_PREFIX.sub("", text)
+        if nxt == text:
+            break
+        text = nxt.strip()
+    text = _CHAT_SUFFIX.sub("", text).strip()
+    for pattern, replacement in _SLANG_FRAMES:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or (question or "").strip()
+
+
 def classify_ask(question: str) -> str:
     """What kind of answer the question wants.
 
@@ -847,7 +944,7 @@ def distinctive_procedure_terms(analysis: QueryAnalysis) -> frozenset[str]:
 
 def analyze_query(question: str) -> QueryAnalysis:
     """Understand one operator question before anything tries to retrieve for it."""
-    text = (question or "").strip()
+    text = rewrite_operator_question(question)
     raw = content_terms(text)
     generic = _generic_and_stop()
     # Frame words join the generic ones for this question only. They land in

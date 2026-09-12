@@ -3879,29 +3879,15 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
     return ""
 
 
-# High-frequency operator misspellings. A typo must not cost the operator the
-# whole intent: "tranfer" is still a transfer.
-_TYPO_FIXES: tuple[tuple[str, str], ...] = (
-    (r"\btra?ns?fe?r\b", "transfer"),
-    (r"\btrasfer\b", "transfer"),
-    (r"\bmigra?te?\b", "migrate"),
-    (r"\bschdule\b", "schedule"),
-    (r"\bmny\b", "many"),
-    (r"\btbls?\b", "tables"),
-    (r"\bcnt\b", "count"),
-    (r"\bconnectorz\b", "connectors"),
-    (r"\bdbs\b", "databases"),
-    (r"\bpostgress?ql\b", "postgresql"),
-    (r"\bposgres\b", "postgres"),
-)
-
-
 def normalize_operator_typos(message: str) -> str:
-    """Repair common misspellings before any intent parsing."""
-    text = message or ""
-    for pattern, replacement in _TYPO_FIXES:
-        text = re.sub(pattern, replacement, text, flags=re.I)
-    return text
+    """Repair slang and misspellings before any intent parsing.
+
+    One rewrite owns both retrieval and routing. Adding a second typo table
+    here is how "gotta have logical wal" reached tools cleaned and RAG raw.
+    """
+    from ..rag.query_analysis import rewrite_operator_question
+
+    return rewrite_operator_question(message)
 
 
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:

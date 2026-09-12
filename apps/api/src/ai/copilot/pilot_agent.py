@@ -1616,6 +1616,7 @@ Draft answer:
             opens_a_row_predicate,
             pending_from_assistant_clarification,
             resolve_followup,
+            resolve_knowledge_engine_followup,
             resolve_pending_answer,
             resolve_platform_coreference,
             resolve_table_coreference_tools,
@@ -1623,6 +1624,9 @@ Draft answer:
         from .working_memory import get_working_memory
 
         session_id = self._session_id(data_context)
+        knowledge = resolve_knowledge_engine_followup(message, history)
+        if knowledge:
+            message = knowledge
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:

@@ -806,6 +806,18 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "what semantic roles do you detect",
             ("amount", "email"),
         ),
+        (
+            "gotta have logical wal for pg cdc right?",
+            ("wal_level", "logical"),
+        ),
+        (
+            "will deletes show up if my mysql binlog is statement",
+            ("binlog_format",),
+        ),
+        (
+            "hey can viewers download the pipeline yaml",
+            ("viewer", "yaml"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(

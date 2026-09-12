@@ -122,6 +122,64 @@ def last_assistant_content(history: list[dict] | None) -> str:
     return ""
 
 
+_CDC_PRIOR = re.compile(
+    r"\b(?:cdc|wal_level|wal|binlog|replication\s+slot|pgoutput|"
+    r"pre-image|replica\s+identity|change[\s-]?stream)\b",
+    re.I,
+)
+_ENGINE_FOLLOWUP = re.compile(
+    r"^\s*(?:(?:what|how)\s+about|and(?:\s+for)?|same\s+for|how\s+about)\s+"
+    r"(?:for\s+)?"
+    r"(?P<eng>mysql|maria(?:db)?|postgres(?:ql)?|pg|mongo(?:db)?|"
+    r"sql\s*server|mssql|oracle)\s*[?.!]?\s*$",
+    re.I,
+)
+_ENGINE_CANON = {
+    "pg": "postgres",
+    "postgres": "postgres",
+    "postgresql": "postgres",
+    "mysql": "mysql",
+    "mariadb": "mysql",
+    "maria": "mysql",
+    "mongo": "mongo",
+    "mongodb": "mongo",
+    "sql server": "sql server",
+    "sqlserver": "sql server",
+    "mssql": "sql server",
+    "oracle": "oracle",
+}
+_ENGINE_CDC_QUESTION = {
+    "postgres": "do I need wal_level logical for postgres CDC",
+    "mysql": "do I need binlog_format ROW for mysql CDC",
+    "mongo": "does Mongo CDC need change-stream pre-images",
+    "sql server": "do you support SQL Server CDC",
+    "oracle": "do you support Oracle CDC",
+}
+
+
+def resolve_knowledge_engine_followup(
+    message: str,
+    history: list[dict] | None,
+) -> str | None:
+    """'what about mysql?' after a CDC answer is the MySQL prerequisite.
+
+    ChatGPT keeps the prior subject and swaps the engine. We do the same only
+    when the last answer was already about capture — otherwise this stays a
+    table/job follow-up and we do not invent a CDC question.
+    """
+    match = _ENGINE_FOLLOWUP.match((message or "").strip())
+    if not match:
+        return None
+    prior = last_assistant_content(history)
+    if not prior or not _CDC_PRIOR.search(prior):
+        return None
+    raw = re.sub(r"\s+", " ", (match.group("eng") or "").strip().lower())
+    engine = _ENGINE_CANON.get(raw)
+    if not engine:
+        return None
+    return _ENGINE_CDC_QUESTION.get(engine)
+
+
 def resolve_platform_coreference(
     message: str,
     history: list[dict] | None,
