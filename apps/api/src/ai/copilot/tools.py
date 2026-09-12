@@ -1630,6 +1630,15 @@ class DataPilotTools:
         retrieved = retrieve_product_answer(query, limit=4)
         if curated and curated[0] == "preflight" and retrieved.answerable:
             curated = None
+        # ``\bcdc\b`` also matches "what happens to a delete in CDC" and
+        # "hand off from snapshot to the CDC stream". The one-sentence mode
+        # definition then buried the cited handoff / tombstone cards.
+        if curated and curated[0] == "sync_mode" and retrieved.answerable:
+            if not re.search(
+                r"^\s*what\s+is\s+(?:cdc|full\s+refresh|overwrite|append)\b",
+                lower,
+            ):
+                curated = None
         if retrieved.answerable:
             documented = compose_product_answer(retrieved)
             return ToolResult(
@@ -4464,7 +4473,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("start_transfer_studio", {}))
     elif (
         "start a transfer" in lower
-        and not re.search(r"\bwho\b|\ballowed\b|\bpermission\b|\brole\b", lower)
+        and not re.search(
+            r"\bwho\b|\ballowed\b|\bpermission\b|\brole\b"
+            r"|\bviewer\b|\beditor\b|\badmin\b|\boperator\b|\bapprover\b",
+            lower,
+        )
         and not any(p[0] == "navigate" for p in planned)
     ):
         # "who is allowed to start a transfer" names the verb and is a

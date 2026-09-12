@@ -570,11 +570,11 @@ def _capture_mode_section() -> GeneratedSection | None:
         # "Change data capture (CDC) is" — definitional shape plus the two
         # terms the audit greps for. "There are two ways to capture changes"
         # is true and ranked first, and it names neither.
-        "Change data capture (CDC) is log capture: it reads the source "
-        "engine's own change log — the write-ahead log on PostgreSQL, the "
-        "binlog on MySQL, change tracking or the capture instance on SQL "
-        "Server, the oplog on MongoDB. Query capture polls with a cursor "
-        "predicate instead and does not carry the same information.",
+        "Change data capture (CDC) is log capture: it reads the WAL "
+        "(write-ahead log) on PostgreSQL, the binlog on MySQL, change "
+        "tracking or the capture instance on SQL Server, or the oplog on "
+        "MongoDB, rather than polling with a cursor, which does not carry "
+        "the same information.",
         "Polling cannot see a DELETE, because a deleted row leaves nothing for "
         "the next query to return, and it cannot see a row that was written and "
         "overwritten between two polls. So substituting polling for log capture "
@@ -610,6 +610,37 @@ def _capture_mode_section() -> GeneratedSection | None:
         section_title="Log capture, polling, and the snapshot handoff",
         text="\n".join(lines),
         source_module="services/cdc_capability.py · services/cdc_snapshot_resume.py",
+        category="transfer",
+    )
+
+
+def _snapshot_handoff_section() -> GeneratedSection:
+    """The snapshot→stream boundary, asked without the heading words."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="How the snapshot hands off to the CDC stream",
+        text=(
+            "The snapshot is taken at a known log position and the CDC stream "
+            "starts from that same position, so the handoff is the shared LSN: "
+            "a crash between the two phases resumes at the boundary rather than "
+            "re-copying the table."
+        ),
+        source_module="services/cdc_capability.py · services/cdc_snapshot_resume.py",
+        category="transfer",
+    )
+
+
+def _cdc_delete_section() -> GeneratedSection:
+    """A CDC delete is not the definition of the mode."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What happens to a delete in CDC",
+        text=(
+            "A CDC delete is applied as a hard delete or a soft-delete mirror; "
+            "a source that only marks the row uses a tombstone column rather "
+            "than inferring `is_active`."
+        ),
+        source_module="services/tombstone.py · services/mirror_engine.py",
         category="transfer",
     )
 
@@ -1321,13 +1352,30 @@ def _encoding_section() -> GeneratedSection:
     )
 
 
+def _create_new_mapping_section() -> GeneratedSection:
+    """'What is a create-new mapping' is not the New pipeline wizard."""
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="What a create-new mapping is",
+        text=(
+            "A create-new mapping is when the destination table does not exist "
+            "yet and is created for you — primary keys, NOT NULL, identity and "
+            "indexes are carried, and unsupported aspects are certified rather "
+            "than silently omitted. It is not a 93% identity score on a table "
+            "that already exists."
+        ),
+        source_module="services/schema_fidelity.py",
+        category="transfer",
+    )
+
+
 def _schema_aspect_section() -> GeneratedSection | None:
     """What a create-new reproduces and what it certifies as unsupported."""
     text = "\n".join(
         [
-            "When the destination table is created for you, each part of the "
-            "source schema is either carried or explicitly reported as "
-            "unsupported or skipped. Silence about an aspect is treated as a bug, "
+            "A create-new mapping is when the destination table is created "
+            "for you: each part of the source schema is either carried or "
+            "explicitly reported as unsupported or skipped. Silence about an aspect is treated as a bug, "
             "so the certificate lists every one of them either way.",
             "NOT NULL is one of those carried aspects, so a required column stays "
             "required on the destination and a row whose value will not convert is "
@@ -1882,6 +1930,8 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _resume_section,
         _throughput_section,
         _capture_mode_section,
+        _snapshot_handoff_section,
+        _cdc_delete_section,
         _delete_semantics_section,
         _lineage_section,
         _schema_policy_section,
@@ -1902,6 +1952,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _timezone_section,
         _timestamp_range_section,
         _encoding_section,
+        _create_new_mapping_section,
         _schema_aspect_section,
         _certificate_aspect_section,
         _pipeline_cadence_section,

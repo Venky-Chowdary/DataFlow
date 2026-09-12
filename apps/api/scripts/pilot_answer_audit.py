@@ -512,6 +512,26 @@ NATURAL_QUESTIONS: list[Case] = [
         "natural",
         ("unattended", "standing authority"),
     ),
+    (
+        "can a viewer start a transfer",
+        "natural",
+        ("viewer", "cannot"),
+    ),
+    (
+        "what happens to a delete in CDC",
+        "natural",
+        ("tombstone", "hard delete"),
+    ),
+    (
+        "what is a create-new mapping",
+        "natural",
+        ("create-new",),
+    ),
+    (
+        "how do you hand off from snapshot to the CDC stream",
+        "natural",
+        ("handoff", "log position"),
+    ),
 ]
 
 SUITES: dict[str, list[Case]] = {

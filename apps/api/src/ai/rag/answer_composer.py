@@ -259,7 +259,8 @@ _CARDINAL = re.compile(
 # work uses one of these. Swept against the buried "what happens" set.
 _CONSEQUENCE = re.compile(
     r"\b(?:quarantined|unsupported|unbalanced|mismatch|lossy|"
-    r"preflight finding|wall[\s-]clock|utc_invented_from_naive)\b",
+    r"preflight finding|wall[\s-]clock|utc_invented_from_naive|"
+    r"tombstone|hard delete|soft[\s-]?delete|handoff|log position)\b",
     re.I,
 )
 
@@ -416,7 +417,21 @@ def _shape_bonus(ask: str, sentence: str, analysis=None) -> float:
 
             distinctive = distinctive_procedure_terms(analysis)
             low = sentence.lower()
-            if distinctive and any(term in low for term in distinctive):
+            job_actions = distinctive & {"resume", "cancel", "retry", "pause"}
+            capture = distinctive & {
+                "snapshot", "stream", "handoff", "cdc", "wal", "lsn",
+            }
+            hits = {term for term in distinctive if term in low}
+            if job_actions and capture:
+                # "how do I resume if it crashes between snapshot and stream"
+                # names a Theater verb and a capture phase. The cancel/resume
+                # button sentence matches *resume* and used to beat the
+                # handoff sentence that actually answers.
+                if hits & capture:
+                    bonus += 2.2
+                else:
+                    bonus -= 1.6
+            elif distinctive and hits:
                 bonus += 2.2
             elif distinctive:
                 bonus -= 1.6
@@ -437,6 +452,10 @@ def _shape_bonus(ask: str, sentence: str, analysis=None) -> float:
         # the destination".
         lower = sentence.lower()
         if "append" in lower and "overwrite" in lower:
+            return 1.8
+        if ("log capture" in lower or "wal" in lower) and (
+            "poll" in lower
+        ):
             return 1.8
     return 0.0
 

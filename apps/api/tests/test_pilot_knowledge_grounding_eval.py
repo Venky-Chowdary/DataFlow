@@ -102,6 +102,21 @@ def test_explain_product_does_not_prepend_uncited_faq_over_docs():
     assert not (o.get("answer") or "").startswith("Preflight has **9 gates**")
 
 
+def test_cdc_aspect_is_not_buried_under_the_mode_definition():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    for question, needle in (
+        ("what happens to a delete in CDC", "tombstone"),
+        ("how do you hand off from snapshot to the CDC stream", "handoff"),
+    ):
+        tr = tools._explain_product(question)
+        answer = (tr.output or {}).get("answer") or ""
+        lead = (split_sentences(answer) or [answer])[0].lower()
+        assert "streams inserts/updates/deletes" not in lead, question
+        assert needle in lead, (question, lead[:200])
+
+
 def test_named_gate_leads_with_that_card_not_the_gate_count():
     from src.ai.rag.answer_composer import split_sentences
 

@@ -165,7 +165,8 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             # verb, not a definition of running. Left as ``other`` it retrieved
             # the role matrix and opened on the viewer-negative PII sentence.
             r"|^\s*who\s+can\b"
-            r"|^\s*who\s+is\s+allowed\b",
+            r"|^\s*who\s+is\s+allowed\b"
+            r"|^\s*can\s+a(?:n)?\s+(?:viewer|editor|admin|operator|approver)\b",
             re.I,
         ),
     ),
@@ -262,6 +263,10 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "standing": ("schedule", "pipeline", "authorization", "unattended"),
     "pause": ("schedule", "pipeline", "enabled", "paused"),
     "resume": ("schedule", "pipeline", "enabled", "resume"),
+    "handoff": ("snapshot", "stream", "capture", "lsn"),
+    "wal": ("log", "capture", "postgres", "write"),
+    "tombstone": ("delete", "soft", "cdc"),
+    "create-new": ("schema", "certificate", "identity"),
     # Permissions
     "permission": ("role", "rbac", "permission", "viewer", "editor", "admin"),
     "permissions": ("role", "rbac", "permission", "viewer", "editor", "admin"),
@@ -507,6 +512,17 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (CDC_DELIVERY_RE, ("cdc", "least", "once", "idempotent", "lsn")),
     (re.compile(r"\bg([1-9])\b", re.I),
      ("gate", "preflight", "validate", "schema")),
+    (re.compile(r"\bhand[\s-]?off\b"
+                r"|\bsnapshot\s+to\s+(?:the\s+)?(?:cdc|stream|log)\b"
+                r"|\bbetween\s+snapshot\s+and\s+stream\b", re.I),
+     ("snapshot", "handoff", "capture", "stream", "lsn")),
+    (re.compile(r"\bwal\b|\bwrite[\s-]?ahead\b", re.I),
+     ("wal", "log", "capture", "postgres")),
+    (re.compile(r"\b(?:cdc\s+)?deletes?\b.+\b(?:cdc|stream|log)\b"
+                r"|\bdelete\s+in\s+cdc\b", re.I),
+     ("tombstone", "delete", "cdc", "soft")),
+    (re.compile(r"\bcreate[\s-]?new\b", re.I),
+     ("create-new", "schema", "certificate", "identity")),
 )
 
 
