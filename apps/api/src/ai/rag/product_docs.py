@@ -557,6 +557,12 @@ def _section_intent_bonus(
         re.search(r"\bgate\s*[1-9]\b|\bg[1-9]\b", analysis.text, re.I)
     )
     if not on_subject:
+        # A named SFTP ask matches the dest/engine inventories only because
+        # those lists contain the token. They are not the SFTP card.
+        if re.search(r"\bsftp\b", analysis.text, re.I) and (
+            "destinations you can write" in title or "engines you can connect" in title
+        ):
+            return -8.0
         # The gate cards still have to pay the off-ask cost when they ranked
         # here on a body word. "Which destinations can I write to" does not
         # name a gate, so "Core gates (before write)" is not on subject — and
@@ -1526,6 +1532,48 @@ def _section_intent_bonus(
     if "github copilot" in title:
         bonus += 6.0 if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) else -3.2
     if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) and "github enterprise" in title:
+        bonus -= 6.0
+    iceberg_ready_ask = bool(
+        re.search(r"\biceberg\b", analysis.text, re.I)
+        and not re.search(r"\b(?:data\s+)?catalog\b|\bglue\b", analysis.text, re.I)
+    )
+    if title == "do you support iceberg":
+        bonus += 6.0 if iceberg_ready_ask else -3.2
+    if iceberg_ready_ask and "data catalog" in title:
+        bonus -= 6.0
+    if title == "do you support sftp":
+        bonus += 6.0 if re.search(r"\bsftp\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bsftp\b", analysis.text, re.I) and (
+        "ssh tunnel" in title or "destinations you can write" in title
+    ):
+        bonus -= 6.0
+    kafka_dest_ask = bool(
+        re.search(r"\bkafka\s+as\s+a\s+destination\b|\bwrite\s+to\s+kafka\b", analysis.text, re.I)
+    )
+    if "kafka as a destination" in title:
+        bonus += 6.0 if kafka_dest_ask else -3.2
+    if kafka_dest_ask and "schema registry" in title:
+        bonus -= 6.0
+    mysql_ready_ask = bool(
+        re.search(r"\bdo\s+you\s+support\s+mysql\b|\bmysql\s+as\s+a\s+(?:source|destination)\b", analysis.text, re.I)
+    )
+    if title == "do you support mysql":
+        bonus += 6.0 if mysql_ready_ask else -3.2
+    if mysql_ready_ask and "azure database for mysql" in title:
+        bonus -= 6.0
+    redis_ready_ask = bool(
+        re.search(r"\bdo\s+you\s+support\s+redis\b|\bredis\s+as\s+a\s+(?:source|destination)\b", analysis.text, re.I)
+    )
+    if title == "do you support redis":
+        bonus += 6.0 if redis_ready_ask else -3.2
+    if redis_ready_ask and (
+        "azure cache for redis" in title or "memorystore" in title
+    ):
+        bonus -= 6.0
+    soc2_ask = bool(re.search(r"\bsoc\s*2\b|\bhipaa\b|\bbaa\b", analysis.text, re.I))
+    if "soc2" in title or "hipaa baa" in title:
+        bonus += 6.0 if soc2_ask else -3.2
+    if soc2_ask and "data residency" in title:
         bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2

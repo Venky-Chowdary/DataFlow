@@ -1534,6 +1534,31 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("postgresql", "driver")),
     (re.compile(
+        r"\bdo\s+you\s+support\s+mysql\b"
+        r"|\bmysql\s+as\s+a\s+(?:source|destination)\b",
+        re.I,
+    ),
+     ("mysql", "driver")),
+    (re.compile(
+        r"\bdo\s+you\s+support\s+redis\b"
+        r"|\bredis\s+as\s+a\s+(?:source|destination)\b",
+        re.I,
+    ),
+     ("redis", "driver")),
+    (re.compile(
+        r"\bdo\s+you\s+support\s+iceberg\b"
+        r"|\biceberg\s+as\s+a\s+(?:source|destination)\b",
+        re.I,
+    ),
+     ("iceberg", "driver")),
+    (re.compile(r"\bsftp\b", re.I), ("sftp",)),
+    (re.compile(
+        r"\bkafka\s+as\s+a\s+destination\b"
+        r"|\bwrite\s+to\s+kafka\b",
+        re.I,
+    ),
+     ("kafka", "driver")),
+    (re.compile(
         r"\bdo\s+you\s+support\s+mongodb\b"
         r"|\bmongodb\s+as\s+a\s+(?:source|destination)\b",
         re.I,
@@ -2720,6 +2745,34 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bgithub\s+copilot\b", re.I),
         ("github_enterprise",),
+    ),
+    (
+        re.compile(
+            r"\bdo\s+you\s+support\s+iceberg\b"
+            r"|\biceberg\s+as\s+a\s+(?:source|destination)\b",
+            re.I,
+        ),
+        ("data_catalog", "catalog"),
+    ),
+    (
+        re.compile(r"\bsftp\b", re.I),
+        ("ssh", "tunnel", "bastion"),
+    ),
+    (
+        re.compile(r"\bkafka\s+as\s+a\s+destination\b|\bwrite\s+to\s+kafka\b", re.I),
+        ("registry", "confluent"),
+    ),
+    (
+        re.compile(r"\bdo\s+you\s+support\s+mysql\b", re.I),
+        ("azure_database_mysql",),
+    ),
+    (
+        re.compile(r"\bdo\s+you\s+support\s+redis\b", re.I),
+        ("azure_redis",),
+    ),
+    (
+        re.compile(r"\bsoc\s*2\b|\bhipaa\b|\bbaa\b", re.I),
+        ("residency", "data_region", "attestation"),
     ),
     # Bare Private Link is not Job Theater.
     (

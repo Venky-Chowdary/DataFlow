@@ -279,7 +279,7 @@ def snowflake_sharing_card() -> CapabilityCard:
 
 
 def kafka_source_card() -> CapabilityCard | None:
-    if "kafka" not in _transfer_ready_drivers():
+    if not kafka_is_transfer_ready():
         return None
     return CapabilityCard(
         title="Can I use Kafka as a source",
@@ -288,6 +288,76 @@ def kafka_source_card() -> CapabilityCard | None:
             "it as a source or a destination. "
             "Native Postgres, MySQL, and Mongo CDC do not require Kafka; "
             "the Debezium envelope bridge is optional."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def kafka_dest_card() -> CapabilityCard | None:
+    if not kafka_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Kafka as a destination",
+        text=(
+            "Yes — Kafka is a transfer-ready driver (kafka), so a transfer "
+            "can write to a topic as a destination. "
+            "A registry URL on the route is optional, not a shipped registry."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def iceberg_ready_card() -> CapabilityCard | None:
+    if not iceberg_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Iceberg",
+        text=(
+            "Yes — Iceberg is a transfer-ready driver (iceberg). "
+            "Upsert and CDC use merge-on-read; overwrite stays copy-on-write."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def sftp_ready_card() -> CapabilityCard | None:
+    if "sftp" not in _transfer_ready_drivers() and not _sftp_is_a_file_connector():
+        return None
+    return CapabilityCard(
+        title="Do you support SFTP",
+        text=(
+            "Yes — SFTP is a transfer-ready file connector (sftp): host, "
+            "port, and credentials, not a bastion in front of a warehouse."
+        ),
+        source_module="src/transfer/connector_capabilities.py · sftp",
+        category="connectors",
+    )
+
+
+def mysql_ready_card() -> CapabilityCard | None:
+    if not mysql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support MySQL",
+        text=(
+            "Yes — MySQL is a transfer-ready driver (mysql)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def redis_ready_card() -> CapabilityCard | None:
+    if not redis_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Redis",
+        text=(
+            "Yes — Redis is a transfer-ready driver (redis). "
+            "Azure Cache for Redis and Memorystore connect as the same driver."
         ),
         source_module="services/catalog_service.py · unique_driver_types",
         category="connectors",
@@ -459,6 +529,14 @@ def gcs_is_transfer_ready() -> bool:
 
 def redis_is_transfer_ready() -> bool:
     return "redis" in _transfer_ready_drivers()
+
+
+def iceberg_is_transfer_ready() -> bool:
+    return "iceberg" in _transfer_ready_drivers()
+
+
+def kafka_is_transfer_ready() -> bool:
+    return "kafka" in _transfer_ready_drivers()
 
 
 def scd2_is_canonical() -> bool:
@@ -640,10 +718,9 @@ def compliance_attestation_card() -> CapabilityCard | None:
         title="Do you sign a SOC2 or HIPAA BAA",
         text=(
             "Datawrap does not invent a signed SOC 2 Type II letter, GDPR DPA, "
-            "or HIPAA BAA — audit export is a workspace-scoped sample whose "
-            "HMAC-SHA256 chain is diligence, not an attestation. "
-            "Settings → Audit Logs list mapping decisions, job runs, and "
-            "quarantine events an auditor can review; they are not a certificate."
+            "or HIPAA BAA (soc2 is false). "
+            "Audit export is a workspace-scoped sample whose HMAC-SHA256 chain "
+            "is diligence, not a certificate."
         ),
         source_module="src/routers/audit_router.py · audit_export_honesty",
         category="enterprise",
@@ -5734,6 +5811,11 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         iceberg_catalog_card,
         snowflake_sharing_card,
         kafka_source_card,
+        kafka_dest_card,
+        iceberg_ready_card,
+        sftp_ready_card,
+        mysql_ready_card,
+        redis_ready_card,
         salesforce_card,
         schema_registry_card,
         silent_data_loss_card,

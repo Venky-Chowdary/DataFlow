@@ -238,6 +238,11 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support App Hub",
         "Do you support Microsoft Advertising",
         "Do you support GitHub Copilot as a destination",
+        "Do you support Iceberg",
+        "Do you support SFTP",
+        "Do you support Kafka as a destination",
+        "Do you support MySQL",
+        "Do you support Redis",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

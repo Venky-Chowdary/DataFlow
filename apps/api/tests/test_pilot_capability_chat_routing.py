@@ -95,6 +95,11 @@ def _names(question: str) -> list[str]:
         "do you support Bing Ads",
         "do you support Config Connector",
         "do you support GitHub Copilot as a destination",
+        "do you support Iceberg",
+        "do you support SFTP",
+        "do you support Kafka as a destination",
+        "do you support MySQL",
+        "do you support Redis",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

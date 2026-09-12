@@ -401,6 +401,11 @@ def _lead(question: str) -> str:
         ("do you support Document AI as a destination", ("document_ai is false",), ("azure_ai_search is false",)),
         ("do you support FHIR as a destination", ("fhir is false",), ("bigquery_ml is false",)),
         ("do you support GitHub Copilot as a destination", ("github_copilot is false",), ("github_enterprise is false",)),
+        ("do you support Iceberg", ("iceberg is a transfer-ready",), ("data_catalog is false",)),
+        ("do you support SFTP", ("sftp is a transfer-ready",), ("destinations the product supports", "does not open ssh",)),
+        ("do you support Kafka as a destination", ("kafka is a transfer-ready",), ("schema registry",)),
+        ("do you support MySQL", ("mysql is a transfer-ready",), ("azure database for mysql is the mysql",)),
+        ("do you support Redis", ("redis is a transfer-ready",), ("azure cache for redis is the redis",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(

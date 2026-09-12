@@ -402,6 +402,11 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support document ai as a destination", "do you support document ai as a destination"),
     ("do you support fhir as a destination", "do you support fhir as a destination"),
     ("do you support github copilot as a destination", "do you support github copilot as a destination"),
+    ("do you support iceberg", "do you support iceberg"),
+    ("do you support sftp", "do you support sftp"),
+    ("do you support kafka as a destination", "do you support kafka as a destination"),
+    ("do you support mysql", "do you support mysql"),
+    ("do you support redis", "do you support redis"),
 )
 
 
