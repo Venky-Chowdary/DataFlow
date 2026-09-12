@@ -380,3 +380,18 @@ def test_briefing_through_agent_uses_tool_not_faq(monkeypatch):
     assert "job_deadbee" in resp.answer or "failed" in resp.answer.lower()
     assert "650" not in resp.answer
     assert "99%" not in resp.answer
+
+
+def test_an_inventory_read_is_not_prefixed_with_filler():
+    """The tool prose already opens with the finding.
+
+    "Here's what I found." cost "how many connectors do I have" and "list my
+    connectors" their first line: the operator read four words of filler
+    before "You have **2 saved connector(s)**".
+    """
+    from src.ai.copilot.conversation_composer import weave_tool_answer
+
+    body = "You have **2 saved connector(s)**:\n\n• **Demo Orders** (sqlite)"
+    woven = weave_tool_answer("list my connectors", [body], act="workspace")
+    assert woven.startswith("You have **2 saved connector(s)**")
+    assert "Here's what I found" not in woven

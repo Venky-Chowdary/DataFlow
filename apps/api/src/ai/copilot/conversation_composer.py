@@ -351,10 +351,12 @@ def weave_tool_answer(message: str, parts: list[str], *, act: DialogueAct) -> st
         return summarize_text(body)
     if act == "next_action":
         return compose_next_action(last_answer=body)
-    # Conversational lead only when the first line is a raw inventory.
-    first = body.split("\n", 1)[0]
-    if first.startswith("You have **") or first.startswith("**") and "pipeline" in first.lower():
-        return f"Here's what I found.\n\n{body}"
+    # No conversational lead. An inventory read was prefixed with "Here's what
+    # I found." to soften it, which cost the answer its first line: asked "how
+    # many connectors do I have" the operator read four words of filler before
+    # "You have **2 saved connector(s)**". The tool prose already opens with
+    # the finding, and a turn that says what it found does not need to announce
+    # that it found something.
     return body
 
 
