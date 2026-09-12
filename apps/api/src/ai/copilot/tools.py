@@ -1427,6 +1427,8 @@ class DataPilotTools:
                     "(transfers run Datawrap's own transfer-ready drivers)",
                     "Invent a signed SOC 2 letter, GDPR DPA, or HIPAA BAA "
                     "(audit export is diligence, not an attestation)",
+                    "Undo a committed transfer or roll back a load "
+                    "(resume and quarantine replay exist; warehouse restore does not)",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [

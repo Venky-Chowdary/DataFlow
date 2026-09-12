@@ -347,6 +347,34 @@ def airbyte_is_transfer_ready() -> bool:
     return "airbyte" in _transfer_ready_drivers()
 
 
+def fivetran_is_transfer_ready() -> bool:
+    return "fivetran" in _transfer_ready_drivers()
+
+
+def transfer_undo_claimed() -> bool:
+    try:
+        from services.recovery_honesty import TRANSFER_UNDO_CLAIMED
+    except Exception:
+        return False
+    return bool(TRANSFER_UNDO_CLAIMED)
+
+
+def viewer_can_read_secrets() -> bool:
+    try:
+        from services.rbac import Permission, role_permissions
+    except Exception:
+        return False
+    return Permission.WORKSPACE_MANAGE in role_permissions("viewer")
+
+
+def snowflake_key_pair_supported() -> bool:
+    try:
+        from services.connector_auth import infer_auth_mode
+    except Exception:
+        return False
+    return infer_auth_mode(private_key="-----BEGIN PRIVATE KEY-----", driver="snowflake") == "key_pair"
+
+
 def silent_data_loss_card() -> CapabilityCard | None:
     """No legal zero-loss SLA — quarantine + ledger, not query-capture deletes."""
     try:
@@ -423,19 +451,148 @@ def compliance_attestation_card() -> CapabilityCard | None:
 
 
 def airbyte_connector_pack_card() -> CapabilityCard | None:
-    """Airbyte is a planned tile / competitor name, not a connector runtime."""
-    if airbyte_is_transfer_ready():
+    """Airbyte / Fivetran tiles are not a connector runtime."""
+    if airbyte_is_transfer_ready() or fivetran_is_transfer_ready():
         return None
     return CapabilityCard(
-        title="Does Datawrap load Airbyte connector packs",
+        title="Does Datawrap load Airbyte or Fivetran connector packs",
         text=(
-            "Datawrap does not load Airbyte connector packs or custom Airbyte "
-            "connectors — a transfer runs Datawrap's own transfer-ready drivers "
-            "(unique_driver_types), not an Airbyte CDK spec. "
-            "Airbyte remains a planned catalog tile and a competitor comparison, "
+            "Datawrap does not load Airbyte connector packs, Fivetran connector "
+            "packs, or custom Airbyte connectors — a transfer runs Datawrap's "
+            "own transfer-ready drivers (unique_driver_types), not an Airbyte "
+            "CDK or Fivetran pack. "
+            "Both remain planned catalog tiles and a competitor comparison, "
             "not a connector runtime."
         ),
         source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def transfer_undo_card() -> CapabilityCard | None:
+    if transfer_undo_claimed():
+        return None
+    try:
+        from services.recovery_honesty import honesty_dict
+    except Exception:
+        return None
+    honesty = honesty_dict()
+    resume = bool((honesty.get("capabilities") or {}).get("checkpoint_resume", {}).get("available"))
+    return CapabilityCard(
+        title="Can I undo a transfer",
+        text=(
+            "Datawrap does not undo a transfer or roll back a committed load — "
+            "transfer_undo_claimed is false, and there is no one-click destination "
+            "undo, staging swap, or warehouse restore. "
+            + (
+                "A failed run can resume from the last safe checkpoint; "
+                "quarantined rows can be replayed; warehouse Time Travel stays DBA tooling."
+                if resume
+                else "Quarantined rows can be replayed; warehouse restore stays DBA tooling."
+            )
+        ),
+        source_module="services/recovery_honesty.py · honesty_dict",
+        category="proof",
+    )
+
+
+def viewer_secrets_card() -> CapabilityCard | None:
+    if viewer_can_read_secrets():
+        return None
+    return CapabilityCard(
+        title="Can a viewer see secrets",
+        text=(
+            "A viewer cannot see secrets — SSO certificates, provider keys, "
+            "API keys, and BYOK stay behind workspace.manage. "
+            "A viewer can read jobs, connectors, and audit events; YAML export "
+            "does not include credentials."
+        ),
+        source_module="services/rbac.py · workspace.manage",
+        category="enterprise",
+    )
+
+
+def rest_api_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Do you have a REST API",
+        text=(
+            "Yes — Datawrap has a REST API at /api/v1; authenticate with a "
+            "Bearer token to list connectors, run preflight, execute a "
+            "transfer, and read job status. "
+            "Mutating calls still require Confirm."
+        ),
+        source_module="docs/API_VERSIONING.md · /api/v1",
+        category="api",
+    )
+
+
+def github_actions_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Can I call Datawrap from GitHub Actions",
+        text=(
+            "Yes — GitHub Actions can call the /api/v1 REST API with a Bearer "
+            "token after you Confirm; Datawrap does not run GitHub Actions or "
+            "Airflow as the write engine. "
+            "An external CI job is a client of the API, not the transfer runtime."
+        ),
+        source_module="docs/API_VERSIONING.md · start_transfer requires_confirm",
+        category="api",
+    )
+
+
+def openlineage_card() -> CapabilityCard | None:
+    try:
+        from services.lineage_telemetry import emit_run_started
+    except Exception:
+        return None
+    if emit_run_started is None:
+        return None
+    return CapabilityCard(
+        title="Do you support OpenLineage",
+        text=(
+            "Yes — transfers emit OpenLineage-compatible events at run and "
+            "dataset grain (job, run, datasets, validation evidence), not a "
+            "hosted OpenLineage server or a per-row graph. "
+            "Row-level questions use the row ledger and quarantine reason."
+        ),
+        source_module="services/lineage_telemetry.py · emit_run_started",
+        category="proof",
+    )
+
+
+def mirror_versus_upsert_card() -> CapabilityCard | None:
+    if not upsert_is_canonical_sync_mode():
+        return None
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return None
+    if "mirror" not in CANONICAL_SYNC_MODES:
+        return None
+    return CapabilityCard(
+        title="What is the difference between mirror and upsert",
+        text=(
+            "Mirror is upsert plus deletion — destination rows whose key the "
+            "source no longer has are removed. "
+            "Upsert leaves those destination-only rows alone. "
+            "Mirror deletes data, so nothing aliases onto it implicitly."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def snowflake_key_pair_card() -> CapabilityCard | None:
+    if not snowflake_key_pair_supported():
+        return None
+    return CapabilityCard(
+        title="Can I connect Snowflake with a private key",
+        text=(
+            "Yes — Snowflake accepts key-pair auth: a private_key selects "
+            "auth_mode key_pair on the Snowflake (and SFTP) connect path. "
+            "That is a connector credential, not BYOK and not AWS PrivateLink."
+        ),
+        source_module="services/connector_auth.py · infer_auth_mode",
         category="connectors",
     )
 
@@ -461,6 +618,13 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         upsert_versus_merge_card,
         airbyte_connector_pack_card,
         compliance_attestation_card,
+        transfer_undo_card,
+        viewer_secrets_card,
+        rest_api_card,
+        github_actions_card,
+        openlineage_card,
+        mirror_versus_upsert_card,
+        snowflake_key_pair_card,
     ):
         card = builder()
         if card is not None:

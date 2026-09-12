@@ -108,6 +108,18 @@ def test_upsert_merge_and_airbyte_pack_do_not_snap_to_neighbors() -> None:
         "can you sign a HIPAA BAA",
         "byok, region, and audit",
     )
+    assert drops_distinctive_subjects(
+        "what is the difference between mirror and upsert",
+        "what is the difference between upsert and merge",
+    )
+    assert drops_distinctive_subjects(
+        "can I undo a transfer",
+        "do you have salesforce",
+    )
+    assert drops_distinctive_subjects(
+        "can I call this from GitHub Actions",
+        "open the mcp page",
+    )
 
 
 def test_rice_is_an_unrelated_subject() -> None:

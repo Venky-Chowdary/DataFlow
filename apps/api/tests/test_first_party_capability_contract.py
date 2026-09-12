@@ -47,7 +47,14 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Can I use an Iceberg Glue catalog",
         "Do you guarantee no silent data loss",
         "What is the difference between upsert and merge",
-        "Does Datawrap load Airbyte connector packs",
+        "Does Datawrap load Airbyte or Fivetran connector packs",
+        "Can I undo a transfer",
+        "Can a viewer see secrets",
+        "Do you have a REST API",
+        "Can I call Datawrap from GitHub Actions",
+        "Do you support OpenLineage",
+        "What is the difference between mirror and upsert",
+        "Can I connect Snowflake with a private key",
         "Do you sign a SOC2 or HIPAA BAA",
     ):
         assert title in titles, title
@@ -93,6 +100,7 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
     assert upsert is not None and "merge into" in upsert.text.lower()
     assert "nightly load" not in upsert.text.lower()
     assert pack is not None and "does not load airbyte" in pack.text.lower()
+    assert "fivetran connector packs" in pack.text.lower()
     from src.ai.first_party.capability_contract import compliance_attestation_card
     from src.routers.audit_router import audit_export_honesty
 
@@ -123,12 +131,48 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     hipaa = compose_product_answer(
         retrieve_product_answer("can you sign a HIPAA BAA", limit=4)
     ) or ""
+    undo = compose_product_answer(
+        retrieve_product_answer("can I undo a transfer", limit=4)
+    ) or ""
+    rollback = compose_product_answer(
+        retrieve_product_answer("can I roll back a load", limit=4)
+    ) or ""
+    secrets = compose_product_answer(
+        retrieve_product_answer("can a viewer see secrets", limit=4)
+    ) or ""
+    rest = compose_product_answer(
+        retrieve_product_answer("do you have a REST API", limit=4)
+    ) or ""
+    gha = compose_product_answer(
+        retrieve_product_answer("can I call this from GitHub Actions", limit=4)
+    ) or ""
+    lineage = compose_product_answer(
+        retrieve_product_answer("do you support OpenLineage", limit=4)
+    ) or ""
+    mirror = compose_product_answer(
+        retrieve_product_answer("what is the difference between mirror and upsert", limit=4)
+    ) or ""
+    keypair = compose_product_answer(
+        retrieve_product_answer("can I connect Snowflake with a private key", limit=4)
+    ) or ""
+    fivetran = compose_product_answer(
+        retrieve_product_answer("do you load Fivetran connector packs", limit=4)
+    ) or ""
     loss_lead = loss.split(". ")[0].lower()
     upsert_lead = upsert.split(". ")[0].lower()
     pack_lead = pack.split(". ")[0].lower()
     wedge_lead = wedge.split(". ")[0].lower()
     iceberg_lead = iceberg.split(". ")[0].lower()
     hipaa_lead = hipaa.split(". ")[0].lower()
+    undo_lead = undo.split(". ")[0].lower()
+    rollback_lead = rollback.split(". ")[0].lower()
+    secrets_lead = secrets.split(". ")[0].lower()
+    rest_lead = rest.split(". ")[0].lower()
+    gha_lead = gha.split(". ")[0].lower()
+    lineage_lead = lineage.split(". ")[0].lower()
+    mirror_lead = mirror.split(". ")[0].lower()
+    keypair_lead = keypair.split(". ")[0].lower()
+    fivetran_lead = fivetran.split(". ")[0].lower()
     assert "does not invent a legal" in loss_lead
     assert "query capture" not in loss_lead
     assert "upsert is a sync mode" in upsert_lead
@@ -140,3 +184,19 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "upsert is a sync mode" not in iceberg_lead
     assert "does not invent a signed" in hipaa_lead
     assert "hipaa review" not in hipaa_lead
+    assert "does not undo a transfer" in undo_lead
+    assert "open **platform" not in undo_lead
+    assert "does not undo a transfer" in rollback_lead
+    assert "pgoutput" not in rollback_lead
+    assert "cannot see secrets" in secrets_lead
+    assert "viewer can do it" not in secrets_lead
+    assert "/api/v1" in rest_lead
+    assert "46 of them" not in rest_lead
+    assert "github actions can call" in gha_lead
+    assert "mcp server status" not in gha_lead
+    assert "openlineage" in lineage_lead
+    assert "mirror is upsert plus deletion" in mirror_lead
+    assert "merge into" not in mirror_lead
+    assert "key-pair" in keypair_lead or "key_pair" in keypair_lead
+    assert "kms key" not in keypair_lead
+    assert "does not load" in fivetran_lead and "fivetran" in fivetran_lead

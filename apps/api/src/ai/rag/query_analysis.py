@@ -575,12 +575,67 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("attestation", "letter", "baa", "soc2")),
     (re.compile(
         r"\b(?:custom\s+airbyte|airbyte\s+connector(?:\s+pack)?|airbyte\s+cdk|"
-        r"load(?:ing)?\s+(?:an?\s+)?airbyte|airbyte\s+pack)\b",
+        r"load(?:ing)?\s+(?:an?\s+)?airbyte|airbyte\s+pack|"
+        r"fivetran\s+connector(?:\s+pack)?|fivetran\s+pack|"
+        r"load(?:ing)?\s+(?:an?\s+)?fivetran)\b",
         re.I,
     ),
-     ("airbyte", "pack", "driver", "cdk")),
+     ("airbyte", "fivetran", "pack", "driver", "cdk")),
     (re.compile(
-        r"\b(?:fivetran|estuary)\b"
+        r"\bundo\s+a\s+transfer\b"
+        r"|\broll\s*back\s+a\s+(?:load|transfer|run)\b"
+        r"|\btransfer\s+undo\b"
+        r"|\bunwind\s+a\s+(?:load|transfer)\b",
+        re.I,
+    ),
+     ("undo", "rollback", "restore")),
+    (re.compile(
+        r"\brest\s+api\b"
+        r"|\b/api/v1\b"
+        r"|\bhttp\s+api\b",
+        re.I,
+    ),
+     ("rest", "api", "bearer")),
+    (re.compile(
+        r"\bgithub\s+actions\b"
+        r"|\bci\s+(?:pipeline|job)\b"
+        r"|\bcall\s+(?:this|datawrap)\s+from\s+github\b",
+        re.I,
+    ),
+     ("github", "actions", "api")),
+    (re.compile(
+        r"\bviewer\s+(?:see|read|export|view)\s+secrets?\b"
+        r"|\bcan\s+a\s+viewer\s+see\s+secrets?\b"
+        r"|\bsecrets?\s+to\s+a\s+viewer\b",
+        re.I,
+    ),
+     ("viewer", "secret", "byok")),
+    (re.compile(r"\bopen\s*lineage\b|\bopenlineage\b", re.I),
+     ("openlineage", "lineage", "dataset")),
+    (re.compile(
+        r"\bmirror\s+(?:vs\.?|versus|or)\s+upsert\b"
+        r"|\bupsert\s+(?:vs\.?|versus|or)\s+mirror\b"
+        r"|\bdifference\s+between\s+mirror\s+and\s+upsert\b",
+        re.I,
+    ),
+     ("mirror", "upsert", "delete")),
+    (re.compile(
+        r"\bsnowflake\s+(?:with\s+a\s+)?private\s+key\b"
+        r"|\bkey[\s-]?pair\s+(?:auth|authentication)?\b"
+        r"|\bsnowflake\s+key[\s-]?pair\b",
+        re.I,
+    ),
+     ("snowflake", "key_pair", "private_key")),
+    (re.compile(
+        r"\bset\s+a\s+watermark\b"
+        r"|\bcdc\s+watermark\b"
+        r"|\bwhere\s+is\s+the\s+watermark\b",
+        re.I,
+    ),
+     ("watermark", "checkpoint", "resume")),
+    (re.compile(
+        r"\bestuary\b"
+        r"|(?<!custom\s)\bfivetran\b(?!\s+connector)(?!\s+pack)"
         r"|(?<!custom\s)\bairbyte\b(?!\s+connector)(?!\s+cdk)(?!\s+pack)",
         re.I,
     ),

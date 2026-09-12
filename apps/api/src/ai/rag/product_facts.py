@@ -2254,10 +2254,10 @@ def _rest_api_section() -> GeneratedSection:
         doc_title="API reference",
         section_title="Procedure: call the /api/v1 endpoints",
         text=(
-            "Use the /api/v1 endpoints to list connectors, run preflight, "
-            "execute a transfer, and read job status. "
+            "Use the /api/v1 endpoints with a Bearer token to list connectors, "
+            "run preflight, execute a transfer, and read job status. "
             "Canonical prefix is /api/v1 — see docs/API_VERSIONING.md for "
-            "deprecation policy. Authenticate with a Bearer token."
+            "deprecation policy."
         ),
         source_module="docs/API_VERSIONING.md · help-api#endpoints",
         category="api",

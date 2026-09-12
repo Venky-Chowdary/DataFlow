@@ -874,6 +874,18 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "can you sign a HIPAA BAA",
             ("does not invent a signed", "hipaa baa"),
         ),
+        (
+            "can I undo a transfer",
+            ("does not undo a transfer",),
+        ),
+        (
+            "do you have a REST API",
+            ("/api/v1",),
+        ),
+        (
+            "what is the difference between mirror and upsert",
+            ("mirror is upsert plus deletion",),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(

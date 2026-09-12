@@ -166,6 +166,10 @@ def subject_aliases() -> frozenset[str]:
             "soc2",
             "hipaa",
             "baa",
+            "openlineage",
+            "github",
+            "undo",
+            "rollback",
         }
     )
     try:
