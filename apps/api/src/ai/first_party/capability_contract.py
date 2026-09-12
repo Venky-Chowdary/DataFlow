@@ -3101,6 +3101,126 @@ def azure_dedicated_sql_pool_shipped() -> bool:
     return bool(_transfer_ready_drivers() & {"dedicated_sql_pool", "synapse"})
 
 
+def cloud_cdn_shipped() -> bool:
+    return False
+
+
+def cloud_nat_shipped() -> bool:
+    return False
+
+
+def cloud_iap_shipped() -> bool:
+    return False
+
+
+def cloud_hsm_shipped() -> bool:
+    return False
+
+
+def certificate_manager_shipped() -> bool:
+    return False
+
+
+def binary_authorization_shipped() -> bool:
+    return False
+
+
+def service_mesh_shipped() -> bool:
+    return False
+
+
+def apigee_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"apigee"})
+
+
+def iot_central_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"iot_central"})
+
+
+def time_series_insights_shipped() -> bool:
+    return False
+
+
+def azure_maps_shipped() -> bool:
+    return False
+
+
+def notification_hubs_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"notification_hubs"})
+
+
+def azure_web_pubsub_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"web_pubsub", "azure_web_pubsub"})
+
+
+def azure_repos_shipped() -> bool:
+    return False
+
+
+def azure_pipelines_shipped() -> bool:
+    return False
+
+
+def bing_ads_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"bing_ads"})
+
+
+def retail_api_shipped() -> bool:
+    return False
+
+
+def healthcare_api_shipped() -> bool:
+    return False
+
+
+def cloud_endpoints_shipped() -> bool:
+    return False
+
+
+def tag_manager_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gtm", "tag_manager"})
+
+
+def search_console_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"search_console", "gsc"})
+
+
+def cloud_load_balancing_shipped() -> bool:
+    return False
+
+
+def assured_workloads_shipped() -> bool:
+    return False
+
+
+def config_connector_shipped() -> bool:
+    return False
+
+
+def app_hub_shipped() -> bool:
+    return False
+
+
+def microsoft_advertising_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"microsoft_advertising", "msads"})
+
+
+def azure_artifacts_shipped() -> bool:
+    return False
+
+
+def document_ai_shipped() -> bool:
+    return False
+
+
+def fhir_shipped() -> bool:
+    return False
+
+
+def github_copilot_dest_shipped() -> bool:
+    return False
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -5179,6 +5299,426 @@ def azure_dedicated_sql_pool_card() -> CapabilityCard | None:
     )
 
 
+def cloud_cdn_card() -> CapabilityCard | None:
+    if cloud_cdn_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud CDN",
+        text=(
+            "Datawrap does not ship Google Cloud CDN "
+            "(cloud_cdn is false). Azure CDN is a different product."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_nat_card() -> CapabilityCard | None:
+    if cloud_nat_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud NAT",
+        text=(
+            "Datawrap does not ship Google Cloud NAT as a connect option "
+            "(cloud_nat is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_iap_card() -> CapabilityCard | None:
+    if cloud_iap_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud IAP",
+        text=(
+            "Datawrap does not ship Identity-Aware Proxy as a connect option "
+            "(cloud_iap is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_hsm_card() -> CapabilityCard | None:
+    if cloud_hsm_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud HSM",
+        text=(
+            "Datawrap does not ship Cloud HSM as a key or connect option "
+            "(cloud_hsm is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def certificate_manager_card() -> CapabilityCard | None:
+    if certificate_manager_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Certificate Manager",
+        text=(
+            "Datawrap does not ship Google Certificate Manager "
+            "(certificate_manager is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def binary_authorization_card() -> CapabilityCard | None:
+    if binary_authorization_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Binary Authorization",
+        text=(
+            "Datawrap does not ship Binary Authorization "
+            "(binary_authorization is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def service_mesh_card() -> CapabilityCard | None:
+    if service_mesh_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Service Mesh",
+        text=(
+            "Datawrap does not ship Cloud Service Mesh "
+            "(service_mesh is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def apigee_card() -> CapabilityCard | None:
+    if apigee_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Apigee as a destination",
+        text=(
+            "Datawrap does not ship Apigee as a transfer destination "
+            "(apigee is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def iot_central_card() -> CapabilityCard | None:
+    if iot_central_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure IoT Central",
+        text=(
+            "Datawrap does not ship Azure IoT Central "
+            "(iot_central is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def time_series_insights_card() -> CapabilityCard | None:
+    if time_series_insights_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Time Series Insights",
+        text=(
+            "Datawrap does not ship Azure Time Series Insights "
+            "(time_series_insights is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_maps_card() -> CapabilityCard | None:
+    if azure_maps_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Maps",
+        text=(
+            "Datawrap does not ship Azure Maps as a transfer destination "
+            "(azure_maps is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def notification_hubs_card() -> CapabilityCard | None:
+    if notification_hubs_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Notification Hubs",
+        text=(
+            "Datawrap does not ship Azure Notification Hubs "
+            "(notification_hubs is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_web_pubsub_card() -> CapabilityCard | None:
+    if azure_web_pubsub_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Web PubSub",
+        text=(
+            "Datawrap does not ship Azure Web PubSub "
+            "(azure_web_pubsub is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_repos_card() -> CapabilityCard | None:
+    if azure_repos_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Repos as a destination",
+        text=(
+            "Datawrap does not ship Azure Repos as a transfer destination "
+            "(azure_repos is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_pipelines_card() -> CapabilityCard | None:
+    if azure_pipelines_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Pipelines as a destination",
+        text=(
+            "Datawrap does not ship Azure Pipelines as a transfer destination "
+            "(azure_pipelines is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bing_ads_card() -> CapabilityCard | None:
+    if bing_ads_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Bing Ads",
+        text=(
+            "Datawrap does not ship Bing Ads as a transfer-ready source "
+            "(bing_ads is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def retail_api_card() -> CapabilityCard | None:
+    if retail_api_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Retail API",
+        text=(
+            "Datawrap does not ship Google Cloud Retail API "
+            "(retail_api is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def healthcare_api_card() -> CapabilityCard | None:
+    if healthcare_api_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Healthcare API",
+        text=(
+            "Datawrap does not ship Google Cloud Healthcare API "
+            "(healthcare_api is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_endpoints_card() -> CapabilityCard | None:
+    if cloud_endpoints_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Endpoints",
+        text=(
+            "Datawrap does not ship Google Cloud Endpoints "
+            "(cloud_endpoints is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def tag_manager_card() -> CapabilityCard | None:
+    if tag_manager_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Tag Manager",
+        text=(
+            "Datawrap does not ship Google Tag Manager as a transfer-ready "
+            "source (tag_manager is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def search_console_card() -> CapabilityCard | None:
+    if search_console_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Search Console as a source",
+        text=(
+            "Datawrap does not ship Search Console as a transfer-ready source "
+            "(search_console is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_load_balancing_card() -> CapabilityCard | None:
+    if cloud_load_balancing_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Load Balancing",
+        text=(
+            "Datawrap does not ship Cloud Load Balancing as a connect option "
+            "(cloud_load_balancing is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def assured_workloads_card() -> CapabilityCard | None:
+    if assured_workloads_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Assured Workloads",
+        text=(
+            "Datawrap does not ship Assured Workloads as a connect option "
+            "(assured_workloads is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def config_connector_card() -> CapabilityCard | None:
+    if config_connector_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Config Connector",
+        text=(
+            "Datawrap does not ship Config Connector as a GitOps write path "
+            "(config_connector is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def app_hub_card() -> CapabilityCard | None:
+    if app_hub_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support App Hub",
+        text=(
+            "Datawrap does not ship App Hub as a transfer-ready driver "
+            "(app_hub is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_advertising_card() -> CapabilityCard | None:
+    if microsoft_advertising_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Advertising",
+        text=(
+            "Datawrap does not ship Microsoft Advertising as a transfer-ready "
+            "source (microsoft_advertising is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_artifacts_card() -> CapabilityCard | None:
+    if azure_artifacts_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Artifacts",
+        text=(
+            "Datawrap does not ship Azure Artifacts as a transfer destination "
+            "(azure_artifacts is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def document_ai_card() -> CapabilityCard | None:
+    if document_ai_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Document AI as a destination",
+        text=(
+            "Datawrap does not ship Document AI as a transfer destination "
+            "(document_ai is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def fhir_card() -> CapabilityCard | None:
+    if fhir_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support FHIR as a destination",
+        text=(
+            "Datawrap does not ship FHIR as a transfer destination "
+            "(fhir is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def github_copilot_dest_card() -> CapabilityCard | None:
+    if github_copilot_dest_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support GitHub Copilot as a destination",
+        text=(
+            "Datawrap does not ship GitHub Copilot as a transfer destination "
+            "(github_copilot is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -5452,6 +5992,36 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         api_gateway_card,
         azure_test_plans_card,
         azure_dedicated_sql_pool_card,
+        cloud_cdn_card,
+        cloud_nat_card,
+        cloud_iap_card,
+        cloud_hsm_card,
+        certificate_manager_card,
+        binary_authorization_card,
+        service_mesh_card,
+        apigee_card,
+        iot_central_card,
+        time_series_insights_card,
+        azure_maps_card,
+        notification_hubs_card,
+        azure_web_pubsub_card,
+        azure_repos_card,
+        azure_pipelines_card,
+        bing_ads_card,
+        retail_api_card,
+        healthcare_api_card,
+        cloud_endpoints_card,
+        tag_manager_card,
+        search_console_card,
+        cloud_load_balancing_card,
+        assured_workloads_card,
+        config_connector_card,
+        app_hub_card,
+        microsoft_advertising_card,
+        azure_artifacts_card,
+        document_ai_card,
+        fhir_card,
+        github_copilot_dest_card,
     ):
         card = builder()
         if card is not None:

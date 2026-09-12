@@ -1283,6 +1283,36 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bapi\s+gateway\b", re.I), ("api_gateway",)),
     (re.compile(r"\btest\s+plans\b", re.I), ("azure_test_plans",)),
     (re.compile(r"\bdedicated\s+sql\s+pool\b", re.I), ("azure_dedicated_sql_pool",)),
+    (re.compile(r"\bcloud\s+cdn\b", re.I), ("cloud_cdn",)),
+    (re.compile(r"\bcloud\s+nat\b", re.I), ("cloud_nat",)),
+    (re.compile(r"\bcloud\s+iap\b|\bidentity[\s-]aware\s+proxy\b", re.I), ("cloud_iap",)),
+    (re.compile(r"\bcloud\s+hsm\b", re.I), ("cloud_hsm",)),
+    (re.compile(r"\bcertificate\s+manager\b", re.I), ("certificate_manager",)),
+    (re.compile(r"\bbinary\s+authorization\b", re.I), ("binary_authorization",)),
+    (re.compile(r"\bservice\s+mesh\b", re.I), ("service_mesh",)),
+    (re.compile(r"\bapigee\b", re.I), ("apigee",)),
+    (re.compile(r"\biot\s+central\b", re.I), ("iot_central",)),
+    (re.compile(r"\btime\s+series\s+insights\b", re.I), ("time_series_insights",)),
+    (re.compile(r"\bazure\s+maps\b", re.I), ("azure_maps",)),
+    (re.compile(r"\bnotification\s+hubs?\b", re.I), ("notification_hubs",)),
+    (re.compile(r"\bweb\s+pubsub\b", re.I), ("azure_web_pubsub",)),
+    (re.compile(r"\bazure\s+repos\b", re.I), ("azure_repos",)),
+    (re.compile(r"\bazure\s+pipelines\b", re.I), ("azure_pipelines",)),
+    (re.compile(r"\bbing\s+ads\b", re.I), ("bing_ads",)),
+    (re.compile(r"\bretail\s+api\b", re.I), ("retail_api",)),
+    (re.compile(r"\bhealthcare\s+api\b", re.I), ("healthcare_api",)),
+    (re.compile(r"\bcloud\s+endpoints\b", re.I), ("cloud_endpoints",)),
+    (re.compile(r"\btag\s+manager\b", re.I), ("tag_manager",)),
+    (re.compile(r"\bsearch\s+console\b", re.I), ("search_console",)),
+    (re.compile(r"\bcloud\s+load\s+balanc", re.I), ("cloud_load_balancing",)),
+    (re.compile(r"\bassured\s+workloads?\b", re.I), ("assured_workloads",)),
+    (re.compile(r"\bconfig\s+connector\b", re.I), ("config_connector",)),
+    (re.compile(r"\bapp\s+hub\b", re.I), ("app_hub",)),
+    (re.compile(r"\bmicrosoft\s+advertising\b", re.I), ("microsoft_advertising",)),
+    (re.compile(r"\bazure\s+artifacts\b", re.I), ("azure_artifacts",)),
+    (re.compile(r"\bdocument\s+ai\b", re.I), ("document_ai",)),
+    (re.compile(r"\bfhir\b", re.I), ("fhir",)),
+    (re.compile(r"\bgithub\s+copilot\b", re.I), ("github_copilot",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2590,6 +2620,106 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bdedicated\s+sql\s+pool\b", re.I),
         ("postgresql", "azure_database_postgresql", "azure_flexible_server"),
+    ),
+    (
+        re.compile(r"\bcloud\s+cdn\b", re.I),
+        ("azure_cdn",),
+    ),
+    (
+        re.compile(
+            r"\bcloud\s+nat\b|\bcloud\s+iap\b|\bidentity[\s-]aware\s+proxy\b"
+            r"|\bcloud\s+hsm\b",
+            re.I,
+        ),
+        ("cloud_run",),
+    ),
+    (
+        re.compile(r"\bcertificate\s+manager\b|\btag\s+manager\b", re.I),
+        ("campaign_manager",),
+    ),
+    (
+        re.compile(r"\bbinary\s+authorization\b", re.I),
+        ("bytea", "blob", "binary"),
+    ),
+    (
+        re.compile(r"\bservice\s+mesh\b", re.I),
+        ("service_bus", "bus"),
+    ),
+    (
+        re.compile(r"\bapigee\b|\bfhir\b", re.I),
+        ("bigquery_ml",),
+    ),
+    (
+        re.compile(r"\biot\s+central\b", re.I),
+        ("business_central",),
+    ),
+    (
+        re.compile(r"\btime\s+series\s+insights\b", re.I),
+        ("application_insights",),
+    ),
+    (
+        re.compile(r"\bazure\s+maps\b", re.I),
+        ("studio",),
+    ),
+    (
+        re.compile(r"\bnotification\s+hubs?\b", re.I),
+        ("event_hubs",),
+    ),
+    (
+        re.compile(r"\bweb\s+pubsub\b", re.I),
+        ("pubsub",),
+    ),
+    (
+        re.compile(r"\bazure\s+repos\b|\bazure\s+pipelines\b", re.I),
+        ("azure_openai",),
+    ),
+    (
+        re.compile(r"\bbing\s+ads\b", re.I),
+        ("google_ads",),
+    ),
+    (
+        re.compile(r"\bretail\s+api\b|\bhealthcare\s+api\b", re.I),
+        ("rest", "api", "bearer"),
+    ),
+    (
+        re.compile(r"\bcloud\s+endpoints\b", re.I),
+        ("catalog", "preflight", "endpoint"),
+    ),
+    (
+        re.compile(r"\bsearch\s+console\b", re.I),
+        ("search_ads_360",),
+    ),
+    (
+        re.compile(r"\bcloud\s+load\s+balanc", re.I),
+        ("dbt", "cloud"),
+    ),
+    (
+        re.compile(r"\bassured\s+workloads?\b", re.I),
+        ("workload", "identity"),
+    ),
+    (
+        re.compile(r"\bconfig\s+connector\b", re.I),
+        ("pipeline", "drawer", "config"),
+    ),
+    (
+        re.compile(r"\bapp\s+hub\b", re.I),
+        ("ip", "allowlist", "vanity"),
+    ),
+    (
+        re.compile(r"\bmicrosoft\s+advertising\b", re.I),
+        ("teams_dest", "team"),
+    ),
+    (
+        re.compile(r"\bazure\s+artifacts\b", re.I),
+        ("artifact_registry",),
+    ),
+    (
+        re.compile(r"\bdocument\s+ai\b", re.I),
+        ("azure_ai_search",),
+    ),
+    (
+        re.compile(r"\bgithub\s+copilot\b", re.I),
+        ("github_enterprise",),
     ),
     # Bare Private Link is not Job Theater.
     (

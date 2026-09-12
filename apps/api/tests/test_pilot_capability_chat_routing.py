@@ -88,6 +88,13 @@ def _names(question: str) -> list[str]:
         "do you support API Gateway",
         "do you support Azure Test Plans",
         "do you support Azure Dedicated SQL Pool",
+        "do you support Cloud CDN",
+        "do you support Binary Authorization",
+        "do you support Azure Maps",
+        "do you support Retail API",
+        "do you support Bing Ads",
+        "do you support Config Connector",
+        "do you support GitHub Copilot as a destination",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

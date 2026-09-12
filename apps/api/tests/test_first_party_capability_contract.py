@@ -221,6 +221,23 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support API Gateway",
         "Do you support Azure Test Plans",
         "Do you support Azure Dedicated SQL Pool",
+        "Do you support Cloud CDN",
+        "Do you support Certificate Manager",
+        "Do you support Binary Authorization",
+        "Do you support Service Mesh",
+        "Do you support Apigee as a destination",
+        "Do you support Azure IoT Central",
+        "Do you support Azure Maps",
+        "Do you support Azure Web PubSub",
+        "Do you support Bing Ads",
+        "Do you support Retail API",
+        "Do you support Healthcare API",
+        "Do you support Google Tag Manager",
+        "Do you support Search Console as a source",
+        "Do you support Config Connector",
+        "Do you support App Hub",
+        "Do you support Microsoft Advertising",
+        "Do you support GitHub Copilot as a destination",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

@@ -1120,7 +1120,12 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\binterconnect\b", analysis.text, re.I) else -3.2
     if "cloud vpn" in title:
         bonus += 6.0 if re.search(r"\bcloud\s+vpn\b", analysis.text, re.I) else -3.2
-    if re.search(r"\bcloud\s+armor\b|\bcloud\s+interconnect\b|\bcloud\s+vpn\b", analysis.text, re.I) and "cloud run" in title:
+    if re.search(
+        r"\bcloud\s+armor\b|\bcloud\s+interconnect\b|\bcloud\s+vpn\b"
+        r"|\bcloud\s+nat\b|\bcloud\s+iap\b|\bcloud\s+hsm\b",
+        analysis.text,
+        re.I,
+    ) and "cloud run" in title:
         bonus -= 6.0
     if "azure arc" in title:
         bonus += 6.0 if re.search(r"\bazure\s+arc\b", analysis.text, re.I) else -3.2
@@ -1423,6 +1428,104 @@ def _section_intent_bonus(
     if re.search(r"\bdedicated\s+sql\s+pool\b", analysis.text, re.I) and (
         "azure database for postgresql" in title or "flexible server" in title
     ):
+        bonus -= 6.0
+    if "cloud cdn" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+cdn\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+cdn\b", analysis.text, re.I) and "azure cdn" in title:
+        bonus -= 6.0
+    if "cloud nat" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+nat\b", analysis.text, re.I) else -3.2
+    if "cloud iap" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+iap\b|\bidentity[\s-]aware\s+proxy\b", analysis.text, re.I) else -3.2
+    if "cloud hsm" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+hsm\b", analysis.text, re.I) else -3.2
+    if "certificate manager" in title:
+        bonus += 6.0 if re.search(r"\bcertificate\s+manager\b", analysis.text, re.I) else -3.2
+    if "tag manager" in title:
+        bonus += 6.0 if re.search(r"\btag\s+manager\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcertificate\s+manager\b|\btag\s+manager\b", analysis.text, re.I) and "campaign manager" in title:
+        bonus -= 6.0
+    if "binary authorization" in title:
+        bonus += 6.0 if re.search(r"\bbinary\s+authorization\b", analysis.text, re.I) else -3.2
+    if "service mesh" in title:
+        bonus += 6.0 if re.search(r"\bservice\s+mesh\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bservice\s+mesh\b", analysis.text, re.I) and "service bus" in title:
+        bonus -= 6.0
+    if "apigee" in title:
+        bonus += 6.0 if re.search(r"\bapigee\b", analysis.text, re.I) else -3.2
+    if "iot central" in title:
+        bonus += 6.0 if re.search(r"\biot\s+central\b", analysis.text, re.I) else -3.2
+    if re.search(r"\biot\s+central\b", analysis.text, re.I) and "business central" in title:
+        bonus -= 6.0
+    if "time series insights" in title:
+        bonus += 6.0 if re.search(r"\btime\s+series\s+insights\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btime\s+series\s+insights\b", analysis.text, re.I) and "application insights" in title:
+        bonus -= 6.0
+    if "azure maps" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+maps\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+maps\b", analysis.text, re.I) and "transfer studio" in title:
+        bonus -= 6.0
+    if "notification hubs" in title:
+        bonus += 6.0 if re.search(r"\bnotification\s+hubs?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bnotification\s+hubs?\b", analysis.text, re.I) and "event hubs" in title:
+        bonus -= 6.0
+    if "web pubsub" in title:
+        bonus += 6.0 if re.search(r"\bweb\s+pubsub\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bweb\s+pubsub\b", analysis.text, re.I) and title == "do you support pub/sub":
+        bonus -= 6.0
+    if "azure repos" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+repos\b", analysis.text, re.I) else -3.2
+    if "azure pipelines" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+pipelines\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+repos\b|\bazure\s+pipelines\b", analysis.text, re.I) and "azure openai" in title:
+        bonus -= 6.0
+    if "bing ads" in title:
+        bonus += 6.0 if re.search(r"\bbing\s+ads\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbing\s+ads\b", analysis.text, re.I) and "google ads" in title:
+        bonus -= 6.0
+    if "retail api" in title:
+        bonus += 6.0 if re.search(r"\bretail\s+api\b", analysis.text, re.I) else -3.2
+    if "healthcare api" in title:
+        bonus += 6.0 if re.search(r"\bhealthcare\s+api\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bretail\s+api\b|\bhealthcare\s+api\b", analysis.text, re.I) and (
+        "rest api" in title or title.rstrip("?") == "what is datawrap"
+    ):
+        bonus -= 6.0
+    if "cloud endpoints" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+endpoints\b", analysis.text, re.I) else -3.2
+    if "search console" in title:
+        bonus += 6.0 if re.search(r"\bsearch\s+console\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bsearch\s+console\b", analysis.text, re.I) and "search ads 360" in title:
+        bonus -= 6.0
+    if "cloud load balancing" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+load\s+balanc", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+load\s+balanc", analysis.text, re.I) and "dbt" in title:
+        bonus -= 6.0
+    if "assured workloads" in title:
+        bonus += 6.0 if re.search(r"\bassured\s+workloads?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bassured\s+workloads?\b", analysis.text, re.I) and "workload identity" in title:
+        bonus -= 6.0
+    if "config connector" in title:
+        bonus += 6.0 if re.search(r"\bconfig\s+connector\b", analysis.text, re.I) else -3.2
+    if "app hub" in title:
+        bonus += 6.0 if re.search(r"\bapp\s+hub\b", analysis.text, re.I) else -3.2
+    if "microsoft advertising" in title:
+        bonus += 6.0 if re.search(r"\bmicrosoft\s+advertising\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmicrosoft\s+advertising\b", analysis.text, re.I) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "azure artifacts" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+artifacts\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+artifacts\b", analysis.text, re.I) and "artifact registry" in title:
+        bonus -= 6.0
+    if "document ai" in title:
+        bonus += 6.0 if re.search(r"\bdocument\s+ai\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdocument\s+ai\b", analysis.text, re.I) and "azure ai search" in title:
+        bonus -= 6.0
+    if title.startswith("do you support fhir"):
+        bonus += 6.0 if re.search(r"\bfhir\b", analysis.text, re.I) else -3.2
+    if "github copilot" in title:
+        bonus += 6.0 if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) and "github enterprise" in title:
         bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
