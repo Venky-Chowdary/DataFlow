@@ -16,7 +16,7 @@ from ..rag.product_docs import (
     product_doc_search,
     retrieve_product_answer,
 )
-from ..rag.query_analysis import classify_ask, is_cdc_delivery_question
+from ..rag.query_analysis import PAUSE_CDC_RE, classify_ask, is_cdc_delivery_question
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -4640,9 +4640,6 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "switch to cdc",
                 "switch to upsert",
                 "switch to append",
-                "use upsert",
-                "use cdc",
-                "use append",
             )
         ) or (
             any(w in lower for w in ("sync mode", "write mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge"))
@@ -5531,6 +5528,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"pre[\s-]?images?|merge[\s-]?on[\s-]?read|copy[\s-]?on[\s-]?write|gtid)\b",
         lower,
     ):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "pause CDC" contains the substring "use cdc", so the advisory tool
+    # recommended incremental CDC instead of the keep-slot fact.
+    if PAUSE_CDC_RE.search(message):
         planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
         if not any(n == "explain_product" for n, _ in planned):
             planned.append(("explain_product", {"query": message[:240]}))

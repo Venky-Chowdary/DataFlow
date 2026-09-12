@@ -30,6 +30,9 @@ def _names(question: str) -> list[str]:
         "what if two source rows have the same key",
         "is Slack a connector",
         "do you support Microsoft Teams as a destination",
+        "if I pause CDC do I lose the slot",
+        "does pausing CDC drop the replication slot",
+        "can I pause CDC",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
@@ -50,6 +53,26 @@ def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None
 def test_live_inventory_asks_still_plan_object_lookups(question: str) -> None:
     names = _names(question)
     assert "list_connector_objects" in names or "list_connectors" in names, names
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "if I pause CDC do I lose the slot",
+        "does pausing CDC drop the replication slot",
+        "can I pause CDC",
+        "how do I pause CDC",
+    ],
+)
+def test_pause_cdc_does_not_recommend_a_sync_mode(question: str) -> None:
+    names = _names(question)
+    assert "explain_product" in names, names
+    assert "recommend_sync_mode" not in names, names
+
+
+def test_should_i_use_cdc_still_recommends_a_mode() -> None:
+    names = _names("should I use CDC for a nightly load")
+    assert "recommend_sync_mode" in names, names
 
 
 def test_product_answer_is_not_prefixed_with_connector_miss() -> None:
