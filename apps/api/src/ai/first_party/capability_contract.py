@@ -2941,6 +2941,114 @@ def azure_ad_b2c_shipped() -> bool:
     return False
 
 
+def google_meet_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gmeet", "google_meet", "meet"})
+
+
+def google_chat_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gchat", "google_chat"})
+
+
+def yammer_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"yammer"})
+
+
+def viva_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"viva"})
+
+
+def copilot_studio_shipped() -> bool:
+    return False
+
+
+def logic_apps_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"logic_apps", "logicapps"})
+
+
+def eventarc_shipped() -> bool:
+    return False
+
+
+def dialogflow_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dialogflow"})
+
+
+def azure_policy_shipped() -> bool:
+    return False
+
+
+def planner_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"planner"})
+
+
+def microsoft_todo_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"todo", "microsoft_todo"})
+
+
+def bookings_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"bookings"})
+
+
+def classroom_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"classroom", "google_classroom"})
+
+
+def azure_signalr_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"signalr", "azure_signalr"})
+
+
+def azure_service_fabric_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"service_fabric"})
+
+
+def keep_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"keep", "google_keep"})
+
+
+def appsheet_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"appsheet"})
+
+
+def azure_communication_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"acs", "azure_communication"})
+
+
+def azure_apim_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"apim", "api_management"})
+
+
+def cloud_workflows_shipped() -> bool:
+    return False
+
+
+def chronicle_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"chronicle"})
+
+
+def microsoft_forms_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"forms", "microsoft_forms"})
+
+
+def microsoft_project_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"msproject", "microsoft_project"})
+
+
+def container_apps_shipped() -> bool:
+    return False
+
+
+def azure_front_door_shipped() -> bool:
+    return False
+
+
+def identity_platform_shipped() -> bool:
+    return False
+
+
+def pubsub_lite_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"pubsub_lite", "pslite"})
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -4430,6 +4538,399 @@ def azure_ad_b2c_card() -> CapabilityCard | None:
     )
 
 
+def google_meet_card() -> CapabilityCard | None:
+    if google_meet_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Meet as a destination",
+        text=(
+            "Datawrap does not ship Google Meet as a transfer-ready "
+            "destination (google_meet is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_chat_card() -> CapabilityCard | None:
+    if google_chat_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Chat as a destination",
+        text=(
+            "Datawrap does not ship Google Chat as a transfer-ready "
+            "destination (google_chat is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def yammer_card() -> CapabilityCard | None:
+    if yammer_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Yammer as a destination",
+        text=(
+            "Datawrap does not ship Yammer as a transfer-ready destination "
+            "(yammer is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def viva_card() -> CapabilityCard | None:
+    if viva_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Viva as a destination",
+        text=(
+            "Datawrap does not ship Microsoft Viva as a transfer destination "
+            "(viva is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def copilot_studio_card() -> CapabilityCard | None:
+    if copilot_studio_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Copilot Studio as a destination",
+        text=(
+            "Datawrap does not ship Copilot Studio as a transfer destination "
+            "(copilot_studio is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def logic_apps_card() -> CapabilityCard | None:
+    if logic_apps_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Logic Apps",
+        text=(
+            "Datawrap does not ship Azure Logic Apps as a transfer destination "
+            "(logic_apps is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def eventarc_card() -> CapabilityCard | None:
+    if eventarc_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Eventarc",
+        text=(
+            "Datawrap does not ship Eventarc "
+            "(eventarc is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def dialogflow_card() -> CapabilityCard | None:
+    if dialogflow_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Dialogflow",
+        text=(
+            "Datawrap does not ship Dialogflow as a transfer-ready source "
+            "(dialogflow is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_policy_card() -> CapabilityCard | None:
+    if azure_policy_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Policy",
+        text=(
+            "Datawrap does not ship Azure Policy "
+            "(azure_policy is false)."
+        ),
+        source_module="src/routers/workspace_router.py · allowlist",
+        category="connectors",
+    )
+
+
+def planner_card() -> CapabilityCard | None:
+    if planner_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Planner",
+        text=(
+            "Datawrap does not ship Microsoft Planner as a transfer-ready "
+            "driver (planner is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_todo_card() -> CapabilityCard | None:
+    if microsoft_todo_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft To Do",
+        text=(
+            "Datawrap does not ship Microsoft To Do as a transfer-ready "
+            "driver (microsoft_todo is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bookings_card() -> CapabilityCard | None:
+    if bookings_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Bookings",
+        text=(
+            "Datawrap does not ship Microsoft Bookings as a transfer-ready "
+            "driver (bookings is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def classroom_card() -> CapabilityCard | None:
+    if classroom_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Classroom as a source",
+        text=(
+            "Datawrap does not ship Google Classroom as a transfer-ready "
+            "source (google_classroom is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_signalr_card() -> CapabilityCard | None:
+    if azure_signalr_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure SignalR",
+        text=(
+            "Datawrap does not ship Azure SignalR as a transfer-ready "
+            "driver (azure_signalr is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_service_fabric_card() -> CapabilityCard | None:
+    if azure_service_fabric_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Service Fabric",
+        text=(
+            "Datawrap does not ship Azure Service Fabric "
+            "(azure_service_fabric is false). Microsoft Fabric is a different product."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def keep_card() -> CapabilityCard | None:
+    if keep_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Keep as a source",
+        text=(
+            "Datawrap does not ship Google Keep as a transfer-ready source "
+            "(google_keep is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def appsheet_card() -> CapabilityCard | None:
+    if appsheet_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support AppSheet as a destination",
+        text=(
+            "Datawrap does not ship AppSheet as a transfer destination "
+            "(appsheet is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_communication_card() -> CapabilityCard | None:
+    if azure_communication_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Communication Services",
+        text=(
+            "Datawrap does not ship Azure Communication Services "
+            "(azure_communication is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_apim_card() -> CapabilityCard | None:
+    if azure_apim_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure API Management",
+        text=(
+            "Datawrap does not ship Azure API Management "
+            "(azure_apim is false)."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
+def cloud_workflows_card() -> CapabilityCard | None:
+    if cloud_workflows_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Workflows",
+        text=(
+            "Datawrap does not ship Cloud Workflows "
+            "(cloud_workflows is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def chronicle_card() -> CapabilityCard | None:
+    if chronicle_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Chronicle as a destination",
+        text=(
+            "Datawrap does not ship Chronicle as a transfer destination "
+            "(chronicle is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_forms_card() -> CapabilityCard | None:
+    if microsoft_forms_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Forms",
+        text=(
+            "Datawrap does not ship Microsoft Forms as a transfer-ready "
+            "driver (microsoft_forms is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_project_card() -> CapabilityCard | None:
+    if microsoft_project_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Project",
+        text=(
+            "Datawrap does not ship Microsoft Project as a transfer-ready "
+            "driver (microsoft_project is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def container_apps_card() -> CapabilityCard | None:
+    if container_apps_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Container Apps",
+        text=(
+            "Datawrap does not ship Azure Container Apps as a transfer "
+            "destination (container_apps is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def azure_front_door_card() -> CapabilityCard | None:
+    if azure_front_door_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Front Door",
+        text=(
+            "Datawrap does not ship Azure Front Door "
+            "(azure_front_door is false)."
+        ),
+        source_module="src/routers/workspace_router.py · allowlist",
+        category="connectors",
+    )
+
+
+def identity_platform_card() -> CapabilityCard | None:
+    if identity_platform_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Identity Platform",
+        text=(
+            "Datawrap does not ship Identity Platform "
+            "(identity_platform is false)."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
+def pubsub_lite_card() -> CapabilityCard | None:
+    if pubsub_lite_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Pub/Sub Lite",
+        text=(
+            "Datawrap does not ship Pub/Sub Lite "
+            "(pubsub_lite is false). Pub/Sub is also not a driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def rds_sqlserver_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon RDS for SQL Server",
+        text=(
+            "Yes — Amazon RDS for SQL Server is the SQL Server driver "
+            "(sqlserver / rds_sqlserver). "
+            "It is not RDS for PostgreSQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -4675,6 +5176,34 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         site_recovery_card,
         entra_external_id_card,
         azure_ad_b2c_card,
+        google_meet_card,
+        google_chat_card,
+        yammer_card,
+        viva_card,
+        copilot_studio_card,
+        logic_apps_card,
+        eventarc_card,
+        dialogflow_card,
+        azure_policy_card,
+        planner_card,
+        microsoft_todo_card,
+        bookings_card,
+        classroom_card,
+        azure_signalr_card,
+        azure_service_fabric_card,
+        keep_card,
+        appsheet_card,
+        azure_communication_card,
+        azure_apim_card,
+        cloud_workflows_card,
+        chronicle_card,
+        microsoft_forms_card,
+        microsoft_project_card,
+        container_apps_card,
+        azure_front_door_card,
+        identity_platform_card,
+        pubsub_lite_card,
+        rds_sqlserver_card,
         column_level_lineage_card,
     ):
         card = builder()

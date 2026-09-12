@@ -1275,6 +1275,113 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bb2c\b", analysis.text, re.I) else -3.2
     if re.search(r"\bazure\s+ad\s+b2c\b", analysis.text, re.I) and title == "can i use a service principal for azure":
         bonus -= 6.0
+    meet_ask = bool(re.search(r"\bgoogle\s+meet\b|\bmeet\s+as\s+a\s+destination\b", analysis.text, re.I))
+    if "google meet" in title:
+        bonus += 6.0 if meet_ask else -3.2
+    if meet_ask and ("google docs" in title or "bigquery ml" in title or "calendar as a source" in title):
+        bonus -= 6.0
+    chat_ask = bool(
+        re.search(
+            r"\bgoogle\s+chat\b"
+            r"|\bchat\s+as\s+a\s+destination\b"
+            r"|\bwrite\s+to\s+(?:google\s+)?chat\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "google chat" in title:
+        bonus += 6.0 if chat_ask else -3.2
+    if chat_ask and title.rstrip("?") == "what is datawrap":
+        bonus -= 8.0
+    if "yammer" in title:
+        bonus += 6.0 if re.search(r"\byammer\b", analysis.text, re.I) else -3.2
+    if "viva" in title:
+        bonus += 6.0 if re.search(r"\bviva\b", analysis.text, re.I) else -3.2
+    if "copilot studio" in title:
+        bonus += 6.0 if re.search(r"\bcopilot\s+studio\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcopilot\s+studio\b", analysis.text, re.I) and (
+        "looker studio" in title or "transfer studio" in title
+    ):
+        bonus -= 6.0
+    if "logic apps" in title:
+        bonus += 6.0 if re.search(r"\blogic\s+apps?\b", analysis.text, re.I) else -3.2
+    if "eventarc" in title:
+        bonus += 6.0 if re.search(r"\beventarc\b", analysis.text, re.I) else -3.2
+    if "dialogflow" in title:
+        bonus += 6.0 if re.search(r"\bdialogflow\b", analysis.text, re.I) else -3.2
+    if "azure policy" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+policy\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+policy\b", analysis.text, re.I) and "add a column during cdc" in title:
+        bonus -= 6.0
+    if "microsoft planner" in title:
+        bonus += 6.0 if re.search(r"\bplanner\b", analysis.text, re.I) else -3.2
+    if "microsoft to do" in title:
+        bonus += 6.0 if re.search(r"\bto\s+do\b", analysis.text, re.I) else -3.2
+    if "microsoft bookings" in title:
+        bonus += 6.0 if re.search(r"\bbookings\b", analysis.text, re.I) else -3.2
+    if re.search(
+        r"\bmicrosoft\s+planner\b|\bmicrosoft\s+to\s+do\b|\bbookings\b"
+        r"|\bmicrosoft\s+forms\b|\bmicrosoft\s+project\b",
+        analysis.text,
+        re.I,
+    ) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "classroom as a source" in title:
+        bonus += 6.0 if re.search(r"\bclassroom\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bclassroom\b", analysis.text, re.I) and "adls as a destination" in title:
+        bonus -= 6.0
+    if "azure signalr" in title:
+        bonus += 6.0 if re.search(r"\bsignalr\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bsignalr\b", analysis.text, re.I) and "azure database for mysql" in title:
+        bonus -= 6.0
+    if "service fabric" in title:
+        bonus += 6.0 if re.search(r"\bservice\s+fabric\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bservice\s+fabric\b", analysis.text, re.I) and (
+        "microsoft fabric" in title or title.startswith("do you support microsoft fabric")
+    ):
+        bonus -= 6.0
+    if "keep as a source" in title:
+        bonus += 6.0 if re.search(r"\bkeep\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bkeep\s+as\s+a\s+source\b|\bgoogle\s+keep\b", analysis.text, re.I) and "gmail as a source" in title:
+        bonus -= 6.0
+    if "appsheet" in title:
+        bonus += 6.0 if re.search(r"\bappsheet\b", analysis.text, re.I) else -3.2
+    if "communication services" in title:
+        bonus += 6.0 if re.search(r"\bcommunication\s+services\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcommunication\s+services\b", analysis.text, re.I) and "service bus" in title:
+        bonus -= 6.0
+    if "api management" in title:
+        bonus += 6.0 if re.search(r"\bapi\s+management\b|\bapim\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bapi\s+management\b", analysis.text, re.I) and "entra pim" in title:
+        bonus -= 6.0
+    if "cloud workflows" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+workflows?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+workflows?\b", analysis.text, re.I) and title.rstrip("?") == "what is datawrap":
+        bonus -= 8.0
+    if "chronicle" in title:
+        bonus += 6.0 if re.search(r"\bchronicle\b", analysis.text, re.I) else -3.2
+    if "microsoft forms" in title:
+        bonus += 6.0 if re.search(r"\bmicrosoft\s+forms\b", analysis.text, re.I) else -3.2
+    if "microsoft project" in title:
+        bonus += 6.0 if re.search(r"\bmicrosoft\s+project\b", analysis.text, re.I) else -3.2
+    if "container apps" in title:
+        bonus += 6.0 if re.search(r"\bcontainer\s+apps?\b", analysis.text, re.I) else -3.2
+    if "front door" in title:
+        bonus += 6.0 if re.search(r"\bfront\s+door\b", analysis.text, re.I) else -3.2
+    if "identity platform" in title:
+        bonus += 6.0 if re.search(r"\bidentity\s+platform\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bidentity\s+platform\b", analysis.text, re.I) and "workload identity" in title:
+        bonus -= 6.0
+    if "pub/sub lite" in title or "pubsub lite" in title:
+        bonus += 6.0 if re.search(r"\blite\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bpub[\s/-]?sub\s+lite\b", analysis.text, re.I) and title == "do you support pub/sub":
+        bonus -= 6.0
+    if "rds for sql server" in title:
+        bonus += 6.0 if re.search(r"\brds\s+for\s+sql\s+server\b", analysis.text, re.I) else -6.0
+    if re.search(r"\brds\s+for\s+sql\s+server\b", analysis.text, re.I) and (
+        "rds for postgresql" in title or title == "do you support sql server"
+    ):
+        bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

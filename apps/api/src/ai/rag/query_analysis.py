@@ -1232,6 +1232,45 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bentra\s+external\s+id\b", re.I), ("entra_external_id",)),
     (re.compile(r"\bazure\s+ad\s+b2c\b", re.I), ("azure_ad_b2c",)),
     (re.compile(
+        r"\bgoogle\s+meet\b"
+        r"|\bmeet\s+as\s+a\s+destination\b",
+        re.I,
+    ),
+     ("google_meet",)),
+    (re.compile(
+        r"\bgoogle\s+chat\b"
+        r"|\bchat\s+as\s+a\s+destination\b"
+        r"|\bwrite\s+to\s+(?:google\s+)?chat\b",
+        re.I,
+    ),
+     ("google_chat",)),
+    (re.compile(r"\byammer\b", re.I), ("yammer",)),
+    (re.compile(r"\bviva\b", re.I), ("viva",)),
+    (re.compile(r"\bcopilot\s+studio\b", re.I), ("copilot_studio",)),
+    (re.compile(r"\blogic\s+apps?\b", re.I), ("logic_apps",)),
+    (re.compile(r"\beventarc\b", re.I), ("eventarc",)),
+    (re.compile(r"\bdialogflow\b", re.I), ("dialogflow",)),
+    (re.compile(r"\bazure\s+policy\b", re.I), ("azure_policy",)),
+    (re.compile(r"\bmicrosoft\s+planner\b|\bplanner\b", re.I), ("planner",)),
+    (re.compile(r"\bmicrosoft\s+to\s+do\b", re.I), ("microsoft_todo",)),
+    (re.compile(r"\bbookings\b", re.I), ("bookings",)),
+    (re.compile(r"\bclassroom\b", re.I), ("google_classroom",)),
+    (re.compile(r"\bsignalr\b", re.I), ("azure_signalr",)),
+    (re.compile(r"\bservice\s+fabric\b", re.I), ("azure_service_fabric",)),
+    (re.compile(r"\bgoogle\s+keep\b|\bkeep\s+as\s+a\s+source\b", re.I), ("google_keep",)),
+    (re.compile(r"\bappsheet\b", re.I), ("appsheet",)),
+    (re.compile(r"\bcommunication\s+services\b", re.I), ("azure_communication",)),
+    (re.compile(r"\bapi\s+management\b|\bapim\b", re.I), ("azure_apim",)),
+    (re.compile(r"\bcloud\s+workflows?\b", re.I), ("cloud_workflows",)),
+    (re.compile(r"\bchronicle\b", re.I), ("chronicle",)),
+    (re.compile(r"\bmicrosoft\s+forms\b", re.I), ("microsoft_forms",)),
+    (re.compile(r"\bmicrosoft\s+project\b", re.I), ("microsoft_project",)),
+    (re.compile(r"\bcontainer\s+apps?\b", re.I), ("container_apps",)),
+    (re.compile(r"\bfront\s+door\b", re.I), ("azure_front_door",)),
+    (re.compile(r"\bidentity\s+platform\b", re.I), ("identity_platform",)),
+    (re.compile(r"\bpub[\s/-]?sub\s+lite\b", re.I), ("pubsub_lite",)),
+    (re.compile(r"\brds\s+for\s+sql\s+server\b", re.I), ("rds_sqlserver", "sqlserver")),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -2433,6 +2472,79 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bcloud\s+sql\s+for\s+postgresql\b", re.I),
         ("mysql", "proxy"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+meet\b|\bmeet\s+as\s+a\s+destination\b", re.I),
+        ("bigquery_ml", "docs", "calendar"),
+    ),
+    (
+        re.compile(
+            r"\bgoogle\s+chat\b"
+            r"|\bchat\s+as\s+a\s+destination\b"
+            r"|\bwrite\s+to\s+(?:google\s+)?chat\b",
+            re.I,
+        ),
+        ("datawrap", "pilot", "mcp", "workflow"),
+    ),
+    (
+        re.compile(r"\byammer\b|\bviva\b|\bappsheet\b|\bchronicle\b", re.I),
+        ("bigquery_ml", "mirror"),
+    ),
+    (
+        re.compile(r"\bcopilot\s+studio\b", re.I),
+        ("looker_studio", "studio", "teams_dest"),
+    ),
+    (
+        re.compile(r"\bazure\s+policy\b", re.I),
+        ("schema", "column", "propagate"),
+    ),
+    (
+        re.compile(
+            r"\bmicrosoft\s+planner\b|\bmicrosoft\s+to\s+do\b|\bbookings\b"
+            r"|\bmicrosoft\s+forms\b|\bmicrosoft\s+project\b",
+            re.I,
+        ),
+        ("teams_dest", "team"),
+    ),
+    (
+        re.compile(r"\bclassroom\b", re.I),
+        ("adls", "source", "blob"),
+    ),
+    (
+        re.compile(r"\bsignalr\b", re.I),
+        ("mysql", "azure_database_mysql", "principal"),
+    ),
+    (
+        re.compile(r"\bservice\s+fabric\b", re.I),
+        ("fabric", "onelake"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+keep\b|\bkeep\s+as\s+a\s+source\b", re.I),
+        ("gmail",),
+    ),
+    (
+        re.compile(r"\bcommunication\s+services\b", re.I),
+        ("service_bus", "bus"),
+    ),
+    (
+        re.compile(r"\bapi\s+management\b|\bapim\b", re.I),
+        ("entra_pim", "pim"),
+    ),
+    (
+        re.compile(r"\bcloud\s+workflows?\b", re.I),
+        ("datawrap", "pilot", "mcp"),
+    ),
+    (
+        re.compile(r"\bidentity\s+platform\b", re.I),
+        ("workload", "identity"),
+    ),
+    (
+        re.compile(r"\bpub[\s/-]?sub\s+lite\b", re.I),
+        ("pubsub",),
+    ),
+    (
+        re.compile(r"\brds\s+for\s+sql\s+server\b", re.I),
+        ("postgresql", "rds_postgresql", "aurora"),
     ),
     # Bare Private Link is not Job Theater.
     (

@@ -74,6 +74,12 @@ def _names(question: str) -> list[str]:
         "do you support Amazon RDS for PostgreSQL",
         "do you support Informatica as a destination",
         "do you support Azure HDInsight",
+        "do you support Classroom as a source",
+        "do you support Google Chat as a destination",
+        "do you support Azure SignalR",
+        "do you support Amazon RDS for SQL Server",
+        "do you support Azure Logic Apps",
+        "do you support Copilot Studio as a destination",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

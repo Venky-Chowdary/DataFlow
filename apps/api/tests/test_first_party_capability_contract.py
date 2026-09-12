@@ -199,6 +199,15 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Informatica as a destination",
         "Do you support AKS as a destination",
         "Do you support Azure AD B2C",
+        "Do you support Google Meet as a destination",
+        "Do you support Google Chat as a destination",
+        "Do you support Azure Logic Apps",
+        "Do you support Classroom as a source",
+        "Do you support Azure SignalR",
+        "Do you support Azure Service Fabric",
+        "Do you support Amazon RDS for SQL Server",
+        "Do you support Copilot Studio as a destination",
+        "Do you support Azure Policy",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
