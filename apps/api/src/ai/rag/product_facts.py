@@ -1122,6 +1122,8 @@ def _connector_catalog_section() -> GeneratedSection | None:
         ready = set()
 
     lines = [
+        "The engines you can connect are the native drivers and SQLAlchemy "
+        "dialects the transfer dispatches on. "
         "A connection names one source or destination endpoint and its "
         "credentials. You add one under Connectors, or paste a connection URL "
         "and ask Data Pilot to create it — Pilot stages a Confirm and the "

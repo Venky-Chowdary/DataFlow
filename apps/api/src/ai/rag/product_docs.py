@@ -739,6 +739,20 @@ def _section_intent_bonus(
         bonus += 6.0 if privatelink_ask else 0.0
     if privatelink_ask and "job theater" in title:
         bonus -= 6.0
+    engine_set_ask = bool(
+        re.search(r"\bengines?\b", analysis.text, re.I)
+        and re.search(r"\bconnect", analysis.text, re.I)
+        and not privatelink_ask
+        and not re.search(r"\bdebezium\b|\bflink\b|\bkafka\s+connect\b", analysis.text, re.I)
+    )
+    if "which engines you can connect" in title:
+        bonus += 8.0 if engine_set_ask else 0.0
+    if engine_set_ask and (
+        "debezium" in title or "privatelink" in title or "private key" in title
+        or title.startswith("how many sources")
+        or title.startswith("procedure: connect")
+    ):
+        bonus -= 8.0
     if core_gates:
         if _GATE_QUESTION.search(analysis.text):
             bonus += _CORE_GATES_ON_ASK

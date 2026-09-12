@@ -209,9 +209,9 @@ def privatelink_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Does Datawrap use AWS PrivateLink",
         text=(
-            "Connecting through Private Link is not shipped (privatelink is "
-            "false) — Datawrap does not ship AWS PrivateLink or GCP Private "
-            "Service Connect as a connect option. "
+            "Private Link is not shipped (privatelink is false) — Datawrap "
+            "does not ship AWS PrivateLink or GCP Private Service Connect "
+            "as a connect option. "
             "Database connections take host, port, and credentials. "
             "VPC peering is also not on that connect path."
         ),
