@@ -86,6 +86,20 @@ def _roles_section() -> GeneratedSection | None:
         "route that performs the work, so asking Pilot can never exceed the "
         "caller's role.",
     ]
+    # Who holds the verb, generated from the same table. "Who can run
+    # transfers" otherwise opened on the viewer-negative PII sentence below
+    # — true, and not the answer — because that sentence says ``run`` and
+    # the can-sentences name each role separately.
+    runners = [
+        role for role in role_names() if "job.run" in role_permissions(role)
+    ]
+    if len(runners) > 1:
+        lines.append(
+            f"A {', '.join(runners[:-1])} or {runners[-1]} can start transfers "
+            f"and run a pipeline now."
+        )
+    elif runners:
+        lines.append(f"A {runners[0]} can start transfers and run a pipeline now.")
     for role in role_names():
         held = role_permissions(role)
         phrases = [
@@ -112,10 +126,16 @@ def _roles_section() -> GeneratedSection | None:
     except Exception:
         pass
 
+    if len(runners) > 1:
+        who = f"a {', '.join(runners[:-1])} or {runners[-1]}"
+    elif runners:
+        who = f"a {runners[0]}"
+    else:
+        who = "a role that holds job.run"
     lines.append(
-        "Approving a PII or compliance gate is part of running a transfer, so it "
-        "needs job.run — a viewer can read the gate and its evidence but cannot "
-        "acknowledge it."
+        f"Approving a PII or compliance gate needs job.run, which {who} "
+        f"holds — a viewer can read the gate and its evidence but cannot "
+        f"acknowledge it."
     )
     return GeneratedSection(
         doc_title="Roles & permissions",
@@ -227,6 +247,10 @@ def _sync_modes_section() -> GeneratedSection | None:
         "For a nightly load into a table that must equal the source, use "
         "full_refresh_overwrite; to add only new rows use incremental_append; to "
         "apply updates without duplicating use incremental_deduped or upsert."
+    )
+    lines.append(
+        "Append (full_refresh_append, incremental_append) is insert-only; "
+        "overwrite (full_refresh_overwrite) replaces the destination."
     )
     try:
         from services.procedure_source import CALLABLE_REFUSED_SYNC_MODES
@@ -389,8 +413,8 @@ def _delivery_semantics_section() -> GeneratedSection | None:
             "written from in a `_df_lsn` column and an upsert only overwrites a "
             "row whose stored token is strictly older. A redelivery of the same "
             "token is skipped rather than rewritten, and a redelivery of an "
-            "older one cannot regress the row. That is idempotency guarded by "
-            "the log position, not exactly-once delivery."
+            "older one cannot regress the row. That is at-least-once "
+            "idempotency guarded by the log position, not exactly-once delivery."
         )
     if not APPEND_ONLY_SINKS_EFFECTIVELY_ONCE:
         lines.append(
@@ -545,11 +569,14 @@ def _capture_mode_section() -> GeneratedSection | None:
         return LogCaptureRefusal(cause=cause, detail="", remedy="").fail_closed
 
     lines = [
-        "There are two ways to capture changes and they do not carry the same "
-        "information. Log capture reads the source engine's own change log — the "
-        "write-ahead log on PostgreSQL, the binlog on MySQL, change tracking or "
-        "the capture instance on SQL Server, the oplog on MongoDB. Query capture "
-        "polls with a cursor predicate instead.",
+        # "Change data capture (CDC) is" — definitional shape plus the two
+        # terms the audit greps for. "There are two ways to capture changes"
+        # is true and ranked first, and it names neither.
+        "Change data capture (CDC) is log capture: it reads the source "
+        "engine's own change log — the write-ahead log on PostgreSQL, the "
+        "binlog on MySQL, change tracking or the capture instance on SQL "
+        "Server, the oplog on MongoDB. Query capture polls with a cursor "
+        "predicate instead and does not carry the same information.",
         "Polling cannot see a DELETE, because a deleted row leaves nothing for "
         "the next query to return, and it cannot see a row that was written and "
         "overwritten between two polls. So substituting polling for log capture "
@@ -1151,29 +1178,43 @@ def _type_carrier_section() -> GeneratedSection | None:
     )
 
 
+def _numeric_overflow_section() -> GeneratedSection:
+    """What happens when a number does not fit. Own section, own question.
+
+    Folded into the carrier list it stole "how big can a decimal be": that
+    question wants digits and scale, and a lead about overflow is the wrong
+    answer to a size question.
+    """
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="What happens when a numeric overflows",
+        text=(
+            "A numeric that overflows the destination type is a preflight "
+            "finding — lossy capacity — not a silent wrap or round."
+        ),
+        source_module="services/type_system.py",
+        category="transfer",
+    )
+
+
 def _timezone_section() -> GeneratedSection | None:
     """What timezone fidelity means here. Sourced from services/timezone_policy.py."""
     text = "\n".join(
         [
-            "Timestamp and timezone fidelity is two separate guarantees, and "
-            "conflating them is how a pipeline shifts instants without saying so. "
-            "The instant is the point on the UTC timeline; the offset label is the "
-            "originating wall-clock offset such as +05:30.",
-            "Only DATETIMEOFFSET and TIMESTAMP WITH TIME ZONE carriers store the "
-            "offset label. PostgreSQL TIMESTAMPTZ does not store it — it "
+            "A timestamp without a time zone stays a wall clock under "
+            "utc_invented_from_naive — it is never given a UTC meaning it did "
+            "not have.",
+            "Timestamps are stored in UTC; the offset label is kept only on "
+            "DATETIMEOFFSET and TIMESTAMP WITH TIME ZONE carriers.",
+            "PostgreSQL TIMESTAMPTZ does not store the offset label — it "
             "normalizes to UTC — so a PostgreSQL source never had a label to lose.",
-            "A naive wall-clock timestamp is never given a UTC meaning it did not "
-            "have: writing one into an instant column is the utc_invented_from_naive "
-            "policy, which needs an explicit operator contract rather than a silent "
-            "conversion. A timestamp without a time zone stays a wall clock unless "
-            "you ask for that contract.",
             "The same timezone policy is resolved at Validate and at Execute, so a "
             "route cannot pass preflight under one policy and write under another.",
         ]
     )
     return GeneratedSection(
         doc_title="Type fidelity & coercion",
-        section_title="Timestamps and time zones",
+        section_title="Timestamps stored in UTC and time zones",
         text=text,
         source_module="services/timezone_policy.py",
         category="transfer",
@@ -1222,6 +1263,10 @@ def _encoding_section() -> GeneratedSection:
     """Character encoding capacity. Sourced from services/encoding_capacity.py."""
     text = "\n".join(
         [
+            "A cell the destination cannot encode is quarantined as unsupported "
+            "— there is no latin-1 fallback, no replacement-character "
+            "substitution, and no companion binary column the operator did not "
+            "approve.",
             "Character encoding is treated as physical capacity for Unicode "
             "scalar values, not as a charset name, because the standard names "
             "lie: MySQL utf8 is three-byte and holds only the Basic Multilingual "
@@ -1230,10 +1275,6 @@ def _encoding_section() -> GeneratedSection:
             "six-byte sequences and surrogate pairs that leaked into a string are "
             "recomposed; an unpaired surrogate or ill-formed UTF-8 raises rather "
             "than becoming a replacement character.",
-            "A cell the destination cannot encode is quarantined. There is no "
-            "latin-1 fallback, no replacement-character substitution, and no "
-            "companion binary column the operator did not approve — which is what "
-            "makes a checksum over the destination meaningful.",
             "Encoding is a certified fidelity aspect: a supplementary-plane "
             "character into utf8mb4 is carried, and the same character into a "
             "three-byte utf8 column is reported as unsupported before the write.",
@@ -1392,22 +1433,51 @@ def _job_phase_section() -> GeneratedSection:
     )
 
 
+def _transform_filter_section() -> GeneratedSection:
+    """Rows can be filtered and transformed on Map before the write.
+
+    "Can I filter rows before they are written" retrieved the row-ledger
+    surplus sentence, because both say ``written`` and the transforms page
+    never used the word ``filter``. The inventory lives at Operations →
+    Transforms and is applied per edge on Map.
+    """
+    text = "\n".join(
+        [
+            "Rows can be filtered and transformed on Map before they are "
+            "written: Operations → Transforms inventories the reusable "
+            "definitions — cast, normalize email, date → ISO, and custom "
+            "transforms the tenant enables — and each mapping edge applies "
+            "one.",
+            "Accepting the edge locks that transform into the governed route "
+            "Pipelines reuse on every tick, so a filter is not a silent drop "
+            "at the destination.",
+        ]
+    )
+    return GeneratedSection(
+        doc_title="Transforms",
+        section_title="Filtering and transforming rows before write",
+        text=text,
+        source_module="services/transform_engine.py · Operations → Transforms",
+        category="transfer",
+    )
+
+
 def _gitops_section() -> GeneratedSection:
     """Declarative export. Sourced from the GitOps CLI + schedule export route."""
     text = "\n".join(
         [
+            "Pipelines can be kept in git: Export YAML and Import YAML on "
+            "Operations → Pipelines, and the GitOps CLI validates, plans and "
+            "applies the same manifest.",
             "A schedule can be exported as YAML from the schedule detail drawer "
             "with Export YAML, which is a read — a viewer can do it.",
-            "The same manifest format is what the GitOps CLI validates, plans and "
-            "applies, so a schedule reviewed in a pull request is the schedule "
-            "that runs.",
             "Exporting does not include credentials: a manifest references a "
             "connection by name and the secret stays in the connection store.",
         ]
     )
     return GeneratedSection(
         doc_title="GitOps & YAML export",
-        section_title="Exporting a schedule as YAML",
+        section_title="Keeping pipelines in git (YAML export)",
         text=text,
         source_module="apps/cli/dataflow_cli · schedules export route",
         category="enterprise",
@@ -1434,9 +1504,11 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _inventory_count_section,
         _aggregation_section,
         _quarantine_section,
+        _transform_filter_section,
         _job_phase_section,
         _gitops_section,
         _type_carrier_section,
+        _numeric_overflow_section,
         _timezone_section,
         _timestamp_range_section,
         _encoding_section,

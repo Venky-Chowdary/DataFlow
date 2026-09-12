@@ -513,7 +513,9 @@ def test_change_data_capture_still_leads_with_the_capture_answer() -> None:
     body = " ".join(
         (compose_product_answer(retrieve_product_answer("what is change data capture", limit=4)) or "").split()
     )
-    assert "capture changes" in body.split(". ")[0], body[:200]
+    lead = body.split(". ")[0].lower()
+    assert "cdc" in lead or "change data capture" in lead, lead[:200]
+    assert "log" in lead, lead[:200]
 
 
 # --------------------------------------------------------------------------
@@ -598,6 +600,47 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
     assert "destination" in lead.lower(), lead[:200]
     assert "full append" not in lead.lower(), lead[:200]
     assert "g1" not in lead.lower(), lead[:200]
+
+
+@pytest.mark.parametrize(
+    ("question", "needles"),
+    [
+        ("who can run transfers", ("operator", "editor", "admin")),
+        ("what roles can approve a risky mapping", ("editor", "admin")),
+        ("what is change data capture", ("cdc", "log")),
+        ("is CDC exactly once", ("at-least-once", "exactly-once")),
+        (
+            "what happens to a timestamp without timezone",
+            ("wall clock", "utc_invented_from_naive"),
+        ),
+        (
+            "what happens to a character the destination cannot store",
+            ("quarantined", "unsupported"),
+        ),
+        (
+            "what happens if a numeric overflows the destination type",
+            ("preflight finding", "lossy"),
+        ),
+        ("can I keep my pipelines in git", ("yaml", "git")),
+        ("can I filter rows before they are written", ("filter", "transform")),
+        (
+            "what is the difference between append and overwrite",
+            ("insert-only", "replaces the destination"),
+        ),
+    ],
+)
+def test_the_lead_names_the_outcome_the_question_asked_for(
+    question: str, needles: tuple[str, ...]
+) -> None:
+    """Named-fixture floor for the consequence / permission / CDC cluster."""
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer(question, limit=4)) or "").split()
+    )
+    lead = body.split(". ")[0].lower()
+    missing = [n for n in needles if n.lower() not in lead]
+    assert not missing, f"{missing} not in {lead[:240]}"
 
 
 def test_the_schema_change_policies_are_named_in_the_lead() -> None:

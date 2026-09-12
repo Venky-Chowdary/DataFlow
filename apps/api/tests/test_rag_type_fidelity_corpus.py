@@ -140,7 +140,7 @@ def test_the_concept_and_the_range_are_separate_sections() -> None:
     to "how do you handle timezones".
     """
     titles = {s.section_title for s in generated_sections()}
-    assert "Timestamps and time zones" in titles
+    assert "Timestamps stored in UTC and time zones" in titles
     assert "Timestamp range and instant carriers" in titles
 
 
