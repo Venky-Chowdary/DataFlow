@@ -90,6 +90,13 @@ RELEVANCE_FLOOR = 0.35
 #: greps for happens to sit in the sentence the subject rule hoisted.
 LEAD_SUBJECT_FLOOR = 0.7
 
+#: When two sentences land this close, treat them as a tie and keep the one
+#: retrieval ranked first (lower ``order``). A 0.0004 IDF wobble is how
+#: "what timezone are timestamps stored in" opened on the range passage's
+#: "bare TIMESTAMP" sentence instead of the UTC / offset-label fact the
+#: fused rank had already put first.
+LEAD_NEAR_TIE = 0.02
+
 #: How close to the rarest typed word another typed word has to be before it
 #: also counts as naming the subject. See ``subject_words``.
 #:
@@ -783,9 +790,18 @@ def _lead(pool: Sequence[Candidate]) -> Candidate:
     naming the subject says a sentence is about the right thing, not that it
     answers.
     """
-    top = max(pool, key=lambda c: c.score)
-    if top.list_vouched:
-        return top
+    scored_top = max(pool, key=lambda c: (c.score, -c.order))
+    if scored_top.list_vouched:
+        return scored_top
+    # Near-ties among prose break toward fused rank (earlier ``order``).
+    # A 0.0004 IDF wobble must not let a support passage speak first.
+    bar_score = scored_top.score
+    near = [
+        c
+        for c in pool
+        if not c.list_item and c.score >= bar_score - LEAD_NEAR_TIE
+    ]
+    top = min(near, key=lambda c: c.order) if near else scored_top
     bar = top.score * LEAD_SUBJECT_FLOOR
     named = [
         c for c in pool if c.names_subject and not c.list_item and c.score >= bar
