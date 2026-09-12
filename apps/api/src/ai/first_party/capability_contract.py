@@ -1403,8 +1403,7 @@ def byok_card() -> CapabilityCard | None:
         title="Do you support BYOK",
         text=(
             "Yes — Settings → Enterprise → BYOK wraps newly saved connector "
-            "secrets with your KMS key when a tenant key is active "
-            "(local, wrapped, or aws_kms). "
+            "secrets with your KMS key when a tenant key is active. "
             "That is secret wrapping, not destination-table encryption."
         ),
         source_module="services/byok_key_manager.py · create_key",

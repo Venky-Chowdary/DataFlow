@@ -1296,6 +1296,31 @@ def _destination_list_section() -> GeneratedSection | None:
     )
 
 
+def _source_count_section() -> GeneratedSection | None:
+    """How many sources — its own heading, so G1 cannot steal the count.
+
+    G1 reads "Source readable — source connects". Wider fusion plus named
+    G-cards opened "how many sources can you connect to" on that card, then
+    on the G1–G9 listing because it also says Source. Destinations already
+    have this split; sources need the same one-section-per-question rule.
+    """
+    try:
+        from services.catalog_service import catalog_summary
+
+        n = catalog_summary().get("source_live")
+    except Exception:
+        n = None
+    if not n:
+        return None
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="How many sources can you connect to",
+        text=f"There are {n} sources a transfer can connect to.",
+        source_module="services.catalog_service.py · catalog_summary",
+        category="connectors",
+    )
+
+
 def _destination_count_section() -> GeneratedSection | None:
     """How many destinations — its own heading, so a count ask can find it.
 
@@ -2513,6 +2538,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _connector_catalog_section,
         _catalog_count_section,
         _destination_list_section,
+        _source_count_section,
         _destination_count_section,
         _sync_mode_count_section,
         _role_count_section,

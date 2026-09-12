@@ -546,12 +546,20 @@ def _section_intent_bonus(
         is_subject_term(term) and _covers(term, heading)
         for term in analysis.search_terms
     )
+    numbered_gate_ask = bool(
+        re.search(r"\bgate\s*[1-9]\b|\bg[1-9]\b", analysis.text, re.I)
+    )
     if not on_subject:
         # The gate cards still have to pay the off-ask cost when they ranked
         # here on a body word. "Which destinations can I write to" does not
         # name a gate, so "Core gates (before write)" is not on subject — and
         # without a penalty it still wins the ranking, because G2 says
-        # "Destination write access".
+        # "Destination write access". G1 says "source connects", which is how
+        # "how many sources can you connect to" opened on a gate card.
+        if named_gate and not numbered_gate_ask:
+            return -_CORE_GATES_OFF_ASK
+        if listing and "gate" in title and analysis.ask == "count":
+            return -_CORE_GATES_OFF_ASK
         if core_gates and not _GATE_QUESTION.search(analysis.text):
             return -_CORE_GATES_OFF_ASK
         return 0.0
@@ -572,6 +580,8 @@ def _section_intent_bonus(
             bonus += _COUNTING_TITLE_BONUS
         if is_procedure:
             bonus -= 2.8
+        if named_gate:
+            bonus -= _CORE_GATES_OFF_ASK
         return bonus
     # A counting heading on any other ask is the wrong container, and a heading
     # that has to name four inventories to say how many there are of each
