@@ -120,6 +120,18 @@ def test_upsert_merge_and_airbyte_pack_do_not_snap_to_neighbors() -> None:
         "can I call this from GitHub Actions",
         "open the mcp page",
     )
+    assert drops_distinctive_subjects(
+        "can I export audit logs as CSV",
+        "do you sign a soc2 or hipaa baa",
+    )
+    assert drops_distinctive_subjects(
+        "what is the difference between incremental and upsert",
+        "what is the difference between upsert and merge",
+    )
+    assert introduces_unrelated_subjects(
+        "do you support IP allowlists",
+        "can I require mfa",
+    )
 
 
 def test_rice_is_an_unrelated_subject() -> None:

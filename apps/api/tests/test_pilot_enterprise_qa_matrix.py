@@ -76,6 +76,15 @@ def _lead(question: str) -> str:
         ("can I connect Snowflake with a private key", ("key-pair",), ("kms key", "privatelink")),
         ("do you support SOC2", ("does not invent a signed", "soc 2"), ("type ii letter we issued",)),
         ("can you sign a HIPAA BAA", ("does not invent a signed", "hipaa baa"), ("for soc 2 / gdpr / hipaa review",)),
+        ("who can export audit logs", ("audit.read",), ("signed soc 2", "type ii letter")),
+        ("can I export audit logs as CSV", ("csv", "audit"), ("select format csv", "file export")),
+        ("do you support IP allowlists", ("ip allowlist",), ("mfa_enforced",)),
+        ("can I require MFA", ("login mfa is not wired",), ("ip allowlist",)),
+        ("where is the CDC watermark stored", ("resume token",), ("separate run", "exactly-once delivery")),
+        ("can I set a watermark", ("resume token", "watermark"), ("separate run",)),
+        ("what is the difference between incremental and upsert", ("cursor-bounded",), ("upsert is a sync mode", "merge into")),
+        ("do you support BigQuery as a destination", ("bigquery is a transfer-ready",), ("string",)),
+        ("can I use a service principal for Azure", ("service principal",), ("schema registry",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(
@@ -107,6 +116,8 @@ def test_off_subject_english_is_refused(question: str) -> None:
     [
         "what is your uptime SLA",
         "how much does it cost",
+        "is there an SLA for job runtime",
+        "do you support SCIM",
     ],
 )
 def test_compliance_and_commercial_asks_are_refused_not_invented(

@@ -78,6 +78,13 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"airflow", "spark", "orchestrat"}),
     frozenset({"glue", "iceberg", "catalog", "nessie"}),
     frozenset({"confirm", "requires_confirm"}),
+    frozenset({"audit", "audit_read"}),
+    frozenset({"mfa", "login"}),
+    frozenset({"allowlist", "cidr"}),
+    frozenset({"watermark", "resume", "checkpoint"}),
+    frozenset({"incremental", "cursor"}),
+    frozenset({"principal", "adls", "service_account"}),
+    frozenset({"bigquery"}),
 )
 
 

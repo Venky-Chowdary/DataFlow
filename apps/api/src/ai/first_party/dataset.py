@@ -102,6 +102,15 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("can I connect snowflake with a private key", "can I connect snowflake with a private key"),
     ("do you support soc2", "do you sign a soc2 or hipaa baa"),
     ("can you sign a hipaa baa", "do you sign a soc2 or hipaa baa"),
+    ("who can export audit logs", "who can export audit logs as csv"),
+    ("can I export audit logs as csv", "who can export audit logs as csv"),
+    ("do you support ip allowlists", "do you support ip allowlists"),
+    ("can I require mfa", "can I require mfa"),
+    ("where is the cdc watermark stored", "where is the cdc watermark stored"),
+    ("can I set a watermark", "where is the cdc watermark stored"),
+    ("what is the difference between incremental and upsert", "what is the difference between incremental and upsert"),
+    ("do you support bigquery as a destination", "do you support bigquery as a destination"),
+    ("can I use a service principal for azure", "can I use a service principal for azure"),
 )
 
 

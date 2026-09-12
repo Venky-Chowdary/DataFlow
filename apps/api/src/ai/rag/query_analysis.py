@@ -598,7 +598,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("rest", "api", "bearer")),
     (re.compile(
         r"\bgithub\s+actions\b"
-        r"|\bci\s+(?:pipeline|job)\b"
+        r"|\bgithub\s+ci\b"
         r"|\bcall\s+(?:this|datawrap)\s+from\s+github\b",
         re.I,
     ),
@@ -629,10 +629,52 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(
         r"\bset\s+a\s+watermark\b"
         r"|\bcdc\s+watermark\b"
-        r"|\bwhere\s+is\s+the\s+watermark\b",
+        r"|\bwhere\s+is\s+the\s+(?:cdc\s+)?watermark\b"
+        r"|\bhow\s+is\s+the\s+(?:high[\s-]?water[\s-]?mark|watermark)\s+stored\b",
         re.I,
     ),
-     ("watermark", "checkpoint", "resume")),
+     ("watermark", "resume")),
+    (re.compile(
+        r"\bwho\s+can\s+export\s+audit\b"
+        r"|\bexport\s+audit\s+logs?(?:\s+as\s+csv)?\b"
+        r"|\baudit\s+logs?\s+as\s+csv\b"
+        r"|/api/v1/audit/",
+        re.I,
+    ),
+     ("audit", "csv", "audit_read", "export")),
+    (re.compile(
+        r"\bip\s+allow\s*lists?\b"
+        r"|\bcidr\s+allow\s*lists?\b"
+        r"|\ballowlist(?:ed)?\s+ips?\b",
+        re.I,
+    ),
+     ("allowlist", "cidr", "custom_domain")),
+    (re.compile(
+        r"\brequire\s+mfa\b"
+        r"|\bmulti[\s-]?factor\b"
+        r"|\blogin\s+mfa\b",
+        re.I,
+    ),
+     ("mfa", "login")),
+    (re.compile(
+        r"\bservice\s+principal(?:\s+for\s+azure)?\b"
+        r"|\bazure\s+service\s+principal\b",
+        re.I,
+    ),
+     ("principal", "adls", "service_account")),
+    (re.compile(
+        r"\bbigquery\s+as\s+a\s+destination\b"
+        r"|\bdestination\s+(?:in|to|on)\s+bigquery\b",
+        re.I,
+    ),
+     ("bigquery", "driver")),
+    (re.compile(
+        r"\bincremental\s+(?:vs\.?|versus|or)\s+upsert\b"
+        r"|\bupsert\s+(?:vs\.?|versus|or)\s+incremental\b"
+        r"|\bdifference\s+between\s+incremental\s+and\s+upsert\b",
+        re.I,
+    ),
+     ("incremental", "upsert", "cursor")),
     (re.compile(
         r"\bestuary\b"
         r"|(?<!custom\s)\bfivetran\b(?!\s+connector)(?!\s+pack)"
@@ -854,6 +896,21 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\b(?:limit|restrict|control)\s+(?:who|access|which\s+\w+\s+can)\b", re.I),
         ("limit", "restrict", "control"),
+    ),
+    # "SLA for job runtime" names a warranty this product does not publish.
+    # Left as content terms it retrieved the Airbyte pack card on ``runtime``
+    # and the data-loss card on ``SLA``. Framing the span drops those words
+    # so the question stays refused, like uptime and price.
+    (
+        re.compile(
+            r"\bsla\s+for\s+(?:a\s+)?(?:job|transfer)\s+runtime\b"
+            r"|\b(?:job|transfer)\s+runtime\s+sla\b",
+            re.I,
+        ),
+        # Leave ``sla`` — it is not a product heading, so the leftover
+        # question has no subject and is refused. Framing ``sla`` too would
+        # empty the term set and fall back to the raw words, including ``job``.
+        ("job", "runtime"),
     ),
 )
 

@@ -375,6 +375,70 @@ def snowflake_key_pair_supported() -> bool:
     return infer_auth_mode(private_key="-----BEGIN PRIVATE KEY-----", driver="snowflake") == "key_pair"
 
 
+def viewer_has_audit_read() -> bool:
+    try:
+        from services.rbac import Permission, role_permissions
+    except Exception:
+        return False
+    return Permission.AUDIT_READ in role_permissions("viewer")
+
+
+def bigquery_is_transfer_ready() -> bool:
+    return "bigquery" in _transfer_ready_drivers()
+
+
+def adls_is_transfer_ready() -> bool:
+    return "adls" in _transfer_ready_drivers()
+
+
+def adls_service_principal_shipped() -> bool:
+    try:
+        from connectors.adls_common import _service_principal_credential
+    except Exception:
+        return False
+    return "ClientSecretCredential" in inspect.getsource(_service_principal_credential)
+
+
+def incremental_modes_are_canonical() -> bool:
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return False
+    return {"incremental_append", "incremental_deduped", "upsert"} <= set(
+        CANONICAL_SYNC_MODES
+    )
+
+
+def login_mfa_enforced() -> bool:
+    """Login MFA is policy memory only — workspace_router.mfa_enforced stays False."""
+    return False
+
+
+def ip_allowlist_enforced_without_custom_domain() -> bool:
+    """CIDR list is stored; enforcement requires a custom domain."""
+    return False
+
+
+def watermark_store_honesty() -> dict[str, object]:
+    """Default resume token vs opted-in EOS table — not a platform exactly-once claim."""
+    try:
+        from services.cdc_exactly_once import (
+            PLATFORM_EXACTLY_ONCE_CLAIMED,
+            WATERMARK_TABLE,
+        )
+    except Exception:
+        return {
+            "default_store": "resume_token",
+            "eos_table": "_df_cdc_eos_watermarks",
+            "exactly_once_claimed": False,
+        }
+    return {
+        "default_store": "resume_token",
+        "eos_table": WATERMARK_TABLE,
+        "exactly_once_claimed": bool(PLATFORM_EXACTLY_ONCE_CLAIMED),
+    }
+
+
 def silent_data_loss_card() -> CapabilityCard | None:
     """No legal zero-loss SLA — quarantine + ledger, not query-capture deletes."""
     try:
@@ -451,7 +515,7 @@ def compliance_attestation_card() -> CapabilityCard | None:
 
 
 def airbyte_connector_pack_card() -> CapabilityCard | None:
-    """Airbyte / Fivetran tiles are not a connector runtime."""
+    """Airbyte / Fivetran tiles are not a connector pack loader."""
     if airbyte_is_transfer_ready() or fivetran_is_transfer_ready():
         return None
     return CapabilityCard(
@@ -462,7 +526,7 @@ def airbyte_connector_pack_card() -> CapabilityCard | None:
             "own transfer-ready drivers (unique_driver_types), not an Airbyte "
             "CDK or Fivetran pack. "
             "Both remain planned catalog tiles and a competitor comparison, "
-            "not a connector runtime."
+            "not a connector pack loader."
         ),
         source_module="services/catalog_service.py · unique_driver_types",
         category="connectors",
@@ -533,7 +597,7 @@ def github_actions_card() -> CapabilityCard:
             "Yes — GitHub Actions can call the /api/v1 REST API with a Bearer "
             "token after you Confirm; Datawrap does not run GitHub Actions or "
             "Airflow as the write engine. "
-            "An external CI job is a client of the API, not the transfer runtime."
+            "An external CI workflow is a client of the API, not the write engine."
         ),
         source_module="docs/API_VERSIONING.md · start_transfer requires_confirm",
         category="api",
@@ -597,6 +661,141 @@ def snowflake_key_pair_card() -> CapabilityCard | None:
     )
 
 
+def audit_export_card() -> CapabilityCard | None:
+    """Who can download the workspace audit sample — not a SOC 2 letter."""
+    try:
+        from src.routers.audit_router import audit_export_honesty
+    except Exception:
+        return None
+    honesty = audit_export_honesty()
+    if honesty.get("signed_soc2") or honesty.get("signed_hipaa_baa"):
+        return None
+    if not viewer_has_audit_read():
+        return None
+    return CapabilityCard(
+        title="Who can export audit logs as CSV",
+        text=(
+            "Any role with audit.read can export audit logs as CSV or JSON "
+            "from GET /api/v1/audit/export. "
+            "Viewers have audit.read. The download is a workspace-scoped "
+            "HMAC-SHA256 sample, not a signed attestation letter."
+        ),
+        source_module="src/routers/audit_router.py · export_events · services/rbac.py",
+        category="enterprise",
+    )
+
+
+def ip_allowlist_card() -> CapabilityCard | None:
+    if ip_allowlist_enforced_without_custom_domain():
+        return None
+    return CapabilityCard(
+        title="Do you support IP allowlists",
+        text=(
+            "A tenant IP allowlist (CIDR) is stored on the workspace and is "
+            "enforced only when a custom domain exists; the vanity app host "
+            "never evaluates the list. "
+            "Without a custom domain, ip_allowlist_enforced stays false."
+        ),
+        source_module="src/routers/workspace_router.py · ip_allowlist_enforced",
+        category="enterprise",
+    )
+
+
+def require_mfa_card() -> CapabilityCard | None:
+    if login_mfa_enforced():
+        return None
+    return CapabilityCard(
+        title="Can I require MFA",
+        text=(
+            "The workspace can record mfa_required as policy memory; login MFA "
+            "is not wired, so mfa_enforced is false. "
+            "Saving the flag does not challenge sign-in."
+        ),
+        source_module="src/routers/workspace_router.py · mfa_enforced",
+        category="enterprise",
+    )
+
+
+def _watermark_store_text() -> str:
+    honesty = watermark_store_honesty()
+    table = honesty.get("eos_table") or "_df_cdc_eos_watermarks"
+    return (
+        "The CDC watermark is stored as the resume token (binlog, GTID, "
+        "LSN, or SCN) kept with the job. "
+        f"An opted-in exactly-once route also persists the committed "
+        f"position in `{table}` on the destination; exactly-once is not "
+        "claimed platform-wide."
+    )
+
+
+def cdc_watermark_store_card() -> CapabilityCard | None:
+    return CapabilityCard(
+        title="Where is the CDC watermark stored",
+        text=_watermark_store_text(),
+        source_module="services/cdc_exactly_once.py · WATERMARK_TABLE",
+        category="transfer",
+    )
+
+
+def set_watermark_card() -> CapabilityCard | None:
+    """Same store fact — the heading operators use when they say 'set'."""
+    return CapabilityCard(
+        title="Can I set a watermark",
+        text=_watermark_store_text(),
+        source_module="services/cdc_exactly_once.py · WATERMARK_TABLE",
+        category="transfer",
+    )
+
+
+def incremental_versus_upsert_card() -> CapabilityCard | None:
+    if not incremental_modes_are_canonical():
+        return None
+    return CapabilityCard(
+        title="What is the difference between incremental and upsert",
+        text=(
+            "Incremental modes are cursor-bounded: incremental_append inserts "
+            "rows past the saved cursor with no dedup; incremental_deduped "
+            "merges those rows on the key. "
+            "Upsert is a whole-source read written key-idempotently. "
+            "Incremental is not a synonym for upsert."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def bigquery_destination_card() -> CapabilityCard | None:
+    if not bigquery_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support BigQuery as a destination",
+        text=(
+            "Yes — BigQuery is a transfer-ready driver, so a transfer can use "
+            "it as a destination or a source. "
+            "Catalog tile count is not the proof; unique_driver_types is."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_service_principal_card() -> CapabilityCard | None:
+    if not adls_is_transfer_ready() or not adls_service_principal_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use a service principal for Azure",
+        text=(
+            "Yes — Azure Data Lake / Blob connections accept a service "
+            "principal via service_account JSON (tenant_id, client_id, "
+            "client_secret) on the ADLS connect path. "
+            "That is a connector credential, not Azure AD SSO as the "
+            "transfer writer."
+        ),
+        source_module="connectors/adls_common.py · _service_principal_credential",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -625,6 +824,14 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         openlineage_card,
         mirror_versus_upsert_card,
         snowflake_key_pair_card,
+        audit_export_card,
+        ip_allowlist_card,
+        require_mfa_card,
+        cdc_watermark_store_card,
+        set_watermark_card,
+        incremental_versus_upsert_card,
+        bigquery_destination_card,
+        azure_service_principal_card,
     ):
         card = builder()
         if card is not None:

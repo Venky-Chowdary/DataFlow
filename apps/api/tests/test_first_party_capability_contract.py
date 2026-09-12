@@ -56,6 +56,14 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "What is the difference between mirror and upsert",
         "Can I connect Snowflake with a private key",
         "Do you sign a SOC2 or HIPAA BAA",
+        "Who can export audit logs as CSV",
+        "Do you support IP allowlists",
+        "Can I require MFA",
+        "Where is the CDC watermark stored",
+        "Can I set a watermark",
+        "What is the difference between incremental and upsert",
+        "Do you support BigQuery as a destination",
+        "Can I use a service principal for Azure",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
@@ -110,6 +118,48 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
     cert = compliance_attestation_card()
     assert cert is not None and "does not invent a signed" in cert.text.lower()
     assert "hipaa baa" in cert.text.lower()
+    from src.ai.first_party.capability_contract import (
+        adls_service_principal_shipped,
+        audit_export_card,
+        azure_service_principal_card,
+        bigquery_destination_card,
+        bigquery_is_transfer_ready,
+        incremental_modes_are_canonical,
+        incremental_versus_upsert_card,
+        ip_allowlist_card,
+        ip_allowlist_enforced_without_custom_domain,
+        login_mfa_enforced,
+        require_mfa_card,
+        viewer_has_audit_read,
+        watermark_store_honesty,
+    )
+
+    assert viewer_has_audit_read() is True
+    assert login_mfa_enforced() is False
+    assert ip_allowlist_enforced_without_custom_domain() is False
+    assert bigquery_is_transfer_ready() is True
+    assert adls_service_principal_shipped() is True
+    assert incremental_modes_are_canonical() is True
+    wm = watermark_store_honesty()
+    assert wm["default_store"] == "resume_token"
+    assert wm["exactly_once_claimed"] is False
+    assert "_df_cdc_eos_watermarks" in str(wm["eos_table"])
+    audit = audit_export_card()
+    assert audit is not None and "audit.read" in audit.text
+    assert "csv" in audit.text.lower()
+    assert ip_allowlist_card() is not None
+    assert require_mfa_card() is not None
+    assert incremental_versus_upsert_card() is not None
+    assert bigquery_destination_card() is not None
+    assert azure_service_principal_card() is not None
+    router = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "src"
+        / "routers"
+        / "workspace_router.py"
+    ).read_text(encoding="utf-8")
+    assert '"mfa_enforced": False' in router
+    assert "ip_allowlist and (tenant.custom_domain" in router
 
 
 def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
@@ -158,6 +208,33 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     fivetran = compose_product_answer(
         retrieve_product_answer("do you load Fivetran connector packs", limit=4)
     ) or ""
+    audit_who = compose_product_answer(
+        retrieve_product_answer("who can export audit logs", limit=4)
+    ) or ""
+    audit_csv = compose_product_answer(
+        retrieve_product_answer("can I export audit logs as CSV", limit=4)
+    ) or ""
+    allowlist = compose_product_answer(
+        retrieve_product_answer("do you support IP allowlists", limit=4)
+    ) or ""
+    mfa = compose_product_answer(
+        retrieve_product_answer("can I require MFA", limit=4)
+    ) or ""
+    watermark = compose_product_answer(
+        retrieve_product_answer("where is the CDC watermark stored", limit=4)
+    ) or ""
+    set_wm = compose_product_answer(
+        retrieve_product_answer("can I set a watermark", limit=4)
+    ) or ""
+    incr = compose_product_answer(
+        retrieve_product_answer("what is the difference between incremental and upsert", limit=4)
+    ) or ""
+    bq = compose_product_answer(
+        retrieve_product_answer("do you support BigQuery as a destination", limit=4)
+    ) or ""
+    azure = compose_product_answer(
+        retrieve_product_answer("can I use a service principal for Azure", limit=4)
+    ) or ""
     loss_lead = loss.split(". ")[0].lower()
     upsert_lead = upsert.split(". ")[0].lower()
     pack_lead = pack.split(". ")[0].lower()
@@ -200,3 +277,30 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "key-pair" in keypair_lead or "key_pair" in keypair_lead
     assert "kms key" not in keypair_lead
     assert "does not load" in fivetran_lead and "fivetran" in fivetran_lead
+    audit_who_lead = audit_who.split(". ")[0].lower()
+    audit_csv_lead = audit_csv.split(". ")[0].lower()
+    allowlist_lead = allowlist.split(". ")[0].lower()
+    mfa_lead = mfa.split(". ")[0].lower()
+    watermark_lead = watermark.split(". ")[0].lower()
+    set_wm_lead = set_wm.split(". ")[0].lower()
+    incr_lead = incr.split(". ")[0].lower()
+    bq_lead = bq.split(". ")[0].lower()
+    azure_lead = azure.split(". ")[0].lower()
+    assert "audit.read" in audit_who_lead
+    assert "signed soc 2" not in audit_who_lead
+    assert "csv" in audit_csv_lead and "audit" in audit_csv_lead
+    assert "file export" not in audit_csv_lead
+    assert "select format csv" not in audit_csv_lead
+    assert "ip allowlist" in allowlist_lead
+    assert "mfa_enforced is false" in mfa_lead or "login mfa is not wired" in mfa_lead
+    assert "resume token" in watermark_lead
+    assert "exactly-once is not claimed platform-wide" not in watermark_lead or "resume token" in watermark_lead
+    assert "separate run" not in watermark_lead
+    assert "resume token" in set_wm_lead or "watermark" in set_wm_lead
+    assert "separate run" not in set_wm_lead
+    assert "cursor-bounded" in incr_lead
+    assert "upsert is a sync mode" not in incr_lead
+    assert "bigquery is a transfer-ready" in bq_lead
+    assert "string" not in bq_lead
+    assert "service principal" in azure_lead
+    assert "schema registry" not in azure_lead

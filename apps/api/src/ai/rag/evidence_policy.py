@@ -170,6 +170,10 @@ def subject_aliases() -> frozenset[str]:
             "github",
             "undo",
             "rollback",
+            "allowlist",
+            "mfa",
+            "principal",
+            "audit_read",
         }
     )
     try:
