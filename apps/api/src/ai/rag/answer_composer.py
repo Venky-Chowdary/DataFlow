@@ -191,9 +191,20 @@ _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
 #: A sentence that answers "how many" says a number. The corpus writes both
 #: digits ("717 tiles", "46 of them") and small cardinals in words ("nine
 #: preflight gates", "five modes"), so both count.
+# What counts as answering "how many". A digit always does. A spelled-out
+# number only does when it is quantifying something — "there are two ways",
+# "nine gates" — because the small ones are far more often adverbial: "in one
+# transaction", "as one atomic unit", "one measure per distinct value". Asked
+# "how many destinations do you support", the count shape bonus went to "commit
+# the applied rows and the watermark that records them in one transaction",
+# which led the answer while the passage stating "30 sources and 30
+# destinations" sat below it. Requiring a plural after the word is what
+# separates a quantity from a manner; ``one`` is dropped entirely, since a
+# singular is not an answer to a plural question.
 _CARDINAL = re.compile(
-    r"\b(?:\d[\d,]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
-    r"twelve|dozen|hundred|thousand|million)\b",
+    r"\b\d[\d,]*\b"
+    r"|\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|"
+    r"hundred|thousand|million)\s+(?:\w+\s+){0,2}\w{3,}s\b",
     re.I,
 )
 

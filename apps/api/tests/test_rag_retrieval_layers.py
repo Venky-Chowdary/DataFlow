@@ -13,8 +13,11 @@ Reading order matches the pipeline:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -499,3 +502,39 @@ def test_every_composed_answer_cites_where_it_came_from():
     answer = compose_answer(analysis, [_GATES])
     assert answer.rstrip().endswith("(Help)")
     assert "Preflight gates explained" in answer
+
+
+
+# --- what counts as answering "how many" -------------------------------------
+
+
+def test_a_spelled_number_used_adverbially_is_not_a_count():
+    """"In one transaction" is a manner, not a quantity.
+
+    Measured: asked "how many destinations do you support", the count shape
+    bonus went to "commit the applied rows and the watermark that records them
+    in one transaction", which then led the answer.
+    """
+    from src.ai.rag.answer_composer import _CARDINAL
+
+    for manner in (
+        "committed in one transaction",
+        "applied as one atomic unit",
+        "one measure per distinct value of a column",
+        "kept in one place",
+    ):
+        assert not _CARDINAL.search(manner), manner
+
+
+def test_a_spelled_number_quantifying_something_still_counts():
+    """The bonus has to survive for the sentences that do answer a count."""
+    from src.ai.rag.answer_composer import _CARDINAL
+
+    for quantity in (
+        "There are two ways to capture changes",
+        "Preflight runs nine core gates",
+        "five sync modes require a cursor field",
+        "46 connectors are live and transfer-ready",
+        "there are 30 sources and 30 destinations",
+    ):
+        assert _CARDINAL.search(quantity), quantity
