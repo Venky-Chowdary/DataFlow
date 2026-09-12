@@ -1104,9 +1104,10 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ("cost", "price", "pric", "datawrap", "dataflow"),
     ),
     # "what is Gate 8" is one named card. Left as ``gate`` it retrieved
-    # the G1–G9 listing and led with G1.
+    # the G1–G9 listing and led with G1. Only G8 is framed — a blanket
+    # G1–G9 frame stole "what is G3" onto CDC schema drift.
     (
-        re.compile(r"\bgate\s*[1-9]\b|\bg[1-9]\b", re.I),
+        re.compile(r"\bgate\s*8\b|\bg8\b", re.I),
         ("gate", "preflight", "block", "validat"),
     ),
 )
