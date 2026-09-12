@@ -274,6 +274,16 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Backup for GKE",
         "Do you support Connected Sheets",
         "Do you support Looker Embedded",
+        "Do you support Colab Enterprise",
+        "Do you support AutoML",
+        "Do you support Digital Twins",
+        "Do you support Spatial Anchors",
+        "Do you support Floodlight",
+        "Do you support BeyondCorp",
+        "Do you support Tekton",
+        "Do you support Traffic Director",
+        "Do you support Parallelstore",
+        "Do you support NetApp Volumes",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

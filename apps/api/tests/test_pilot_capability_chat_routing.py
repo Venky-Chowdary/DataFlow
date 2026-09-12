@@ -119,6 +119,17 @@ def _names(question: str) -> list[str]:
         "do you support Cloud Deploy",
         "is there a Google Voice connector",
         "is Slack a connector",
+        "do you support Colab Enterprise",
+        "do you support AutoML",
+        "do you support Digital Twins",
+        "do you support Spatial Anchors",
+        "do you support Floodlight",
+        "do you support BeyondCorp",
+        "do you support Tekton",
+        "do you support Traffic Director",
+        "do you support Parallelstore",
+        "do you support NetApp Volumes",
+        "is there a Tekton connector",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

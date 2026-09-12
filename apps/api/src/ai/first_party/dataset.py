@@ -446,6 +446,16 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support backup for gke", "do you support backup for gke"),
     ("do you support connected sheets", "do you support connected sheets"),
     ("do you support looker embedded", "do you support looker embedded"),
+    ("do you support colab enterprise", "do you support colab enterprise"),
+    ("do you support automl", "do you support automl"),
+    ("do you support digital twins", "do you support digital twins"),
+    ("do you support spatial anchors", "do you support spatial anchors"),
+    ("do you support floodlight", "do you support floodlight"),
+    ("do you support beyondcorp", "do you support beyondcorp"),
+    ("do you support tekton", "do you support tekton"),
+    ("do you support traffic director", "do you support traffic director"),
+    ("do you support parallelstore", "do you support parallelstore"),
+    ("do you support netapp volumes", "do you support netapp volumes"),
 )
 
 

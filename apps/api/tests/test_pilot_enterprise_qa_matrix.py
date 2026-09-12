@@ -446,6 +446,16 @@ def _lead(question: str) -> str:
         ("do you support Backup for GKE", ("backup_for_gke is false",), ("does not ship gke as",)),
         ("do you support Connected Sheets", ("connected_sheets is false",), ("google_sheets is false",)),
         ("do you support Looker Embedded", ("looker_embedded is false",), ()),
+        ("do you support Colab Enterprise", ("colab_enterprise is false",), ("vertex_ai_workbench is false",)),
+        ("do you support AutoML", ("automl is false",), ("bigquery_ml is false",)),
+        ("do you support Digital Twins", ("digital_twins is false",), ("iot_hub is false",)),
+        ("do you support Spatial Anchors", ("spatial_anchors is false",), ("azure_maps is false",)),
+        ("do you support Floodlight", ("floodlight is false",), ("campaign_manager is false",)),
+        ("do you support BeyondCorp", ("beyondcorp is false",), ("cloud_iap is false",)),
+        ("do you support Tekton", ("tekton is false",), ("cloud_deploy is false",)),
+        ("do you support Traffic Director", ("traffic_director is false",), ("cloud_load_balancing is false",)),
+        ("do you support Parallelstore", ("parallelstore is false",), ("filestore is false",)),
+        ("do you support NetApp Volumes", ("netapp_volumes is false",), ("azure_files is false",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(

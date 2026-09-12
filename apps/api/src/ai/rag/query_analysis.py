@@ -1362,6 +1362,16 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bbackup\s+for\s+gke\b", re.I), ("backup_for_gke",)),
     (re.compile(r"\bconnected\s+sheets\b", re.I), ("connected_sheets",)),
     (re.compile(r"\blooker\s+embedded\b", re.I), ("looker_embedded",)),
+    (re.compile(r"\bcolab\b", re.I), ("colab_enterprise",)),
+    (re.compile(r"\bautoml\b", re.I), ("automl",)),
+    (re.compile(r"\bdigital\s+twins\b", re.I), ("digital_twins",)),
+    (re.compile(r"\bspatial\s+anchors\b", re.I), ("spatial_anchors",)),
+    (re.compile(r"\bfloodlight\b", re.I), ("floodlight",)),
+    (re.compile(r"\bbeyondcorp\b", re.I), ("beyondcorp",)),
+    (re.compile(r"\btekton\b", re.I), ("tekton",)),
+    (re.compile(r"\btraffic\s+director\b", re.I), ("traffic_director",)),
+    (re.compile(r"\bparallelstore\b", re.I), ("parallelstore",)),
+    (re.compile(r"\bnetapp\b", re.I), ("netapp_volumes",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2939,6 +2949,46 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\blooker\s+embedded\b", re.I),
         ("looker",),
+    ),
+    (
+        re.compile(r"\bcolab\b", re.I),
+        ("vertex_ai_workbench",),
+    ),
+    (
+        re.compile(r"\bautoml\b", re.I),
+        ("bigquery_ml",),
+    ),
+    (
+        re.compile(r"\bdigital\s+twins\b", re.I),
+        ("iot_hub",),
+    ),
+    (
+        re.compile(r"\bspatial\s+anchors\b", re.I),
+        ("azure_maps", "remote_rendering"),
+    ),
+    (
+        re.compile(r"\bfloodlight\b", re.I),
+        ("campaign_manager",),
+    ),
+    (
+        re.compile(r"\bbeyondcorp\b", re.I),
+        ("cloud_iap",),
+    ),
+    (
+        re.compile(r"\btekton\b", re.I),
+        ("cloud_deploy",),
+    ),
+    (
+        re.compile(r"\btraffic\s+director\b", re.I),
+        ("cloud_load_balancing",),
+    ),
+    (
+        re.compile(r"\bparallelstore\b", re.I),
+        ("filestore",),
+    ),
+    (
+        re.compile(r"\bnetapp\b", re.I),
+        ("azure_files",),
     ),
     # Bare Private Link is not Job Theater.
     (

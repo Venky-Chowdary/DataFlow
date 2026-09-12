@@ -3454,6 +3454,46 @@ def looker_embedded_shipped() -> bool:
     return False
 
 
+def colab_enterprise_shipped() -> bool:
+    return False
+
+
+def automl_shipped() -> bool:
+    return False
+
+
+def digital_twins_shipped() -> bool:
+    return False
+
+
+def spatial_anchors_shipped() -> bool:
+    return False
+
+
+def floodlight_shipped() -> bool:
+    return False
+
+
+def beyondcorp_shipped() -> bool:
+    return False
+
+
+def tekton_shipped() -> bool:
+    return False
+
+
+def traffic_director_shipped() -> bool:
+    return False
+
+
+def parallelstore_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"parallelstore"})
+
+
+def netapp_volumes_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"netapp", "anf"})
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -6498,6 +6538,146 @@ def looker_embedded_card() -> CapabilityCard | None:
     )
 
 
+def colab_enterprise_card() -> CapabilityCard | None:
+    if colab_enterprise_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Colab Enterprise",
+        text=(
+            "Datawrap does not ship Colab Enterprise as a transfer destination "
+            "(colab_enterprise is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def automl_card() -> CapabilityCard | None:
+    if automl_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support AutoML",
+        text=(
+            "Datawrap does not ship AutoML as a transfer destination "
+            "(automl is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def digital_twins_card() -> CapabilityCard | None:
+    if digital_twins_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Digital Twins",
+        text=(
+            "Datawrap does not ship Azure Digital Twins "
+            "(digital_twins is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def spatial_anchors_card() -> CapabilityCard | None:
+    if spatial_anchors_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Spatial Anchors",
+        text=(
+            "Datawrap does not ship Azure Spatial Anchors "
+            "(spatial_anchors is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def floodlight_card() -> CapabilityCard | None:
+    if floodlight_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Floodlight",
+        text=(
+            "Datawrap does not ship Floodlight as a transfer-ready source "
+            "(floodlight is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def beyondcorp_card() -> CapabilityCard | None:
+    if beyondcorp_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support BeyondCorp",
+        text=(
+            "Datawrap does not ship BeyondCorp as a connect option "
+            "(beyondcorp is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def tekton_card() -> CapabilityCard | None:
+    if tekton_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Tekton",
+        text=(
+            "Datawrap does not ship Tekton as a transfer or write engine "
+            "(tekton is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def traffic_director_card() -> CapabilityCard | None:
+    if traffic_director_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Traffic Director",
+        text=(
+            "Datawrap does not ship Traffic Director as a connect option "
+            "(traffic_director is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def parallelstore_card() -> CapabilityCard | None:
+    if parallelstore_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Parallelstore",
+        text=(
+            "Datawrap does not ship Parallelstore as a transfer-ready driver "
+            "(parallelstore is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def netapp_volumes_card() -> CapabilityCard | None:
+    if netapp_volumes_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support NetApp Volumes",
+        text=(
+            "Datawrap does not ship NetApp Volumes as a transfer-ready driver "
+            "(netapp_volumes is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -6845,6 +7025,16 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         backup_for_gke_card,
         connected_sheets_card,
         looker_embedded_card,
+        colab_enterprise_card,
+        automl_card,
+        digital_twins_card,
+        spatial_anchors_card,
+        floodlight_card,
+        beyondcorp_card,
+        tekton_card,
+        traffic_director_card,
+        parallelstore_card,
+        netapp_volumes_card,
     ):
         card = builder()
         if card is not None:

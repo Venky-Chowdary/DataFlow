@@ -581,6 +581,28 @@ def _section_intent_bonus(
             "azure openai" in title or "hybrid" in title
         ):
             return -8.0
+        if re.search(r"\bcolab\b", analysis.text, re.I) and "vertex ai workbench" in title:
+            return -8.0
+        if re.search(r"\bautoml\b", analysis.text, re.I) and "bigquery ml" in title:
+            return -8.0
+        if re.search(r"\bdigital\s+twins\b", analysis.text, re.I) and "iot hub" in title:
+            return -8.0
+        if re.search(r"\bspatial\s+anchors\b", analysis.text, re.I) and (
+            "azure maps" in title or "remote rendering" in title
+        ):
+            return -8.0
+        if re.search(r"\bfloodlight\b", analysis.text, re.I) and "campaign manager" in title:
+            return -8.0
+        if re.search(r"\bbeyondcorp\b", analysis.text, re.I) and "cloud iap" in title:
+            return -8.0
+        if re.search(r"\btekton\b", analysis.text, re.I) and "cloud deploy" in title:
+            return -8.0
+        if re.search(r"\btraffic\s+director\b", analysis.text, re.I) and "cloud load balancing" in title:
+            return -8.0
+        if re.search(r"\bparallelstore\b", analysis.text, re.I) and "filestore" in title:
+            return -8.0
+        if re.search(r"\bnetapp\b", analysis.text, re.I) and "azure files" in title:
+            return -8.0
         # The gate cards still have to pay the off-ask cost when they ranked
         # here on a body word. "Which destinations can I write to" does not
         # name a gate, so "Core gates (before write)" is not on subject — and
@@ -1695,6 +1717,48 @@ def _section_intent_bonus(
     if "looker embedded" in title:
         bonus += 6.0 if re.search(r"\blooker\s+embedded\b", analysis.text, re.I) else -3.2
     if re.search(r"\blooker\s+embedded\b", analysis.text, re.I) and title.startswith("do you support looker") and "embedded" not in title:
+        bonus -= 6.0
+    if "colab" in title:
+        bonus += 6.0 if re.search(r"\bcolab\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcolab\b", analysis.text, re.I) and "vertex ai workbench" in title:
+        bonus -= 6.0
+    if "automl" in title:
+        bonus += 6.0 if re.search(r"\bautoml\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bautoml\b", analysis.text, re.I) and "bigquery ml" in title:
+        bonus -= 6.0
+    if "digital twins" in title:
+        bonus += 6.0 if re.search(r"\bdigital\s+twins\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdigital\s+twins\b", analysis.text, re.I) and "iot hub" in title:
+        bonus -= 6.0
+    if "spatial anchors" in title:
+        bonus += 6.0 if re.search(r"\bspatial\s+anchors\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bspatial\s+anchors\b", analysis.text, re.I) and (
+        "azure maps" in title or "remote rendering" in title
+    ):
+        bonus -= 6.0
+    if "floodlight" in title:
+        bonus += 6.0 if re.search(r"\bfloodlight\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bfloodlight\b", analysis.text, re.I) and "campaign manager" in title:
+        bonus -= 6.0
+    if "beyondcorp" in title:
+        bonus += 6.0 if re.search(r"\bbeyondcorp\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbeyondcorp\b", analysis.text, re.I) and "cloud iap" in title:
+        bonus -= 6.0
+    if "tekton" in title:
+        bonus += 6.0 if re.search(r"\btekton\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btekton\b", analysis.text, re.I) and "cloud deploy" in title:
+        bonus -= 6.0
+    if "traffic director" in title:
+        bonus += 6.0 if re.search(r"\btraffic\s+director\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btraffic\s+director\b", analysis.text, re.I) and "cloud load balancing" in title:
+        bonus -= 6.0
+    if "parallelstore" in title:
+        bonus += 6.0 if re.search(r"\bparallelstore\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bparallelstore\b", analysis.text, re.I) and "filestore" in title:
+        bonus -= 6.0
+    if "netapp" in title:
+        bonus += 6.0 if re.search(r"\bnetapp\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bnetapp\b", analysis.text, re.I) and "azure files" in title:
         bonus -= 6.0
     iceberg_ready_ask = bool(
         re.search(r"\biceberg\b", analysis.text, re.I)
