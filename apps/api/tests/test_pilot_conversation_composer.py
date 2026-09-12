@@ -332,6 +332,30 @@ def test_infer_tools_briefing_and_general():
         )
         == "do I need binlog_format ROW for mysql CDC"
     )
+    assert (
+        resolve_knowledge_engine_followup(
+            "what about deletes?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "what happens to a delete in CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "do I need that?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "do I need wal_level logical for postgres CDC"
+    )
 
 
 def test_brief_workspace_is_permissioned_like_other_reads():

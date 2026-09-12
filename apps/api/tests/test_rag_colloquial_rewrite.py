@@ -38,6 +38,19 @@ def test_rewrite_strips_chat_filler_and_expands_slang() -> None:
         "wait so do I need logical decoding for postgres cdc"
     ).lower().startswith("do i need wal_level logical")
     assert rewrite_operator_question("rice?") == "rice?"
+    assert rewrite_operator_question("confused about g3").lower() == "what is g3"
+    assert rewrite_operator_question(
+        "is there a way to export yaml as a viewer"
+    ).lower() == "can a viewer export yaml"
+    assert rewrite_operator_question(
+        "can read-only users export yaml"
+    ).lower() == "can a viewer export yaml"
+    assert "binlog_format" in rewrite_operator_question(
+        "bin log format row for mysql?"
+    ).lower()
+    assert rewrite_operator_question("repl slot?").lower() == (
+        "what is replication slot"
+    )
     assert "same cdc change twice" in rewrite_operator_question(
         "what if I replay the same change"
     ).lower()
@@ -99,6 +112,36 @@ def test_engine_followup_only_after_a_cdc_answer() -> None:
         resolve_knowledge_engine_followup("same question but for mysql", history)
         == "do I need binlog_format ROW for mysql CDC"
     )
+    assert (
+        resolve_knowledge_engine_followup("what about deletes?", history)
+        == "what happens to a delete in CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup("and lag?", history)
+        == "how do I see CDC lag"
+    )
+    assert (
+        resolve_knowledge_engine_followup("do I need that?", history)
+        == "do I need wal_level logical for postgres CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup("same for deletes?", history)
+        == "what happens to a delete in CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "what about deletes?",
+            [{"role": "assistant", "content": "You have 2 jobs."}],
+        )
+        is None
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "do I need that?",
+            [{"role": "assistant", "content": "You have 2 jobs."}],
+        )
+        is None
+    )
 
 
 def test_rewrite_does_not_create_terms_for_an_off_subject_question() -> None:
@@ -126,3 +169,8 @@ def test_chat_wrappers_still_lead_on_the_documented_subject() -> None:
     )
     assert "_df_lsn" in _lead("is _df_lsn how you skip dupes")
     assert "_df_lsn" in _lead("what if I replay the same change")
+    assert "g3" in _lead("confused about g3")
+    assert "viewer" in _lead("is there a way to export yaml as a viewer")
+    assert "viewer" in _lead("can read-only users export yaml")
+    assert "binlog_format" in _lead("bin log format row for mysql?")
+    assert "slot" in _lead("repl slot?")

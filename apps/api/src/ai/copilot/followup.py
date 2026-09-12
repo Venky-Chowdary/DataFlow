@@ -161,6 +161,58 @@ _ENGINE_CDC_QUESTION = {
     "oracle": "do you support Oracle CDC",
 }
 
+# ChatGPT keeps the CDC topic and swaps the *aspect*. "what about deletes?"
+# after a wal_level answer is the delete sentence, not a new job list.
+_SUBJECT_FOLLOWUP = re.compile(
+    r"^\s*(?:"
+    r"(?:what|how)\s+about|"
+    r"and(?:\s+(?:for|what\s+about))?|"
+    r"same\s+(?:for|thing(?:\s+but)?\s+for|question(?:\s+but)?\s+for)|"
+    r"how\s+about"
+    r")\s+"
+    r"(?:for\s+)?"
+    r"(?P<sub>deletes?|lag|toast|replica\s+identity|pgoutput|plugin|"
+    r"replication\s+slots?|slots?|pre-?images?|gtid|publications?|"
+    r"wal_level|binlog(?:_format)?)\s*[?.!]?\s*$",
+    re.I,
+)
+_SUBJECT_CDC_QUESTION = {
+    "delete": "what happens to a delete in CDC",
+    "deletes": "what happens to a delete in CDC",
+    "lag": "how do I see CDC lag",
+    "toast": "do unchanged TOAST columns get dropped on a CDC update",
+    "replica identity": "do I need REPLICA IDENTITY FULL for postgres CDC",
+    "pgoutput": "what plugin does postgres CDC use",
+    "plugin": "what plugin does postgres CDC use",
+    "replication slot": "what is a replication slot",
+    "replication slots": "what is a replication slot",
+    "slot": "what is a replication slot",
+    "slots": "what is a replication slot",
+    "pre-image": "does Mongo CDC need change-stream pre-images",
+    "pre-images": "does Mongo CDC need change-stream pre-images",
+    "preimage": "does Mongo CDC need change-stream pre-images",
+    "preimages": "does Mongo CDC need change-stream pre-images",
+    "gtid": "what is GTID on a MySQL CDC route",
+    "publication": "what is a publication",
+    "publications": "what is a publication",
+    "wal_level": "do I need wal_level logical for postgres CDC",
+    "binlog": "do I need binlog_format ROW for mysql CDC",
+    "binlog_format": "do I need binlog_format ROW for mysql CDC",
+}
+_NEED_THAT = re.compile(
+    r"^\s*(?:do\s+i\s+need\s+that|is\s+that\s+(?:required|needed|necessary))"
+    r"(?:\s+for\s+\w+)?\s*[?.!]?\s*$",
+    re.I,
+)
+
+
+def _rewrite_followup_text(message: str) -> str:
+    try:
+        from ..rag.query_analysis import rewrite_operator_question
+    except Exception:
+        return (message or "").strip()
+    return rewrite_operator_question(message)
+
 
 def resolve_knowledge_engine_followup(
     message: str,
@@ -168,21 +220,46 @@ def resolve_knowledge_engine_followup(
 ) -> str | None:
     """'what about mysql?' after a CDC answer is the MySQL prerequisite.
 
-    ChatGPT keeps the prior subject and swaps the engine. We do the same only
-    when the last answer was already about capture — otherwise this stays a
-    table/job follow-up and we do not invent a CDC question.
+    ChatGPT keeps the prior subject and swaps the engine *or* the aspect
+    (deletes, lag, toast). We do the same only when the last answer was
+    already about capture — otherwise this stays a table/job follow-up
+    and we do not invent a CDC question.
     """
-    match = _ENGINE_FOLLOWUP.match((message or "").strip())
-    if not match:
-        return None
+    text = _rewrite_followup_text(message)
     prior = last_assistant_content(history)
     if not prior or not _CDC_PRIOR.search(prior):
         return None
-    raw = re.sub(r"\s+", " ", (match.group("eng") or "").strip().lower())
-    engine = _ENGINE_CANON.get(raw)
-    if not engine:
-        return None
-    return _ENGINE_CDC_QUESTION.get(engine)
+    match = _ENGINE_FOLLOWUP.match(text)
+    if match:
+        raw = re.sub(r"\s+", " ", (match.group("eng") or "").strip().lower())
+        engine = _ENGINE_CANON.get(raw)
+        if engine:
+            return _ENGINE_CDC_QUESTION.get(engine)
+    sub = _SUBJECT_FOLLOWUP.match(text)
+    if sub:
+        key = re.sub(r"\s+", " ", (sub.group("sub") or "").strip().lower())
+        return _SUBJECT_CDC_QUESTION.get(key)
+    if _NEED_THAT.match(text):
+        named = re.search(
+            r"\b(mysql|maria(?:db)?|postgres(?:ql)?|pg|mongo(?:db)?|"
+            r"sql\s*server|mssql|oracle)\b",
+            text,
+            re.I,
+        )
+        if named:
+            raw = re.sub(r"\s+", " ", named.group(1).strip().lower())
+            engine = _ENGINE_CANON.get(raw)
+            if engine:
+                return _ENGINE_CDC_QUESTION.get(engine)
+        if re.search(r"wal_level", prior, re.I):
+            return "do I need wal_level logical for postgres CDC"
+        if re.search(r"binlog", prior, re.I):
+            return "do I need binlog_format ROW for mysql CDC"
+        if re.search(r"replica\s+identity", prior, re.I):
+            return "do I need REPLICA IDENTITY FULL for postgres CDC"
+        if re.search(r"pre-?image", prior, re.I):
+            return "does Mongo CDC need change-stream pre-images"
+    return None
 
 
 def resolve_platform_coreference(

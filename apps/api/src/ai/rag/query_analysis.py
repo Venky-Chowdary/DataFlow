@@ -731,6 +731,14 @@ _CHAT_PREFIX = re.compile(
     r"^\s*(?:hey|hi|hello|yo|sup|so|ok(?:ay)?|um+|uh+|well|"
     r"wait\s+so|so\s+wait|"
     r"listen|look|"
+    r"honestly|basically|"
+    r"in\s+other\s+words|"
+    r"idk\s+but|"
+    r"confused\s+about|"
+    r"regarding|re|"
+    r"mind\s+explaining|"
+    r"is\s+there\s+a\s+way\s+to|"
+    r"would\s+it\s+be\s+possible\s+to|"
     r"i\s+was\s+(?:just\s+)?wondering|"
     r"just\s+wondering|"
     r"can\s+you\s+tell\s+me(?:\s+if|\s+whether)?|"
@@ -797,6 +805,15 @@ _SLANG_FRAMES: tuple[tuple[str, str], ...] = (
     (r"\bcan\s+viewers\b", "can a viewer"),
     (r"\bcan\s+editors\b", "can an editor"),
     (r"\bcan\s+admins\b", "can an admin"),
+    (r"\bcan\s+my\s+viewer\b", "can a viewer"),
+    (r"\bcan\s+read[\s-]?only\s+users\b", "can a viewer"),
+    (r"\b(?:export|download)\s+yaml\s+as\s+a\s+viewer\b",
+     "can a viewer export yaml"),
+    (r"\bbin\s+logs?\b", "binlog"),
+    (r"\bbinlog\s+format\b", "binlog_format"),
+    (r"\bwallevel\b", "wal_level"),
+    (r"\brepl\s+slots?\b", "replication slot"),
+    (r"\bgreen\s+checkmark\b", "green test"),
     (r"\breplciation\b|\breplicaton\b", "replication"),
     (r"\bvalidte\b|\bvaildate\b", "validate"),
     (r"\bquarentine\b", "quarantine"),
@@ -822,7 +839,8 @@ _SLANG_FRAMES: tuple[tuple[str, str], ...] = (
 _PRODUCT_FRAGMENT = re.compile(
     r"^\s*(?P<term>g[1-9]|wal_level|pgoutput|gtid|binlog_format|"
     r"replica\s+identity(?:\s+full)?|_df_lsn|replication\s+slots?|"
-    r"type_locked|pre-?images?|toast)\s*[?.!]?\s*$",
+    r"type_locked|standing\s+authority|quarantine|"
+    r"pre-?images?|toast)\s*[?.!]?\s*$",
     re.I,
 )
 
