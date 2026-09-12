@@ -161,6 +161,21 @@ _INDEPENDENT_DEST = frozenset(
     {DEST_READBACK, DEST_ARTIFACT_READBACK, DEST_IDENTITY_READBACK}
 )
 
+def silent_loss_honesty() -> dict[str, Any]:
+    """Claims the row ledger is allowed to make — not a legal SLA.
+
+    Pilot reads this so "do you guarantee no data loss" cannot drift into
+    a SOC2 / HIPAA / zero-loss warranty the engine does not sign, and
+    cannot be answered with query-capture's "loss of deletes".
+    """
+    return {
+        "legal_sla": False,
+        "silent_drop": False,
+        "writer_ack_closes": False,
+        "identity": "reader_count == dest_population + hold_outs + skipped",
+    }
+
+
 KIND_OVERWRITE = "overwrite"
 KIND_APPEND_DELTA = "append_delta"
 KIND_KEYED = "keyed"

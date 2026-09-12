@@ -12,6 +12,25 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
 
+def audit_export_honesty() -> dict[str, object]:
+    """Claims the audit download is allowed to make — not a signed letter.
+
+    Pilot reads this so "do you have SOC 2" / "can you sign a HIPAA BAA"
+    cannot drift into an attestation the export route does not issue.
+    """
+    return {
+        "official": False,
+        "kind": "workspace_audit_sample",
+        "signed_soc2": False,
+        "signed_hipaa_baa": False,
+        "signed_gdpr_dpa": False,
+        "note": (
+            "Workspace-scoped audit export. HMAC-SHA256 chain is diligence, "
+            "NOT a SOC 2 Type II letter, GDPR DPA, or HIPAA BAA attestation."
+        ),
+    }
+
+
 def _scope(request: Request) -> tuple[str, str]:
     from services.audit_log import workspace_id_from_request
     from services.tenant_store import get_tenant_for_workspace
@@ -80,14 +99,11 @@ async def export_events(
         until=until,
     )
     tip = latest_event_hash()
-    honesty = (
-        "Workspace-scoped audit export. HMAC-SHA256 chain is diligence, "
-        "NOT a SOC 2 Type II letter, GDPR DPA, or HIPAA BAA attestation."
-    )
+    honesty = audit_export_honesty()
     attestation = {
-        "official": False,
-        "kind": "workspace_audit_sample",
-        "note": honesty,
+        "official": honesty["official"],
+        "kind": honesty["kind"],
+        "note": honesty["note"],
     }
     fmt = (format or "csv").strip().lower()
     if fmt not in ("csv", "json"):

@@ -57,6 +57,16 @@ def _lead(question: str) -> str:
         ("can I bring Iceberg with a Glue catalog?", ("glue",), ()),
         ("what about snowflake sharing?", ("does not implement snowflake secure",), ("shared lsn",)),
         ("is there a schema registry?", ("does not ship a standalone", "schema registry"), ()),
+        ("do you guarantee no data loss", ("does not invent a legal", "quarantine"), ("query capture", "loss of deletes")),
+        ("can you guarantee we never lose data", ("does not invent a legal",), ("query capture",)),
+        ("what's the difference between upsert and merge", ("upsert is a sync mode", "merge into"), ("nightly load", "full_refresh")),
+        ("upsert vs merge", ("upsert is a sync mode", "merge into"), ("table.upsert",)),
+        ("is upsert the same as merge", ("upsert is a sync mode", "merge into"), ("catalog mode also",)),
+        ("can I use a custom Airbyte connector", ("does not load airbyte",), ("differs from airbyte and fivetran",)),
+        ("can I load an Airbyte connector pack", ("does not load airbyte",), ("optional add-ons",)),
+        ("how are you different from airbyte", ("semantic mapping", "quarantine"), ("does not load airbyte",)),
+        ("do you support SOC2", ("does not invent a signed", "soc 2"), ("type ii letter we issued",)),
+        ("can you sign a HIPAA BAA", ("does not invent a signed", "hipaa baa"), ("for soc 2 / gdpr / hipaa review",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(
@@ -78,6 +88,22 @@ def test_enterprise_wording_leads_on_the_asked_fact(
     ],
 )
 def test_off_subject_english_is_refused(question: str) -> None:
+    answer = retrieve_product_answer(question, limit=4)
+    assert answer.verdict.outcome == "refuse"
+    assert not answer.hits
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "what is your uptime SLA",
+        "how much does it cost",
+    ],
+)
+def test_compliance_and_commercial_asks_are_refused_not_invented(
+    question: str,
+) -> None:
+    """No invented price or uptime SLA. Refuse is the honest product."""
     answer = retrieve_product_answer(question, limit=4)
     assert answer.verdict.outcome == "refuse"
     assert not answer.hits

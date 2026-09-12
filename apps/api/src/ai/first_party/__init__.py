@@ -34,6 +34,8 @@ Honesty bar (do not regress)
 * dbt and SSH are **not** product capabilities. The claim gate refuses
   them unless the evidence already names them (it should not).
 * Catalog tiles ≠ transfer-live. This package does not invent SKUs.
+* No legal no-data-loss SLA. Bad rows are quarantined; the row ledger
+  must close. Airbyte connector packs are not a runtime.
 
 Public serve API: ``semantic_rewrite``, ``narrate_answer``.
 """

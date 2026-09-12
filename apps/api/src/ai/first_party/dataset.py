@@ -83,6 +83,16 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("can I bring iceberg with a glue catalog", "can I use an iceberg glue catalog"),
     ("what about snowflake sharing", "does datawrap use snowflake secure sharing"),
     ("is there a schema registry", "does datawrap include a schema registry"),
+    ("do you guarantee no data loss", "do you guarantee no silent data loss"),
+    ("zero data loss right", "do you guarantee no silent data loss"),
+    ("can you guarantee we never lose data", "do you guarantee no silent data loss"),
+    ("what's the difference between upsert and merge", "what is the difference between upsert and merge"),
+    ("upsert vs merge", "what is the difference between upsert and merge"),
+    ("is upsert the same as merge", "what is the difference between upsert and merge"),
+    ("can I use a custom airbyte connector", "does datawrap load airbyte connector packs"),
+    ("can I load an airbyte connector pack", "does datawrap load airbyte connector packs"),
+    ("do you support soc2", "do you sign a soc2 or hipaa baa"),
+    ("can you sign a hipaa baa", "do you sign a soc2 or hipaa baa"),
 )
 
 

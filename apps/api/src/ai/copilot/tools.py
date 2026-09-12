@@ -1421,6 +1421,12 @@ class DataPilotTools:
                     "(transform projects can export a dbt starter pack)",
                     "Open an SSH tunnel or bastion in front of a database "
                     "(SFTP is a file connector)",
+                    "Invent a legal no-data-loss SLA "
+                    "(bad rows are quarantined; the row ledger must close)",
+                    "Load an Airbyte connector pack or custom Airbyte CDK spec "
+                    "(transfers run Datawrap's own transfer-ready drivers)",
+                    "Invent a signed SOC 2 letter, GDPR DPA, or HIPAA BAA "
+                    "(audit export is diligence, not an attestation)",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [

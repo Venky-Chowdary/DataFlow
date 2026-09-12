@@ -91,6 +91,25 @@ def test_glue_catalog_is_not_rewritten_to_a_generic_iceberg_heading() -> None:
     )
 
 
+def test_upsert_merge_and_airbyte_pack_do_not_snap_to_neighbors() -> None:
+    assert introduces_unrelated_subjects(
+        "what's the difference between upsert and merge",
+        "does iceberg upsert use merge-on-read",
+    )
+    assert drops_distinctive_subjects(
+        "can I use a custom Airbyte connector",
+        "how datawrap differs from airbyte and fivetran",
+    )
+    assert drops_distinctive_subjects(
+        "do you guarantee no data loss",
+        "do you read the wal or just poll",
+    )
+    assert drops_distinctive_subjects(
+        "can you sign a HIPAA BAA",
+        "byok, region, and audit",
+    )
+
+
 def test_rice_is_an_unrelated_subject() -> None:
     assert introduces_unrelated_subjects(
         "how do I cook rice tonight",

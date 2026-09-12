@@ -858,6 +858,22 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "can I connect through a bastion host?",
             ("does not open ssh", "bastion"),
         ),
+        (
+            "do you guarantee no data loss",
+            ("does not invent a legal", "quarantine"),
+        ),
+        (
+            "what's the difference between upsert and merge",
+            ("upsert is a sync mode", "merge into"),
+        ),
+        (
+            "can I use a custom Airbyte connector",
+            ("does not load airbyte",),
+        ),
+        (
+            "can you sign a HIPAA BAA",
+            ("does not invent a signed", "hipaa baa"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(

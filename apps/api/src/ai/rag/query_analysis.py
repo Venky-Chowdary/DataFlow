@@ -452,6 +452,22 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("reconciliation", "checksum", "conservation", "ledger")),
     (re.compile(r"\bdata\s+loss|\blos(?:e|ing|t)\s+(?:row|record|data)s?\b", re.I),
      ("quarantine", "reconciliation", "checksum", "unaccounted")),
+    (re.compile(
+        r"\bguarantee\s+(?:no\s+)?(?:silent\s+)?data\s+loss\b"
+        r"|\bzero\s+data\s+loss\b"
+        r"|\bnever\s+lose\s+data\b"
+        r"|\bno\s+silent\s+(?:data\s+)?loss\b",
+        re.I,
+    ),
+     ("quarantine", "ledger", "silent", "checksum")),
+    (re.compile(
+        r"\bupsert\s+(?:vs\.?|versus|or)\s+merge\b"
+        r"|\bmerge\s+(?:vs\.?|versus|or)\s+upsert\b"
+        r"|\bdifference\s+between\s+upsert\s+and\s+merge\b"
+        r"|\bis\s+upsert\s+(?:the\s+same\s+as|like)\s+merge\b",
+        re.I,
+    ),
+     ("upsert", "merge", "dialect", "conflict")),
     (re.compile(r"\bchange\s+data\s+capture\b", re.I),
      ("cdc", "sync", "mode", "log", "change")),
     (re.compile(r"\bdead\s+letter\b", re.I), ("quarantine", "dlq", "reject")),
@@ -552,7 +568,22 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bturn\s+off\b"
                 r"|\bdisable\s+(?:a\s+|the\s+)?(?:pipeline|schedule|sync|nightly)\b", re.I),
      ("pause", "pipeline", "schedule")),
-    (re.compile(r"\b(?:airbyte|fivetran|estuary)\b", re.I),
+    (re.compile(
+        r"\bsoc\s*2\b|\bhipaa\b|\bbaa\b|\bgdpr\s+dpa\b",
+        re.I,
+    ),
+     ("attestation", "letter", "baa", "soc2")),
+    (re.compile(
+        r"\b(?:custom\s+airbyte|airbyte\s+connector(?:\s+pack)?|airbyte\s+cdk|"
+        r"load(?:ing)?\s+(?:an?\s+)?airbyte|airbyte\s+pack)\b",
+        re.I,
+    ),
+     ("airbyte", "pack", "driver", "cdk")),
+    (re.compile(
+        r"\b(?:fivetran|estuary)\b"
+        r"|(?<!custom\s)\bairbyte\b(?!\s+connector)(?!\s+cdk)(?!\s+pack)",
+        re.I,
+    ),
      ("semantic", "mapping", "quarantine", "checksum")),
     (re.compile(
         r"\bdebezium\b"

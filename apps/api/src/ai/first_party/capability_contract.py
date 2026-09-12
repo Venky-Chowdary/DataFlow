@@ -326,6 +326,120 @@ def schema_registry_card() -> CapabilityCard:
     )
 
 
+def upsert_is_canonical_sync_mode() -> bool:
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return False
+    return "upsert" in CANONICAL_SYNC_MODES
+
+
+def merge_sql_dialect_shipped() -> bool:
+    """Whether a warehouse writer actually emits MERGE INTO."""
+    try:
+        from connectors.snowflake_writer import build_snowflake_merge_sql
+    except Exception:
+        return False
+    return "MERGE INTO" in inspect.getsource(build_snowflake_merge_sql)
+
+
+def airbyte_is_transfer_ready() -> bool:
+    return "airbyte" in _transfer_ready_drivers()
+
+
+def silent_data_loss_card() -> CapabilityCard | None:
+    """No legal zero-loss SLA — quarantine + ledger, not query-capture deletes."""
+    try:
+        from services.row_conservation import silent_loss_honesty
+    except Exception:
+        return None
+    honesty = silent_loss_honesty()
+    if honesty.get("legal_sla") or honesty.get("silent_drop"):
+        return None
+    try:
+        from services.cdc_effectively_once import DELIVERY_DEFAULT
+    except Exception:
+        delivery = "at-least-once"
+    else:
+        delivery = DELIVERY_DEFAULT
+    return CapabilityCard(
+        title="Do you guarantee no silent data loss",
+        text=(
+            "Datawrap does not invent a legal no-data-loss SLA — the product "
+            "rule is no silent drop: a bad row is quarantined and surfaced, "
+            "and the row ledger must close "
+            f"({honesty.get('identity') or 'read = dest + hold-outs + skipped'}) "
+            "or the run is unbalanced. "
+            f"CDC stays {delivery} upsert on `_df_lsn`; checksum reconcile "
+            "is Gate-8 proof, not a warranty."
+        ),
+        source_module="services/row_conservation.py · silent_loss_honesty",
+        category="proof",
+    )
+
+
+def upsert_versus_merge_card() -> CapabilityCard | None:
+    """Sync-mode upsert vs destination MERGE SQL — not Iceberg MoR."""
+    if not upsert_is_canonical_sync_mode() or not merge_sql_dialect_shipped():
+        return None
+    return CapabilityCard(
+        title="What is the difference between upsert and merge",
+        text=(
+            "Upsert is a sync mode written key-idempotently (new keys insert, "
+            "known keys update); MERGE is a destination SQL dialect "
+            "(MERGE INTO / ON CONFLICT), not Iceberg merge-on-read. "
+            "Iceberg merge-on-read is only the Iceberg table-format write for "
+            "upsert and CDC, not the product-wide meaning of upsert versus merge."
+        ),
+        source_module=(
+            "services/sync_cursor.py · CANONICAL_SYNC_MODES · "
+            "connectors/snowflake_writer.py · build_snowflake_merge_sql"
+        ),
+        category="transfer",
+    )
+
+
+def compliance_attestation_card() -> CapabilityCard | None:
+    """Audit export is diligence — not a signed SOC 2 / HIPAA / DPA letter."""
+    try:
+        from src.routers.audit_router import audit_export_honesty
+    except Exception:
+        return None
+    honesty = audit_export_honesty()
+    if honesty.get("signed_soc2") or honesty.get("signed_hipaa_baa"):
+        return None
+    return CapabilityCard(
+        title="Do you sign a SOC2 or HIPAA BAA",
+        text=(
+            "Datawrap does not invent a signed SOC 2 Type II letter, GDPR DPA, "
+            "or HIPAA BAA — audit export is a workspace-scoped sample whose "
+            "HMAC-SHA256 chain is diligence, not an attestation. "
+            "Settings → Audit Logs list mapping decisions, job runs, and "
+            "quarantine events an auditor can review; they are not a certificate."
+        ),
+        source_module="src/routers/audit_router.py · audit_export_honesty",
+        category="enterprise",
+    )
+
+
+def airbyte_connector_pack_card() -> CapabilityCard | None:
+    """Airbyte is a planned tile / competitor name, not a connector runtime."""
+    if airbyte_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Does Datawrap load Airbyte connector packs",
+        text=(
+            "Datawrap does not load Airbyte connector packs or custom Airbyte "
+            "connectors — a transfer runs Datawrap's own transfer-ready drivers "
+            "(unique_driver_types), not an Airbyte CDK spec. "
+            "Airbyte remains a planned catalog tile and a competitor comparison, "
+            "not a connector runtime."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -343,6 +457,10 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         kafka_source_card,
         salesforce_card,
         schema_registry_card,
+        silent_data_loss_card,
+        upsert_versus_merge_card,
+        airbyte_connector_pack_card,
+        compliance_attestation_card,
     ):
         card = builder()
         if card is not None:
