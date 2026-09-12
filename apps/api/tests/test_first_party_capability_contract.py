@@ -111,6 +111,19 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support SQL Server CDC",
         "Can I use change tracking instead of CDC on SQL Server",
         "Can I filter CDC events",
+        "Do you support ADLS as a destination",
+        "Do you support Microsoft Fabric",
+        "Do you support Power BI as a destination",
+        "Do you support Azure Data Factory",
+        "Do you support Oracle XStream",
+        "Do you support SQL Server Always On",
+        "Can I use Azure managed identity",
+        "Can I set a CDC heartbeat interval",
+        "What is the CDC fetch size",
+        "Can I skip deletes in CDC",
+        "Do you support Cosmos DB",
+        "Do you support Event Hubs",
+        "Do you support Azure Service Bus",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

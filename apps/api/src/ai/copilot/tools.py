@@ -2973,7 +2973,8 @@ _EXPLANATORY_QUESTION = re.compile(
 # saved connector named redshift" and the miss leads the reply.
 _CAPABILITY_TABLE_LANDING = re.compile(
     r"\b(?:land|write|load|put|send|replicate)\s+(?:the\s+|my\s+|our\s+)?"
-    r"(?:tables?|data|rows|records)\b",
+    r"(?:tables?|data|rows|records)\b"
+    r"|\bland\s+(?:in|to|into)\b",
     re.I,
 )
 

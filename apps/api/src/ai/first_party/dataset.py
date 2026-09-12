@@ -180,6 +180,19 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support oracle logminer", "do you support oracle logminer"),
     ("do you support sql server cdc", "do you support sql server cdc"),
     ("can I filter cdc events", "can I filter cdc events"),
+    ("can I land in adls", "do you support adls as a destination"),
+    ("do you support microsoft fabric", "do you support microsoft fabric"),
+    ("can I write to microsoft fabric", "do you support microsoft fabric"),
+    ("do you support onelake", "do you support microsoft fabric"),
+    ("do you support oracle xstream", "do you support oracle xstream"),
+    ("do you support sql server always on", "do you support sql server always on"),
+    ("can I use azure managed identity", "can I use azure managed identity"),
+    ("can I set a cdc heartbeat interval", "can I set a cdc heartbeat interval"),
+    ("can I skip deletes in cdc", "can I skip deletes in cdc"),
+    ("do you support cosmos db", "do you support cosmos db"),
+    ("do you support event hubs", "do you support event hubs"),
+    ("do you support azure data factory", "do you support azure data factory"),
+    ("do you support synapse", "do you support azure synapse"),
 )
 
 

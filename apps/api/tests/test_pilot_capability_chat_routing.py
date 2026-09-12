@@ -33,6 +33,9 @@ def _names(question: str) -> list[str]:
         "if I pause CDC do I lose the slot",
         "does pausing CDC drop the replication slot",
         "can I pause CDC",
+        "can I land in ADLS",
+        "can I write to Microsoft Fabric",
+        "do you support Oracle XStream",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

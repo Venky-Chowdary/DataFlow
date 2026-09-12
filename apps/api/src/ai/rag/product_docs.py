@@ -703,6 +703,42 @@ def _section_intent_bonus(
             bonus += 6.0
         if title.startswith("what a replication slot"):
             bonus -= 6.0
+    fabric_ask = bool(re.search(r"\bfabric\b|\bonelake\b", analysis.text, re.I))
+    if "microsoft fabric" in title:
+        bonus += 6.0 if fabric_ask else -3.2
+    if fabric_ask and "teams as a destination" in title:
+        bonus -= 6.0
+    if "oracle xstream" in title:
+        bonus += 6.0 if re.search(r"\bxstream\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bxstream\b", analysis.text, re.I) and "logminer" in title:
+        bonus -= 6.0
+    if "always on" in title:
+        bonus += 6.0 if re.search(r"\balways\s+on\b|\bavailability\s+group", analysis.text, re.I) else -3.2
+    if "managed identity" in title:
+        bonus += 6.0 if re.search(r"\bmanaged\s+identity\b", analysis.text, re.I) else -3.2
+    if "heartbeat interval" in title:
+        bonus += 6.0 if re.search(r"\bheartbeat\s+interval\b|\bset\s+a\s+cdc\s+heartbeat\b", analysis.text, re.I) else -3.2
+    if "cdc fetch size" in title:
+        bonus += 6.0 if re.search(r"\bfetch\s+size\b|\bcdc\s+batch\s+size\b", analysis.text, re.I) else -3.2
+    if "skip deletes" in title:
+        bonus += 6.0 if re.search(r"\bskip\s+deletes?\b|\bignore\s+deletes?\b", analysis.text, re.I) else -3.2
+    if "cosmos db" in title:
+        bonus += 6.0 if re.search(r"\bcosmos\b", analysis.text, re.I) else -3.2
+    if "event hubs" in title:
+        bonus += 6.0 if re.search(r"\bevent\s+hubs?\b", analysis.text, re.I) else -3.2
+    if "service bus" in title:
+        bonus += 6.0 if re.search(r"\bservice\s+bus\b", analysis.text, re.I) else -3.2
+    if "azure data factory" in title:
+        bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
+    if "adls as a destination" in title:
+        bonus += 6.0 if re.search(r"\badls\b", analysis.text, re.I) else -3.2
+    if "power bi" in title:
+        bonus += 6.0 if re.search(r"\bpower\s*bi\b", analysis.text, re.I) else -3.2
+    privatelink_ask = bool(re.search(r"\bprivate\s+link\b|\bprivatelink\b", analysis.text, re.I))
+    if "privatelink" in title or "private service connect" in title:
+        bonus += 6.0 if privatelink_ask else 0.0
+    if privatelink_ask and "job theater" in title:
+        bonus -= 6.0
     if core_gates:
         if _GATE_QUESTION.search(analysis.text):
             bonus += _CORE_GATES_ON_ASK

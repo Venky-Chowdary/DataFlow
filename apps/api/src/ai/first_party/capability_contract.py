@@ -209,9 +209,10 @@ def privatelink_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Does Datawrap use AWS PrivateLink",
         text=(
-            "Datawrap does not ship AWS PrivateLink or GCP Private Service "
-            "Connect as a connect option — database connections take host, "
-            "port, and credentials. "
+            "Connecting through Private Link is not shipped (privatelink is "
+            "false) — Datawrap does not ship AWS PrivateLink or GCP Private "
+            "Service Connect as a connect option. "
+            "Database connections take host, port, and credentials. "
             "VPC peering is also not on that connect path."
         ),
         source_module="connectors/postgresql.py · test_postgresql",
@@ -1127,7 +1128,7 @@ def synapse_destination_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Do you support Azure Synapse",
         text=(
-            "Azure Synapse is not a transfer-ready driver — "
+            "Azure Synapse is not a transfer-ready driver (azure_synapse). "
             "unique_driver_types does not include synapse. "
             "A catalog tile is not a live writer."
         ),
@@ -1740,6 +1741,247 @@ def filter_cdc_events_card() -> CapabilityCard | None:
     )
 
 
+def microsoft_fabric_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"fabric", "microsoft_fabric", "onelake"})
+
+
+def power_bi_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"powerbi", "power_bi"})
+
+
+def azure_data_factory_shipped() -> bool:
+    return False
+
+
+def oracle_xstream_shipped() -> bool:
+    return False
+
+
+def sqlserver_always_on_shipped() -> bool:
+    return False
+
+
+def azure_managed_identity_shipped() -> bool:
+    try:
+        from connectors.adls_common import _service_principal_credential
+    except Exception:
+        return False
+    src = inspect.getsource(_service_principal_credential)
+    return "DefaultAzureCredential" in src or "ManagedIdentityCredential" in src
+
+
+def cdc_heartbeat_interval_shipped() -> bool:
+    return False
+
+
+def cdc_fetch_size_shipped() -> bool:
+    return False
+
+
+def cdc_skip_deletes_shipped() -> bool:
+    return False
+
+
+def cosmos_db_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"cosmos", "cosmosdb", "cosmos_db"})
+
+
+def event_hubs_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"eventhubs", "event_hubs", "eventhub"})
+
+
+def service_bus_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"servicebus", "service_bus"})
+
+
+def adls_destination_card() -> CapabilityCard | None:
+    if not adls_is_transfer_ready():
+        return None
+    return _ready_driver_card("Do you support ADLS as a destination", "ADLS")
+
+
+def microsoft_fabric_card() -> CapabilityCard | None:
+    if microsoft_fabric_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Fabric",
+        text=(
+            "Datawrap does not ship Microsoft Fabric or OneLake as a "
+            "transfer-ready driver (fabric is false). "
+            "Teams alerts are a webhook channel, not a Fabric write."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def power_bi_card() -> CapabilityCard | None:
+    if power_bi_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Power BI as a destination",
+        text=(
+            "Datawrap does not ship Power BI as a transfer-ready destination "
+            "(power_bi is false). "
+            "A report tool is not a write driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_data_factory_card() -> CapabilityCard | None:
+    if azure_data_factory_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Data Factory",
+        text=(
+            "Datawrap does not ship Azure Data Factory as the transfer "
+            "engine (adf is false). "
+            "An external orchestrator can call /api/v1 after you Confirm."
+        ),
+        source_module="src/transfer/engine.py",
+        category="product",
+    )
+
+
+def oracle_xstream_card() -> CapabilityCard | None:
+    if oracle_xstream_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Oracle XStream",
+        text=(
+            "Datawrap does not ship Oracle XStream (oracle_xstream is false). "
+            "Oracle CDC on this product is LogMiner, not XStream."
+        ),
+        source_module="connectors/oracle_logminer.py · OracleLogMinerCdc",
+        category="transfer",
+    )
+
+
+def sqlserver_always_on_card() -> CapabilityCard | None:
+    if sqlserver_always_on_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support SQL Server Always On",
+        text=(
+            "Datawrap does not ship SQL Server Always On Availability Groups "
+            "as a CDC connect option (sqlserver_ag is false). "
+            "The driver card is not an AG listener topology."
+        ),
+        source_module="connectors/sqlserver_cdc_native.py · services/catalog_service.py",
+        category="transfer",
+    )
+
+
+def azure_managed_identity_card() -> CapabilityCard | None:
+    if azure_managed_identity_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use Azure managed identity",
+        text=(
+            "Datawrap does not connect Azure with managed identity "
+            "(azure_managed_identity is false). "
+            "ADLS accepts a service principal (tenant_id, client_id, "
+            "client_secret), not DefaultAzureCredential."
+        ),
+        source_module="connectors/adls_common.py · _service_principal_credential",
+        category="connectors",
+    )
+
+
+def cdc_heartbeat_interval_card() -> CapabilityCard | None:
+    if cdc_heartbeat_interval_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I set a CDC heartbeat interval",
+        text=(
+            "Datawrap does not ship a CDC heartbeat interval connect field "
+            "(cdc_heartbeat_interval is false). "
+            "The capture heartbeat keeps an idle slot alive; it is not a "
+            "Freshness SLO and not an INTERVAL column type."
+        ),
+        source_module="services/cdc_lag_honesty.py · connectors/postgresql_change_stream.py",
+        category="transfer",
+    )
+
+
+def cdc_fetch_size_card() -> CapabilityCard | None:
+    if cdc_fetch_size_shipped():
+        return None
+    return CapabilityCard(
+        title="What is the CDC fetch size",
+        text=(
+            "Datawrap does not ship a CDC fetch-size or batch-size connect "
+            "field (cdc_fetch_size is false). "
+            "Reader batch_size is an internal constructor default, not a "
+            "Job Theater phase setting."
+        ),
+        source_module="connectors/postgresql_change_stream.py",
+        category="transfer",
+    )
+
+
+def skip_cdc_deletes_card() -> CapabilityCard | None:
+    if cdc_skip_deletes_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I skip deletes in CDC",
+        text=(
+            "Datawrap does not skip CDC deletes as a capture option "
+            "(cdc_skip_deletes is false) — a CDC delete is still applied, "
+            "and Map row filters are not a capture-side skip-deletes switch."
+        ),
+        source_module="services/cdc_capability.py · services/transform_engine.py",
+        category="transfer",
+    )
+
+
+def cosmos_db_card() -> CapabilityCard | None:
+    if cosmos_db_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cosmos DB",
+        text=(
+            "Datawrap does not ship Azure Cosmos DB as a transfer-ready "
+            "driver (cosmos is false). "
+            "Mongo change-stream pre-images are not a Cosmos connect path."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def event_hubs_card() -> CapabilityCard | None:
+    if event_hubs_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Event Hubs",
+        text=(
+            "Datawrap does not ship Azure Event Hubs as a transfer-ready "
+            "driver (event_hubs is false). "
+            "OpenLineage run events are not an Event Hubs writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def service_bus_card() -> CapabilityCard | None:
+    if service_bus_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Service Bus",
+        text=(
+            "Datawrap does not ship Azure Service Bus as a transfer-ready "
+            "driver (service_bus is false). "
+            "A service principal on ADLS is not a Service Bus writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -1789,6 +2031,7 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         incremental_versus_upsert_card,
         bigquery_destination_card,
         azure_service_principal_card,
+        adls_destination_card,
         parallel_transfers_card,
         two_jobs_same_table_card,
         full_refresh_versus_incremental_card,
@@ -1835,6 +2078,18 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         sqlserver_cdc_card,
         sqlserver_change_tracking_card,
         filter_cdc_events_card,
+        microsoft_fabric_card,
+        power_bi_card,
+        azure_data_factory_card,
+        oracle_xstream_card,
+        sqlserver_always_on_card,
+        azure_managed_identity_card,
+        cdc_heartbeat_interval_card,
+        cdc_fetch_size_card,
+        skip_cdc_deletes_card,
+        cosmos_db_card,
+        event_hubs_card,
+        service_bus_card,
         column_level_lineage_card,
     ):
         card = builder()

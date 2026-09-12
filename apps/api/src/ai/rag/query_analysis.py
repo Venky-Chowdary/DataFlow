@@ -739,6 +739,91 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("cdc_event_filter",)),
     (re.compile(
+        r"\bskip\s+deletes?\s+(?:in\s+)?cdc\b"
+        r"|\bignore\s+deletes?\s+on\s+the\s+cdc\b"
+        r"|\bcdc\s+skip\s+deletes?\b",
+        re.I,
+    ),
+     ("cdc_skip_deletes",)),
+    (re.compile(
+        r"\bcdc\s+heartbeat\s+interval\b"
+        r"|\bset\s+a\s+cdc\s+heartbeat\b"
+        r"|\bheartbeat\s+interval\b",
+        re.I,
+    ),
+     ("cdc_heartbeat_interval",)),
+    (re.compile(
+        r"\bcdc\s+fetch\s+size\b"
+        r"|\bcdc\s+batch\s+size\b"
+        r"|\bset\s+the\s+cdc\s+batch\b",
+        re.I,
+    ),
+     ("cdc_fetch_size",)),
+    (re.compile(
+        r"\boracle\s+xstream\b"
+        r"|\bxstream\b",
+        re.I,
+    ),
+     ("oracle_xstream",)),
+    (re.compile(
+        r"\balways\s+on\b"
+        r"|\bavailability\s+groups?\b",
+        re.I,
+    ),
+     ("sqlserver_ag",)),
+    (re.compile(
+        r"\bmicrosoft\s+fabric\b"
+        r"|\bonelake\b"
+        r"|\bfabric\s+as\s+a\s+destination\b"
+        r"|\bwrite\s+to\s+microsoft\s+fabric\b",
+        re.I,
+    ),
+     ("fabric",)),
+    (re.compile(
+        r"\bpower\s*bi\b",
+        re.I,
+    ),
+     ("power_bi",)),
+    (re.compile(
+        r"\bazure\s+data\s+factory\b"
+        r"|\badf\b",
+        re.I,
+    ),
+     ("adf",)),
+    (re.compile(
+        r"\bmanaged\s+identity\b",
+        re.I,
+    ),
+     ("azure_managed_identity",)),
+    (re.compile(
+        r"\bcosmos\s*db\b",
+        re.I,
+    ),
+     ("cosmos",)),
+    (re.compile(
+        r"\bevent\s+hubs?\b",
+        re.I,
+    ),
+     ("event_hubs",)),
+    (re.compile(
+        r"\bservice\s+bus\b",
+        re.I,
+    ),
+     ("service_bus",)),
+    (re.compile(
+        r"\bland\s+(?:tables?\s+)?(?:in|to|into)\s+adls\b"
+        r"|\badls\s+as\s+a\s+destination\b"
+        r"|\bwrite\s+to\s+adls\b"
+        r"|\bdo\s+you\s+support\s+adls\b",
+        re.I,
+    ),
+     ("adls", "driver")),
+    (re.compile(
+        r"\bprivate\s+link\b",
+        re.I,
+    ),
+     ("privatelink",)),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -936,10 +1021,11 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("redshift",)),
     (re.compile(
         r"\bazure\s+synapse\b"
-        r"|\bsynapse\s+as\s+a\s+destination\b",
+        r"|\bsynapse\s+as\s+a\s+destination\b"
+        r"|\bdo\s+you\s+support\s+synapse\b",
         re.I,
     ),
-     ("synapse",)),
+     ("synapse", "azure_synapse")),
     (re.compile(
         r"\bsnowflake\s+as\s+a\s+destination\b"
         r"|\bdo\s+you\s+support\s+snowflake\b",
@@ -1400,6 +1486,70 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bfilter\s+cdc\b|\bcdc\s+event\s+filter\b", re.I),
         ("gtid", "watermark", "heartbeat"),
+    ),
+    # Skip-deletes is not the apply-delete / tombstone card.
+    (
+        re.compile(
+            r"\bskip\s+deletes?\b"
+            r"|\bignore\s+deletes?\b",
+            re.I,
+        ),
+        ("tombstone", "is_active", "preflight", "validate"),
+    ),
+    # Heartbeat interval is not the INTERVAL type carrier.
+    (
+        re.compile(r"\bheartbeat\s+interval\b|\bset\s+a\s+cdc\s+heartbeat\b", re.I),
+        ("interval", "type", "carrier"),
+    ),
+    # Fetch/batch size is not Job Theater duration.
+    (
+        re.compile(r"\bcdc\s+fetch\s+size\b|\bcdc\s+batch\s+size\b", re.I),
+        ("phase", "duration", "delete", "theater"),
+    ),
+    # XStream is not the LogMiner "yes" card.
+    (
+        re.compile(r"\bxstream\b", re.I),
+        ("logminer", "driver", "destination"),
+    ),
+    # Always On is not the SQL Server driver card.
+    (
+        re.compile(r"\balways\s+on\b|\bavailability\s+groups?\b", re.I),
+        ("driver", "sqlserver", "cdc"),
+    ),
+    # Fabric / OneLake is not Teams alerts.
+    (
+        re.compile(r"\bmicrosoft\s+fabric\b|\bonelake\b|\bfabric\s+as\s+a\s+destination\b", re.I),
+        ("team", "alert", "webhook", "notify"),
+    ),
+    # Managed identity is not Synapse and not Workload Identity.
+    (
+        re.compile(r"\bmanaged\s+identity\b", re.I),
+        ("synapse", "workload", "identity"),
+    ),
+    # Cosmos is not Mongo pre-images.
+    (
+        re.compile(r"\bcosmos\s*db\b", re.I),
+        ("mongo", "preimage", "preimag"),
+    ),
+    # Event Hubs is not OpenLineage events.
+    (
+        re.compile(r"\bevent\s+hubs?\b", re.I),
+        ("lineage", "openlineage", "event"),
+    ),
+    # Service Bus is not the ADLS service principal.
+    (
+        re.compile(r"\bservice\s+bus\b", re.I),
+        ("principal", "adls", "service_account"),
+    ),
+    # ADF is not Synapse.
+    (
+        re.compile(r"\bazure\s+data\s+factory\b|\badf\b", re.I),
+        ("synapse", "contract"),
+    ),
+    # Bare Private Link is not Job Theater.
+    (
+        re.compile(r"\bprivate\s+link\b", re.I),
+        ("theater", "job", "open"),
     ),
     # Secrets Manager / Vault is not PrivateLink and not viewer secrets.
     (
