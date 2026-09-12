@@ -88,6 +88,19 @@ def _record_as_job_doc(record: Any) -> dict[str, Any]:
     }
 
 
+def _mongo_already_unreachable(mongo: Any) -> bool:
+    """True when this process already failed to open Mongo.
+
+    ``list_jobs`` otherwise re-runs the 5s server-selection ping on every
+    last-transfer question, which is how "status of my last transfer" sat
+    on a spinner and then said the store was empty.
+    """
+    return (
+        type(mongo).__name__ == "MongoDBService"
+        and getattr(mongo, "client", None) is None
+    )
+
+
 def _from_engine_store(limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw = list(job_store.list_recent(limit=limit) or [])
     summaries = [summarize_listed_job(_record_as_job_doc(row)) for row in raw]
@@ -122,6 +135,9 @@ def list_transfer_jobs(
         from services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
+        if _mongo_already_unreachable(mongo):
+            summaries, counts = _from_engine_store(limit)
+            return summaries, counts, "job_store"
         raw = mongo.list_jobs(limit=limit, workspace_id=workspace_id)
         counts = mongo.count_jobs(workspace_id=workspace_id)
         summaries = [summarize_listed_job(j) for j in (raw or []) if isinstance(j, dict)]
@@ -139,9 +155,11 @@ def read_transfer_job(job_id: str) -> dict[str, Any] | None:
     try:
         from services.mongodb_service import get_mongodb_service
 
-        job = get_mongodb_service().get_job(needle)
-        if job:
-            return job
+        mongo = get_mongodb_service()
+        if not _mongo_already_unreachable(mongo):
+            job = mongo.get_job(needle)
+            if job:
+                return job
     except Exception:
         job = None
     try:

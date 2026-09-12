@@ -51,6 +51,34 @@ def test_list_jobs_reads_engine_store_when_mongo_is_down(monkeypatch):
     assert "MongoDB unavailable" not in (result.error or "")
 
 
+def test_list_jobs_skips_a_mongo_client_that_already_failed_to_connect(monkeypatch):
+    """Startup already pinged Mongo. Do not pay the 5s timeout again per turn."""
+    from services.jobs import MemoryJobStore
+    from src.ai.copilot.job_reads import list_transfer_jobs
+
+    store = MemoryJobStore()
+    rec = store.create(operation="copy", source="a", destination="b", total_rows=1)
+    store.complete(rec.job_id, 1)
+
+    class MongoDBService:
+        client = None
+
+        def list_jobs(self, limit=10, workspace_id=None):
+            raise AssertionError("must not re-ping Mongo after a failed connect")
+
+        def count_jobs(self, workspace_id=None):
+            raise AssertionError("must not re-ping Mongo after a failed connect")
+
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service", lambda: MongoDBService()
+    )
+    monkeypatch.setattr("src.ai.copilot.job_reads.job_store", store)
+
+    jobs, _counts, source = list_transfer_jobs(limit=5)
+    assert source == "job_store"
+    assert any(j["id"] == rec.job_id for j in jobs)
+
+
 def test_get_job_reads_engine_store_when_mongo_misses(monkeypatch):
     from services.jobs import MemoryJobStore
 
