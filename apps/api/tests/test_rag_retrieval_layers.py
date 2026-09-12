@@ -143,6 +143,7 @@ LISTING_QUESTIONS = [
     "what roles are there",
     "which destinations can I write to",
     "what destinations do you support",
+    "who can run transfers",
     # Singular, but ``which`` opens it: picking one member out of a set is
     # answered from the same list as the whole set.
     "which preflight gate blocks a lossy type change",
@@ -170,6 +171,8 @@ NOT_LISTING = [
     # Something is wrong, which is a different question from what exists.
     ("what gates failed on my transfer", "diagnosis"),
     ("why did my gates fail", "diagnosis"),
+    ("what happens to a timestamp without timezone", "consequence"),
+    ("what happens if the destination count does not match", "consequence"),
 ]
 
 

@@ -578,6 +578,12 @@ def _section_intent_bonus(
         # wants, not the definition of a gate.
         if is_procedure:
             bonus += 1.6
+    elif ask == "consequence":
+        # The outcome is in a fidelity or proof passage. A procedure that
+        # names the subject is how "what happens if the destination count
+        # does not match" opened on a delete-polarity caption.
+        if is_procedure:
+            bonus -= 1.6
     elif ask == "enumeration":
         if listing:
             bonus += 2.4

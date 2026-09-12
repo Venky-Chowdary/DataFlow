@@ -126,7 +126,7 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "diagnosis",
         re.compile(
             r"\bwhy\s+(?:did|does|is|are|was|were|do|am|can'?t|cannot|won'?t)\b"
-            r"|\b(?:fail|failed|failing|failure|error|errors|broke|broken|stuck|"
+            r"|\b(?:fail|fails|failed|failing|failure|error|errors|broke|broken|stuck|"
             r"blocked|refused|rejected|mismatch|crash|crashed|timeout|timed\s+out)\b"
             r"|\bnot\s+working\b|\bwhat\s+went\s+wrong\b",
             re.I,
@@ -160,7 +160,28 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"|^\s*which\s+(?:\w+\s+){0,3}"
             r"(?:mode|option|type|gate|role|connector|policy|phase|step|"
             r"permission|engine|format)\b"
-            r"|\ball\s+(?:the\s+)?(?:modes?|gates?|roles?|options?|types?)\b",
+            r"|\ball\s+(?:the\s+)?(?:modes?|gates?|roles?|options?|types?)\b"
+            # "Who can run transfers" is a request for the roles that hold a
+            # verb, not a definition of running. Left as ``other`` it retrieved
+            # the role matrix and opened on the viewer-negative PII sentence.
+            r"|^\s*who\s+can\b",
+            re.I,
+        ),
+    ),
+    (
+        # An outcome, not a procedure and not a diagnosis. "What happens to a
+        # timestamp without timezone" matched nothing and opened on the
+        # framing sentence of the timezone passage; "what happens if the
+        # destination count does not match" opened on a delete-polarity
+        # sentence because both say "destination count". The composer pays
+        # this ask for a sentence that states the outcome (quarantined,
+        # unbalanced, wall clock), and the heading prior prefers the
+        # fidelity / proof passages over a wizard step.
+        "consequence",
+        re.compile(
+            r"\bwhat\s+happens\b"
+            r"|\bwhat\s+if\b"
+            r"|\bwhat\s+(?:do\s+you\s+do|does\s+(?:it|the\s+\w+))\s+when\b",
             re.I,
         ),
     ),
@@ -382,6 +403,16 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("schedule", "cron", "timezone", "pipeline")),
     (re.compile(r"\bread[\s-]?only\b", re.I), ("viewer", "role", "permission", "read")),
     (re.compile(r"\bwho\s+can\b", re.I), ("role", "permission", "rbac", "approve")),
+    (re.compile(r"\bin\s+git\b|\bkeep\s+.{0,24}\b(?:git|github)\b", re.I),
+     ("gitop", "yaml", "export", "import", "manifest")),
+    (re.compile(r"\brows?\s+that\s+failed\b"
+                r"|\b(?:failed|rejected)\s+rows?\b", re.I),
+     ("quarantine", "csv", "export", "reject")),
+    (re.compile(r"\bfilter\s+rows\b|\bbefore\s+(?:they\s+are\s+)?written\b", re.I),
+     ("transform", "filter", "map")),
+    (re.compile(r"\bdestination\s+count\b"
+                r"|\bcounts?\s+(?:do\s+not|don't|doesn'?t)\s+match\b", re.I),
+     ("checksum", "unbalanced", "mismatch", "reconciliation")),
     # The same question without the modal. "Can I limit who sees a connector"
     # reached "Honest transfer-ready labels" — the one connector section that
     # says nothing about who may read one — because ``who can`` was the only

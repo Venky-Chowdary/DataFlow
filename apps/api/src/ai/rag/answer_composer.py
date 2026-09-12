@@ -203,6 +203,19 @@ _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
     # sentence that states no number, so the heading only breaks ties among
     # sentences that could answer.
     "count": (("engin", 1.4), ("connect", 1.2), ("gate", 1.0), ("procedure:", -1.6)),
+    # An outcome lives in the fidelity and proof passages. A wizard step that
+    # happens to name the subject is the wrong container: "what happens if the
+    # destination count does not match" opened on a delete-polarity sentence
+    # from a procedure-adjacent heading.
+    "consequence": (
+        ("type", 1.4),
+        ("checksum", 1.4),
+        ("quarantine", 1.2),
+        ("timezone", 1.2),
+        ("encoding", 1.2),
+        ("ledger", 1.2),
+        ("procedure:", -1.6),
+    ),
 }
 
 #: A sentence that answers "how many" says a number. The corpus writes both
@@ -222,6 +235,15 @@ _CARDINAL = re.compile(
     r"\b\d[\d,]*\b"
     r"|\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|dozen|"
     r"hundred|thousand|million)\s+(?:\w+\s+){0,2}\w{3,}s\b",
+    re.I,
+)
+
+# What counts as answering "what happens". The framing sentence of a fidelity
+# passage names the topic and none of the outcome; the sentence that does the
+# work uses one of these. Swept against the buried "what happens" set.
+_CONSEQUENCE = re.compile(
+    r"\b(?:quarantined|unsupported|unbalanced|mismatch|lossy|"
+    r"preflight finding|wall[\s-]clock|utc_invented_from_naive)\b",
     re.I,
 )
 
@@ -314,6 +336,7 @@ _ASK_SHAPE_TEST: dict[str, re.Pattern[str]] = {
     "definition": _DEFINITIONAL,
     "procedure": _IMPERATIVE,
     "count": _CARDINAL,
+    "consequence": _CONSEQUENCE,
 }
 
 
@@ -370,6 +393,17 @@ def _shape_bonus(ask: str, sentence: str) -> float:
         return 0.9
     if ask == "count" and _CARDINAL.search(sentence):
         return 2.0
+    if ask == "consequence" and _CONSEQUENCE.search(sentence):
+        return 2.0
+    if ask == "comparison":
+        # A comparison is answered by the sentence that names both sides.
+        # "**Append** adds source rows onto the destination without replacing
+        # existing ones" matches only one side, so "what is the difference
+        # between append and overwrite" never reached "insert-only / replaces
+        # the destination".
+        lower = sentence.lower()
+        if "append" in lower and "overwrite" in lower:
+            return 1.8
     return 0.0
 
 
