@@ -1626,6 +1626,10 @@ class DataPilotTools:
             or ("append" in lower and "overwrite" in lower)
             or " vs " in lower
             or " versus " in lower
+            or "same as" in lower
+            or ("upsert" in lower and "merge" in lower)
+            or "merge-on-read" in lower
+            or "merge on read" in lower
         ):
             curated = None
         # A named gate (G3) or a listing the docs already answer must not sit

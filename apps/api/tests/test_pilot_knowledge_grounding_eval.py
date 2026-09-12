@@ -138,6 +138,27 @@ def test_named_gate_leads_with_that_card_not_the_gate_count():
     assert "schema contract" in lead
 
 
+def test_upsert_versus_merge_is_not_the_curated_upsert_faq():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("is upsert the same as merge")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "upsert is a sync mode" in lead
+    assert "merge into" in lead
+    assert not lead.startswith("**upsert**")
+
+
+def test_iceberg_merge_on_read_is_not_the_upsert_versus_merge_card():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("does iceberg use merge on read")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "copy-on-write" in lead or lead.startswith("iceberg overwrite")
+    assert "upsert is a sync mode" not in lead
+
+
 def test_an_append_vs_overwrite_question_is_not_the_append_only_faq():
     """The curated append snippet matched on ``append`` and became the lead."""
     from src.ai.rag.answer_composer import split_sentences

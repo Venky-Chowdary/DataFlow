@@ -40,7 +40,7 @@ def _lead(question: str) -> str:
         ("where do bad rows go?", ("quarantine",), ("dbt",)),
         ("how is this different from fivetran?", ("semantic mapping", "quarantine"), ("dbt cloud",)),
         ("can a viewer export yaml?", ("viewer", "yaml"), ("dbt",)),
-        ("does iceberg use merge on read?", ("merge-on-read",), ("exactly-once",)),
+        ("does iceberg use merge on read?", ("merge-on-read",), ("upsert is a sync mode", "merge into / on conflict")),
         ("who can start a transfer?", ("job.run",), ("dbt",)),
         ("do you have webhooks?", ("webhook",), ("dbt",)),
         ("do you embed Debezium?", ("does not embed debezium",), ("airbyte", "fivetran")),

@@ -387,9 +387,9 @@ def upsert_versus_merge_card() -> CapabilityCard | None:
         text=(
             "Upsert is a sync mode written key-idempotently (new keys insert, "
             "known keys update); MERGE is a destination SQL dialect "
-            "(MERGE INTO / ON CONFLICT), not Iceberg merge-on-read. "
-            "Iceberg merge-on-read is only the Iceberg table-format write for "
-            "upsert and CDC, not the product-wide meaning of upsert versus merge."
+            "(MERGE INTO / ON CONFLICT) to apply that upsert. "
+            "The dialect is how Snowflake, BigQuery, and similar writers emit "
+            "the upsert; it is not a separate sync mode."
         ),
         source_module=(
             "services/sync_cursor.py · CANONICAL_SYNC_MODES · "

@@ -136,6 +136,7 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "nightly load" not in upsert_lead
     assert "does not load airbyte" in pack_lead
     assert "semantic mapping" in wedge_lead
-    assert "merge-on-read" in iceberg_lead
+    assert iceberg_lead.startswith("iceberg overwrite") or "copy-on-write" in iceberg_lead
+    assert "upsert is a sync mode" not in iceberg_lead
     assert "does not invent a signed" in hipaa_lead
     assert "hipaa review" not in hipaa_lead
