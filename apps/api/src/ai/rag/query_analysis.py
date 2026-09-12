@@ -1044,6 +1044,17 @@ def distinctive_procedure_terms(analysis: QueryAnalysis) -> frozenset[str]:
 def analyze_query(question: str) -> QueryAnalysis:
     """Understand one operator question before anything tries to retrieve for it."""
     text = rewrite_operator_question(question)
+    # Dual-encoder snap onto a gold question when cosine is high and the gold
+    # names no unrelated product subject. Failures stay on the deterministic
+    # rewrite — a trained head must not invent a heading the operator did not ask.
+    try:
+        from src.ai.first_party.engine import semantic_rewrite
+
+        snapped = semantic_rewrite(text)
+        if snapped:
+            text = snapped
+    except Exception:
+        pass
     raw = content_terms(text)
     generic = _generic_and_stop()
     # Frame words join the generic ones for this question only. They land in

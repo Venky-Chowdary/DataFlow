@@ -1386,7 +1386,8 @@ class DataPilotTools:
                 "runtime": "local_engine",
                 "runtime_note": (
                     "First-party brain is Datawrap's own local Pilot engine "
-                    "(NL → tools → compose). OpenAI / Anthropic / Ollama stay "
+                    "(dual encoder + copy-grounded pointer-generator, then "
+                    "NL → tools → compose). OpenAI / Anthropic / Ollama stay "
                     "opt-in polish — never required, never the source of transfer facts."
                 ),
                 "can": [
@@ -1595,7 +1596,8 @@ class DataPilotTools:
                 ),
                 "local_primary",
                 (
-                    "Datawrap Pilot's **own local engine** is the default brain — NL → tools → compose "
+                    "Datawrap Pilot's **own local engine** is the default brain — a "
+                    "first-party copy-grounded generator (NL → tools → compose) "
                     "with no OpenAI, Anthropic, or Ollama key. A third-party LLM is optional polish "
                     "you turn on in Settings → AI; it never supplies transfer, aggregate, or Confirm facts."
                 ),

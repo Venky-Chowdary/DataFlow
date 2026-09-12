@@ -2150,12 +2150,13 @@ def _query_playground_section() -> GeneratedSection:
 
 
 def _pilot_engine_section() -> GeneratedSection | None:
-    """First-party engine is the default brain; third-party LLMs stay opt-in.
+    """First-party copy-grounded engine is the default brain; vendors stay opt-in.
 
     Operators ask "are you ChatGPT" and "do you use OpenAI". The rule lives in
     ``pilot_engine_decision``: local unless the operator saves a key and
     selects hybrid. Generating the passage from that function keeps the
-    answer from drifting into "we are ChatGPT".
+    answer from drifting into "we are ChatGPT" or "we shipped a foundation
+    model".
     """
     try:
         from ..llm.provider import resolve_pilot_engine
@@ -2170,9 +2171,12 @@ def _pilot_engine_section() -> GeneratedSection | None:
         section_title="Does Pilot use ChatGPT or a third-party LLM",
         text=(
             "Datawrap Pilot answers with its own local engine by default — "
-            "a third-party LLM (OpenAI, Anthropic, or Ollama) is optional "
-            "polish the operator turns on in Settings → AI, and it never "
-            "supplies transfer, aggregate, or Confirm facts. "
+            "a first-party copy-grounded generator (dual encoder plus "
+            "pointer-generator) that restates documented evidence, not "
+            "ChatGPT or a third-party foundation model, and a third-party "
+            "LLM (OpenAI, Anthropic, or Ollama) is optional polish the "
+            "operator turns on in Settings → AI, and it never supplies "
+            "transfer, aggregate, or Confirm facts. "
             "DATAFLOW_PILOT_ENGINE and Settings → AI can select hybrid "
             "wording; they do not move tools, gates, or proofs off the "
             "first-party engine."

@@ -1012,6 +1012,15 @@ def compose_product_answer(answer: ProductAnswer) -> str:
         partial_caveat=answer.caveat,
     )
     if composed:
+        try:
+            from src.ai.first_party.engine import narrate_answer
+
+            evidence = " ".join(chunk_text for *_, chunk_text in sections)
+            narrated = narrate_answer(answer.analysis.text, evidence, composed)
+            if narrated:
+                return narrated
+        except Exception:
+            pass
         return composed
     legacy = compose_documented_answer(list(answer.hits))
     if legacy and answer.caveat:

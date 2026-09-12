@@ -886,7 +886,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-head">
                     <div>
                       <h2>Active model route</h2>
-                      <p>Datawrap&apos;s own Pilot engine answers by default. A third-party model is used only when you save a key and choose Hybrid.</p>
+                      <p>Datawrap&apos;s own Pilot engine answers by default — a first-party copy-grounded generator, not a third-party foundation model. A third-party model is used only when you save a key and choose Hybrid.</p>
                     </div>
                   </div>
                   <div className="df2-settings-section-body">
