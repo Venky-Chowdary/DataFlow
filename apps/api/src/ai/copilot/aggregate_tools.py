@@ -83,6 +83,15 @@ _PLATFORM_NOUNS = frozenset({
     "contract", "contracts", "dataset", "datasets",
     "table", "tables", "collection", "collections", "column", "columns",
     "workspace", "workspaces", "preflight", "quarantine",
+    # The product's own inventory, which the documentation counts and no
+    # warehouse holds a table of. "How many sources can you connect to" and
+    # "how many file formats can you read" are questions about the catalog, and
+    # the rejection only applies when no connector was named — so "count
+    # sources on Demo Orders", where the operator really does mean a table of
+    # that name, still reaches the aggregator.
+    "source", "sources", "destination", "destinations",
+    "format", "formats", "engine", "engines", "warehouse", "warehouses",
+    "role", "roles", "gate", "gates", "mode", "modes",
 })
 
 
@@ -240,6 +249,12 @@ _STOP_TOKENS = frozenset({
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
     "that", "this", "to", "and", "or", "be", "been", "get", "got", "show",
     "me", "tell", "currently", "right", "now", "again", "still",
+    # Modals. Without them "how many file formats can you read" and "how many
+    # sources can you connect to" produced tables called `file formats can`
+    # and `sources can` — no error reached the operator, because the
+    # documentation answer led, but every such turn ran a doomed lookup first.
+    # A modal is a fragment of the question, never part of a name.
+    "can", "could", "will", "would", "should", "may", "might", "must", "shall",
 })
 
 # Adjectives that mean a status/state filter, not part of the table name.
@@ -526,7 +541,14 @@ def _finish_request(
     table_tokens = req.table.lower().split()
     if (
         table_tokens
-        and (req.table.lower() in _PLATFORM_NOUNS or table_tokens[0] in _PLATFORM_NOUNS)
+        and (
+            req.table.lower() in _PLATFORM_NOUNS
+            # First token and last. The head of an English noun phrase is its
+            # final word, so "file formats" is a question about formats; only
+            # the first was checked, and "file" is not a platform noun.
+            or table_tokens[0] in _PLATFORM_NOUNS
+            or table_tokens[-1] in _PLATFORM_NOUNS
+        )
         and not req.connector_name
     ):
         # Platform inventory question — let the jobs/connectors routes answer it.

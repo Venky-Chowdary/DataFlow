@@ -292,3 +292,67 @@ def test_the_guard_does_not_swallow_a_plain_request_that_reads_the_same_way():
     assert not _asks_about_the_operation("show me the count")
     assert not _asks_about_the_operation("count of orders by status")
     assert _asks_about_the_operation("is the count exact or a sample")
+
+
+# --- a question about the catalog is not a table to count --------------------
+#
+# Measured over HTTP: "how many file formats can you read" and "how many
+# sources can you connect to" planned a count over tables named `file formats
+# can` and `sources can`. No error reached the operator, because the
+# documentation answer led, but every such turn ran a doomed lookup first and
+# the same defect *did* surface as a validation error for phrasings where the
+# documentation did not lead.
+
+CATALOG_COUNTS = [
+    "how many file formats can you read",
+    "how many sources can you connect to",
+    "how many destinations do you support",
+    "how many roles are there",
+    "how many gates run before a write",
+    "how many engines can it use",
+    "how many warehouses do you support",
+    "how many sync modes are there",
+]
+
+# The same nouns with a connector named. The operator really does mean a table
+# of that name, so the rejection must not reach them.
+NAMED_ON_A_CONNECTOR = [
+    ("count sources on Demo Orders", "sources"),
+    ("count modes on Demo Orders", "modes"),
+    ("count orders by region on Demo Orders", "orders"),
+]
+
+
+@pytest.mark.parametrize("question", CATALOG_COUNTS)
+def test_a_count_of_the_products_own_inventory_is_not_an_aggregation(question):
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    assert parse_aggregation_request(question) is None, question
+
+
+@pytest.mark.parametrize(("question", "table"), NAMED_ON_A_CONNECTOR)
+def test_the_same_noun_on_a_named_connector_still_aggregates(question, table):
+    from src.ai.copilot.aggregate_tools import parse_aggregation_request
+
+    parsed = parse_aggregation_request(question)
+    assert parsed is not None, question
+    assert parsed.table == table, parsed
+    assert parsed.connector_name == "Demo Orders", parsed
+
+
+def test_a_modal_is_never_part_of_a_name():
+    """"File formats can" is a fragment of the question, not an identifier."""
+    from src.ai.copilot.aggregate_tools import _STOP_TOKENS, _trim_filler
+
+    assert {"can", "could", "will", "would", "should"} <= _STOP_TOKENS
+    assert _trim_filler("file formats can") == "file formats"
+    assert _trim_filler("sources can") == "sources"
+
+
+def test_the_head_of_the_noun_phrase_is_checked_and_not_only_the_first_word():
+    """"File formats" is a question about formats; ``file`` is not a platform noun."""
+    from src.ai.copilot.aggregate_tools import _PLATFORM_NOUNS, parse_aggregation_request
+
+    assert "formats" in _PLATFORM_NOUNS
+    assert "file" not in _PLATFORM_NOUNS
+    assert parse_aggregation_request("count file formats") is None
