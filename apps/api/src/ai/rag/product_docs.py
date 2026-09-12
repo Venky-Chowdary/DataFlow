@@ -563,6 +563,16 @@ def _section_intent_bonus(
             "destinations you can write" in title or "engines you can connect" in title
         ):
             return -8.0
+        if re.search(r"\bconfidential\s+ledger\b", analysis.text, re.I) and "row ledger" in title:
+            return -8.0
+        if re.search(r"\bearth\s+engine\b", analysis.text, re.I) and (
+            "airflow" in title or "spark" in title
+        ):
+            return -8.0
+        if re.search(r"\bspeech[\s-]to[\s-]text\b", analysis.text, re.I) and (
+            "logical type" in title or "carrier" in title
+        ):
+            return -8.0
         # The gate cards still have to pay the off-ask cost when they ranked
         # here on a body word. "Which destinations can I write to" does not
         # name a gate, so "Core gates (before write)" is not on subject — and
@@ -1533,6 +1543,77 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) else -3.2
     if re.search(r"\bgithub\s+copilot\b", analysis.text, re.I) and "github enterprise" in title:
         bonus -= 6.0
+    if "google photos" in title:
+        bonus += 6.0 if re.search(r"\bphotos\b", analysis.text, re.I) else -3.2
+    if "google contacts" in title:
+        bonus += 6.0 if re.search(r"\bcontacts\b", analysis.text, re.I) else -3.2
+    if "google maps" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+maps\b", analysis.text, re.I) else -3.2
+    if "google news" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+news\b", analysis.text, re.I) else -3.2
+    if "google play" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+play\b", analysis.text, re.I) else -3.2
+    if re.search(
+        r"\bgoogle\s+photos\b|\bphotos\s+as\s+a\s+source\b"
+        r"|\bgoogle\s+contacts\b|\bcontacts\s+as\s+a\s+source\b"
+        r"|\bgoogle\s+maps\b|\bgoogle\s+news\b|\bgoogle\s+play\b",
+        analysis.text,
+        re.I,
+    ) and "google workspace" in title:
+        bonus -= 6.0
+    if re.search(r"\bgoogle\s+maps\b", analysis.text, re.I) and "azure maps" in title:
+        bonus -= 6.0
+    if "vision ai" in title:
+        bonus += 6.0 if re.search(r"\bvision\s+ai\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bvision\s+ai\b", analysis.text, re.I) and "azure ai search" in title:
+        bonus -= 6.0
+    if "speech-to-text" in title or "speech to text" in title:
+        bonus += 6.0 if re.search(r"\bspeech[\s-]to[\s-]text\b", analysis.text, re.I) else -3.2
+    if "earth engine" in title:
+        bonus += 6.0 if re.search(r"\bearth\s+engine\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bearth\s+engine\b", analysis.text, re.I) and (
+        "airflow" in title or "spark" in title
+    ):
+        bonus -= 6.0
+    if "bi engine" in title:
+        bonus += 6.0 if re.search(r"\bbi\s+engine\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbi\s+engine\b", analysis.text, re.I) and (
+        "power bi" in title or "bigquery as a destination" in title
+    ):
+        bonus -= 6.0
+    if "media services" in title:
+        bonus += 6.0 if re.search(r"\bmedia\s+services\b|\bazure\s+media\b", analysis.text, re.I) else -3.2
+    if "cognitive services" in title:
+        bonus += 6.0 if re.search(r"\bcognitive\s+services\b", analysis.text, re.I) else -3.2
+    if "bot service" in title:
+        bonus += 6.0 if re.search(r"\bbot\s+service\b|\bazure\s+bot\b", analysis.text, re.I) else -3.2
+    if re.search(
+        r"\bmedia\s+services\b|\bazure\s+media\b|\bcognitive\s+services\b"
+        r"|\bbot\s+service\b|\bazure\s+bot\b",
+        analysis.text,
+        re.I,
+    ) and "service bus" in title:
+        bonus -= 6.0
+    if re.search(r"\bcognitive\s+services\b", analysis.text, re.I) and "azure ai search" in title:
+        bonus -= 6.0
+    if "confidential ledger" in title:
+        bonus += 6.0 if re.search(r"\bconfidential\s+ledger\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bconfidential\s+ledger\b", analysis.text, re.I) and "row ledger" in title:
+        bonus -= 6.0
+    if "operator nexus" in title:
+        bonus += 6.0 if re.search(r"\boperator\s+nexus\b", analysis.text, re.I) else -3.2
+    if "microsoft clarity" in title:
+        bonus += 6.0 if re.search(r"\bclarity\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmicrosoft\s+clarity\b|\bclarity\b", analysis.text, re.I) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "anthos" in title:
+        bonus += 6.0 if re.search(r"\banthos\b", analysis.text, re.I) else -3.2
+    if "iot hub" in title:
+        bonus += 6.0 if re.search(r"\biot\s+hub\b", analysis.text, re.I) else -3.2
+    if re.search(r"\biot\s+hub\b", analysis.text, re.I) and "iot central" in title:
+        bonus -= 6.0
+    if "merchant center" in title:
+        bonus += 6.0 if re.search(r"\bmerchant\s+center\b", analysis.text, re.I) else -3.2
     iceberg_ready_ask = bool(
         re.search(r"\biceberg\b", analysis.text, re.I)
         and not re.search(r"\b(?:data\s+)?catalog\b|\bglue\b", analysis.text, re.I)

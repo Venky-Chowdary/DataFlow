@@ -100,6 +100,15 @@ def _names(question: str) -> list[str]:
         "do you support Kafka as a destination",
         "do you support MySQL",
         "do you support Redis",
+        "do you support Google Photos as a source",
+        "do you support Vision AI as a destination",
+        "do you support Earth Engine",
+        "do you support BigQuery BI Engine",
+        "do you support Azure Confidential Ledger",
+        "do you support Microsoft Clarity",
+        "do you support Anthos",
+        "do you support Azure IoT Hub",
+        "do you support Merchant Center",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

@@ -243,6 +243,22 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Kafka as a destination",
         "Do you support MySQL",
         "Do you support Redis",
+        "Do you support Google Photos as a source",
+        "Do you support Google Contacts as a source",
+        "Do you support Google Maps as a source",
+        "Do you support Vision AI as a destination",
+        "Do you support Speech-to-Text as a destination",
+        "Do you support Earth Engine",
+        "Do you support BigQuery BI Engine",
+        "Do you support Azure Media Services",
+        "Do you support Azure Cognitive Services",
+        "Do you support Azure Bot Service",
+        "Do you support Azure Confidential Ledger",
+        "Do you support Azure Operator Nexus",
+        "Do you support Microsoft Clarity",
+        "Do you support Anthos",
+        "Do you support Azure IoT Hub",
+        "Do you support Merchant Center",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

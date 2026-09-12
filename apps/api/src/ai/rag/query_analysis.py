@@ -1313,6 +1313,24 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bdocument\s+ai\b", re.I), ("document_ai",)),
     (re.compile(r"\bfhir\b", re.I), ("fhir",)),
     (re.compile(r"\bgithub\s+copilot\b", re.I), ("github_copilot",)),
+    (re.compile(r"\bgoogle\s+photos\b|\bphotos\s+as\s+a\s+source\b", re.I), ("google_photos",)),
+    (re.compile(r"\bgoogle\s+contacts\b|\bcontacts\s+as\s+a\s+source\b", re.I), ("google_contacts",)),
+    (re.compile(r"\bgoogle\s+maps\b", re.I), ("google_maps",)),
+    (re.compile(r"\bgoogle\s+news\b", re.I), ("google_news",)),
+    (re.compile(r"\bgoogle\s+play\b", re.I), ("google_play",)),
+    (re.compile(r"\bvision\s+ai\b", re.I), ("vision_ai",)),
+    (re.compile(r"\bspeech[\s-]to[\s-]text\b", re.I), ("speech_to_text",)),
+    (re.compile(r"\bearth\s+engine\b", re.I), ("earth_engine",)),
+    (re.compile(r"\bbi\s+engine\b|\bbigquery\s+bi\s+engine\b", re.I), ("bigquery_bi_engine",)),
+    (re.compile(r"\bmedia\s+services\b|\bazure\s+media\b", re.I), ("azure_media",)),
+    (re.compile(r"\bcognitive\s+services\b", re.I), ("azure_cognitive",)),
+    (re.compile(r"\bbot\s+service\b|\bazure\s+bot\b", re.I), ("azure_bot",)),
+    (re.compile(r"\bconfidential\s+ledger\b", re.I), ("confidential_ledger",)),
+    (re.compile(r"\boperator\s+nexus\b", re.I), ("operator_nexus",)),
+    (re.compile(r"\bmicrosoft\s+clarity\b|\bclarity\b", re.I), ("microsoft_clarity",)),
+    (re.compile(r"\banthos\b", re.I), ("anthos",)),
+    (re.compile(r"\biot\s+hub\b", re.I), ("iot_hub",)),
+    (re.compile(r"\bmerchant\s+center\b", re.I), ("merchant_center",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2773,6 +2791,55 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bsoc\s*2\b|\bhipaa\b|\bbaa\b", re.I),
         ("residency", "data_region", "attestation"),
+    ),
+    (
+        re.compile(
+            r"\bgoogle\s+photos\b|\bphotos\s+as\s+a\s+source\b"
+            r"|\bgoogle\s+contacts\b|\bcontacts\s+as\s+a\s+source\b"
+            r"|\bgoogle\s+maps\b|\bgoogle\s+news\b|\bgoogle\s+play\b",
+            re.I,
+        ),
+        ("google_workspace",),
+    ),
+    (
+        re.compile(r"\bvision\s+ai\b", re.I),
+        ("azure_ai_search",),
+    ),
+    (
+        re.compile(r"\bspeech[\s-]to[\s-]text\b", re.I),
+        ("logical", "carrier"),
+    ),
+    (
+        re.compile(r"\bearth\s+engine\b", re.I),
+        ("spark", "airflow"),
+    ),
+    (
+        re.compile(r"\bbi\s+engine\b|\bbigquery\s+bi\s+engine\b", re.I),
+        ("powerbi", "power_bi"),
+    ),
+    (
+        re.compile(
+            r"\bmedia\s+services\b|\bazure\s+media\b"
+            r"|\bcognitive\s+services\b|\bbot\s+service\b|\bazure\s+bot\b",
+            re.I,
+        ),
+        ("service_bus", "bus"),
+    ),
+    (
+        re.compile(r"\bconfidential\s+ledger\b", re.I),
+        ("ledger", "quarantine"),
+    ),
+    (
+        re.compile(r"\boperator\s+nexus\b", re.I),
+        ("watermark",),
+    ),
+    (
+        re.compile(r"\bmicrosoft\s+clarity\b|\bclarity\b", re.I),
+        ("teams_dest", "team"),
+    ),
+    (
+        re.compile(r"\biot\s+hub\b", re.I),
+        ("iot_central",),
     ),
     # Bare Private Link is not Job Theater.
     (

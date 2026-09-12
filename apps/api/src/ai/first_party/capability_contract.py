@@ -3298,6 +3298,78 @@ def github_copilot_dest_shipped() -> bool:
     return False
 
 
+def google_photos_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gphotos", "google_photos"})
+
+
+def google_contacts_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gcontacts", "google_contacts"})
+
+
+def google_maps_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gmaps", "google_maps"})
+
+
+def google_news_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gnews", "google_news"})
+
+
+def google_play_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gplay", "google_play"})
+
+
+def vision_ai_shipped() -> bool:
+    return False
+
+
+def speech_to_text_shipped() -> bool:
+    return False
+
+
+def earth_engine_shipped() -> bool:
+    return False
+
+
+def bigquery_bi_engine_shipped() -> bool:
+    return False
+
+
+def azure_media_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_media", "media_services"})
+
+
+def azure_cognitive_shipped() -> bool:
+    return False
+
+
+def azure_bot_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_bot", "bot_service"})
+
+
+def confidential_ledger_shipped() -> bool:
+    return False
+
+
+def operator_nexus_shipped() -> bool:
+    return False
+
+
+def microsoft_clarity_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"clarity", "microsoft_clarity"})
+
+
+def anthos_shipped() -> bool:
+    return False
+
+
+def iot_hub_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"iot_hub", "iothub"})
+
+
+def merchant_center_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"merchant_center", "gmc"})
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -5796,6 +5868,258 @@ def github_copilot_dest_card() -> CapabilityCard | None:
     )
 
 
+def google_photos_card() -> CapabilityCard | None:
+    if google_photos_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Photos as a source",
+        text=(
+            "Datawrap does not ship Google Photos as a transfer-ready source "
+            "(google_photos is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_contacts_card() -> CapabilityCard | None:
+    if google_contacts_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Contacts as a source",
+        text=(
+            "Datawrap does not ship Google Contacts as a transfer-ready "
+            "source (google_contacts is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_maps_card() -> CapabilityCard | None:
+    if google_maps_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Maps as a source",
+        text=(
+            "Datawrap does not ship Google Maps as a transfer-ready source "
+            "(google_maps is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_news_card() -> CapabilityCard | None:
+    if google_news_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google News as a source",
+        text=(
+            "Datawrap does not ship Google News as a transfer-ready source "
+            "(google_news is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_play_card() -> CapabilityCard | None:
+    if google_play_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Play as a source",
+        text=(
+            "Datawrap does not ship Google Play as a transfer-ready source "
+            "(google_play is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def vision_ai_card() -> CapabilityCard | None:
+    if vision_ai_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Vision AI as a destination",
+        text=(
+            "Datawrap does not ship Vision AI as a transfer destination "
+            "(vision_ai is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def speech_to_text_card() -> CapabilityCard | None:
+    if speech_to_text_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Speech-to-Text as a destination",
+        text=(
+            "Datawrap does not ship Speech-to-Text as a transfer destination "
+            "(speech_to_text is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def earth_engine_card() -> CapabilityCard | None:
+    if earth_engine_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Earth Engine",
+        text=(
+            "Datawrap does not ship Earth Engine as a transfer-ready driver "
+            "(earth_engine is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bigquery_bi_engine_card() -> CapabilityCard | None:
+    if bigquery_bi_engine_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support BigQuery BI Engine",
+        text=(
+            "Datawrap does not ship BigQuery BI Engine "
+            "(bigquery_bi_engine is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_media_card() -> CapabilityCard | None:
+    if azure_media_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Media Services",
+        text=(
+            "Datawrap does not ship Azure Media Services "
+            "(azure_media is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_cognitive_card() -> CapabilityCard | None:
+    if azure_cognitive_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Cognitive Services",
+        text=(
+            "Datawrap does not ship Azure Cognitive Services "
+            "(azure_cognitive is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_bot_card() -> CapabilityCard | None:
+    if azure_bot_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Bot Service",
+        text=(
+            "Datawrap does not ship Azure Bot Service "
+            "(azure_bot is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def confidential_ledger_card() -> CapabilityCard | None:
+    if confidential_ledger_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Confidential Ledger",
+        text=(
+            "Datawrap does not ship Azure Confidential Ledger "
+            "(confidential_ledger is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def operator_nexus_card() -> CapabilityCard | None:
+    if operator_nexus_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Operator Nexus",
+        text=(
+            "Datawrap does not ship Azure Operator Nexus "
+            "(operator_nexus is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_clarity_card() -> CapabilityCard | None:
+    if microsoft_clarity_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Clarity",
+        text=(
+            "Datawrap does not ship Microsoft Clarity as a transfer-ready "
+            "source (microsoft_clarity is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def anthos_card() -> CapabilityCard | None:
+    if anthos_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Anthos",
+        text=(
+            "Datawrap does not ship Anthos as a connect or transfer option "
+            "(anthos is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def iot_hub_card() -> CapabilityCard | None:
+    if iot_hub_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure IoT Hub",
+        text=(
+            "Datawrap does not ship Azure IoT Hub as a transfer-ready driver "
+            "(iot_hub is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def merchant_center_card() -> CapabilityCard | None:
+    if merchant_center_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Merchant Center",
+        text=(
+            "Datawrap does not ship Merchant Center as a transfer-ready "
+            "source (merchant_center is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -6104,6 +6428,24 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         document_ai_card,
         fhir_card,
         github_copilot_dest_card,
+        google_photos_card,
+        google_contacts_card,
+        google_maps_card,
+        google_news_card,
+        google_play_card,
+        vision_ai_card,
+        speech_to_text_card,
+        earth_engine_card,
+        bigquery_bi_engine_card,
+        azure_media_card,
+        azure_cognitive_card,
+        azure_bot_card,
+        confidential_ledger_card,
+        operator_nexus_card,
+        microsoft_clarity_card,
+        anthos_card,
+        iot_hub_card,
+        merchant_center_card,
     ):
         card = builder()
         if card is not None:
