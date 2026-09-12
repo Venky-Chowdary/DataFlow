@@ -94,10 +94,8 @@ def _roles_section() -> GeneratedSection | None:
         role for role in role_names() if "job.run" in role_permissions(role)
     ]
     if len(runners) > 1:
-        lines.append(
-            f"A {', '.join(runners[:-1])} or {runners[-1]} can start transfers "
-            f"and run a pipeline now."
-        )
+        who = f"{', '.join(runners[:-1])} or {runners[-1]}"
+        lines.append(f"{who[0].upper() + who[1:]} can start transfers and run a pipeline now.")
     elif runners:
         lines.append(f"A {runners[0]} can start transfers and run a pipeline now.")
     for role in role_names():
@@ -127,7 +125,7 @@ def _roles_section() -> GeneratedSection | None:
         pass
 
     if len(runners) > 1:
-        who = f"a {', '.join(runners[:-1])} or {runners[-1]}"
+        who = f"{', '.join(runners[:-1])} or {runners[-1]}"
     elif runners:
         who = f"a {runners[0]}"
     else:
