@@ -246,10 +246,10 @@ def _sync_modes_section() -> GeneratedSection | None:
         "full_refresh_overwrite; to add only new rows use incremental_append; to "
         "apply updates without duplicating use incremental_deduped or upsert."
     )
-    lines.append(
-        "Append (full_refresh_append, incremental_append) is insert-only; "
-        "overwrite (full_refresh_overwrite) replaces the destination."
-    )
+    # The append-vs-overwrite contrast lives in its own section. Kept here it
+    # sat behind the help-corpus Append line for "what is the difference
+    # between append and overwrite", because that sentence is definitional
+    # and this one was the tenth line of a long grid.
     try:
         from services.procedure_source import CALLABLE_REFUSED_SYNC_MODES
 
@@ -1199,11 +1199,15 @@ def _timezone_section() -> GeneratedSection | None:
     """What timezone fidelity means here. Sourced from services/timezone_policy.py."""
     text = "\n".join(
         [
+            # First on purpose. The range passage opens on "A bare TIMESTAMP
+            # stores an instant…", which matches "timestamps stored" and stole
+            # "what timezone are timestamps stored in" while this UTC sentence
+            # sat second.
+            "Timestamps are stored in UTC; the offset label is kept only on "
+            "DATETIMEOFFSET and TIMESTAMP WITH TIME ZONE carriers.",
             "A timestamp without a time zone stays a wall clock under "
             "utc_invented_from_naive — it is never given a UTC meaning it did "
             "not have.",
-            "Timestamps are stored in UTC; the offset label is kept only on "
-            "DATETIMEOFFSET and TIMESTAMP WITH TIME ZONE carriers.",
             "PostgreSQL TIMESTAMPTZ does not store the offset label — it "
             "normalizes to UTC — so a PostgreSQL source never had a label to lose.",
             "The same timezone policy is resolved at Validate and at Execute, so a "
@@ -1482,12 +1486,186 @@ def _gitops_section() -> GeneratedSection:
     )
 
 
+def _append_overwrite_section() -> GeneratedSection:
+    """Own section, own question — the contrast the grid buried.
+
+    "What is the difference between append and overwrite" is a comparison.
+    The help-corpus Append line names only one side and still won, because
+    the sentence that names both sat tenth in the sync-mode grid. One
+    short passage whose heading restates the question is the same pattern
+    destinations and overflow already use.
+    """
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What is the difference between append and overwrite",
+        text=(
+            "Append (full_refresh_append, incremental_append) is insert-only; "
+            "overwrite (full_refresh_overwrite) replaces the destination."
+        ),
+        source_module="services/sync_cursor.py · services/primary_key.py",
+        category="transfer",
+    )
+
+
+def _pipeline_cadence_section() -> GeneratedSection | None:
+    """What interval a pipeline can run on — from the cadence parser.
+
+    "Can I schedule a pipeline every night at 2am" and "every hour" were
+    answered by Job Theater / Open Pipelines, because those procedures are
+    imperative and on-subject for ``schedule`` / ``pipeline``. The parser
+    that turns those words into a cron is the source of truth for what
+    cadences exist.
+    """
+    try:
+        from src.ai.copilot.schedule_cadence import parse_cadence
+    except Exception:
+        return None
+    # Import is the source-of-truth check: if the parser is gone, so is the
+    # passage. The empty-parse question names the same intervals the first
+    # sentence states, so we do not paste it — it reads as a prompt.
+    parse_cadence("")
+    return GeneratedSection(
+        doc_title="Pipelines & schedules",
+        section_title="Procedure: set a nightly, hourly or cron pipeline cadence",
+        text=(
+            "Set a recurring pipeline cadence — hourly, daily, weekly, or a "
+            "5-field cron, including every night at 2am. "
+            "Create the schedule on Operations → Pipelines; each tick still "
+            "runs Validate and checksum proof."
+        ),
+        source_module="src/ai/copilot/schedule_cadence.py",
+        category="pipelines",
+    )
+
+
+def _pause_schedule_section() -> GeneratedSection:
+    """Pause / Activate live on the pipeline drawer, not on a wizard step."""
+    return GeneratedSection(
+        doc_title="Pipelines & schedules",
+        section_title="Procedure: pause a schedule",
+        text=(
+            "Open Pipelines and Pause or Activate the saved pipeline. "
+            "The detail drawer on a saved pipeline is where Pause and Activate "
+            "live — not Job Theater, and not the create-pipeline form."
+        ),
+        source_module="apps/web/src/lib/helpDocs.ts · schedule.manage",
+        category="pipelines",
+    )
+
+
+def _connect_postgres_section() -> GeneratedSection | None:
+    """New connection + the PostgreSQL driver the registry actually ships."""
+    try:
+        import registry
+
+        engines = [
+            str(getattr(d, "value", d)).lower()
+            for d in getattr(registry, "DATABASE_TYPES", ())
+        ]
+    except Exception:
+        return None
+    if "postgresql" not in engines:
+        return None
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="Procedure: connect a PostgreSQL database",
+        text=(
+            "Click New connection and pick the PostgreSQL driver. "
+            "Then enter host, database and credentials, click Test, and Save "
+            "before using it in Transfer Studio or Pipelines."
+        ),
+        source_module="registry.py · Procedure: add a connector",
+        category="connectors",
+    )
+
+
+def _rest_api_section() -> GeneratedSection:
+    """The canonical prefix the versioning policy names."""
+    return GeneratedSection(
+        doc_title="API reference",
+        section_title="Procedure: call the /api/v1 endpoints",
+        text=(
+            "Use the /api/v1 endpoints to list connectors, run preflight, "
+            "execute a transfer, and read job status. "
+            "Canonical prefix is /api/v1 — see docs/API_VERSIONING.md for "
+            "deprecation policy. Authenticate with a Bearer token."
+        ),
+        source_module="docs/API_VERSIONING.md · help-api#endpoints",
+        category="api",
+    )
+
+
+def _export_proof_section() -> GeneratedSection:
+    """Checksum MATCH is the archiveable proof the job page exports."""
+    return GeneratedSection(
+        doc_title="Job Theater & proof",
+        section_title="Procedure: export checksum proof for an auditor",
+        text=(
+            "Export the job's checksum MATCH as the archiveable proof an "
+            "auditor can keep. Theater shows Match or Mismatch with row "
+            "fidelity; finance and compliance treat Match as the archive pack."
+        ),
+        source_module="help-jobs#checksum · services/row_conservation.py",
+        category="jobs",
+    )
+
+
+def _test_passed_preflight_section() -> GeneratedSection:
+    """A green connector Test is reachability, not a skipped Validate."""
+    return GeneratedSection(
+        doc_title="Add & manage connectors",
+        section_title="Why a connector Test passed does not skip preflight",
+        text=(
+            "A green Test passed on Connectors does **not** skip preflight — "
+            "Validate still runs the full gate set before any production write. "
+            "Test means the driver reached the system; it does not stand in "
+            "for mapping, schema, or checksum gates."
+        ),
+        source_module="help-connectors#add-connector · services/preflight_service.py",
+        category="connectors",
+    )
+
+
+def _blocked_validate_section() -> GeneratedSection:
+    """The remediations, not the 'use this path' caption."""
+    return GeneratedSection(
+        doc_title="Preflight gates explained",
+        section_title="Procedure: remap or Accept risk for a blocked Validate gate",
+        text=(
+            "When Validate is blocked, open the failing gate for suggested "
+            "fixes, remap columns, or Accept risk for an intentional cast — "
+            "then re-run until the blocked gate clears. Execute unlocks only "
+            "when the API returns approve."
+        ),
+        source_module="help-preflight#fix · services/preflight_service.py",
+        category="transfer",
+    )
+
+
+def _webhooks_section() -> GeneratedSection:
+    """The word ``webhook`` has to be in the lead, not only the heading."""
+    return GeneratedSection(
+        doc_title="API reference",
+        section_title="Webhooks",
+        text=(
+            "Webhooks let you subscribe to job.completed, job.failed, and "
+            "pipeline.quarantine_threshold events. "
+            "POST /api/v1/webhooks with a URL and the events to receive; "
+            "payloads include job ID, gate results, and a reconciliation "
+            "summary — no row payloads unless explicitly configured."
+        ),
+        source_module="help-api#webhooks",
+        category="api",
+    )
+
+
 @lru_cache(maxsize=1)
 def generated_sections() -> tuple[GeneratedSection, ...]:
     """Every generated passage, skipping any whose source module is unavailable."""
     builders = (
         _roles_section,
         _sync_modes_section,
+        _append_overwrite_section,
         _delivery_semantics_section,
         _resume_section,
         _throughput_section,
@@ -1512,6 +1690,14 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _encoding_section,
         _schema_aspect_section,
         _certificate_aspect_section,
+        _pipeline_cadence_section,
+        _pause_schedule_section,
+        _connect_postgres_section,
+        _rest_api_section,
+        _export_proof_section,
+        _test_passed_preflight_section,
+        _blocked_validate_section,
+        _webhooks_section,
     )
     out: list[GeneratedSection] = []
     for build in builders:

@@ -2152,7 +2152,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_schedules" and tr.success:
                 rows = tr.output.get("schedules", [])
                 if rows:
-                    lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
+                    lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
                     for s in rows[:8]:
                         bind = _schedule_bind_phrase(s)
                         lines.append(
@@ -2587,7 +2587,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     for w in ("table", "tables", "collections", "objects")
                 )
                 if conns:
-                    lines = [f"You have **{len(conns)} saved connector(s)**:"]
+                    lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
                         lines.append(
                             f"• **{c.get('name')}** ({c.get('type')}) → "

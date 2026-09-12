@@ -142,6 +142,9 @@ def test_the_concept_and_the_range_are_separate_sections() -> None:
     titles = {s.section_title for s in generated_sections()}
     assert "Timestamps stored in UTC and time zones" in titles
     assert "Timestamp range and instant carriers" in titles
+    lead = _section("Timestamps stored in UTC and time zones").text.split(". ")[0]
+    assert "stored in UTC" in lead
+    assert "offset label" in lead
 
 
 # --------------------------------------------------------------------------

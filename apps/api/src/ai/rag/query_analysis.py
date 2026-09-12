@@ -243,6 +243,11 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "hanging": ("phas", "stuck", "theater", "timeout"),
     # Scheduling
     "nightly": ("schedule", "pipeline", "cron", "recurr", "daily"),
+    # "every night at 2am" / "every hour" are how operators say nightly/hourly.
+    # Without these, those words never reached the cadence vocabulary and
+    # "can I schedule a pipeline to run every night" retrieved Job Theater.
+    "night": ("schedule", "pipeline", "cron", "recurr", "daily", "nightly"),
+    "hour": ("schedule", "pipeline", "cron", "recurr", "hourly"),
     "hourly": ("schedule", "pipeline", "cron", "recurr"),
     "daily": ("schedule", "pipeline", "cron", "recurr"),
     "weekly": ("schedule", "pipeline", "cron", "recurr"),

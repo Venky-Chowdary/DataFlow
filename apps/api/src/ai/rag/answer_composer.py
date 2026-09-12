@@ -146,6 +146,10 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z(`*\d])")
 _GATE_LINE = re.compile(r"^G\d+\b")
 _LIST_LINE = re.compile(r"^(?:\d+[.)]\s|[-*•]\s|\*\*[A-Z][^*]{0,40}\*\*\s*(?:—|-|:))")
 _SKIP_PREFIX = ("Where:", "Tip:", "Note:", "Example:")
+#: Live inventory lines were written "You have **2 saved connector(s)**:".
+#: Dropping every colon-terminated piece made that sentence disappear, so
+#: "how many connectors do I have" opened on the first bullet instead.
+_INVENTORY_LEAD = re.compile(r"^(?:You have|There are|Found)\b", re.I)
 _UI_CAPTION = re.compile(
     r"^(Validate|Map|Job Theater|System|Operations|Transfer|Pilot|Connectors|"
     r"Schedules|Proofs|Evidence) — ",
@@ -307,8 +311,12 @@ def _split_annotated(text: str, section_title: str = "") -> list[tuple[str, bool
                 continue
         for piece in _SENTENCE_SPLIT.split(line):
             piece = piece.strip()
-            if not piece or piece.startswith(_SKIP_PREFIX) or piece.endswith(":"):
+            if not piece or piece.startswith(_SKIP_PREFIX):
                 continue
+            if piece.endswith(":"):
+                if not _INVENTORY_LEAD.match(piece):
+                    continue
+                piece = piece[:-1].rstrip() + "."
             if _DOC_META.search(piece):
                 continue
             if len(piece) < 12:

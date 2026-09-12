@@ -50,6 +50,12 @@ def test_dialogue_acts_cover_copilot_turns():
     assert classify_dialogue_act("what is the capital of France") == "general"
     assert classify_dialogue_act("show my jobs") == "workspace"
     assert classify_dialogue_act("plan a transfer of orders") == "workspace"
+    assert classify_dialogue_act("what's the status") == "briefing"
+    assert classify_dialogue_act("what is the status of my workspace") == "briefing"
+    # "what is the status of my last transfer" matched the sitrep pattern on
+    # "what is the status" and opened with the workspace briefing instead of
+    # the last job.
+    assert classify_dialogue_act("what is the status of my last transfer") == "workspace"
 
 
 def test_tell_me_everything_about_a_table_is_not_a_sitrep():
@@ -391,7 +397,7 @@ def test_an_inventory_read_is_not_prefixed_with_filler():
     """
     from src.ai.copilot.conversation_composer import weave_tool_answer
 
-    body = "You have **2 saved connector(s)**:\n\n• **Demo Orders** (sqlite)"
+    body = "You have **2 saved connector(s)**.\n\n• **Demo Orders** (sqlite)"
     woven = weave_tool_answer("list my connectors", [body], act="workspace")
     assert woven.startswith("You have **2 saved connector(s)**")
     assert "Here's what I found" not in woven

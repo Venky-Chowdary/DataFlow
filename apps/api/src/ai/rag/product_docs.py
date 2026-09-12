@@ -491,6 +491,58 @@ _GATE_QUESTION = re.compile(r"\bgates?\b|\bpreflight\b", re.I)
 _CORE_GATES_ON_ASK = 3.0
 _CORE_GATES_OFF_ASK = 6.0
 
+#: Verbs and container nouns that appear on almost every procedure heading.
+#: A heading that only shares these with the question is weakly on-subject —
+#: "Procedure: connect Cursor" for "how do I connect a postgres database",
+#: "Open Job Theater" / "Procedure: create a pipeline" for "can I schedule
+#: a pipeline every night". The +3.0 procedure prior is withheld unless the
+#: heading also names a distinctive term (postgres, cadence, pause, api).
+#: When the question has no distinctive term ("how do I add a connector"),
+#: the prior stays as it was.
+_PROCEDURE_GENERIC_TERMS = frozenset(
+    {
+        "connect",
+        "open",
+        "creat",
+        "add",
+        "run",
+        "click",
+        "use",
+        "set",
+        "configur",
+        "enabl",
+        "pipelin",
+        "transfer",
+        "job",
+        "connector",
+        "schedul",
+        "step",
+        "path",
+        "page",
+        "save",
+        "pick",
+        "choos",
+        "procedur",
+    }
+)
+
+
+def _distinctive_procedure_terms(analysis: QueryAnalysis) -> frozenset[str]:
+    """Typed words and phrase expansions that are not generic procedure verbs.
+
+    Adjacent identifier shingles (``add_connector``, ``connect_postgresql``)
+    are a retrieval device, not a heading test: they made every "how do I
+    add a connector" look distinctive and withheld the procedure prior from
+    the section that answers it.
+    """
+    return frozenset(
+        term
+        for term in (*analysis.terms, *analysis.phrase_expansions)
+        if term not in _PROCEDURE_GENERIC_TERMS
+        and len(term) >= 3
+        and "_" not in term
+    )
+
 
 def _section_intent_bonus(
     chunk: ProductDocChunk,
@@ -570,7 +622,12 @@ def _section_intent_bonus(
         bonus -= _COUNTING_TITLE_OFF_ASK
     if ask == "procedure":
         if is_procedure:
-            bonus += 3.0
+            # Weak overlap on ``connect`` / ``pipeline`` / ``schedule`` is how
+            # MCP, Job Theater and the create-pipeline wizard beat the section
+            # written about the distinctive object (PostgreSQL, cadence, pause).
+            distinctive = _distinctive_procedure_terms(analysis)
+            if not distinctive or any(_covers(term, heading) for term in distinctive):
+                bonus += 3.0
         if definitional:
             bonus -= 1.2
     elif ask == "diagnosis":

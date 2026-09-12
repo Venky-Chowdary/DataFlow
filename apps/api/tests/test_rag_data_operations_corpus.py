@@ -627,6 +627,46 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "what is the difference between append and overwrite",
             ("insert-only", "replaces the destination"),
         ),
+        (
+            "can I schedule a pipeline to run every night at 2am",
+            ("cadence", "recurring"),
+        ),
+        (
+            "can I schedule a transfer every hour",
+            ("cadence", "hourly", "cron"),
+        ),
+        (
+            "how do I pause a schedule",
+            ("pause", "activate", "pipelines"),
+        ),
+        (
+            "how do I connect a postgres database",
+            ("new connection", "postgresql"),
+        ),
+        (
+            "how do I use the API",
+            ("/api/v1", "endpoint"),
+        ),
+        (
+            "how do I export proof for an auditor",
+            ("archive", "checksum"),
+        ),
+        (
+            "my connector test passed but the transfer failed, why",
+            ("does **not** skip preflight", "validate still runs"),
+        ),
+        (
+            "what do I do when validate is blocked",
+            ("suggested fixes", "accept risk", "remap", "blocked gate"),
+        ),
+        (
+            "do you have webhooks",
+            ("webhook",),
+        ),
+        (
+            "what timezone are timestamps stored in",
+            ("utc", "offset label"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -658,3 +698,20 @@ def test_the_schema_change_policies_are_named_in_the_lead() -> None:
     lead = body.split(". ")[0]
     for name in SCHEMA_POLICIES:
         assert name in lead, lead[:220]
+
+
+def test_the_how_to_passages_are_generated() -> None:
+    """One short section per procedure the audit still buried in a wizard step."""
+    titles = {section.section_title for section in generated_sections()}
+    for title in (
+        "Procedure: set a nightly, hourly or cron pipeline cadence",
+        "Procedure: pause a schedule",
+        "Procedure: connect a PostgreSQL database",
+        "Procedure: call the /api/v1 endpoints",
+        "Procedure: export checksum proof for an auditor",
+        "Why a connector Test passed does not skip preflight",
+        "Procedure: remap or Accept risk for a blocked Validate gate",
+        "Webhooks",
+        "What is the difference between append and overwrite",
+    ):
+        assert title in titles, title

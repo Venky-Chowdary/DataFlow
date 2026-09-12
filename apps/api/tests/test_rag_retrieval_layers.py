@@ -44,6 +44,7 @@ from src.ai.rag.product_docs import (  # noqa: E402
     _COUNTING_TITLE_BONUS,
     _COUNTING_TITLE_OFF_ASK,
     _ROLE_MATRIX_DOC,
+    _distinctive_procedure_terms,
     _section_intent_bonus,
     _select_covering,
     _split_procedure,
@@ -627,6 +628,65 @@ def test_the_gate_list_pays_the_off_ask_cost_for_a_destination_question():
     assert _section_intent_bonus(_gates_chunk(), analysis) == pytest.approx(
         -_CORE_GATES_OFF_ASK
     )
+
+
+def test_a_generic_procedure_heading_does_not_get_the_full_prior():
+    """MCP / Job Theater were beating cadence and New connection.
+
+    Any ``Procedure:`` heading that shared ``connect`` or ``pipeline`` collected
+    +3.0. The heading has to name the distinctive object — PostgreSQL, cadence,
+    pause — or the prior is withheld.
+    """
+    from src.ai.rag.product_docs import ProductDocChunk
+
+    mcp = ProductDocChunk(
+        id="mcp",
+        doc_id="help-mcp",
+        doc_slug="mcp",
+        doc_title="MCP Server for agents",
+        category="mcp",
+        section_id="connect",
+        section_title="Procedure: connect Cursor",
+        text="Copy the Cursor snippet.",
+    )
+    postgres = analyze_query("how do I connect a postgres database")
+    assert postgres.ask == "procedure"
+    assert _distinctive_procedure_terms(postgres)
+    assert _section_intent_bonus(mcp, postgres) == 0.0
+
+
+def test_a_procedure_with_no_distinctive_object_still_gets_the_prior():
+    """"How do I add a connector" has only generic verbs — keep the +3.0."""
+    from src.ai.rag.product_docs import ProductDocChunk
+
+    add = ProductDocChunk(
+        id="add",
+        doc_id="help-connectors",
+        doc_slug="connectors",
+        doc_title="Add & manage connectors",
+        category="connectors",
+        section_id="add",
+        section_title="Procedure: add a connector",
+        text="Click New connection.",
+    )
+    question = analyze_query("how do I add a connector")
+    assert question.ask == "procedure"
+    assert not _distinctive_procedure_terms(question)
+    assert _section_intent_bonus(add, question) == 3.0
+
+
+def test_a_cadence_heading_keeps_the_procedure_prior():
+    """The distinctive object is cadence / hourly / cron, so the prior stands."""
+    question = analyze_query("can I schedule a pipeline to run every night at 2am")
+    assert question.ask == "procedure"
+    chunk = None
+    for candidate in retrieval_passages():
+        title = (candidate.section_title or "").strip().lower()
+        if "cadence" in title and title.startswith("procedure:"):
+            chunk = candidate
+            break
+    assert chunk is not None
+    assert _section_intent_bonus(chunk, question) == 3.0
 
 
 def test_a_counting_heading_pays_when_the_question_did_not_ask_for_a_number():

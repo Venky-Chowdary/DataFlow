@@ -145,6 +145,23 @@ def test_phrase_credit_survives_a_long_sentence() -> None:
 # Captions are not content
 # --------------------------------------------------------------------------
 
+def test_an_inventory_lead_that_ends_in_a_colon_is_kept() -> None:
+    """Live tool prose was "You have **2 saved connector(s)**:".
+
+    The splitter dropped every colon-terminated piece so the inventory
+    sentence never became the lead and the first bullet did.
+    """
+    kept = split_sentences("You have **2 saved connector(s)**:\n• **Demo Orders**")
+    assert kept
+    assert kept[0].startswith("You have **2 saved connector(s)**")
+
+
+def test_a_heading_colon_is_still_dropped() -> None:
+    """Fill: / Where: captions are not sentences."""
+    kept = split_sentences("Fill:\n1. Pipeline name")
+    assert not any(s.startswith("Fill") for s in kept)
+
+
 def test_a_sentence_about_the_screenshots_is_not_an_answer() -> None:
     """It contains the phrase the operator typed and nothing they can act on.
 
