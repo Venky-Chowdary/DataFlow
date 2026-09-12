@@ -514,3 +514,52 @@ def test_change_data_capture_still_leads_with_the_capture_answer() -> None:
         (compose_product_answer(retrieve_product_answer("what is change data capture", limit=4)) or "").split()
     )
     assert "capture changes" in body.split(". ")[0], body[:200]
+
+
+# --------------------------------------------------------------------------
+# One enum, one shape: nine parallel lines that score the same way
+# --------------------------------------------------------------------------
+
+def test_every_line_of_the_sync_mode_grid_is_written_as_a_definition() -> None:
+    """A definition ask pays for definitional shape, so the grid must be uniform.
+
+    When ``mirror`` was the only line opening with a copula it collected that
+    bonus for questions about every *other* mode: asked "what is SCD type 2"
+    the answer led with "Sync mode mirror is upsert plus deletion", and asked
+    "what does mirror mode do to deleted rows" — before the grid was made
+    uniform — the answer led with whichever other line the arbitrary part of
+    the ranking preferred. Uniform shape hands the decision back to the words
+    the operator typed.
+    """
+    from src.ai.rag.answer_composer import _DEFINITIONAL, split_sentences
+
+    section = _section("What each sync mode does")
+    lines = [
+        line
+        for line in split_sentences(section.text, section.section_title)
+        if line.startswith("Sync mode ")
+    ]
+    assert len(lines) >= 8, lines
+    off_shape = [line for line in lines if not _DEFINITIONAL.match(line)]
+    assert not off_shape, off_shape
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("what is SCD type 2", "scd2"),
+        ("what is upsert mode", "upsert"),
+        ("what does cdc mode do", "cdc"),
+    ],
+)
+def test_a_question_about_one_mode_leads_with_that_mode(
+    question: str, expected: str
+) -> None:
+    """Named-fixture floor: the lead names the mode that was asked about."""
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer(question, limit=4)) or "").split()
+    )
+    assert body, question
+    assert expected in body.split(". ")[0].lower(), body[:220]

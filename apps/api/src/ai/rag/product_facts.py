@@ -129,27 +129,37 @@ def _roles_section() -> GeneratedSection | None:
 # What each canonical mode does at the destination. Sourced from the engine
 # modules named in ``source_module``; the cursor / key requirements below are
 # read from the helpers rather than restated.
+#
+# Every line is deliberately written in the same definitional shape — "Sync mode
+# X is …" — because the composer pays a definition ask for that shape, and the
+# grid is nine parallel descriptions of one enum. When only ``mirror`` opened
+# with a copula it collected that bonus for questions about every other mode:
+# asked "what is SCD type 2" the answer led with "Sync mode mirror is upsert
+# plus deletion". Uniform shape hands the decision back to the words the
+# operator typed, which is the only thing here that distinguishes the modes.
 _SYNC_MODE_BEHAVIOUR: dict[str, str] = {
     "full_refresh_append": (
-        "reads the whole source and inserts every row at the destination, "
+        "is a whole-source read that inserts every row at the destination, "
         "leaving rows already there untouched. Re-running it appends a second "
         "copy, so it is for insert-only feeds"
     ),
     "full_refresh_overwrite": (
-        "reads the whole source and replaces the destination population — rows "
+        "is a whole-source read that replaces the destination population — rows "
         "already there are dropped. It is destructive, so Pilot stages a "
         "Confirm before it runs"
     ),
     "incremental_append": (
-        "reads only rows past the saved cursor and inserts them. It is the "
-        "bare 'Incremental' of other tools: append-mode, no deduplication"
+        "is a cursor-bounded read that inserts only the rows past the saved "
+        "cursor. It is the bare 'Incremental' of other tools: append-mode, no "
+        "deduplication"
     ),
     "incremental_deduped": (
-        "reads only rows past the saved cursor and merges them on the primary "
-        "key, so a row that arrives twice updates instead of duplicating"
+        "is a cursor-bounded read that merges the rows past the saved cursor on "
+        "the primary key, so a row that arrives twice updates instead of "
+        "duplicating"
     ),
     "upsert": (
-        "reads the whole source and writes it key-idempotently: new keys insert, "
+        "is a whole-source read written key-idempotently: new keys insert, "
         "known keys update, and destination rows the source does not have are "
         "left alone"
     ),
@@ -159,18 +169,19 @@ _SYNC_MODE_BEHAVIOUR: dict[str, str] = {
         "exactly. It deletes data, so nothing aliases onto it implicitly"
     ),
     "cdc": (
-        "streams inserts, updates and deletes from the source log rather than "
-        "re-reading the table. The default delivery guarantee is at-least-once "
-        "upsert, so the write path must be idempotent on the key"
+        "is a log-based read that streams inserts, updates and deletes from the "
+        "source log rather than re-reading the table. The default delivery "
+        "guarantee is at-least-once upsert, so the write path must be "
+        "idempotent on the key"
     ),
     "scd2": (
-        "keeps history: one source identity becomes several destination "
-        "versions, each with its own validity window, instead of overwriting "
-        "the previous value"
+        "is a history-keeping write: one source identity becomes several "
+        "destination versions, each with its own validity window, instead of "
+        "overwriting the previous value"
     ),
     "reverse_etl": (
-        "writes from the warehouse back out to an operational system, keyed on "
-        "the destination's own identity"
+        "is a write from the warehouse back out to an operational system, keyed "
+        "on the destination's own identity"
     ),
 }
 
