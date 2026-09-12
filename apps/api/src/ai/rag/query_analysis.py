@@ -225,7 +225,8 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"^\s*(?:can|could|does|do|is|are|will|would|should)\s+"
             r"(?:you|i|we|it|this|datawrap|dataflow|pilot|the\s+\w+)\b"
-            r"|\bdo\s+you\s+support\b|\bis\s+it\s+possible\b|\bsupported\b",
+            r"|\bdo\s+you\s+support\b|\bis\s+it\s+possible\b|\bsupported\b"
+            r"|^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b",
             re.I,
         ),
     ),

@@ -2664,6 +2664,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"|do\s+you\s+support\b"
             r"|does\s+.{3,48}?\s+skip\b"
             r"|is\s+it\s+possible\b"
+            r"|^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
             r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
             r"|what\s+happens\s+(?:to|when|if|on)\b"
             r"|what\s+if\b"
@@ -2973,6 +2974,14 @@ _EXPLANATORY_QUESTION = re.compile(
 _CAPABILITY_TABLE_LANDING = re.compile(
     r"\b(?:land|write|load|put|send|replicate)\s+(?:the\s+|my\s+|our\s+)?"
     r"(?:tables?|data|rows|records)\b",
+    re.I,
+)
+
+# "is Slack a connector" is a catalog-capability question. The inventory
+# parser otherwise reads the word ``connector`` as "list my saved
+# connections" and the reply opens on "You have 2 saved connector(s)".
+_IS_A_CONNECTOR_ASK = re.compile(
+    r"^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b",
     re.I,
 )
 
@@ -4071,8 +4080,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         q = setup.group(1).strip()
         role = "destination" if "destination" in lower else "source"
         planned.append(("search_connectors", {"query": q[:40], "role": role}))
-    elif re.search(r"\bconnectors?\b|\bconnections?\b", lower) and not any(
-        v in lower for v in ("go to", "take me", "navigate to")
+    elif (
+        re.search(r"\bconnectors?\b|\bconnections?\b", lower)
+        and not any(v in lower for v in ("go to", "take me", "navigate to"))
+        and not _IS_A_CONNECTOR_ASK.search(lower)
     ):
         # "open connectors" is navigate; "find my postgres connector" is search.
         bare_open_connectors = bool(
@@ -5530,6 +5541,20 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         lower,
     ):
         planned = [(n, a) for n, a in planned if n != "list_connectors"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if _IS_A_CONNECTOR_ASK.search(lower):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "list_connectors",
+                "list_connector_objects",
+                "search_connectors",
+            )
+        ]
         if not any(n == "explain_product" for n, _ in planned):
             planned.append(("explain_product", {"query": message[:240]}))
 

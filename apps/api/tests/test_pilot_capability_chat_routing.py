@@ -28,6 +28,8 @@ def _names(question: str) -> list[str]:
         "can I land tables in Redshift",
         "what happens on a unique key collision",
         "what if two source rows have the same key",
+        "is Slack a connector",
+        "do you support Microsoft Teams as a destination",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
