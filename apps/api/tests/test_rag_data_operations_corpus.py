@@ -548,6 +548,7 @@ def test_every_line_of_the_sync_mode_grid_is_written_as_a_definition() -> None:
     ("question", "expected"),
     [
         ("what is SCD type 2", "scd2"),
+        ("what does mirror mode do to deleted rows", "mirror"),
         ("what is upsert mode", "upsert"),
         ("what does cdc mode do", "cdc"),
     ],

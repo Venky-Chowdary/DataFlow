@@ -572,19 +572,57 @@ def test_a_loose_expansion_is_recall_not_subject() -> None:
     assert subject == frozenset({"logs"})
 
 
-def test_an_idf_tie_breaks_toward_the_head_of_the_noun_phrase() -> None:
-    """English puts the head last, so a tie resolves to the last word.
+def test_words_as_rare_as_the_rarest_all_name_the_subject() -> None:
+    """A gap too small to mean anything must not decide the lead.
 
-    "How is this different from writing ETL scripts" scores ``writ``, ``etl``
-    and ``script`` at exactly 4.19 each. Taking the first made the question
-    about *writing*, and the answer opened on "writing one into an instant
-    column" from the timestamp passage.
+    "What does mirror mode do to deleted rows" scores ``delet`` at 2.60 and
+    ``mirror`` at 2.48. On the single rarest word the sentence defining mirror
+    mode was not *about* mirror mode, and the answer opened with the definition
+    of CDC, which says "deletes".
+    """
+    analysis = analyze_query("what does mirror mode do to deleted rows")
+    subject = subject_words(
+        analysis,
+        frozenset(analysis.terms),
+        _idf({"delet": 2.60, "mirror": 2.48, "mode": 1.62, "rows": 1.42}),
+    )
+    assert {"delet", "mirror"} <= subject
+    # The band is a band, not an amnesty: the ordinary words of the question
+    # still do not speak for its subject.
+    assert "mode" not in subject
+    assert "rows" not in subject
+
+
+def test_the_band_widens_on_a_statistic_and_never_on_its_absence() -> None:
+    """A word the corpus never uses cannot be banded against.
+
+    Scaling zero by anything is zero, so every typed word would clear the bar
+    and the subject test would stop discriminating entirely. The head-last
+    tiebreak still decides that case, because English puts the head last.
     """
     analysis = analyze_query("how is this different from writing ETL scripts")
-    available = frozenset(analysis.terms)
-    subject = subject_words(analysis, available, _idf(dict.fromkeys(analysis.terms, 4.19)))
+    subject = subject_words(
+        analysis, frozenset(analysis.terms), _idf(dict.fromkeys(analysis.terms, 0.0))
+    )
     assert "script" in subject
     assert "writ" not in subject
+
+
+def test_an_exact_tie_no_longer_hides_the_head_of_the_noun_phrase() -> None:
+    """Tied words are indistinguishable, so the score decides among them.
+
+    "How is this different from writing ETL scripts" scores ``writ``, ``etl``
+    and ``script`` at exactly 4.19 each. Taking one made the question about
+    *writing*, and the answer opened on "writing one into an instant column"
+    from the timestamp passage. Admitting all three does not bring that back:
+    ``script`` is still the subject, and among sentences that name a subject
+    word the ranking still chooses.
+    """
+    analysis = analyze_query("how is this different from writing ETL scripts")
+    subject = subject_words(
+        analysis, frozenset(analysis.terms), _idf(dict.fromkeys(analysis.terms, 4.19))
+    )
+    assert {"writ", "etl", "script"} <= subject
 
 
 def test_no_corpus_statistic_means_no_subject_rule() -> None:

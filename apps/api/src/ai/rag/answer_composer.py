@@ -90,6 +90,17 @@ RELEVANCE_FLOOR = 0.35
 #: greps for happens to sit in the sentence the subject rule hoisted.
 LEAD_SUBJECT_FLOOR = 0.7
 
+#: How close to the rarest typed word another typed word has to be before it
+#: also counts as naming the subject. See ``subject_words``.
+#:
+#: The rarest word alone made an arbitrary tiebreak decide the lead. Swept over
+#: the 158-case answer audit, leads-with-the-answer by band: 1.0 (the rarest
+#: word alone) 119, 0.95 and 0.9 and 0.85 120, 0.8 and 0.75 and 0.7 121, 0.6
+#: 120. The middle of the plateau, and the turn back down at 0.6 is the reason
+#: for a band rather than none: widened far enough, every ordinary word of the
+#: question speaks for the subject and the test stops discriminating.
+SUBJECT_ANCHOR_BAND = 0.75
+
 MAX_SENTENCES = 6
 MAX_CITED_SECTIONS = 3
 
@@ -402,10 +413,15 @@ def subject_words(
     "how do I connect a postgres database" it opened with the MCP server entry;
     asked "what does mirror mode do to deleted rows" it opened with ``upsert``.
 
-    Two things count. First the **head anchor**: the rarest word the operator
+    Two things count. First the **head anchors**: the rarest words the operator
     actually typed, restricted to words some retrieved sentence uses, so this
     never asks for a lead that does not exist. Rarest by corpus IDF, the same
-    statistic ranking already trusts.
+    statistic ranking already trusts — and every typed word within
+    ``SUBJECT_ANCHOR_BAND`` of the rarest, because a gap that small is not a
+    distinction. Asked "what does mirror mode do to deleted rows", ``delet``
+    scored 2.60 and ``mirror`` 2.48: on the single rarest word the sentence
+    defining mirror mode was not *about* mirror mode, and the answer opened
+    with the definition of CDC because it says "deletes".
 
     Second, the phrase expansions, because they are the operator's own words in
     the corpus's spelling — a sentence using one is on subject even when it
@@ -428,8 +444,16 @@ def subject_words(
     # ``writ``, ``etl`` and ``script`` at exactly 4.19 each; taking the first
     # made the question about *writing*, and the answer opened on "writing one
     # into an instant column" from the timestamp passage.
-    anchor = max(enumerate(typed), key=lambda pair: (float(idf(pair[1])), pair[0]))[1]
-    return frozenset({anchor, *analysis.phrase_expansions})
+    scored = [(float(idf(term)), position, term) for position, term in enumerate(typed)]
+    rarest = max(scored, key=lambda row: (row[0], row[1]))
+    if rarest[0] <= 0:
+        # No corpus statistic to band against — every typed word is equally
+        # unknown, and widening on a zero would make the whole question the
+        # subject, which is the same as having no subject test at all.
+        return frozenset({rarest[2], *analysis.phrase_expansions})
+    bar = rarest[0] * SUBJECT_ANCHOR_BAND
+    anchors = {term for value, _, term in scored if value >= bar}
+    return frozenset({*anchors, *analysis.phrase_expansions})
 
 
 def build_candidates(
