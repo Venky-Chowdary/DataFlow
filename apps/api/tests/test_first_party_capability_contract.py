@@ -86,6 +86,8 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Can I use a GCP service account",
         "Can I use Workload Identity",
         "Do you support column-level lineage",
+        "What if the source has no primary key",
+        "What is Gate 8",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

@@ -923,7 +923,7 @@ def test_the_how_to_passages_are_generated() -> None:
     """One short section per procedure the audit still buried in a wizard step."""
     titles = {section.section_title for section in generated_sections()}
     for title in (
-        "Procedure: set a nightly, hourly or cron pipeline cadence",
+        "Procedure: schedule a transfer on a nightly, hourly or cron cadence",
         "Procedure: pause a schedule",
         "Procedure: connect a PostgreSQL database",
         "Procedure: call the /api/v1 endpoints",

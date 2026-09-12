@@ -143,6 +143,11 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("can I use workload identity", "can I use workload identity"),
     ("do you support private service connect", "does datawrap use aws privatelink"),
     ("do you support column-level lineage", "do you support column-level lineage"),
+    ("can I schedule a transfer", "can I schedule a transfer"),
+    ("how do I schedule a transfer", "can I schedule a transfer"),
+    ("what if the source has no primary key", "what if the source has no primary key"),
+    ("what is gate 8", "what is gate 8"),
+    ("what is g8", "what is gate 8"),
 )
 
 

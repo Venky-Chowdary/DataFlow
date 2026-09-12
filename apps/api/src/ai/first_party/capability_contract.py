@@ -1136,6 +1136,54 @@ def synapse_destination_card() -> CapabilityCard | None:
     )
 
 
+def unique_identity_modes() -> frozenset[str]:
+    try:
+        from services.primary_key import _UNIQUE_IDENTITY_SYNC_MODES
+    except Exception:
+        return frozenset()
+    return frozenset(str(mode) for mode in _UNIQUE_IDENTITY_SYNC_MODES)
+
+
+def missing_primary_key_card() -> CapabilityCard | None:
+    modes = unique_identity_modes()
+    if not modes:
+        return None
+    return CapabilityCard(
+        title="What if the source has no primary key",
+        text=(
+            "A source with no primary key cannot run upsert, CDC, mirror, "
+            "or the other identity sync modes — preflight refuses those "
+            "runs. full_refresh_overwrite and incremental_append do not "
+            "require a primary key."
+        ),
+        source_module="services/primary_key.py · _UNIQUE_IDENTITY_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def gate_8_shipped() -> bool:
+    try:
+        import src.transfer.reconcile_step as reconcile_step
+    except Exception:
+        return False
+    return "Gate 8" in str(getattr(reconcile_step, "__doc__", "") or "")
+
+
+def gate_8_card() -> CapabilityCard | None:
+    if not gate_8_shipped():
+        return None
+    return CapabilityCard(
+        title="What is Gate 8",
+        text=(
+            "G8 Reconciliation is count and fingerprint policy after the "
+            "write plan. "
+            "It is not the schema-contract gate and not the destination lock."
+        ),
+        source_module="src/transfer/reconcile_step.py",
+        category="transfer",
+    )
+
+
 def unique_key_collision_card() -> CapabilityCard | None:
     if not source_duplicate_probe_shipped():
         return None
@@ -1278,6 +1326,8 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         redshift_destination_card,
         synapse_destination_card,
         unique_key_collision_card,
+        missing_primary_key_card,
+        gate_8_card,
         data_location_card,
         byok_card,
         gcp_service_account_card,

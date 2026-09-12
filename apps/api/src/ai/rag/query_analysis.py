@@ -471,7 +471,20 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bchange\s+data\s+capture\b", re.I),
      ("cdc", "sync", "mode", "log", "change")),
     (re.compile(r"\bdead\s+letter\b", re.I), ("quarantine", "dlq", "reject")),
+    (re.compile(
+        r"\b(?:no|without(?:\s+a)?|missing|lack(?:s|ing)?(?:\s+a)?)\s+primary\s+key\b"
+        r"|\bsource\s+has\s+no\s+primary\s+key\b",
+        re.I,
+    ),
+     ("primary_key",)),
     (re.compile(r"\bprimary\s+key\b", re.I), ("key", "upsert", "identity", "deduped")),
+    (re.compile(
+        r"\bschedule\s+a\s+(?:transfer|pipeline|load|sync|job)\b"
+        r"|\bschedule\s+this\s+(?:transfer|pipeline|load|sync)\b",
+        re.I,
+    ),
+     ("cadence", "recurr", "cron")),
+    (re.compile(r"\bgate\s*8\b|\bg8\b", re.I), ("g8", "reconcil")),
     # The other sense of "key". With only the identity sense above, "can I use
     # my own encryption key" landed on whichever sync-mode sentence says the
     # word most often — upsert's "key-idempotently: new keys insert, known keys
@@ -1076,6 +1089,26 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         # empty the term set and fall back to the raw words, including ``job``.
         ("job", "runtime"),
     ),
+    # "how much does datawrap cost" names the brand, so retrieval treated
+    # ``datawrap`` as a covered subject and spoke Workload Identity. Price
+    # is not a product heading — frame the brand and the commercial words
+    # so the ask stays refused, like "how much does it cost".
+    (
+        re.compile(
+            r"\bhow\s+much\s+does\b.+\bcost\b"
+            r"|\b(?:what\s+is|what'?s)\s+the\s+pric(?:e|ing)\b"
+            r"|\bdo\s+you\s+have\s+pric(?:e|ing)\b"
+            r"|\bpric(?:e|ing)\s+(?:page|plan|tier|model)\b",
+            re.I,
+        ),
+        ("cost", "price", "pric", "datawrap", "dataflow"),
+    ),
+    # "what is Gate 8" is one named card. Left as ``gate`` it retrieved
+    # the G1–G9 listing and led with G1.
+    (
+        re.compile(r"\bgate\s*[1-9]\b|\bg[1-9]\b", re.I),
+        ("gate", "preflight", "block", "validat"),
+    ),
 )
 
 
@@ -1308,8 +1341,20 @@ def expand_terms_tiered(
     loose_out: list[str] = []
     seen = set(terms)
     lookup = _expansion_lookup()
+    missing_pk = bool(
+        re.search(
+            r"\b(?:no|without(?:\s+a)?|missing|lack(?:s|ing)?(?:\s+a)?)\s+primary\s+key\b"
+            r"|\bsource\s+has\s+no\s+primary\s+key\b",
+            question or "",
+            re.I,
+        )
+    )
     for pattern, targets in _PHRASE_EXPANSIONS:
         if not pattern.search(question or ""):
+            continue
+        # The identity-sense ``primary key`` expansion steals missing-PK
+        # questions onto upsert / certificate aspects.
+        if missing_pk and targets == ("key", "upsert", "identity", "deduped"):
             continue
         for target in targets:
             t = normalize(target)
@@ -1346,8 +1391,18 @@ def phrase_evidence(
     evidence for its reading of the operator's words to be borne out.
     """
     text = question or ""
+    missing_pk = bool(
+        re.search(
+            r"\b(?:no|without(?:\s+a)?|missing|lack(?:s|ing)?(?:\s+a)?)\s+primary\s+key\b"
+            r"|\bsource\s+has\s+no\s+primary\s+key\b",
+            text,
+            re.I,
+        )
+    )
     out: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     for pattern, targets in _PHRASE_EXPANSIONS:
+        if missing_pk and targets == ("key", "upsert", "identity", "deduped"):
+            continue
         consumed: list[str] = []
         for match in pattern.finditer(text):
             for term in content_terms(match.group(0)):
@@ -1421,15 +1476,16 @@ def analyze_query(question: str) -> QueryAnalysis:
     frame = frame_words(text)
     kept = tuple(t for t in raw if t not in generic and t not in frame)
     dropped = tuple(t for t in raw if t in generic or t in frame)
-    # A question made only of discourse words ("what does it do") still has to
-    # retrieve something, so fall back to the raw terms rather than nothing.
-    terms = kept or tuple(raw)
     # Expansion reads every term, generic ones included, so "bad" and "allowed"
     # can still point at the quarantine and role vocabulary; the dedupe below
     # keeps the generic words themselves out of the expansion set.
     phrase, loose = expand_terms_tiered(text, tuple(raw))
-    phrase = tuple(t for t in phrase if t not in generic)
-    loose = tuple(t for t in loose if t not in generic)
+    phrase = tuple(t for t in phrase if t not in generic and t not in frame)
+    loose = tuple(t for t in loose if t not in generic and t not in frame)
+    # A question made only of discourse words ("what does it do") still has to
+    # retrieve something. Prefer a framed phrase expansion ("Gate 8" → g8)
+    # over falling back to the raw frame words that would retrieve the listing.
+    terms = kept or phrase or tuple(raw)
     # "reverse etl" is how an operator writes the label the corpus spells
     # ``reverse_etl``. A shingle that names nothing simply has no document
     # frequency, so this costs nothing when it does not apply.

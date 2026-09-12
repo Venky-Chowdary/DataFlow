@@ -103,6 +103,8 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"mongodb"}),
     frozenset({"s3"}),
     frozenset({"collision", "duplicate"}),
+    frozenset({"primary_key"}),
+    frozenset({"g8", "reconcil"}),
     frozenset({"hosted"}),
     frozenset({"gcp"}),
     frozenset({"workload_identity"}),

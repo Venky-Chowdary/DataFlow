@@ -2008,12 +2008,12 @@ def _pipeline_cadence_section() -> GeneratedSection | None:
     parse_cadence("")
     return GeneratedSection(
         doc_title="Pipelines & schedules",
-        section_title="Procedure: set a nightly, hourly or cron pipeline cadence",
+        section_title="Procedure: schedule a transfer on a nightly, hourly or cron cadence",
         text=(
-            "Set a recurring pipeline cadence — hourly, daily, weekly, or a "
-            "5-field cron, including every night at 2am. "
-            "Create the schedule on Operations → Pipelines; each tick still "
-            "runs Validate and checksum proof."
+            "Schedule a transfer on Operations → Pipelines on a recurring "
+            "cadence — hourly, daily, weekly, or a 5-field cron, including "
+            "every night at 2am — and each tick still runs Validate and "
+            "checksum proof."
         ),
         source_module="src/ai/copilot/schedule_cadence.py",
         category="pipelines",

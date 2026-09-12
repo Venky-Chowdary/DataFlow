@@ -116,6 +116,9 @@ def _lead(question: str) -> str:
         ("can I use Workload Identity", ("does not ship gcp workload identity",), ("replica identity",)),
         ("do you support Private Service Connect", ("private service connect",), ("service principal",)),
         ("do you support column-level lineage", ("column-level lineage",), ("openlineage- and opentelemetry",)),
+        ("can I schedule a transfer", ("cadence",), ("export yaml", "gitops read")),
+        ("what if the source has no primary key", ("no primary key",), ("unsupported aspects", "certified rather")),
+        ("what is Gate 8", ("g8 reconciliation",), ("g1 source readable through g9",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(
@@ -147,6 +150,7 @@ def test_off_subject_english_is_refused(question: str) -> None:
     [
         "what is your uptime SLA",
         "how much does it cost",
+        "how much does datawrap cost",
         "is there an SLA for job runtime",
         "do you support SCIM",
     ],
