@@ -2988,7 +2988,8 @@ _CAPABILITY_TABLE_LANDING = re.compile(
 # parser otherwise reads the word ``connector`` as "list my saved
 # connections" and the reply opens on "You have 2 saved connector(s)".
 _IS_A_CONNECTOR_ASK = re.compile(
-    r"^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b",
+    r"^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
+    r"|^\s*is\s+there\s+(?:a|an)\s+(?!saved\b|my\b)[\w .+/-]{2,48}\s+connector\b",
     re.I,
 )
 

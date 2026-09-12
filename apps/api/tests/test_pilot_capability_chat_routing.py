@@ -117,6 +117,8 @@ def _names(question: str) -> list[str]:
         "can I write to Translation API",
         "do you support Microsoft Copilot as a destination",
         "do you support Cloud Deploy",
+        "is there a Google Voice connector",
+        "is Slack a connector",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
