@@ -1655,18 +1655,13 @@ def _test_passed_preflight_section() -> GeneratedSection:
 
 
 def _core_gate_cards() -> list[str]:
-    """G1–G9 as the product publishes them — engine table, else the help cards."""
-    try:
-        from preflight.gates import PREFLIGHT_GATES
+    """G1–G9 as the Validate cards publish them.
 
-        cards: list[str] = []
-        for index, (gid, spec) in enumerate(PREFLIGHT_GATES, start=1):
-            name = getattr(spec, "title", None) or getattr(spec, "name", None) or str(gid)
-            cards.append(f"G{index} {name}")
-        if cards:
-            return cards
-    except Exception:
-        pass
+    ``PREFLIGHT_GATES`` is a longer engine table (13 ids, enum names). Reading
+    it as the spoken list produced "G1 GateId.G1_SOURCE through G13 …" on a
+    live API where the module imported — not the nine named cards the
+    operator sees. The help section is generated from those cards.
+    """
     try:
         import json
         from pathlib import Path
@@ -1675,11 +1670,13 @@ def _core_gate_cards() -> list[str]:
         chunks = raw.get("chunks") if isinstance(raw, dict) else raw
         for section in chunks or []:
             if (section.get("section_title") or "") == "Core gates (before write)":
-                return [
+                cards = [
                     line.strip()
                     for line in (section.get("text") or "").splitlines()
                     if line.startswith("G") and len(line) > 2 and line[1].isdigit()
                 ]
+                if cards:
+                    return cards
     except Exception:
         pass
     return []
