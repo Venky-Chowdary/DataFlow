@@ -2665,7 +2665,8 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"|does\s+.{3,48}?\s+skip\b"
             r"|is\s+it\s+possible\b"
             r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
-            r"|what\s+happens\s+(?:to|when|if)\b"
+            r"|what\s+happens\s+(?:to|when|if|on)\b"
+            r"|what\s+if\b"
             r"|who\s+can\b",
             text,
         )
@@ -2959,9 +2960,19 @@ _EXPLANATORY_QUESTION = re.compile(
     r"|\bhow\s+to\b"
     r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
     r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
-    r"|\bwhat\s+happens\s+(?:if|when|to)\b"
+    r"|\bwhat\s+happens\s+(?:if|when|to|on)\b"
+    r"|\bwhat\s+if\b"
     r"|\bwalk\s+me\s+through\b"
     r"|\bexplain\s+how\b",
+    re.I,
+)
+
+# "can I land tables in Redshift" is a destination-capability question. The
+# inventory parser otherwise reads ``tables in Redshift`` as "list objects on a
+# saved connector named redshift" and the miss leads the reply.
+_CAPABILITY_TABLE_LANDING = re.compile(
+    r"\b(?:land|write|load|put|send|replicate)\s+(?:the\s+|my\s+|our\s+)?"
+    r"(?:tables?|data|rows|records)\b",
     re.I,
 )
 
@@ -4786,7 +4797,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
-    if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
+    if (
+        tables_on
+        and "introspect_connector_schema" not in [p[0] for p in planned]
+        and not _CAPABILITY_TABLE_LANDING.search(lower)
+    ):
         cname = _capture_connector_name(tables_on.group(1))
         if cname:
             planned.append(("list_connector_objects", {"connector_name": cname}))
@@ -5431,6 +5446,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if (
         _EXPLANATORY_QUESTION.search(lower)
         and not _has_explicit_workspace_subject(lower)
+        and not _looks_like_live_data_fetch(lower)
         and any(n in _KNOWLEDGE_TOOLS for n, _ in planned)
     ):
         planned = [

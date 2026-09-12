@@ -26,6 +26,8 @@ from .tool_permissions import bind_current_context, is_permission_denial
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
+    _has_explicit_workspace_subject,
+    _looks_like_product_howto,
     format_tool_results_for_llm,
     get_pilot_tools,
     infer_tools_from_message,
@@ -2834,15 +2836,44 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
         # Surface failures in plain language — never name internal tools.
         failed = [tr for tr in turn.tool_results if not tr.success and tr.error]
+        product_answered = any(
+            tr.name == "explain_product"
+            and tr.success
+            and str((tr.output or {}).get("answer") or "").strip()
+            for tr in turn.tool_results
+        )
+        asked = (message or "").lower()
+        product_howto = _looks_like_product_howto(asked) and not _has_explicit_workspace_subject(
+            asked
+        )
+
+        def _connector_miss_noise(text: str) -> bool:
+            low = (text or "").lower()
+            return any(
+                needle in low
+                for needle in (
+                    "no connector matched",
+                    "which connector",
+                    "connector not found",
+                    "which saved connector",
+                    "no saved connectors",
+                    "name a saved connector",
+                )
+            )
+
         if failed and not parts:
             parts.append(_failure_reply(failed[:4]))
         elif failed and parts:
-            # Mixed success+failure: keep connector/clarification errors visible.
+            # Mixed success+failure: keep connector/clarification errors visible
+            # unless a documented product answer already covers a capability ask
+            # that named no live workspace object.
             for tr in failed:
                 err = (tr.error or "").strip()
                 if not err:
                     continue
                 low = err.lower()
+                if product_answered and product_howto and _connector_miss_noise(err):
+                    continue
                 if (
                     err.startswith("Which ")
                     or "did you mean" in low
@@ -2856,7 +2887,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     break
 
         if turn.needs_clarification and turn.needs_clarification not in "\n".join(parts):
-            parts.insert(0, turn.needs_clarification)
+            if not (
+                product_answered
+                and product_howto
+                and _connector_miss_noise(turn.needs_clarification)
+            ):
+                parts.insert(0, turn.needs_clarification)
 
         if not parts:
             from .dialogue_acts import classify_dialogue_act
