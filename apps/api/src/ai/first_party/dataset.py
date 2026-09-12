@@ -162,6 +162,15 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support okta", "how do I set up sso"),
     ("what is the difference between jobs and pipelines", "what is the difference between jobs and pipelines"),
     ("jobs vs pipelines", "what is the difference between jobs and pipelines"),
+    ("do you support hubspot", "do you support hubspot"),
+    ("do you support stripe", "do you support stripe"),
+    ("is slack a connector", "is slack a connector"),
+    ("can I send email alerts", "can I send email alerts"),
+    ("do you support servicenow tickets", "do you support servicenow tickets"),
+    ("do you support row-level security", "do you support row-level security"),
+    ("do you support snowflake dynamic tables", "do you support snowflake dynamic tables"),
+    ("can I use entra id", "how do I set up sso"),
+    ("do you support azure key vault", "can I use aws secrets manager"),
 )
 
 

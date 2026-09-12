@@ -646,6 +646,16 @@ def _section_intent_bonus(
     custom_roles_ask = bool(re.search(r"\bcustom\s+roles?\b", analysis.text, re.I))
     if "custom role" in title:
         bonus += 3.2 if custom_roles_ask else -3.2
+    slack_connector_ask = bool(
+        re.search(
+            r"\bis\s+slack\s+a\s+connector\b"
+            r"|\bslack\s+(?:as\s+a\s+)?(?:source|destination|connector)\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "slack a connector" in title:
+        bonus += 3.2 if slack_connector_ask else -3.2
     if core_gates:
         if _GATE_QUESTION.search(analysis.text):
             bonus += _CORE_GATES_ON_ASK

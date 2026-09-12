@@ -136,6 +136,24 @@ def _lead(question: str) -> str:
             ("pipelines owns the schedule",),
             ("destination lock", "shared lsn"),
         ),
+        ("do you support HubSpot", ("hubspot is a transfer-ready",), ("adls, avro, bigquery",)),
+        ("do you support Stripe", ("stripe is a transfer-ready",), ("46 of them",)),
+        ("is Slack a connector", ("not a transfer-ready",), ("incoming webhook url",)),
+        (
+            "do you support Microsoft Teams as a destination",
+            ("not a transfer-ready",),
+            ("incoming webhook url", "settings → sso"),
+        ),
+        ("can I send email alerts", ("email", "kind=email"), ("kind=teams",)),
+        ("do you support ServiceNow tickets", ("servicenow", "kind=servicenow"), ("we ship scim",)),
+        ("do you support row-level security", ("does not ship row-level security",), ("row-level questions use",)),
+        (
+            "do you support Snowflake dynamic tables",
+            ("does not ship snowflake dynamic tables",),
+            ("snowflake is a transfer-ready",),
+        ),
+        ("can I use Entra ID", ("saml",), ("we ship scim",)),
+        ("do you support Azure Key Vault", ("does not read", "azure key vault"), ("privatelink",)),
     ],
 )
 def test_enterprise_wording_leads_on_the_asked_fact(

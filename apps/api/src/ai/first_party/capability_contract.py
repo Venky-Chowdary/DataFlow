@@ -1203,6 +1203,38 @@ def teams_webhook_notifications_shipped() -> bool:
     return callable(send_to_channel) and callable(_send_teams)
 
 
+def email_notifications_shipped() -> bool:
+    try:
+        from services.notification_service import send_to_channel, _send_email
+    except Exception:
+        return False
+    return callable(send_to_channel) and callable(_send_email)
+
+
+def servicenow_notifications_shipped() -> bool:
+    try:
+        from services.notification_service import send_to_channel, _send_servicenow
+    except Exception:
+        return False
+    return callable(send_to_channel) and callable(_send_servicenow)
+
+
+def slack_is_transfer_ready() -> bool:
+    return bool(_transfer_ready_drivers() & {"slack"})
+
+
+def teams_is_transfer_ready() -> bool:
+    return bool(_transfer_ready_drivers() & {"teams", "microsoft_teams"})
+
+
+def snowflake_dynamic_tables_shipped() -> bool:
+    return False
+
+
+def row_level_security_shipped() -> bool:
+    return False
+
+
 def closed_rbac_roles() -> tuple[str, ...]:
     try:
         from services.rbac import _ROLE_PERMISSIONS
@@ -1261,7 +1293,7 @@ def slack_notification_card() -> CapabilityCard | None:
         text=(
             "Yes — Slack alerts are a workspace notification channel: an "
             "incoming webhook URL, dispatched by send_to_channel kind=slack. "
-            "This is not a Slack source or destination connector."
+            "Alerts do not move rows."
         ),
         source_module="services/notification_service.py · _send_slack",
         category="enterprise",
@@ -1281,6 +1313,111 @@ def teams_notification_card() -> CapabilityCard | None:
         ),
         source_module="services/notification_service.py · _send_teams",
         category="enterprise",
+    )
+
+
+def email_notification_card() -> CapabilityCard | None:
+    if not email_notifications_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I send email alerts",
+        text=(
+            "Yes — email alerts are a workspace notification channel: "
+            "send_to_channel kind=email via SMTP or a platform mailer. "
+            "This is not a transfer destination."
+        ),
+        source_module="services/notification_service.py · _send_email",
+        category="enterprise",
+    )
+
+
+def servicenow_notification_card() -> CapabilityCard | None:
+    if not servicenow_notifications_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support ServiceNow tickets",
+        text=(
+            "Yes — ServiceNow tickets are a workspace notification "
+            "channel: send_to_channel kind=servicenow. "
+            "ServiceNow is not a transfer-ready driver."
+        ),
+        source_module="services/notification_service.py · _send_servicenow",
+        category="enterprise",
+    )
+
+
+def slack_connector_card() -> CapabilityCard | None:
+    if slack_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Is Slack a connector",
+        text=(
+            "Slack is not a transfer-ready driver (slack_connector is false) "
+            "— unique_driver_types does not include slack. "
+            "Incoming webhooks are a notification channel, not a source or destination."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def teams_destination_card() -> CapabilityCard | None:
+    if teams_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Teams as a destination",
+        text=(
+            "Microsoft Teams is not a transfer-ready driver "
+            "(teams_dest is false) — unique_driver_types does not include "
+            "teams. "
+            "Incoming webhooks are a notification channel, not a writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def hubspot_card() -> CapabilityCard | None:
+    if "hubspot" not in _transfer_ready_drivers():
+        return None
+    return _ready_driver_card("Do you support HubSpot", "HubSpot")
+
+
+def stripe_card() -> CapabilityCard | None:
+    if "stripe" not in _transfer_ready_drivers():
+        return None
+    return _ready_driver_card("Do you support Stripe", "Stripe")
+
+
+def row_level_security_card() -> CapabilityCard | None:
+    if row_level_security_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support row-level security",
+        text=(
+            "Datawrap does not ship row-level security (rls is false) — "
+            "there is no RLS policy on the destination. "
+            "Per-row accounting is the ledger and quarantine reason."
+        ),
+        source_module="services/row_conservation.py · services/rbac.py",
+        category="enterprise",
+    )
+
+
+def snowflake_dynamic_tables_card() -> CapabilityCard | None:
+    if snowflake_dynamic_tables_shipped():
+        return None
+    if not snowflake_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Snowflake dynamic tables",
+        text=(
+            "Datawrap does not ship Snowflake Dynamic Tables as a write "
+            "target (snowflake_dynamic is false). "
+            "Snowflake the driver is transfer-ready; Dynamic Tables are not a destination object."
+        ),
+        source_module="apps/api/registry.py · DATABASE_TYPES",
+        category="connectors",
     )
 
 
@@ -1352,9 +1489,9 @@ def external_secret_store_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Can I use AWS Secrets Manager",
         text=(
-            "Datawrap does not read AWS Secrets Manager or HashiCorp Vault "
-            "(external_vault is false) — connector secrets live in the "
-            "connection store. "
+            "Datawrap does not read AWS Secrets Manager, HashiCorp Vault, "
+            "or Azure Key Vault (external_vault is false) — connector "
+            "secrets live in the connection store. "
             "Optional tenant-key wrap applies to those stored secrets; it is "
             "not a vault client."
         ),
@@ -1509,6 +1646,14 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         salesforce_oauth_card,
         slack_notification_card,
         teams_notification_card,
+        email_notification_card,
+        servicenow_notification_card,
+        slack_connector_card,
+        teams_destination_card,
+        hubspot_card,
+        stripe_card,
+        row_level_security_card,
+        snowflake_dynamic_tables_card,
         custom_roles_card,
         field_level_encryption_card,
         hudi_card,

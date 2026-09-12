@@ -96,6 +96,14 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Apache Hudi",
         "Can I use Kafka consumer groups",
         "Can I use AWS Secrets Manager",
+        "Can I send email alerts",
+        "Do you support ServiceNow tickets",
+        "Is Slack a connector",
+        "Do you support Microsoft Teams as a destination",
+        "Do you support HubSpot",
+        "Do you support Stripe",
+        "Do you support row-level security",
+        "Do you support Snowflake dynamic tables",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

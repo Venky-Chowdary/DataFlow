@@ -517,6 +517,48 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("teams_notify",)),
+    (re.compile(
+        r"\bemail\s+alerts?\b"
+        r"|\bsend\s+email\s+(?:alerts?|notifications?)\b",
+        re.I,
+    ),
+     ("email_notify",)),
+    (re.compile(
+        r"\bservicenow\s+tickets?\b"
+        r"|\bservicenow\s+(?:alerts?|notifications?)\b",
+        re.I,
+    ),
+     ("servicenow_notify",)),
+    (re.compile(
+        r"\bis\s+slack\s+a\s+connector\b"
+        r"|\bslack\s+(?:as\s+a\s+)?(?:source|destination|connector)\b",
+        re.I,
+    ),
+     ("slack_connector",)),
+    (re.compile(
+        r"\bteams?\s+as\s+a\s+destination\b"
+        r"|\bmicrosoft\s+teams\s+as\s+a\s+destination\b",
+        re.I,
+    ),
+     ("teams_dest",)),
+    (re.compile(r"\bhubspot\b", re.I), ("hubspot",)),
+    (re.compile(r"\bstripe\b", re.I), ("stripe",)),
+    (re.compile(
+        r"\brow[\s-]level\s+security\b|\brls\b",
+        re.I,
+    ),
+     ("rls",)),
+    (re.compile(
+        r"\bsnowflake\s+dynamic\s+tables?\b"
+        r"|\bdynamic\s+tables?\b",
+        re.I,
+    ),
+     ("snowflake_dynamic",)),
+    (re.compile(
+        r"\bentra\s+id\b|\bazure\s+ad\b|\benva\s+id\b",
+        re.I,
+    ),
+     ("sso", "saml", "oidc")),
     (re.compile(r"\bcustom\s+roles?\b", re.I), ("custom_roles",)),
     (re.compile(r"\bfield[\s-]level\s+encryption\b|\bcolumn\s+encryption\b", re.I),
      ("field_encryption",)),
@@ -531,6 +573,11 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("external_vault",)),
     (re.compile(r"\bokta\b(?!\s+scim)", re.I), ("sso", "saml", "oidc")),
+    (re.compile(
+        r"\bazure\s+key\s+vault\b",
+        re.I,
+    ),
+     ("external_vault",)),
     # The other sense of "key". With only the identity sense above, "can I use
     # my own encryption key" landed on whichever sync-mode sentence says the
     # word most often — upsert's "key-idempotently: new keys insert, known keys
@@ -1177,6 +1224,43 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\b(?:microsoft\s+)?teams?\s+alerts?\b", re.I),
         ("team", "send"),
+    ),
+    # Teams/Slack as a destination is not the webhook alert card.
+    (
+        re.compile(
+            r"\bteams?\s+as\s+a\s+destination\b"
+            r"|\bmicrosoft\s+teams\s+as\s+a\s+destination\b",
+            re.I,
+        ),
+        ("alert", "webhook", "notify"),
+    ),
+    (
+        re.compile(
+            r"\bis\s+slack\s+a\s+connector\b"
+            r"|\bslack\s+(?:as\s+a\s+)?(?:source|destination|connector)\b",
+            re.I,
+        ),
+        ("alert", "webhook", "notify"),
+    ),
+    # Email alerts are not Teams / Slack.
+    (
+        re.compile(r"\bemail\s+alerts?\b", re.I),
+        ("team", "slack", "webhook"),
+    ),
+    # RLS is not the row ledger.
+    (
+        re.compile(r"\brow[\s-]level\s+security\b|\brls\b", re.I),
+        ("ledger", "quarantine", "lineage"),
+    ),
+    # Dynamic Tables are not the Snowflake driver card.
+    (
+        re.compile(r"\bdynamic\s+tables?\b", re.I),
+        ("snowflake", "driver", "transfer"),
+    ),
+    # Azure Key Vault is the vault client, not BYOK cells.
+    (
+        re.compile(r"\bazure\s+key\s+vault\b", re.I),
+        ("byok", "kms", "key"),
     ),
     # Viewer-see-secrets is RBAC, not BYOK wrapping. Framing ``byok``
     # drops the viewer-secrets expansion from pulling the BYOK card
