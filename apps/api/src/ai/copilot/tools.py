@@ -2974,7 +2974,10 @@ _SUPPORTED_EXPORT = re.compile(
     r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract|ya?ml)\b"
     r"|\bexport\s+(?:as\s+)?ya?ml\b"
     r"|\b(?:schedule|pipeline|manifest|contract)\b[^.?!]{0,40}\bas\s+ya?ml\b"
-    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest|export)\b",
+    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest|export)\b"
+    # Workspace audit download is GET /api/v1/audit/export, not a file write.
+    r"|\bexport\s+audit\b"
+    r"|\baudit\s+logs?\b",
     re.I,
 )
 

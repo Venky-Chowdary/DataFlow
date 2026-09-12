@@ -281,6 +281,10 @@ def test_infer_tools_briefing_and_general():
     assert not _looks_like_unsupported_mutation(
         "what happens if I delete a CDC schedule"
     )
+    assert not _looks_like_unsupported_mutation("who can export audit logs")
+    assert not _looks_like_unsupported_mutation("can I export audit logs as CSV")
+    names = [n for n, _ in infer_tools_from_message("who can export audit logs")]
+    assert "search_knowledge" in names or "explain_product" in names
 
     names = [
         n
