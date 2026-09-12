@@ -1169,18 +1169,197 @@ def gate_8_shipped() -> bool:
     return "Gate 8" in str(getattr(reconcile_step, "__doc__", "") or "")
 
 
-def gate_8_card() -> CapabilityCard | None:
-    if not gate_8_shipped():
+def salesforce_oauth_shipped() -> bool:
+    try:
+        from connectors.salesforce import test_salesforce
+    except Exception:
+        return False
+    names = {name.lower() for name in inspect.signature(test_salesforce).parameters}
+    return bool(
+        names
+        & {
+            "oauth",
+            "client_id",
+            "client_secret",
+            "refresh_token",
+            "connected_app",
+        }
+    )
+
+
+def slack_webhook_notifications_shipped() -> bool:
+    try:
+        from services.notification_service import send_to_channel, _send_slack
+    except Exception:
+        return False
+    return callable(send_to_channel) and callable(_send_slack)
+
+
+def teams_webhook_notifications_shipped() -> bool:
+    try:
+        from services.notification_service import send_to_channel, _send_teams
+    except Exception:
+        return False
+    return callable(send_to_channel) and callable(_send_teams)
+
+
+def closed_rbac_roles() -> tuple[str, ...]:
+    try:
+        from services.rbac import _ROLE_PERMISSIONS
+    except Exception:
+        return ()
+    return tuple(sorted(_ROLE_PERMISSIONS))
+
+
+def custom_roles_shipped() -> bool:
+    return False
+
+
+def field_level_encryption_shipped() -> bool:
+    return False
+
+
+def hudi_is_transfer_ready() -> bool:
+    return bool(_transfer_ready_drivers() & {"hudi", "apache_hudi"})
+
+
+def kafka_group_id_shipped() -> bool:
+    try:
+        from connectors import kafka_reader
+    except Exception:
+        return False
+    return "group_id" in inspect.getsource(kafka_reader)
+
+
+def external_secret_store_shipped() -> bool:
+    return False
+
+
+def salesforce_oauth_card() -> CapabilityCard | None:
+    if "salesforce" not in _transfer_ready_drivers():
+        return None
+    if salesforce_oauth_shipped():
         return None
     return CapabilityCard(
-        title="What is Gate 8",
+        title="Do you support Salesforce OAuth",
         text=(
-            "G8 Reconciliation is count and fingerprint policy after the "
-            "write plan. "
-            "It is not the schema-contract gate and not the destination lock."
+            "Connected App OAuth and token refresh are not connect fields "
+            "(salesforce_oauth is false) — saas_common.token reads a pasted "
+            "access token from api_key or connection_string. "
+            "The SaaS probe has no client_id, refresh_token, or connected_app parameter."
         ),
-        source_module="src/transfer/reconcile_step.py",
-        category="transfer",
+        source_module="connectors/salesforce.py · test_salesforce · saas_common.token",
+        category="connectors",
+    )
+
+
+def slack_notification_card() -> CapabilityCard | None:
+    if not slack_webhook_notifications_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I get Slack alerts",
+        text=(
+            "Yes — Slack alerts are a workspace notification channel: an "
+            "incoming webhook URL, dispatched by send_to_channel kind=slack. "
+            "This is not a Slack source or destination connector."
+        ),
+        source_module="services/notification_service.py · _send_slack",
+        category="enterprise",
+    )
+
+
+def teams_notification_card() -> CapabilityCard | None:
+    if not teams_webhook_notifications_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I send Teams alerts",
+        text=(
+            "Yes — Microsoft Teams alerts are a workspace notification "
+            "channel: an incoming webhook URL, dispatched by send_to_channel "
+            "kind=teams. "
+            "This is not the Team roles page and not SSO."
+        ),
+        source_module="services/notification_service.py · _send_teams",
+        category="enterprise",
+    )
+
+
+def custom_roles_card() -> CapabilityCard | None:
+    roles = closed_rbac_roles()
+    if not roles:
+        return None
+    named = ", ".join(roles)
+    return CapabilityCard(
+        title="Do you have custom roles",
+        text=(
+            f"Datawrap does not ship custom roles — the closed RBAC set is "
+            f"{named}. "
+            "Unknown labels map onto that set; there is no role-builder."
+        ),
+        source_module="services/rbac.py · _ROLE_PERMISSIONS",
+        category="enterprise",
+    )
+
+
+def field_level_encryption_card() -> CapabilityCard | None:
+    if field_level_encryption_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support field-level encryption",
+        text=(
+            "Datawrap does not ship field-level or column encryption "
+            "(field_encryption is false). "
+            "Tenant keys wrap newly saved connector secrets, not destination table cells."
+        ),
+        source_module="services/byok_key_manager.py · create_key",
+        category="enterprise",
+    )
+
+
+def hudi_card() -> CapabilityCard | None:
+    if hudi_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Apache Hudi",
+        text=(
+            "Apache Hudi is not a transfer-ready driver — unique_driver_types "
+            "does not include hudi. "
+            "A catalog tile is not a live write path."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def kafka_consumer_group_card() -> CapabilityCard | None:
+    if not kafka_group_id_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use Kafka consumer groups",
+        text=(
+            "Yes — a Kafka source takes kafka_group / group_id on the connector. "
+            "Uniqueness proof uses an ephemeral group_id so it does not evict "
+            "the transfer consumer."
+        ),
+        source_module="connectors/kafka_reader.py · services/source_duplicate_probe.py",
+        category="connectors",
+    )
+
+
+def external_secret_store_card() -> CapabilityCard | None:
+    if external_secret_store_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use AWS Secrets Manager",
+        text=(
+            "Datawrap does not read AWS Secrets Manager or HashiCorp Vault "
+            "(external_vault is false) — connector secrets live in the "
+            "connection store. "
+            "Optional tenant-key wrap applies to those stored secrets; it is "
+            "not a vault client."
+        ),
+        source_module="services/connector_store.py · services/byok_key_manager.py",
+        category="enterprise",
     )
 
 
@@ -1224,7 +1403,8 @@ def byok_card() -> CapabilityCard | None:
         title="Do you support BYOK",
         text=(
             "Yes — Settings → Enterprise → BYOK wraps newly saved connector "
-            "secrets when a tenant key is active. "
+            "secrets with your KMS key when a tenant key is active "
+            "(local, wrapped, or aws_kms). "
             "That is secret wrapping, not destination-table encryption."
         ),
         source_module="services/byok_key_manager.py · create_key",
@@ -1327,7 +1507,14 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         synapse_destination_card,
         unique_key_collision_card,
         missing_primary_key_card,
-        gate_8_card,
+        salesforce_oauth_card,
+        slack_notification_card,
+        teams_notification_card,
+        custom_roles_card,
+        field_level_encryption_card,
+        hudi_card,
+        kafka_consumer_group_card,
+        external_secret_store_card,
         data_location_card,
         byok_card,
         gcp_service_account_card,

@@ -87,7 +87,15 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Can I use Workload Identity",
         "Do you support column-level lineage",
         "What if the source has no primary key",
-        "What is Gate 8",
+        "What is G8",
+        "Do you support Salesforce OAuth",
+        "Can I get Slack alerts",
+        "Can I send Teams alerts",
+        "Do you have custom roles",
+        "Do you support field-level encryption",
+        "Do you support Apache Hudi",
+        "Can I use Kafka consumer groups",
+        "Can I use AWS Secrets Manager",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

@@ -1989,6 +1989,27 @@ def _append_overwrite_section() -> GeneratedSection:
     )
 
 
+def _jobs_versus_pipelines_section() -> GeneratedSection:
+    """The comparison the create-pipeline procedure buried past fusion.
+
+    "What is the difference between jobs and pipelines" is answered in one
+    help sentence. Wider fusion plus destination-lock / two-jobs cards
+    opened on a neighbor. One short comparison section is the same pattern
+    append-vs-overwrite uses.
+    """
+    return GeneratedSection(
+        doc_title="Jobs and pipelines",
+        section_title="What is the difference between jobs and pipelines",
+        text=(
+            "Pipelines owns the schedule; Jobs owns the proof for each tick. "
+            "Every cadence tick and every Run now creates a job with the same "
+            "phases as Transfer Studio — gates, write, then reconcile."
+        ),
+        source_module="apps/web/src/lib/helpDocs.ts · help-pipelines#jobs-vs-pipelines",
+        category="pipelines",
+    )
+
+
 def _pipeline_cadence_section() -> GeneratedSection | None:
     """What interval a pipeline can run on — from the cadence parser.
 
@@ -2367,6 +2388,28 @@ def _core_gate_cards() -> list[str]:
     return []
 
 
+def _named_preflight_gate_sections() -> tuple[GeneratedSection, ...]:
+    """One section per Validate card so “what is Gate 7” does not steal G8."""
+    out: list[GeneratedSection] = []
+    for line in _core_gate_cards():
+        digits = "".join(ch for ch in line[1:] if ch.isdigit())
+        if not digits:
+            continue
+        num = int(digits)
+        out.append(
+            GeneratedSection(
+                doc_title="Validate cards",
+                section_title=f"What is G{num}",
+                text=(
+                    f"{line}."
+                ),
+                source_module="preflight.gates · help-preflight#gates",
+                category="transfer",
+            )
+        )
+    return tuple(out)
+
+
 def _preflight_gates_list_section() -> GeneratedSection | None:
     """The nine named cards, short enough that a listing ask can retrieve them.
 
@@ -2391,7 +2434,8 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
         text=(
             f"{first} through {last} are the {len(ordered)} core preflight gates "
             f"Validate runs before any write; G3 Schema contract is the one "
-            f"that blocks a lossy type change. " + " ".join(ordered)
+            f"that blocks a lossy type change. These preflight gates are the "
+            f"named Validate cards. " + " ".join(ordered)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",
@@ -2488,6 +2532,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _create_new_mapping_section,
         _schema_aspect_section,
         _certificate_aspect_section,
+        _jobs_versus_pipelines_section,
         _pipeline_cadence_section,
         _pause_schedule_section,
         _stop_type_change_section,
@@ -2506,6 +2551,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _export_proof_section,
         _test_passed_preflight_section,
         _preflight_gates_list_section,
+        _named_preflight_gate_sections,
         _blocked_validate_section,
         _webhooks_section,
     )

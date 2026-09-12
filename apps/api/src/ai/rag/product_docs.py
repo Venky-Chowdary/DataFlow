@@ -62,7 +62,7 @@ TITLE_WEIGHT = 3.0
 # How many passages the fusion stage considers before the evidence policy judges
 # them. Wider than the answer needs: a question answered by the third-ranked
 # section is ordinary, and the policy measures coverage over the whole set.
-FUSION_CANDIDATES = 14
+FUSION_CANDIDATES = 24
 
 # BM25 over the operator's own words leads the fusion. The expansion vocabulary
 # and the n-gram retriever are there for recall, not precision, so they carry
@@ -539,6 +539,7 @@ def _section_intent_bonus(
     title = (chunk.section_title or "").strip().lower()
     counting = title.startswith(_COUNTING_TITLE)
     listing = title.startswith(_LISTING_TITLE)
+    named_gate = bool(re.search(r"^what is g[1-9]\b", title))
     core_gates = "core gates" in title
     heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))
     on_subject = any(
@@ -620,6 +621,21 @@ def _section_intent_bonus(
             bonus += 3.2
         if is_procedure:
             bonus -= 2.8
+    # A numbered G-card is the answer to "what is G3" and the wrong
+    # container for the set. ``explain the preflight gates`` is classified
+    # definition on ``explain`` unless the inventory rule fires, so the
+    # penalty cannot live only on the enumeration branch.
+    gate_set_ask = bool(
+        re.search(r"\bgates\b", analysis.text, re.I)
+        and not re.search(r"\bgate\s*[1-9]\b|\bg[1-9]\b", analysis.text, re.I)
+    )
+    if named_gate and gate_set_ask:
+        bonus -= 3.2
+    if listing and gate_set_ask and ask != "enumeration":
+        bonus += 2.4
+    custom_roles_ask = bool(re.search(r"\bcustom\s+roles?\b", analysis.text, re.I))
+    if "custom role" in title:
+        bonus += 3.2 if custom_roles_ask else -3.2
     if core_gates:
         if _GATE_QUESTION.search(analysis.text):
             bonus += _CORE_GATES_ON_ASK

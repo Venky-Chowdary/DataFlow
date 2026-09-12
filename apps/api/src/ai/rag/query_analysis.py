@@ -84,7 +84,12 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "definition",
         re.compile(
             r"^\s*(?:so\s+)?(?:what(?:'s| is| are| does)|what\s+do\s+you\s+mean|"
-            r"define|meaning\s+of|tell\s+me\s+about|explain(?:\s+what)?)\b"
+            r"define|meaning\s+of|tell\s+me\s+about|"
+            # "explain quarantine" is a definition. "explain the preflight
+            # gates" is the G1–G9 list — leave that for enumeration so a
+            # single G-card does not take the definitional +3.2.
+            r"explain(?:\s+what)?(?!\s+(?:the\s+)?(?:preflight\s+)?"
+            r"(?:gates|modes|roles|connectors|destinations)\b))\b"
             r"|\bwhat\s+(?:is|are)\s+(?:a|an|the)?\s*\w+\s*\??$"
             r"|\bmean(?:s|ing)?\s*\??$",
             re.I,
@@ -164,6 +169,10 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             # "Who can run transfers" is a request for the roles that hold a
             # verb, not a definition of running. Left as ``other`` it retrieved
             # the role matrix and opened on the viewer-negative PII sentence.
+            r"|^\s*explain\s+(?:the\s+)?(?:preflight\s+)?"
+            r"(?:modes|options|types|gates|roles|connectors|connections|"
+            r"kinds|policies|phases|steps|permissions|engines|formats|"
+            r"destinations|sources|warehouses|databases|guarantees|limits)\b"
             r"|^\s*who\s+can\b"
             r"|^\s*who\s+is\s+allowed\b"
             # A role plus a generic permission verb is a request for the
@@ -484,7 +493,44 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("cadence", "recurr", "cron")),
+    (re.compile(r"\bgate\s*1\b|\bg1\b", re.I), ("g1",)),
+    (re.compile(r"\bgate\s*2\b|\bg2\b", re.I), ("g2",)),
+    (re.compile(r"\bgate\s*3\b|\bg3\b", re.I), ("g3",)),
+    (re.compile(r"\bgate\s*4\b|\bg4\b", re.I), ("g4",)),
+    (re.compile(r"\bgate\s*5\b|\bg5\b", re.I), ("g5",)),
+    (re.compile(r"\bgate\s*6\b|\bg6\b", re.I), ("g6",)),
+    (re.compile(r"\bgate\s*7\b|\bg7\b", re.I), ("g7",)),
     (re.compile(r"\bgate\s*8\b|\bg8\b", re.I), ("g8", "reconcil")),
+    (re.compile(r"\bgate\s*9\b|\bg9\b", re.I), ("g9",)),
+    (re.compile(
+        r"\bsalesforce\s+oauth\b"
+        r"|\bconnected\s+app\b"
+        r"|\brefresh\s+salesforce\s+tokens?\b",
+        re.I,
+    ),
+     ("salesforce_oauth",)),
+    (re.compile(r"\bslack\s+(?:alerts?|notifications?)\b", re.I),
+     ("slack",)),
+    (re.compile(
+        r"\b(?:microsoft\s+)?teams?\s+alerts?\b"
+        r"|\bteams\s+notifications?\b",
+        re.I,
+    ),
+     ("teams_notify",)),
+    (re.compile(r"\bcustom\s+roles?\b", re.I), ("custom_roles",)),
+    (re.compile(r"\bfield[\s-]level\s+encryption\b|\bcolumn\s+encryption\b", re.I),
+     ("field_encryption",)),
+    (re.compile(r"\bapache\s+hudi\b|\bhudi\b", re.I), ("hudi",)),
+    (re.compile(r"\bkafka\s+consumer\s+groups?\b|\bconsumer\s+groups?\b", re.I),
+     ("kafka_group",)),
+    (re.compile(
+        r"\baws\s+secrets?\s+manager\b"
+        r"|\bhashicorp\s+vault\b"
+        r"|\bsecrets?\s+manager\b",
+        re.I,
+    ),
+     ("external_vault",)),
+    (re.compile(r"\bokta\b(?!\s+scim)", re.I), ("sso", "saml", "oidc")),
     # The other sense of "key". With only the identity sense above, "can I use
     # my own encryption key" landed on whichever sync-mode sentence says the
     # word most often — upsert's "key-idempotently: new keys insert, known keys
@@ -625,7 +671,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         r"|\bsecrets?\s+to\s+a\s+viewer\b",
         re.I,
     ),
-     ("viewer", "secret", "byok")),
+     ("viewer", "secret")),
     (re.compile(r"\bopen\s*lineage\b|\bopenlineage\b", re.I),
      ("openlineage", "lineage", "dataset")),
     (re.compile(
@@ -635,6 +681,13 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("mirror", "upsert", "delete")),
+    (re.compile(
+        r"\bdifference\s+between\s+jobs\s+and\s+pipelines\b"
+        r"|\bjobs\s+(?:vs\.?|versus|or)\s+pipelines\b"
+        r"|\bpipelines\s+(?:vs\.?|versus|or)\s+jobs\b",
+        re.I,
+    ),
+     ("pipeline", "job", "schedule", "tick")),
     (re.compile(
         r"\bsnowflake\s+(?:with\s+a\s+)?private\s+key\b"
         r"|\bkey[\s-]?pair\s+(?:auth|authentication)?\b"
@@ -1103,12 +1156,58 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
         ("cost", "price", "pric", "datawrap", "dataflow"),
     ),
-    # "what is Gate 8" is one named card. Left as ``gate`` it retrieved
-    # the G1–G9 listing and led with G1. Only G8 is framed — a blanket
-    # G1–G9 frame stole "what is G3" onto CDC schema drift.
+    # Numbered-gate asks have their own card. Left as ``gate`` they
+    # retrieved the G1–G9 listing (or a neighbor card).
     (
-        re.compile(r"\bgate\s*8\b|\bg8\b", re.I),
+        re.compile(r"\bgate\s*[1-9]\b|\bg[1-9]\b", re.I),
         ("gate", "preflight", "block", "validat"),
+    ),
+    # Salesforce OAuth / Connected App is not the transfer-ready driver card
+    # and not full_refresh.
+    (
+        re.compile(
+            r"\bsalesforce\s+oauth\b"
+            r"|\bconnected\s+app\b"
+            r"|\brefresh\s+salesforce\s+tokens?\b",
+            re.I,
+        ),
+        ("salesforce", "refresh"),
+    ),
+    # "Teams alerts" is Microsoft Teams, not Team roles / SSO.
+    (
+        re.compile(r"\b(?:microsoft\s+)?teams?\s+alerts?\b", re.I),
+        ("team", "send"),
+    ),
+    # Viewer-see-secrets is RBAC, not BYOK wrapping. Framing ``byok``
+    # drops the viewer-secrets expansion from pulling the BYOK card
+    # into the lead ("Settings → Enterprise → BYOK wraps…").
+    (
+        re.compile(
+            r"\b(?:can\s+a\s+)?viewer\s+(?:see|read|export|view)\s+secrets?\b"
+            r"|\bsecrets?\s+to\s+a\s+viewer\b",
+            re.I,
+        ),
+        ("byok", "kms", "wrap"),
+    ),
+    # Field-level encryption is not column-level lineage and not BYOK cells.
+    (
+        re.compile(r"\bfield[\s-]level\s+encryption\b|\bcolumn\s+encryption\b", re.I),
+        ("encryption", "field", "level", "lineage", "byok"),
+    ),
+    # Kafka consumer groups are not SQL GROUP BY.
+    (
+        re.compile(r"\b(?:kafka\s+)?consumer\s+groups?\b", re.I),
+        ("group", "consumer", "aggregat", "kafka"),
+    ),
+    # Secrets Manager / Vault is not PrivateLink and not viewer secrets.
+    (
+        re.compile(
+            r"\baws\s+secrets?\s+manager\b"
+            r"|\bhashicorp\s+vault\b"
+            r"|\bsecrets?\s+manager\b",
+            re.I,
+        ),
+        ("secret", "aws", "manager", "privatelink"),
     ),
 )
 
