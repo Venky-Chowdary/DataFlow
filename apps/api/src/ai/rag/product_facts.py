@@ -2251,7 +2251,7 @@ def _capability_contract_sections() -> tuple[GeneratedSection, ...]:
     for card in capability_cards():
         out.append(
             GeneratedSection(
-                doc_title="What Datawrap is",
+                doc_title="Capability contract",
                 section_title=card.title,
                 text=card.text,
                 source_module=card.source_module,

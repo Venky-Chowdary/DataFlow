@@ -576,6 +576,14 @@ def _section_intent_bonus(
     ask = analysis.ask
 
     bonus = 0.0
+    bare_product_ask = bool(
+        re.search(r"^\s*what\s+is\s+datawrap\??\s*$", analysis.text, re.I)
+    )
+    if bare_product_ask:
+        if title.rstrip("?") == "what is datawrap":
+            bonus += 8.0
+        else:
+            bonus -= 8.0
     if ask == "count":
         # A count is published under a heading that asks for one. Left in the
         # definitional family below, a count ask paid "Core gates (before
