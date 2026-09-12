@@ -124,6 +124,21 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Cosmos DB",
         "Do you support Event Hubs",
         "Do you support Azure Service Bus",
+        "Do you support GCS as a destination",
+        "Do you support Cloud SQL",
+        "Do you support Azure SQL",
+        "Do you support Pub/Sub",
+        "Do you support Cloud Spanner",
+        "Can I use Vertex AI as a destination",
+        "Do you support SharePoint as a destination",
+        "Do you support Dynamics 365",
+        "Do you support Microsoft Purview",
+        "Can I write to Excel Online",
+        "Can I assume an AWS IAM role",
+        "Can I set the replication slot name",
+        "Can I do a blue-green cutover",
+        "Do you support SCD type 2",
+        "Can I use incremental by updated_at",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

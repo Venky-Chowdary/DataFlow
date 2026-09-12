@@ -44,6 +44,8 @@ from .evidence_policy import EvidenceVerdict, assess_evidence
 from .fusion import reciprocal_rank_fusion
 from .lexical_index import Bm25Index, content_terms
 from .query_analysis import (
+    CUSTOM_SLOT_NAME_RE,
+    INCREMENTAL_UPDATED_AT_RE,
     PAUSE_CDC_RE,
     QueryAnalysis,
     analyze_query,
@@ -728,6 +730,84 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bevent\s+hubs?\b", analysis.text, re.I) else -3.2
     if "service bus" in title:
         bonus += 6.0 if re.search(r"\bservice\s+bus\b", analysis.text, re.I) else -3.2
+    cloud_sql_ask = bool(re.search(r"\bcloud\s+sql\b", analysis.text, re.I))
+    if "cloud sql" in title:
+        bonus += 6.0 if cloud_sql_ask else -3.2
+    if cloud_sql_ask and title == "do you support sql server":
+        bonus -= 6.0
+    azure_sql_ask = bool(re.search(r"\bazure\s+sql\b", analysis.text, re.I))
+    if "azure sql" in title:
+        bonus += 6.0 if azure_sql_ask else -3.2
+    if azure_sql_ask and "azure synapse" in title:
+        bonus -= 6.0
+    gcs_ask = bool(
+        re.search(
+            r"\bgcs\b|\bgoogle\s+cloud\s+storage\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "gcs as a destination" in title:
+        bonus += 6.0 if gcs_ask else -3.2
+    if gcs_ask and "glue catalog" in title:
+        bonus -= 6.0
+    if "pub/sub" in title or "pubsub" in title:
+        bonus += 6.0 if re.search(r"\bpub[\s/-]?sub\b", analysis.text, re.I) else -3.2
+    if "cloud spanner" in title:
+        bonus += 6.0 if re.search(r"\bspanner\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bspanner\b", analysis.text, re.I) and "dbt cloud" in title:
+        bonus -= 6.0
+    vertex_ask = bool(re.search(r"\bvertex\s+ai\b", analysis.text, re.I))
+    if "vertex ai" in title:
+        bonus += 6.0 if vertex_ask else -3.2
+    if vertex_ask and (
+        "chatgpt" in title or "third-party llm" in title or "hybrid" in title
+    ):
+        bonus -= 6.0
+    if "sharepoint" in title:
+        bonus += 6.0 if re.search(r"\bsharepoint\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bsharepoint\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "dynamics 365" in title:
+        bonus += 6.0 if re.search(r"\bdynamics\s*365\b|\bdataverse\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdynamics\s*365\b|\bdataverse\b", analysis.text, re.I) and "dynamic tables" in title:
+        bonus -= 6.0
+    if "purview" in title:
+        bonus += 6.0 if re.search(r"\bpurview\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bpurview\b", analysis.text, re.I) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "excel online" in title:
+        bonus += 6.0 if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", analysis.text, re.I) else -3.2
+    iam_ask = bool(
+        re.search(
+            r"\biam\s+role\b|\bsts:assumerole\b|\bassume\s+an?\s+aws\s+iam\s+role\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "aws iam role" in title:
+        bonus += 6.0 if iam_ask else -3.2
+    if iam_ask and (
+        "privatelink" in title or title.startswith("how many roles")
+    ):
+        bonus -= 6.0
+    if CUSTOM_SLOT_NAME_RE.search(analysis.text):
+        if "replication slot name" in title:
+            bonus += 6.0
+        if title.startswith("what a replication slot") or "max_replication_slots" in title:
+            bonus -= 6.0
+    scd2_ask = bool(re.search(r"\bscd\s*(?:type\s*)?2\b", analysis.text, re.I))
+    if "scd type 2" in title:
+        bonus += 6.0 if scd2_ask else -3.2
+    if scd2_ask and title.endswith("scd1"):
+        bonus -= 6.0
+    if INCREMENTAL_UPDATED_AT_RE.search(analysis.text):
+        if "incremental by updated_at" in title:
+            bonus += 6.0
+        if "difference between incremental and upsert" in title:
+            bonus -= 6.0
+    if "blue-green" in title or "blue green" in title:
+        bonus += 6.0 if re.search(r"\bblue[\s-]green\b|\bzero[\s-]downtime\s+cutover\b", analysis.text, re.I) else -3.2
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

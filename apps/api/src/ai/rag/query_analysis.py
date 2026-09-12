@@ -460,6 +460,25 @@ PAUSE_CDC_RE = re.compile(
 # anchors pull the slot-definition card over the pause-keep card.
 _REPLICATION_SLOT_EXPAND = ("slot", "wal", "cdc", "postgres")
 
+# Custom slot name is derived. The same ``replication slot`` expansion
+# otherwise opens on the WAL definition or max_replication_slots.
+CUSTOM_SLOT_NAME_RE = re.compile(
+    r"\bcustom\s+(?:replication\s+)?slot\s+name\b"
+    r"|\bset\s+the\s+replication\s+slot\s+name\b"
+    r"|\bslot\s+name\s+for\s+postgres\b",
+    re.I,
+)
+
+# Incremental-by-updated_at is a shipped cursor mode. ``use incremental``
+# otherwise plans a sync-mode recommendation instead of the card.
+INCREMENTAL_UPDATED_AT_RE = re.compile(
+    r"\bincremental\s+by\s+updated_at\b"
+    r"|\bincremental\s+on\s+updated_at\b"
+    r"|\buse\s+incremental\s+by\s+updated_at\b"
+    r"|\bupdated_at\s+(?:as\s+a\s+)?(?:cursor|watermark)\b",
+    re.I,
+)
+
 
 # Multi-word operator phrases that only mean something together. Matched on the
 # normalized question before single-term expansion.
@@ -824,6 +843,78 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("privatelink",)),
     (re.compile(
+        r"\bgcs\s+as\s+a\s+destination\b"
+        r"|\bwrite\s+to\s+gcs\b"
+        r"|\bdo\s+you\s+support\s+gcs\b"
+        r"|\bgoogle\s+cloud\s+storage\b",
+        re.I,
+    ),
+     ("gcs", "driver")),
+    (re.compile(
+        r"\bcloud\s+sql\b",
+        re.I,
+    ),
+     ("cloud_sql",)),
+    (re.compile(
+        r"\bazure\s+sql\b",
+        re.I,
+    ),
+     ("azure_sql",)),
+    (re.compile(
+        r"\bpub[\s/-]?sub\b",
+        re.I,
+    ),
+     ("pubsub",)),
+    (re.compile(
+        r"\bcloud\s+spanner\b"
+        r"|\bspanner\b",
+        re.I,
+    ),
+     ("spanner",)),
+    (re.compile(
+        r"\bvertex\s+ai\b",
+        re.I,
+    ),
+     ("vertex_ai",)),
+    (re.compile(
+        r"\bsharepoint\b",
+        re.I,
+    ),
+     ("sharepoint",)),
+    (re.compile(
+        r"\bdynamics\s*365\b"
+        r"|\bdataverse\b",
+        re.I,
+    ),
+     ("dynamics365",)),
+    (re.compile(
+        r"\bpurview\b",
+        re.I,
+    ),
+     ("purview",)),
+    (re.compile(
+        r"\bexcel\s+online\b"
+        r"|\bexcel\s+365\b",
+        re.I,
+    ),
+     ("excel_online",)),
+    (re.compile(
+        r"\bassume\s+an?\s+aws\s+iam\s+role\b"
+        r"|\biam\s+role\b"
+        r"|\bsts:assumerole\b",
+        re.I,
+    ),
+     ("aws_iam_role",)),
+    (CUSTOM_SLOT_NAME_RE, ("custom_slot_name",)),
+    (INCREMENTAL_UPDATED_AT_RE, ("incremental_updated_at", "cursor")),
+    (re.compile(
+        r"\bblue[\s-]green\b"
+        r"|\bzero[\s-]downtime\s+cutover\b"
+        r"|\bcut\s+over\s+with\s+zero\s+downtime\b",
+        re.I,
+    ),
+     ("blue_green_cutover",)),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -1001,8 +1092,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("custom_domain", "vanity")),
     (re.compile(
         r"\bsql\s+server\b"
-        r"|\bmssql\b"
-        r"|\bazure\s+sql\b",
+        r"|\bmssql\b",
         re.I,
     ),
      ("sqlserver", "driver")),
@@ -1546,6 +1636,97 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.compile(r"\bazure\s+data\s+factory\b|\badf\b", re.I),
         ("synapse", "contract"),
     ),
+    # Cloud SQL is not the SQL Server driver and not Azure SQL.
+    (
+        re.compile(r"\bcloud\s+sql\b", re.I),
+        ("sqlserver", "sql", "server", "driver", "azure", "mssql"),
+    ),
+    # Azure SQL is the SQL Server driver, not Synapse and not Cloud SQL.
+    (
+        re.compile(r"\bazure\s+sql\b", re.I),
+        ("synapse", "cloud", "fabric"),
+    ),
+    # GCS dest is not the Iceberg Glue catalog card.
+    (
+        re.compile(
+            r"\bgcs\s+as\s+a\s+destination\b"
+            r"|\bwrite\s+to\s+gcs\b"
+            r"|\bdo\s+you\s+support\s+gcs\b"
+            r"|\bgoogle\s+cloud\s+storage\b",
+            re.I,
+        ),
+        ("glue", "catalog", "iceberg"),
+    ),
+    # Pub/Sub is not a destination-count listing.
+    (
+        re.compile(r"\bpub[\s/-]?sub\b", re.I),
+        ("destination", "count", "kafka"),
+    ),
+    # Spanner is not dbt Cloud.
+    (
+        re.compile(r"\bcloud\s+spanner\b|\bspanner\b", re.I),
+        ("dbt", "cloud", "complement"),
+    ),
+    # Vertex is not Settings → AI Hybrid polish.
+    (
+        re.compile(r"\bvertex\s+ai\b", re.I),
+        ("hybrid", "llm", "polish", "chatgpt", "engine"),
+    ),
+    # SharePoint is not a warehouse driver card.
+    (
+        re.compile(r"\bsharepoint\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    # Dynamics / Dataverse is not Snowflake Dynamic Tables.
+    (
+        re.compile(r"\bdynamics\s*365\b|\bdataverse\b", re.I),
+        ("snowflake", "dynamic", "salesforce"),
+    ),
+    # Purview is not Teams alerts.
+    (
+        re.compile(r"\bpurview\b", re.I),
+        ("team", "webhook", "alert", "notify"),
+    ),
+    # Excel Online is not the file-format list.
+    (
+        re.compile(r"\bexcel\s+online\b|\bexcel\s+365\b", re.I),
+        ("format", "csv", "parquet", "xlsx"),
+    ),
+    # IAM assume-role is not Private Link and not an RBAC role count.
+    (
+        re.compile(
+            r"\bassume\s+an?\s+aws\s+iam\s+role\b"
+            r"|\biam\s+role\b"
+            r"|\bsts:assumerole\b",
+            re.I,
+        ),
+        ("privatelink", "role", "rbac", "viewer"),
+    ),
+    # Custom slot name is derived, not the WAL definition or slot quota.
+    (
+        CUSTOM_SLOT_NAME_RE,
+        ("wal", "publication", "quota", "max_replication"),
+    ),
+    # SCD2 is not the SCD1 leftover upsert sentence.
+    (
+        re.compile(r"\bscd\s*(?:type\s*)?2\b", re.I),
+        ("scd1", "upsert", "mirror", "leftover"),
+    ),
+    # Incremental-by-updated_at is the cursor mode, not upsert-vs-incremental.
+    (
+        INCREMENTAL_UPDATED_AT_RE,
+        ("upsert", "merge", "whole"),
+    ),
+    # Blue-green is not Pause/Activate.
+    (
+        re.compile(
+            r"\bblue[\s-]green\b"
+            r"|\bzero[\s-]downtime\s+cutover\b"
+            r"|\bcut\s+over\s+with\s+zero\s+downtime\b",
+            re.I,
+        ),
+        ("pause", "activate", "cadence"),
+    ),
     # Bare Private Link is not Job Theater.
     (
         re.compile(r"\bprivate\s+link\b", re.I),
@@ -1812,6 +1993,8 @@ def expand_terms_tiered(
         # slot-definition and wal_level cards.
         if PAUSE_CDC_RE.search(question or "") and targets == _REPLICATION_SLOT_EXPAND:
             continue
+        if CUSTOM_SLOT_NAME_RE.search(question or "") and targets == _REPLICATION_SLOT_EXPAND:
+            continue
         for target in targets:
             t = normalize(target)
             if t not in seen:
@@ -1860,6 +2043,8 @@ def phrase_evidence(
         if missing_pk and targets == ("key", "upsert", "identity", "deduped"):
             continue
         if PAUSE_CDC_RE.search(text) and targets == _REPLICATION_SLOT_EXPAND:
+            continue
+        if CUSTOM_SLOT_NAME_RE.search(text) and targets == _REPLICATION_SLOT_EXPAND:
             continue
         consumed: list[str] = []
         for match in pattern.finditer(text):

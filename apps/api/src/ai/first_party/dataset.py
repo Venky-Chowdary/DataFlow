@@ -193,6 +193,23 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support event hubs", "do you support event hubs"),
     ("do you support azure data factory", "do you support azure data factory"),
     ("do you support synapse", "do you support azure synapse"),
+    ("do you support gcs as a destination", "do you support gcs as a destination"),
+    ("do you support google cloud storage", "do you support gcs as a destination"),
+    ("do you support cloud sql", "do you support cloud sql"),
+    ("do you support azure sql", "do you support azure sql"),
+    ("can I write to google pub/sub", "do you support pub/sub"),
+    ("do you support pub/sub", "do you support pub/sub"),
+    ("do you support cloud spanner", "do you support cloud spanner"),
+    ("can I use vertex ai as a destination", "can I use vertex ai as a destination"),
+    ("do you support sharepoint as a destination", "do you support sharepoint as a destination"),
+    ("do you support dynamics 365", "do you support dynamics 365"),
+    ("do you support microsoft purview", "do you support microsoft purview"),
+    ("can I write to excel online", "can I write to excel online"),
+    ("can I assume an aws iam role", "can I assume an aws iam role"),
+    ("can I set the replication slot name", "can I set the replication slot name"),
+    ("can I do a blue-green cutover", "can I do a blue-green cutover"),
+    ("do you support scd type 2", "do you support scd type 2"),
+    ("can I use incremental by updated_at", "can I use incremental by updated_at"),
 )
 
 

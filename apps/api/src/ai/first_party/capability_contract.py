@@ -449,6 +449,18 @@ def s3_is_transfer_ready() -> bool:
     return "s3" in _transfer_ready_drivers()
 
 
+def gcs_is_transfer_ready() -> bool:
+    return "gcs" in _transfer_ready_drivers()
+
+
+def scd2_is_canonical() -> bool:
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return False
+    return "scd2" in CANONICAL_SYNC_MODES
+
+
 def redshift_is_transfer_ready() -> bool:
     return bool(_transfer_ready_drivers() & {"redshift", "amazon_redshift"})
 
@@ -959,6 +971,38 @@ def scd1_card() -> CapabilityCard | None:
     )
 
 
+def scd2_card() -> CapabilityCard | None:
+    if not scd2_is_canonical():
+        return None
+    return CapabilityCard(
+        title="Do you support SCD type 2",
+        text=(
+            "Yes — SCD2 is a shipped sync mode (scd2): one source identity "
+            "becomes several destination versions, each with a validity "
+            "window, instead of overwriting the previous value. "
+            "SCD1 is not a mode."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def incremental_updated_at_card() -> CapabilityCard | None:
+    if not incremental_modes_are_canonical():
+        return None
+    return CapabilityCard(
+        title="Can I use incremental by updated_at",
+        text=(
+            "Yes — incremental_append and incremental_deduped are shipped "
+            "sync modes that advance a saved cursor (often updated_at / "
+            "incremental_updated_at) instead of rewriting the table. "
+            "Upsert is key-idempotent and is not incremental."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
 def session_timeout_card() -> CapabilityCard | None:
     if session_timeout_enforced():
         return None
@@ -1105,6 +1149,12 @@ def s3_destination_card() -> CapabilityCard | None:
     if not s3_is_transfer_ready():
         return None
     return _ready_driver_card("Do you support S3 as a destination", "S3")
+
+
+def gcs_destination_card() -> CapabilityCard | None:
+    if not gcs_is_transfer_ready():
+        return None
+    return _ready_driver_card("Do you support GCS as a destination", "GCS")
 
 
 def redshift_destination_card() -> CapabilityCard | None:
@@ -1982,6 +2032,230 @@ def service_bus_card() -> CapabilityCard | None:
     )
 
 
+def cloud_sql_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"cloudsql", "cloud_sql"})
+
+
+def pubsub_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"pubsub", "pub_sub"})
+
+
+def spanner_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"spanner", "cloud_spanner"})
+
+
+def vertex_ai_shipped() -> bool:
+    return False
+
+
+def sharepoint_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"sharepoint"})
+
+
+def dynamics_365_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dynamics", "dynamics365", "dataverse"})
+
+
+def purview_shipped() -> bool:
+    return False
+
+
+def excel_online_shipped() -> bool:
+    return False
+
+
+def aws_iam_role_connect_shipped() -> bool:
+    return False
+
+
+def custom_slot_name_shipped() -> bool:
+    return False
+
+
+def blue_green_cutover_shipped() -> bool:
+    return False
+
+
+def azure_sql_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure SQL",
+        text=(
+            "Yes — Azure SQL is the SQL Server driver (sqlserver / azure_sql). "
+            "It is not Azure Synapse and not Cloud SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_sql_card() -> CapabilityCard | None:
+    if cloud_sql_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud SQL",
+        text=(
+            "Cloud SQL is not its own transfer-ready driver (cloud_sql is "
+            "false). Connect the instance as MySQL or PostgreSQL. "
+            "It is not SQL Server and not Azure SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def pubsub_card() -> CapabilityCard | None:
+    if pubsub_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Pub/Sub",
+        text=(
+            "Datawrap does not ship Google Pub/Sub as a transfer-ready "
+            "driver (pubsub is false). "
+            "A destination count is not a Pub/Sub writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def spanner_card() -> CapabilityCard | None:
+    if spanner_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Spanner",
+        text=(
+            "Datawrap does not ship Cloud Spanner as a transfer-ready "
+            "driver (spanner is false). "
+            "dbt Cloud is not a Spanner connect path."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def vertex_ai_card() -> CapabilityCard | None:
+    if vertex_ai_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use Vertex AI as a destination",
+        text=(
+            "Datawrap does not ship Vertex AI as a transfer destination "
+            "(vertex_ai is false). "
+            "Settings → AI Hybrid is wording polish, not a Vertex write."
+        ),
+        source_module="src/ai/first_party/engine.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def sharepoint_card() -> CapabilityCard | None:
+    if sharepoint_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support SharePoint as a destination",
+        text=(
+            "Datawrap does not ship SharePoint as a transfer-ready "
+            "destination (sharepoint is false). "
+            "A warehouse driver card is not a SharePoint writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def dynamics_365_card() -> CapabilityCard | None:
+    if dynamics_365_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Dynamics 365",
+        text=(
+            "Datawrap does not ship Dynamics 365 or Dataverse as a "
+            "transfer-ready driver (dynamics365 is false). "
+            "Snowflake Dynamic Tables are not Dynamics."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def purview_card() -> CapabilityCard | None:
+    if purview_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Purview",
+        text=(
+            "Datawrap does not ship Microsoft Purview as a catalog or "
+            "lineage destination (purview is false). "
+            "Teams alerts are a webhook channel, not Purview."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def excel_online_card() -> CapabilityCard | None:
+    if excel_online_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I write to Excel Online",
+        text=(
+            "Excel Online / Microsoft 365 workbooks are not a destination "
+            "driver (excel_online is false). "
+            "Excel files are a transfer-ready file format."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def aws_iam_role_card() -> CapabilityCard | None:
+    if aws_iam_role_connect_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I assume an AWS IAM role",
+        text=(
+            "Datawrap does not assume an AWS IAM role as a connect option "
+            "(aws_iam_role is false). "
+            "S3 and warehouse cards take keys or a service account, not "
+            "sts:AssumeRole, and IAM is not an RBAC role count."
+        ),
+        source_module="connectors/s3_writer.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def custom_slot_name_card() -> CapabilityCard | None:
+    if custom_slot_name_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I set the replication slot name",
+        text=(
+            "Datawrap does not ship a custom replication slot name as a "
+            "connect field (custom_slot_name is false). "
+            "The slot name is derived from database, table, and cursor key."
+        ),
+        source_module="connectors/postgresql_change_stream.py · _slot_name",
+        category="transfer",
+    )
+
+
+def blue_green_cutover_card() -> CapabilityCard | None:
+    if blue_green_cutover_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I do a blue-green cutover",
+        text=(
+            "Datawrap does not ship a blue-green cutover "
+            "(blue_green_cutover is false). "
+            "Pause/Activate and Run now are not a dual-environment swap."
+        ),
+        source_module="services/schedule_runner.py · _dispatch_transfer",
+        category="transfer",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -2036,6 +2310,8 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         two_jobs_same_table_card,
         full_refresh_versus_incremental_card,
         scd1_card,
+        scd2_card,
+        incremental_updated_at_card,
         session_timeout_card,
         custom_domain_card,
         data_residency_card,
@@ -2047,6 +2323,7 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         postgres_destination_card,
         mongodb_destination_card,
         s3_destination_card,
+        gcs_destination_card,
         redshift_destination_card,
         synapse_destination_card,
         unique_key_collision_card,
@@ -2090,6 +2367,18 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         cosmos_db_card,
         event_hubs_card,
         service_bus_card,
+        azure_sql_card,
+        cloud_sql_card,
+        pubsub_card,
+        spanner_card,
+        vertex_ai_card,
+        sharepoint_card,
+        dynamics_365_card,
+        purview_card,
+        excel_online_card,
+        aws_iam_role_card,
+        custom_slot_name_card,
+        blue_green_cutover_card,
         column_level_lineage_card,
     ):
         card = builder()

@@ -16,7 +16,13 @@ from ..rag.product_docs import (
     product_doc_search,
     retrieve_product_answer,
 )
-from ..rag.query_analysis import PAUSE_CDC_RE, classify_ask, is_cdc_delivery_question
+from ..rag.query_analysis import (
+    CUSTOM_SLOT_NAME_RE,
+    INCREMENTAL_UPDATED_AT_RE,
+    PAUSE_CDC_RE,
+    classify_ask,
+    is_cdc_delivery_question,
+)
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -5536,6 +5542,20 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # "pause CDC" contains the substring "use cdc", so the advisory tool
     # recommended incremental CDC instead of the keep-slot fact.
     if PAUSE_CDC_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Incremental-by-updated_at is a shipped cursor mode. ``use incremental``
+    # otherwise recommends a workload instead of speaking the card.
+    if INCREMENTAL_UPDATED_AT_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Custom slot name is derived. The slot-definition expansion would
+    # otherwise recommend a CDC mode.
+    if CUSTOM_SLOT_NAME_RE.search(message):
         planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
         if not any(n == "explain_product" for n, _ in planned):
             planned.append(("explain_product", {"query": message[:240]}))

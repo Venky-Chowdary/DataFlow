@@ -36,6 +36,14 @@ def _names(question: str) -> list[str]:
         "can I land in ADLS",
         "can I write to Microsoft Fabric",
         "do you support Oracle XStream",
+        "do you support Cloud SQL",
+        "do you support Azure SQL",
+        "can I write to Google Pub/Sub",
+        "do you support SharePoint as a destination",
+        "can I assume an AWS IAM role",
+        "can I set the replication slot name",
+        "can I use incremental by updated_at",
+        "do you support SCD type 2",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
@@ -68,6 +76,20 @@ def test_live_inventory_asks_still_plan_object_lookups(question: str) -> None:
     ],
 )
 def test_pause_cdc_does_not_recommend_a_sync_mode(question: str) -> None:
+    names = _names(question)
+    assert "explain_product" in names, names
+    assert "recommend_sync_mode" not in names, names
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "can I use incremental by updated_at",
+        "can I set the replication slot name",
+        "do you support SCD type 2",
+    ],
+)
+def test_cursor_mode_asks_do_not_recommend_a_sync_mode(question: str) -> None:
     names = _names(question)
     assert "explain_product" in names, names
     assert "recommend_sync_mode" not in names, names
