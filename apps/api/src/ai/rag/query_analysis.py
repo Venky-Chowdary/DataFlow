@@ -440,6 +440,27 @@ def is_cdc_delivery_question(text: str) -> bool:
     return bool(text and CDC_DELIVERY_RE.search(text))
 
 
+# Pause CDC is cadence + slot keep. ``pause(?:ing)?`` matches "pause" /
+# "pauseing" and misses the operator spelling "pausing", which is how
+# "does pausing CDC drop the replication slot" never fired the heading
+# prior and retrieved the slot definition instead.
+PAUSE_CDC_RE = re.compile(
+    r"\bpaus(?:e|ing)\s+(?:a\s+|the\s+)?cdc\b"
+    r"|\bpause\s+a\s+cdc\s+pipeline\b"
+    r"|\bresume\s+cdc\b"
+    r"|\bkeep\s+the\s+resume\s+token\s+when\s+i\s+pause\b"
+    r"|\bwithout\s+losing\s+the\s+lsn\b"
+    r"|\bpaus(?:e|ing)\s+cdc\s+drop\b"
+    r"|\bdoes\s+paus(?:e|ing)\s+cdc\b"
+    r"|\bif\s+i\s+pause\s+cdc\b",
+    re.I,
+)
+
+# ``replication slot`` otherwise expands to wal / postgres and those
+# anchors pull the slot-definition card over the pause-keep card.
+_REPLICATION_SLOT_EXPAND = ("slot", "wal", "cdc", "postgres")
+
+
 # Multi-word operator phrases that only mean something together. Matched on the
 # normalized question before single-term expansion.
 _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
@@ -676,8 +697,62 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
                 r"|\bwhere\s+do\s+(?:the\s+)?(?:bad|rejected|failed)\s+rows\b", re.I),
      ("quarantine", "reject")),
     (re.compile(r"\bturn\s+off\b"
-                r"|\bdisable\s+(?:a\s+|the\s+)?(?:pipeline|schedule|sync|nightly)\b", re.I),
+                r"|\bdisable\s+(?:a\s+|the\s+)?(?:pipeline|schedule|sync|nightly)\b"
+                r"|\bpause\s+a\s+nightly\b",
+                re.I),
      ("pause", "pipeline", "schedule")),
+    (PAUSE_CDC_RE, ("pause_cdc",)),
+    (re.compile(
+        r"\bhow\s+do\s+i\s+connect\s+salesforce\b"
+        r"|\badd\s+a\s+salesforce\s+connection\b"
+        r"|\bset\s+up\s+salesforce\b",
+        re.I,
+    ),
+     ("salesforce_connect",)),
+    (re.compile(
+        r"\bread\s+replica\b"
+        r"|\bphysical\s+standby\b"
+        r"|\bhot\s+standby\b"
+        r"|\bcdc\s+from\s+a\s+replica\b",
+        re.I,
+    ),
+     ("cdc_read_replica",)),
+    (re.compile(r"\boracle\s+logminer\b|\blogminer\b", re.I),
+     ("oracle_logminer",)),
+    (re.compile(
+        r"\bsql\s+server\s+cdc\b"
+        r"|\bsqlserver\s+cdc\b",
+        re.I,
+    ),
+     ("sqlserver_cdc",)),
+    (re.compile(
+        r"\bchange\s+tracking\b"
+        r"|\bchange\s+tracking\s+instead\s+of\s+cdc\b",
+        re.I,
+    ),
+     ("sqlserver_ct",)),
+    (re.compile(
+        r"\bfilter\s+cdc\s+events?\b"
+        r"|\bcdc\s+event\s+filter\b"
+        r"|\bfilter\s+cdc\b",
+        re.I,
+    ),
+     ("cdc_event_filter",)),
+    (re.compile(
+        r"\bsnapshot\s+handoff\b"
+        r"|\bhand\s+off\s+from\s+snapshot\b"
+        r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
+        re.I,
+    ),
+     ("handoff", "snapshot", "lsn")),
+    (re.compile(
+        r"\bslot\s+fills?\b"
+        r"|\bwal\s+fills?\b"
+        r"|\bmax_replication_slots\b"
+        r"|\breplication\s+slot\s+fills?\b",
+        re.I,
+    ),
+     ("slot_quota",)),
     (re.compile(
         r"\bsoc\s*2\b|\bhipaa\b|\bbaa\b|\bgdpr\s+dpa\b",
         re.I,
@@ -1284,6 +1359,48 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.compile(r"\b(?:kafka\s+)?consumer\s+groups?\b", re.I),
         ("group", "consumer", "aggregat", "kafka"),
     ),
+    # Pause CDC is cadence + slot keep, not the pipeline-drawer caption,
+    # REPLICA IDENTITY / Mongo pre-images / snapshot handoff, or the
+    # WAL / publication definition the slot expansion would otherwise add.
+    (
+        PAUSE_CDC_RE,
+        ("drawer", "edit", "identity", "preimage", "handoff", "toast", "wal", "publication"),
+    ),
+    (
+        re.compile(r"\bpause\s+a\s+nightly\b", re.I),
+        ("full_refresh", "overwrite", "incremental", "upsert"),
+    ),
+    # Salesforce connect is New connection + pasted token, not OAuth
+    # "connect fields" and not the transfer-ready driver card.
+    (
+        re.compile(
+            r"\bhow\s+do\s+i\s+connect\s+salesforce\b"
+            r"|\badd\s+a\s+salesforce\s+connection\b"
+            r"|\bset\s+up\s+salesforce\b",
+            re.I,
+        ),
+        ("oauth", "refresh", "driver"),
+    ),
+    # A read replica is not REPLICA IDENTITY FULL.
+    (
+        re.compile(r"\bread\s+replica\b|\bphysical\s+standby\b|\bhot\s+standby\b", re.I),
+        ("identity", "toast", "full"),
+    ),
+    # LogMiner is the Oracle capture plugin, not the destination driver.
+    (
+        re.compile(r"\blogminer\b", re.I),
+        ("goldengate", "destination", "driver"),
+    ),
+    # SQL Server CDC / change tracking is not the generic WAL definition.
+    (
+        re.compile(r"\bsql\s+server\s+cdc\b|\bchange\s+tracking\b", re.I),
+        ("wal", "binlog", "oplog"),
+    ),
+    # Capture-side CDC filters are not GTID / watermark.
+    (
+        re.compile(r"\bfilter\s+cdc\b|\bcdc\s+event\s+filter\b", re.I),
+        ("gtid", "watermark", "heartbeat"),
+    ),
     # Secrets Manager / Vault is not PrivateLink and not viewer secrets.
     (
         re.compile(
@@ -1541,6 +1658,10 @@ def expand_terms_tiered(
         # questions onto upsert / certificate aspects.
         if missing_pk and targets == ("key", "upsert", "identity", "deduped"):
             continue
+        # ``replication slot`` → wal/postgres steals pause-keep onto the
+        # slot-definition and wal_level cards.
+        if PAUSE_CDC_RE.search(question or "") and targets == _REPLICATION_SLOT_EXPAND:
+            continue
         for target in targets:
             t = normalize(target)
             if t not in seen:
@@ -1587,6 +1708,8 @@ def phrase_evidence(
     out: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     for pattern, targets in _PHRASE_EXPANSIONS:
         if missing_pk and targets == ("key", "upsert", "identity", "deduped"):
+            continue
+        if PAUSE_CDC_RE.search(text) and targets == _REPLICATION_SLOT_EXPAND:
             continue
         consumed: list[str] = []
         for match in pattern.finditer(text):

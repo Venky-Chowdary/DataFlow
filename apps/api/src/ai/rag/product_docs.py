@@ -43,7 +43,12 @@ from .char_ngram_index import CharNgramIndex
 from .evidence_policy import EvidenceVerdict, assess_evidence
 from .fusion import reciprocal_rank_fusion
 from .lexical_index import Bm25Index, content_terms
-from .query_analysis import QueryAnalysis, analyze_query, distinctive_procedure_terms
+from .query_analysis import (
+    PAUSE_CDC_RE,
+    QueryAnalysis,
+    analyze_query,
+    distinctive_procedure_terms,
+)
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
 
@@ -656,6 +661,48 @@ def _section_intent_bonus(
     )
     if "slack a connector" in title:
         bonus += 3.2 if slack_connector_ask else -3.2
+    pause_cdc_ask = bool(PAUSE_CDC_RE.search(analysis.text))
+    if "pause cdc" in title or "pausing cdc" in title:
+        bonus += 6.0 if pause_cdc_ask else -3.2
+    if pause_cdc_ask and (
+        "replication slot is" in title or "delete a cdc schedule" in title
+    ):
+        bonus -= 6.0
+    if pause_cdc_ask and re.search(r"\bdrop\b", analysis.text, re.I):
+        if "drop the replication slot" in title:
+            bonus += 2.4
+    generic_pause = bool(re.search(r"\bpause\b", analysis.text, re.I)) and not pause_cdc_ask
+    if "pause a schedule" in title:
+        bonus += 3.2 if generic_pause else (-3.2 if pause_cdc_ask else 0.0)
+    salesforce_connect_ask = bool(
+        re.search(
+            r"connect\s+salesforce|salesforce\s+connection|set\s+up\s+salesforce",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "connect salesforce" in title:
+        bonus += 3.2 if salesforce_connect_ask else -3.2
+    if "sql server cdc" in title:
+        bonus += 3.2 if re.search(r"\bsql\s+server\s+cdc\b", analysis.text, re.I) else -3.2
+    if "change tracking" in title:
+        bonus += 3.2 if re.search(r"\bchange\s+tracking\b", analysis.text, re.I) else -3.2
+    if "snapshot hands off" in title or "snapshot handoff" in title:
+        if re.search(r"\bhandoff\b|\bhand\s+off\b", analysis.text, re.I):
+            bonus += 3.2
+    slot_fill_ask = bool(
+        re.search(
+            r"\bslot\s+fills?\b|\bwal\s+fills?\b|\bmax_replication_slots\b"
+            r"|\breplication\s+slot\s+fills?\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if slot_fill_ask:
+        if "max_replication_slots" in title:
+            bonus += 6.0
+        if title.startswith("what a replication slot"):
+            bonus -= 6.0
     if core_gates:
         if _GATE_QUESTION.search(analysis.text):
             bonus += _CORE_GATES_ON_ASK

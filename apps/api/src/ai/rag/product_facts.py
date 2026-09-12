@@ -621,7 +621,8 @@ def _snapshot_handoff_section() -> GeneratedSection:
         section_title="How the snapshot hands off to the CDC stream",
         text=(
             "The snapshot is taken at a known log position and the CDC stream "
-            "starts from that same position, so the handoff is the shared LSN: "
+            "starts from that same position, so the snapshot handoff is the "
+            "shared LSN: "
             "a crash between the two phases resumes at the boundary rather than "
             "re-copying the table."
         ),
@@ -812,8 +813,9 @@ def _slot_quota_section() -> GeneratedSection:
         doc_title="Sync modes",
         section_title="What happens if max_replication_slots is exhausted",
         text=(
-            f"When max_replication_slots is exhausted the CDC attach fails "
-            f"closed. {remedy} Continuing would silently stop carrying deletes."
+            f"When a replication slot fills up or max_replication_slots is "
+            f"exhausted the CDC attach fails closed (slot_quota). {remedy} "
+            f"Continuing would silently stop carrying deletes."
         ),
         source_module="services/cdc_capability.py",
         category="transfer",
@@ -2066,13 +2068,40 @@ def _pipeline_cadence_section() -> GeneratedSection | None:
     )
 
 
+def _pause_cdc_drop_section() -> GeneratedSection | None:
+    """Pausing is not slot release — delete is.
+
+    "Does pausing CDC drop the replication slot" retrieved "What a
+    replication slot is" because both name the slot and the pause card
+    is titled as a capability.
+    """
+    try:
+        from src.ai.first_party.capability_contract import cadence_pause_keeps_slot
+    except Exception:
+        return None
+    if not cadence_pause_keeps_slot():
+        return None
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Does pausing CDC drop the replication slot",
+        text=(
+            "Pausing CDC does not drop the replication slot or the resume "
+            "token (pause_cdc). Deleting the CDC schedule is what runs "
+            "pg_drop_replication_slot."
+        ),
+        source_module="services/cdc_capture_release.py · services/schedule_runner.py",
+        category="transfer",
+    )
+
+
 def _pause_schedule_section() -> GeneratedSection:
     """Pause / Activate live on the pipeline drawer, not on a wizard step."""
     return GeneratedSection(
         doc_title="Pipelines & schedules",
         section_title="Procedure: pause a schedule",
         text=(
-            "Pause or Activate a saved pipeline from Pipelines to turn it off. "
+            "Pause or Activate a saved pipeline from Pipelines to turn it off, "
+            "including a nightly pipeline. "
             "The detail drawer on a saved pipeline is where Pause and Activate "
             "live — not Job Theater, and not the create-pipeline form."
         ),
@@ -2560,6 +2589,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _certificate_aspect_section,
         _jobs_versus_pipelines_section,
         _pipeline_cadence_section,
+        _pause_cdc_drop_section,
         _pause_schedule_section,
         _stop_type_change_section,
         _type_locked_section,

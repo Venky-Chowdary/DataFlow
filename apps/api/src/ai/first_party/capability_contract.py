@@ -1267,6 +1267,49 @@ def external_secret_store_shipped() -> bool:
     return False
 
 
+def cadence_pause_keeps_slot() -> bool:
+    """Pause flips ``enabled``; slot release is delete-only."""
+    try:
+        from services.schedule_runner import _dispatch_transfer
+        from services.cdc_capture_release import release_schedule_cdc_capture
+    except Exception:
+        return False
+    doc = inspect.getdoc(_dispatch_transfer) or ""
+    return "gates the cadence" in doc and callable(release_schedule_cdc_capture)
+
+
+def oracle_logminer_shipped() -> bool:
+    try:
+        from connectors.oracle_logminer import OracleLogMinerCdc
+    except Exception:
+        return False
+    return inspect.isclass(OracleLogMinerCdc)
+
+
+def sqlserver_native_cdc_shipped() -> bool:
+    try:
+        from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+    except Exception:
+        return False
+    return inspect.isclass(SqlServerNativeCdc)
+
+
+def sqlserver_change_tracking_shipped() -> bool:
+    try:
+        from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
+    except Exception:
+        return False
+    return inspect.isclass(SqlServerChangeTrackingCdc)
+
+
+def cdc_read_replica_shipped() -> bool:
+    return False
+
+
+def cdc_capture_event_filter_shipped() -> bool:
+    return False
+
+
 def salesforce_oauth_card() -> CapabilityCard | None:
     if "salesforce" not in _transfer_ready_drivers():
         return None
@@ -1575,6 +1618,127 @@ def workload_identity_card() -> CapabilityCard | None:
     )
 
 
+def pause_cdc_card() -> CapabilityCard | None:
+    if not cadence_pause_keeps_slot():
+        return None
+    return CapabilityCard(
+        title="Can I pause CDC",
+        text=(
+            "Yes — Pause on Operations → Pipelines sets enabled false and "
+            "stops the cadence; pausing CDC does not drop the replication "
+            "slot or the resume token (pause_cdc). "
+            "Run now still works; deleting the CDC schedule is what runs "
+            "pg_drop_replication_slot."
+        ),
+        source_module=(
+            "services/schedule_runner.py · _dispatch_transfer · "
+            "services/cdc_capture_release.py"
+        ),
+        category="transfer",
+    )
+
+
+def connect_salesforce_card() -> CapabilityCard | None:
+    if "salesforce" not in _transfer_ready_drivers():
+        return None
+    return CapabilityCard(
+        title="Procedure: connect Salesforce",
+        text=(
+            "Click New connection and pick the Salesforce driver, then paste "
+            "an access token in api_key or connection_string, click Test, "
+            "and Save (salesforce_connect). "
+            "Connected App OAuth and token refresh are not connect fields."
+        ),
+        source_module="connectors/salesforce.py · test_salesforce · Procedure: add a connector",
+        category="connectors",
+    )
+
+
+def cdc_read_replica_card() -> CapabilityCard | None:
+    if cdc_read_replica_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use a read replica for CDC",
+        text=(
+            "Datawrap does not connect CDC to a physical standby or read "
+            "replica (cdc_read_replica is false). "
+            "REPLICA IDENTITY FULL is a source-table setting for old keys, "
+            "not a standby reader."
+        ),
+        source_module="connectors/postgresql_change_stream.py · services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def oracle_logminer_card() -> CapabilityCard | None:
+    if not oracle_is_transfer_ready() or not oracle_logminer_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Oracle LogMiner",
+        text=(
+            "Yes — Oracle CDC reads redo through Oracle LogMiner "
+            "(OracleLogMinerCdc), not GoldenGate. "
+            "The driver card is not the capture plugin."
+        ),
+        source_module="connectors/oracle_logminer.py · OracleLogMinerCdc",
+        category="transfer",
+    )
+
+
+def sqlserver_cdc_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready() or not sqlserver_native_cdc_shipped():
+        return None
+    tracking = (
+        " Change tracking (SqlServerChangeTrackingCdc) is a separate cursor "
+        "when a capture instance is not configured."
+        if sqlserver_change_tracking_shipped()
+        else ""
+    )
+    return CapabilityCard(
+        title="Do you support SQL Server CDC",
+        text=(
+            "Yes — SQL Server CDC uses the native capture instance "
+            f"(sqlserver_cdc / SqlServerNativeCdc).{tracking}"
+        ),
+        source_module=(
+            "connectors/sqlserver_cdc_native.py · "
+            "connectors/sqlserver_change_stream.py"
+        ),
+        category="transfer",
+    )
+
+
+def sqlserver_change_tracking_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready() or not sqlserver_change_tracking_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use change tracking instead of CDC on SQL Server",
+        text=(
+            "Yes — SQL Server change tracking is a separate cursor "
+            "(sqlserver_ct / SqlServerChangeTrackingCdc) when a capture "
+            "instance is not configured. "
+            "It is not the WAL/binlog definition of CDC."
+        ),
+        source_module="connectors/sqlserver_change_stream.py · SqlServerChangeTrackingCdc",
+        category="transfer",
+    )
+
+
+def filter_cdc_events_card() -> CapabilityCard | None:
+    if cdc_capture_event_filter_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I filter CDC events",
+        text=(
+            "Datawrap does not ship a capture-side CDC event filter "
+            "(cdc_event_filter is false). "
+            "Row filters and transforms run on Map before the write."
+        ),
+        source_module="services/transform_engine.py · services/cdc_capability.py",
+        category="transfer",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -1663,6 +1827,13 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         byok_card,
         gcp_service_account_card,
         workload_identity_card,
+        pause_cdc_card,
+        connect_salesforce_card,
+        cdc_read_replica_card,
+        oracle_logminer_card,
+        sqlserver_cdc_card,
+        sqlserver_change_tracking_card,
+        filter_cdc_events_card,
         column_level_lineage_card,
     ):
         card = builder()

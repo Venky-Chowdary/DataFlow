@@ -104,6 +104,13 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Stripe",
         "Do you support row-level security",
         "Do you support Snowflake dynamic tables",
+        "Can I pause CDC",
+        "Procedure: connect Salesforce",
+        "Can I use a read replica for CDC",
+        "Do you support Oracle LogMiner",
+        "Do you support SQL Server CDC",
+        "Can I use change tracking instead of CDC on SQL Server",
+        "Can I filter CDC events",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
@@ -407,3 +414,18 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "unity catalog" in unity_lead
     assert "does not ship delta lake" in delta_lead
     assert "service principal" not in delta_lead
+
+
+def test_pausing_cdc_drop_is_not_the_slot_definition() -> None:
+    """``pausing`` must fire the pause-keep card, not ``pause(?:ing)?``."""
+    from src.ai.rag.query_analysis import PAUSE_CDC_RE, analyze_query
+
+    question = "does pausing CDC drop the replication slot"
+    assert PAUSE_CDC_RE.search(question)
+    analysis = analyze_query(question)
+    assert "paus_cdc" in analysis.phrase_expansions
+    assert "wal" not in analysis.anchor_terms
+    body = compose_product_answer(retrieve_product_answer(question, limit=4)) or ""
+    lead = body.split(". ")[0].lower()
+    assert "does not drop" in lead
+    assert "deleting a cdc schedule drops" not in lead

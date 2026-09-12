@@ -171,6 +171,15 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support snowflake dynamic tables", "do you support snowflake dynamic tables"),
     ("can I use entra id", "how do I set up sso"),
     ("do you support azure key vault", "can I use aws secrets manager"),
+    ("can I pause cdc", "can I pause cdc"),
+    ("how do I pause cdc", "can I pause cdc"),
+    ("does pausing cdc drop the replication slot", "does pausing cdc drop the replication slot"),
+    ("if I pause cdc do I lose the slot", "does pausing cdc drop the replication slot"),
+    ("how do I connect salesforce", "how do I connect salesforce"),
+    ("can I use a read replica for cdc", "can I use a read replica for cdc"),
+    ("do you support oracle logminer", "do you support oracle logminer"),
+    ("do you support sql server cdc", "do you support sql server cdc"),
+    ("can I filter cdc events", "can I filter cdc events"),
 )
 
 
