@@ -675,6 +675,29 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "explain the preflight gates",
             ("g1", "g9"),
         ),
+        ("what is type_locked", ("type_locked", "type change")),
+        ("what is standing authority", ("unattended", "authorize")),
+        ("what is G3", ("g3", "schema contract")),
+        ("who is allowed to start a transfer", ("editor", "admin")),
+        (
+            "if I run the same CDC change twice is it safe",
+            ("_df_lsn", "at-least-once"),
+        ),
+        ("where do bad rows end up", ("quarantine",)),
+        ("can I turn off a nightly pipeline", ("pause", "pipelines")),
+        ("how do I cancel a running transfer", ("cancel", "job")),
+        (
+            "how are you different from airbyte",
+            ("semantic mapping", "quarantine", "checksum"),
+        ),
+        (
+            "can I query my warehouse from here",
+            ("query playground", "read-only"),
+        ),
+        (
+            "can pipelines run while nobody is watching",
+            ("unattended", "standing authority"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -723,5 +746,12 @@ def test_the_how_to_passages_are_generated() -> None:
         "Webhooks",
         "What is the difference between append and overwrite",
         "Which preflight gates run before a write",
+        "What type_locked rejects",
+        "Can pipelines run unattended while nobody is watching",
+        "Who is allowed to start a transfer",
+        "Procedure: cancel a running transfer",
+        "What Query Playground is",
+        "How Datawrap differs from Airbyte and Fivetran",
+        "Where bad rows end up",
     ):
         assert title in titles, title

@@ -16,7 +16,7 @@ from ..rag.product_docs import (
     product_doc_search,
     retrieve_product_answer,
 )
-from ..rag.query_analysis import classify_ask
+from ..rag.query_analysis import classify_ask, is_cdc_delivery_question
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -1557,7 +1557,13 @@ class DataPilotTools:
                 ),
             ),
             (
-                re.compile(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s+run|nine\s+gates|9\s+gates)\b"),
+                # Listing / count of the set — not a single gate id. "what is G3"
+                # used to match ``g[1-9]`` and the 9-gates blurb buried Schema
+                # contract, the card the operator named.
+                re.compile(
+                    r"\b(?:nine\s+gates|9\s+gates|quality\s+gates|"
+                    r"what\s+(?:are\s+)?(?:the\s+)?(?:preflight\s+)?gates)\b"
+                ),
                 "preflight",
                 (
                     "Preflight has **9 gates** (G1–G9). **G5 Dry run** samples coercion "
@@ -1607,6 +1613,13 @@ class DataPilotTools:
             or " versus " in lower
         ):
             curated = None
+        # A named gate (G3) or a listing the docs already answer must not sit
+        # under the uncited 9-gates blurb. The cited Help / generated cards
+        # are the lead; the FAQ is only a fallback when retrieval cannot.
+        if curated and curated[0] == "preflight" and (
+            re.search(r"\bg[1-9]\b|\bgate\s*[1-9]\b", lower)
+        ):
+            curated = None
 
         # The shipped operator documentation plus the passages generated from the
         # product's own enforcing modules, retrieved hybrid and judged by the
@@ -1615,6 +1628,8 @@ class DataPilotTools:
         # alone gave the operator a confident paragraph they could not trace to
         # any page.
         retrieved = retrieve_product_answer(query, limit=4)
+        if curated and curated[0] == "preflight" and retrieved.answerable:
+            curated = None
         if retrieved.answerable:
             documented = compose_product_answer(retrieved)
             return ToolResult(
@@ -4443,9 +4458,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "transfer"}))
 
     if any(w in lower for w in (
-        "new transfer", "start a transfer", "open transfer studio",
+        "new transfer", "open transfer studio",
         "start transfer studio", "open the transfer studio", "launch transfer studio",
     )) and not any(p[0] == "navigate" for p in planned):
+        planned.append(("start_transfer_studio", {}))
+    elif (
+        "start a transfer" in lower
+        and not re.search(r"\bwho\b|\ballowed\b|\bpermission\b|\brole\b", lower)
+        and not any(p[0] == "navigate" for p in planned)
+    ):
+        # "who is allowed to start a transfer" names the verb and is a
+        # roles question. Opening Studio there answered the wrong ask.
         planned.append(("start_transfer_studio", {}))
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
@@ -5394,6 +5417,24 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         )
         if not keep_rag:
             planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    # A CDC redelivery / exactly-once question is knowledge. "If I run the
+    # same CDC change twice" used to plan list_jobs because it says "run",
+    # and the empty-history sentence then became the lead.
+    if is_cdc_delivery_question(message):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in {
+                "list_jobs",
+                "start_transfer",
+                "plan_transfer",
+                "start_transfer_studio",
+            }
+        ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
 
     # A question about something this product documents must never leave here
     # with nothing planned. "What string type is created on postgres" named an

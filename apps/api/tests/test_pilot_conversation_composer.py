@@ -248,6 +248,19 @@ def test_infer_tools_briefing_and_general():
     assert "explain_product" in names or "profile_quality_rules" in names
     assert "list_datasets" not in names
 
+    names = [n for n, _ in infer_tools_from_message("who is allowed to start a transfer")]
+    assert "explain_product" in names
+    assert "start_transfer_studio" not in names
+
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "if I run the same CDC change twice is it safe"
+        )
+    ]
+    assert "explain_product" in names
+    assert "list_jobs" not in names
+
 
 def test_brief_workspace_is_permissioned_like_other_reads():
     assert "brief_workspace" in {d["name"] for d in TOOL_DEFINITIONS}

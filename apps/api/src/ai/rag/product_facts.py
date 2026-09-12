@@ -394,15 +394,15 @@ def _delivery_semantics_section() -> GeneratedSection | None:
         # capture", so a definitional question was answered with the delivery
         # guarantee instead of with what the mode reads.
         f"The platform-wide delivery guarantee for a CDC route is "
-        f"{DELIVERY_DEFAULT}. Log delivery can repeat an event, so the "
+        f"{DELIVERY_DEFAULT} — running the same CDC change twice is "
+        f"idempotent on `_df_lsn`. Log delivery can repeat an event, so the "
         f"destination — not the reader — is what makes a repeat harmless.",
     ]
     if not EXACTLY_ONCE_CLAIMED:
         lines.append(
-            "Exactly-once is not claimed platform-wide. A route opts in, and only "
-            "when the destination can commit the applied rows and the watermark "
-            "that records them in one transaction; anything else stays "
-            "at-least-once and says so."
+            "Exactly-once is not claimed platform-wide, so a CDC route stays "
+            "at-least-once unless the destination can commit the applied rows "
+            "and the watermark that records them in one transaction."
         )
     if EFFECTIVELY_ONCE_PK_SINKS:
         lines.append(
@@ -1434,6 +1434,21 @@ def _quarantine_section() -> GeneratedSection:
     )
 
 
+def _bad_rows_end_up_section() -> GeneratedSection:
+    """'Where do they end up' is not the aggregation primer."""
+    return GeneratedSection(
+        doc_title="Quarantine & bad rows",
+        section_title="Where bad rows end up",
+        text=(
+            "Bad rows end up in quarantine — never silently dropped. "
+            "Open the job's Quarantine tab to see column, value, and reason, "
+            "then export CSV or Replay once the cause is fixed."
+        ),
+        source_module="services/preflight_service.py · quarantine write path",
+        category="proof",
+    )
+
+
 def _job_phase_section() -> GeneratedSection:
     """How to read a job's duration. Sourced from the Job Theater phase model."""
     text = "\n".join(
@@ -1571,12 +1586,127 @@ def _pause_schedule_section() -> GeneratedSection:
         doc_title="Pipelines & schedules",
         section_title="Procedure: pause a schedule",
         text=(
-            "Open Pipelines and Pause or Activate the saved pipeline. "
+            "Pause or Activate a saved pipeline from Pipelines to turn it off. "
             "The detail drawer on a saved pipeline is where Pause and Activate "
             "live — not Job Theater, and not the create-pipeline form."
         ),
         source_module="apps/web/src/lib/helpDocs.ts · schedule.manage",
         category="pipelines",
+    )
+
+
+def _type_locked_section() -> GeneratedSection:
+    """Own heading so the snake_case policy name is a subject, not a refusal."""
+    return GeneratedSection(
+        doc_title="Schema drift & policy",
+        section_title="What type_locked rejects",
+        text=(
+            "Schema policy type_locked rejects type changes outright — a column "
+            "whose type moved fails the run instead of being cast. "
+            "Use it when a destination type must stay the one Validate signed."
+        ),
+        source_module="services/schedule_store.py · SCHEMA_POLICIES",
+        category="transfer",
+    )
+
+
+def _standing_authority_section() -> GeneratedSection:
+    """The permission id is terse; the operator asks for standing authority."""
+    return GeneratedSection(
+        doc_title="Roles & permissions",
+        section_title="Can pipelines run unattended while nobody is watching",
+        text=(
+            "Pipelines can run unattended while nobody is watching once "
+            "standing authority (schedule.authorize) is granted and, when "
+            "Require signed is on, a signed contract is bound. "
+            "Each tick still runs the same Validate gates."
+        ),
+        source_module="services/rbac.py · schedule.authorize",
+        category="enterprise",
+    )
+
+
+def _who_can_start_section() -> GeneratedSection:
+    """'Who is allowed to start a transfer' is not an Execute click."""
+    try:
+        from services.rbac import role_names, role_permissions
+    except Exception:
+        return GeneratedSection(
+            doc_title="Roles & permissions",
+            section_title="Who is allowed to start a transfer",
+            text=(
+                "An editor, operator or admin is allowed to start a transfer; "
+                "a viewer is not."
+            ),
+            source_module="services/rbac.py · job.run",
+            category="enterprise",
+        )
+    runners = [
+        role for role in role_names() if "job.run" in role_permissions(role)
+    ]
+    if len(runners) > 1:
+        who = f"{', '.join(runners[:-1])} or {runners[-1]}"
+    elif runners:
+        who = f"A {runners[0]}"
+    else:
+        who = "A role that holds job.run"
+    return GeneratedSection(
+        doc_title="Roles & permissions",
+        section_title="Who is allowed to start a transfer",
+        text=(
+            f"{who[0].upper() + who[1:] if who[0].islower() else who} is "
+            f"allowed to start a transfer — job.run is what the API checks. "
+            f"A viewer can read the run and cannot start one."
+        ),
+        source_module="services/rbac.py · job.run",
+        category="enterprise",
+    )
+
+
+def _cancel_transfer_section() -> GeneratedSection:
+    """Cancel lives on the job, not on the Execute button."""
+    return GeneratedSection(
+        doc_title="Job Theater & proof",
+        section_title="Procedure: cancel a running transfer",
+        text=(
+            "Cancel a running transfer from Jobs / Job Theater — cancel, retry "
+            "and resume are job.manage actions on that run, not Execute Transfer. "
+            "A cancelled job keeps the rows it already wrote; resume from the "
+            "last checkpoint rather than starting over."
+        ),
+        source_module="services/rbac.py · job.manage",
+        category="jobs",
+    )
+
+
+def _query_playground_section() -> GeneratedSection:
+    """The first sentence has to say Query Playground, not only Operations → Query."""
+    return GeneratedSection(
+        doc_title="Query Playground",
+        section_title="What Query Playground is",
+        text=(
+            "Query Playground is the read-only query surface: open "
+            "Operations → Query, pick a saved connector, and run SELECT. "
+            "It does not write, export files, or skip Validate on a transfer."
+        ),
+        source_module="apps/web Query · query.use",
+        category="query",
+    )
+
+
+def _competitor_wedge_section() -> GeneratedSection:
+    """Airbyte/Fivetran are how operators ask the wedge, not off-subject names."""
+    return GeneratedSection(
+        doc_title="What Datawrap is",
+        section_title="How Datawrap differs from Airbyte and Fivetran",
+        text=(
+            "Datawrap differs from Airbyte and Fivetran on semantic mapping, "
+            "quarantine, and checksum reconcile — those three are enforced on "
+            "every write, not optional add-ons. "
+            "Catalog tile count is not a transfer-ready driver count."
+        ),
+        source_module="help-product · services/row_conservation.py",
+        category="product",
     )
 
 
@@ -1700,7 +1830,8 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
         section_title="Which preflight gates run before a write",
         text=(
             f"{first} through {last} are the {len(cards)} core preflight gates "
-            f"Validate runs before any write. " + " ".join(cards)
+            f"Validate runs before any write; G3 Schema contract is the one "
+            f"that blocks a lossy type change. " + " ".join(cards)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",
@@ -1762,6 +1893,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _inventory_count_section,
         _aggregation_section,
         _quarantine_section,
+        _bad_rows_end_up_section,
         _transform_filter_section,
         _job_phase_section,
         _gitops_section,
@@ -1774,6 +1906,12 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _certificate_aspect_section,
         _pipeline_cadence_section,
         _pause_schedule_section,
+        _type_locked_section,
+        _standing_authority_section,
+        _who_can_start_section,
+        _cancel_transfer_section,
+        _query_playground_section,
+        _competitor_wedge_section,
         _connect_postgres_section,
         _rest_api_section,
         _export_proof_section,

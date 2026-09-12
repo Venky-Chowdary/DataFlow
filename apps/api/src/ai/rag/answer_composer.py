@@ -175,7 +175,8 @@ _CODE_SPAN = re.compile(r"`[^`]*`")
 _IMPERATIVE = re.compile(
     r"^(?:Open|Click|Pick|Choose|Select|Set|Enter|Type|Paste|Copy|Add|Create|"
     r"Review|Return|Expand|Fix|Remediate|Use|Run|Press|Confirm|Approve|Sign|"
-    r"Go|Navigate|Upload|Download|Export|Import|Enable|Disable|Start|Stop)\b"
+    r"Go|Navigate|Upload|Download|Export|Import|Enable|Disable|Start|Stop|"
+    r"Pause|Activate|Cancel|Retry|Resume|Turn)\b"
 )
 _DEFINITIONAL = re.compile(
     r"^\s*(?:\*\*)?[A-Z][\w \-/()`*]{0,60}(?:\*\*)?\s+"
@@ -403,9 +404,23 @@ def _length_norm(term_count: int) -> float:
     return LENGTH_PIVOT / term_count
 
 
-def _shape_bonus(ask: str, sentence: str) -> float:
+def _shape_bonus(ask: str, sentence: str, analysis=None) -> float:
     if ask == "procedure" and _IMPERATIVE.match(sentence):
-        return 1.4
+        bonus = 1.4
+        # An imperative that does not name the step is how "Create the
+        # schedule on Operations → Pipelines" opened "how do I pause a
+        # schedule". The heading prior already requires a distinctive term;
+        # the spoken sentence has to as well.
+        if analysis is not None:
+            from .query_analysis import distinctive_procedure_terms
+
+            distinctive = distinctive_procedure_terms(analysis)
+            low = sentence.lower()
+            if distinctive and any(term in low for term in distinctive):
+                bonus += 2.2
+            elif distinctive:
+                bonus -= 1.6
+        return bonus
     if ask == "definition" and _DEFINITIONAL.match(sentence):
         return 2.0
     if ask == "enumeration" and ("·" in sentence or sentence.count(",") >= 2):
@@ -620,7 +635,7 @@ def build_candidates(
                     + PHRASE_CREDIT * phrase_hits
                     + listed_credit
                     + _section_bonus(analysis.ask, section_title, sentence)
-                    + _shape_bonus(analysis.ask, sentence)
+                    + _shape_bonus(analysis.ask, sentence, analysis=analysis)
                     + 0.8 * rank_prior
                 )
             elif heading_match >= anchor_bar:

@@ -44,7 +44,6 @@ from src.ai.rag.product_docs import (  # noqa: E402
     _COUNTING_TITLE_BONUS,
     _COUNTING_TITLE_OFF_ASK,
     _ROLE_MATRIX_DOC,
-    _distinctive_procedure_terms,
     _section_intent_bonus,
     _select_covering,
     _split_procedure,
@@ -57,6 +56,7 @@ from src.ai.rag.query_analysis import (  # noqa: E402
     GENERIC_QUESTION_WORDS,
     analyze_query,
     classify_ask,
+    distinctive_procedure_terms,
     expand_terms_tiered,
 )
 
@@ -145,6 +145,7 @@ LISTING_QUESTIONS = [
     "which destinations can I write to",
     "what destinations do you support",
     "who can run transfers",
+    "who is allowed to start a transfer",
     # Singular, but ``which`` opens it: picking one member out of a set is
     # answered from the same list as the whole set.
     "which preflight gate blocks a lossy type change",
@@ -651,7 +652,7 @@ def test_a_generic_procedure_heading_does_not_get_the_full_prior():
     )
     postgres = analyze_query("how do I connect a postgres database")
     assert postgres.ask == "procedure"
-    assert _distinctive_procedure_terms(postgres)
+    assert distinctive_procedure_terms(postgres)
     assert _section_intent_bonus(mcp, postgres) == 0.0
 
 
@@ -671,7 +672,7 @@ def test_a_procedure_with_no_distinctive_object_still_gets_the_prior():
     )
     question = analyze_query("how do I add a connector")
     assert question.ask == "procedure"
-    assert not _distinctive_procedure_terms(question)
+    assert not distinctive_procedure_terms(question)
     assert _section_intent_bonus(add, question) == 3.0
 
 

@@ -43,7 +43,7 @@ from .char_ngram_index import CharNgramIndex
 from .evidence_policy import EvidenceVerdict, assess_evidence
 from .fusion import reciprocal_rank_fusion
 from .lexical_index import Bm25Index, content_terms
-from .query_analysis import QueryAnalysis, analyze_query
+from .query_analysis import QueryAnalysis, analyze_query, distinctive_procedure_terms
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
 
@@ -510,51 +510,6 @@ _TIMEZONE_TITLE_OFF_ASK = 3.2
 #: heading also names a distinctive term (postgres, cadence, pause, api).
 #: When the question has no distinctive term ("how do I add a connector"),
 #: the prior stays as it was.
-_PROCEDURE_GENERIC_TERMS = frozenset(
-    {
-        "connect",
-        "open",
-        "creat",
-        "add",
-        "run",
-        "click",
-        "use",
-        "set",
-        "configur",
-        "enabl",
-        "pipelin",
-        "transfer",
-        "job",
-        "connector",
-        "schedul",
-        "step",
-        "path",
-        "page",
-        "save",
-        "pick",
-        "choos",
-        "procedur",
-    }
-)
-
-
-def _distinctive_procedure_terms(analysis: QueryAnalysis) -> frozenset[str]:
-    """Typed words and phrase expansions that are not generic procedure verbs.
-
-    Adjacent identifier shingles (``add_connector``, ``connect_postgresql``)
-    are a retrieval device, not a heading test: they made every "how do I
-    add a connector" look distinctive and withheld the procedure prior from
-    the section that answers it.
-    """
-    return frozenset(
-        term
-        for term in (*analysis.terms, *analysis.phrase_expansions)
-        if term not in _PROCEDURE_GENERIC_TERMS
-        and len(term) >= 3
-        and "_" not in term
-    )
-
-
 def _section_intent_bonus(
     chunk: ProductDocChunk,
     analysis: QueryAnalysis,
@@ -636,7 +591,7 @@ def _section_intent_bonus(
             # Weak overlap on ``connect`` / ``pipeline`` / ``schedule`` is how
             # MCP, Job Theater and the create-pipeline wizard beat the section
             # written about the distinctive object (PostgreSQL, cadence, pause).
-            distinctive = _distinctive_procedure_terms(analysis)
+            distinctive = distinctive_procedure_terms(analysis)
             if not distinctive or any(_covers(term, heading) for term in distinctive):
                 bonus += 3.0
         if definitional:

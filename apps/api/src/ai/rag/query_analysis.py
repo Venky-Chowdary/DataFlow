@@ -164,7 +164,8 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             # "Who can run transfers" is a request for the roles that hold a
             # verb, not a definition of running. Left as ``other`` it retrieved
             # the role matrix and opened on the viewer-negative PII sentence.
-            r"|^\s*who\s+can\b",
+            r"|^\s*who\s+can\b"
+            r"|^\s*who\s+is\s+allowed\b",
             re.I,
         ),
     ),
@@ -257,6 +258,8 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "automate": ("schedule", "pipeline", "recurr"),
     "automated": ("schedule", "pipeline", "recurr"),
     "unattended": ("schedule", "pipeline", "authorization"),
+    "watching": ("schedule", "pipeline", "authorization", "unattended"),
+    "standing": ("schedule", "pipeline", "authorization", "unattended"),
     "pause": ("schedule", "pipeline", "enabled", "paused"),
     "resume": ("schedule", "pipeline", "enabled", "resume"),
     # Permissions
@@ -376,6 +379,22 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "tenant": ("tenant", "workspace", "enterprise", "organization"),
 }
 
+# A CDC redelivery / exactly-once question is knowledge, not a job list.
+# "If I run the same CDC change twice" used to plan list_jobs because it
+# says "run", and the empty-history sentence then became the lead.
+CDC_DELIVERY_RE = re.compile(
+    r"\b(?:exactly[\s-]?once|at[\s-]?least[\s-]?once|idempotent|"
+    r"redeliver|(?:same|identical)\s+(?:change|event|record)|"
+    r"run(?:ning)?\s+(?:it|the\s+same).{0,32}twice)\b",
+    re.I,
+)
+
+
+def is_cdc_delivery_question(text: str) -> bool:
+    """Whether the turn asks about CDC redelivery / exactly-once, not a job."""
+    return bool(text and CDC_DELIVERY_RE.search(text))
+
+
 # Multi-word operator phrases that only mean something together. Matched on the
 # normalized question before single-term expansion.
 _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
@@ -411,6 +430,8 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("schedule", "cron", "timezone", "pipeline")),
     (re.compile(r"\bread[\s-]?only\b", re.I), ("viewer", "role", "permission", "read")),
     (re.compile(r"\bwho\s+can\b", re.I), ("role", "permission", "rbac", "approve")),
+    (re.compile(r"\bwho\s+is\s+allowed\b", re.I),
+     ("role", "permission", "rbac", "editor", "admin")),
     (re.compile(r"\bin\s+git\b|\bkeep\s+.{0,24}\b(?:git|github)\b", re.I),
      ("gitop", "yaml", "export", "import", "manifest")),
     (re.compile(r"\brows?\s+that\s+failed\b"
@@ -468,6 +489,24 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\baggregat\w*\b|\bbreak\s*downs?\b"
                 r"|\bgroup(?:ed|ing)?\s+by\b|\bper\s+(?:group|bucket)\b", re.I),
      ("group", "aggregate", "measure")),
+    (re.compile(r"\bstanding\s+authorit", re.I),
+     ("authorize", "unattended", "schedule", "pipeline")),
+    (re.compile(r"\b(?:nobody|no[\s-]?one)\s+is\s+watching\b"
+                r"|\bwithout\s+watching\b|\bunattended\b", re.I),
+     ("unattended", "authorize", "signed", "schedule")),
+    (re.compile(r"\btype[\s_-]?locked\b", re.I),
+     ("type_locked", "schema", "policy", "type")),
+    (re.compile(r"\b(?:end|ended)\s+up\b"
+                r"|\bwhere\s+do\s+(?:the\s+)?(?:bad|rejected|failed)\s+rows\b", re.I),
+     ("quarantine", "reject")),
+    (re.compile(r"\bturn\s+off\b"
+                r"|\bdisable\s+(?:a\s+|the\s+)?(?:pipeline|schedule|sync|nightly)\b", re.I),
+     ("pause", "pipeline", "schedule")),
+    (re.compile(r"\b(?:airbyte|fivetran|estuary|debezium)\b", re.I),
+     ("semantic", "mapping", "quarantine", "checksum")),
+    (CDC_DELIVERY_RE, ("cdc", "least", "once", "idempotent", "lsn")),
+    (re.compile(r"\bg([1-9])\b", re.I),
+     ("gate", "preflight", "validate", "schema")),
 )
 
 
@@ -671,6 +710,47 @@ def phrase_evidence(
         if consumed:
             out.append((tuple(consumed), tuple(normalize(t) for t in targets)))
     return tuple(out)
+
+
+# Verbs and containers that appear on every wizard step. A procedure prior
+# that fires on these alone is how Job Theater beat "pause a schedule".
+PROCEDURE_GENERIC_TERMS = frozenset(
+    {
+        "connect",
+        "open",
+        "creat",
+        "add",
+        "run",
+        "click",
+        "use",
+        "set",
+        "configur",
+        "enabl",
+        "pipelin",
+        "transfer",
+        "job",
+        "connector",
+        "schedul",
+        "step",
+        "path",
+        "page",
+        "save",
+        "pick",
+        "choos",
+        "procedur",
+    }
+)
+
+
+def distinctive_procedure_terms(analysis: QueryAnalysis) -> frozenset[str]:
+    """Typed words and phrase expansions that name the step, not the wizard."""
+    return frozenset(
+        term
+        for term in (*analysis.terms, *analysis.phrase_expansions)
+        if term not in PROCEDURE_GENERIC_TERMS
+        and len(term) >= 3
+        and "_" not in term
+    )
 
 
 def analyze_query(question: str) -> QueryAnalysis:

@@ -127,6 +127,10 @@ def subject_aliases() -> frozenset[str]:
 
         for policy in SCHEMA_POLICIES:
             extra.update(content_terms(policy.replace("_", " ")))
+            # Keep the snake_case token. ``type_locked`` tokenized to
+            # ``type`` + ``locked`` and "what is type_locked" was refused
+            # even though the policy enum is the product's own label.
+            extra.add(normalize(policy))
     except Exception:
         pass
     try:
@@ -135,6 +139,7 @@ def subject_aliases() -> frozenset[str]:
         extra.update(normalize(r) for r in role_names())
     except Exception:
         extra.update({"viewer", "editor", "operator", "admin"})
+    extra.update(f"g{i}" for i in range(1, 10))
     try:
         # The logical type space is an enum the engine dispatches on, so a
         # question about booleans, arrays, decimals or binary names a subject

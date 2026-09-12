@@ -177,6 +177,15 @@ def test_timezone_written_as_one_word_reaches_the_policy() -> None:
     assert names_product_subject("how do you handle timezones")
 
 
+def test_product_enum_labels_are_subjects_not_refusals() -> None:
+    """Operators type the label the engine already ships."""
+    assert is_subject_term(normalize("type_locked"))
+    assert names_product_subject("what is type_locked")
+    assert names_product_subject("what is G3")
+    assert names_product_subject("what is standing authority")
+    assert names_product_subject("how are you different from airbyte")
+
+
 # --------------------------------------------------------------------------
 # End to end: the questions that were refused
 # --------------------------------------------------------------------------

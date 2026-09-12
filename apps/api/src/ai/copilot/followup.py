@@ -137,12 +137,32 @@ def resolve_platform_coreference(
     # "No transfer jobs yet".
     if has_own_question_frame(text):
         return None
+    # "If I run the same CDC change twice is it safe" matches ``same`` / ``it``
+    # and used to look like a jobs follow-up because ``runs?`` also matches the
+    # verb *run*. A delivery-semantics question is never a pointer at the last
+    # job list — even when the prior turn happened to mention transfers.
+    from ..rag.query_analysis import is_cdc_delivery_question
+
+    if is_cdc_delivery_question(text):
+        return None
     prior = last_assistant_content(history).lower()
     low = text.lower()
-    jobs_cue = bool(re.search(r"\b(?:jobs?|transfers?|failed|failures|runs?)\b", low)) or (
-        "job" in prior or "transfer" in prior or "pipeline" in prior
+    # Noun *runs* / "the last run", never the verb in "if I run …".
+    jobs_cue = bool(
+        re.search(
+            r"\b(?:jobs?|transfers?|failed|failures|runs)\b"
+            r"|(?:last|this|that|my|the)\s+run\b",
+            low,
+        )
+    ) or ("job" in prior or "transfer" in prior or "pipeline" in prior)
+    # "is it safe" is a dummy pronoun, not a pointer at the last job list.
+    dummy_it = bool(
+        re.search(r"\bis\s+it\s+(?:safe|idempotent|lossy|dangerous|ok|okay|fine)\b", low)
     )
-    if jobs_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", low)) or (
+        bool(re.search(r"\bit\b", low)) and not dummy_it
+    )
+    if jobs_cue and job_pointer:
         return [("list_jobs", {"limit": 10})]
     connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
     if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
@@ -261,7 +281,9 @@ _QUESTION_FRAME = re.compile(
     r"|\bwhat\s+\w+(?:\s+\w+){0,2}\s+(?:are|is)\s+there\b"
     r"|\bwhy\s+(?:do|does|did|is|are|was|were|can'?t|cannot)\b"
     r"|\bwho\s+can\b"
-    r"|\bdo\s+(?:you|i|we)\s+(?:support|have|need|ever)\b",
+    r"|\bdo\s+(?:you|i|we)\s+(?:support|have|need|ever)\b"
+    r"|\bis\s+it\s+(?:safe|idempotent|lossy|dangerous)\b"
+    r"|\bif\s+(?:i|we|you)\s+(?:run|replay|redeliver)\b",
     re.I,
 )
 

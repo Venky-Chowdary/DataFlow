@@ -62,7 +62,7 @@ ON_TARGET_FLOORS = {
     # this one was written first and measured second, and it found two questions
     # the engine could not reach (permissions asked as "who sees", resuming
     # asked as "fails halfway").
-    "natural": (14, 14),
+    "natural": (25, 25),
 }
 
 SESSION_MODES = [

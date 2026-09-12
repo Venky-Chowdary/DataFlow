@@ -482,6 +482,36 @@ NATURAL_QUESTIONS: list[Case] = [
     ("how big can a decimal be", "natural", ("digits", "scale")),
     ("what does the row ledger prove", "natural", ("accounting", "conservation")),
     ("what is a contract", "natural", ("schema agreement",)),
+    # Operator labels the product already ships, asked without the docs'
+    # heading words. These were refused or stolen by a nearby wizard / empty
+    # job list on the expand probe.
+    ("what is type_locked", "natural", ("type_locked", "type change")),
+    ("what is standing authority", "natural", ("unattended", "authorize")),
+    ("what is G3", "natural", ("g3", "schema contract")),
+    ("who is allowed to start a transfer", "natural", ("editor", "admin")),
+    (
+        "if I run the same CDC change twice is it safe",
+        "natural",
+        ("_df_lsn", "at-least-once"),
+    ),
+    ("where do bad rows end up", "natural", ("quarantine",)),
+    ("can I turn off a nightly pipeline", "natural", ("pause", "pipelines")),
+    ("how do I cancel a running transfer", "natural", ("cancel", "job")),
+    (
+        "how are you different from airbyte",
+        "natural",
+        ("semantic mapping", "quarantine", "checksum"),
+    ),
+    (
+        "can I query my warehouse from here",
+        "natural",
+        ("query playground", "read-only", "read only"),
+    ),
+    (
+        "can pipelines run while nobody is watching",
+        "natural",
+        ("unattended", "standing authority"),
+    ),
 ]
 
 SUITES: dict[str, list[Case]] = {
