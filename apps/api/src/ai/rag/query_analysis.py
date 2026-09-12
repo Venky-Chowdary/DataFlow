@@ -1085,6 +1085,76 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("cloud_sql_auth_proxy",)),
     (re.compile(r"\bsynapse\s+link\b", re.I), ("synapse_link",)),
     (re.compile(
+        r"\bazure\s+table\b"
+        r"|\btable\s+storage\b",
+        re.I,
+    ),
+     ("azure_table", "table_storage")),
+    (re.compile(
+        r"\bazure\s+queue\b"
+        r"|\bqueue\s+storage\b",
+        re.I,
+    ),
+     ("azure_queue", "queue_storage")),
+    (re.compile(
+        r"\bsql\s+server\s+on\s+(?:an?\s+)?azure\s+vms?\b"
+        r"|\bsql\s+server\s+on\s+azure\s+(?:virtual\s+machines?|vms?)\b",
+        re.I,
+    ),
+     ("sqlserver_azure_vm", "sqlserver")),
+    (re.compile(r"\bsplunk\b", re.I), ("splunk",)),
+    (re.compile(r"\btableau\b", re.I), ("tableau",)),
+    (re.compile(
+        r"\bdata\s+lake\s+gen\s*2\b"
+        r"|\badls\s+gen\s*2\b"
+        r"|\bazure\s+data\s+lake(?:\s+storage)?(?:\s+gen\s*2)?\b",
+        re.I,
+    ),
+     ("data_lake_gen2", "adls")),
+    (re.compile(
+        r"\bservice\s+principal\s+for\s+azure\s+sql\b"
+        r"|\bazure\s+sql\b.{0,40}\bservice\s+principal\b"
+        r"|\bservice\s+principal\b.{0,40}\bazure\s+sql\b",
+        re.I,
+    ),
+     ("azure_sql_sp", "sqlserver")),
+    (re.compile(r"\bdynamodb\b|\bdynamo\s+db\b", re.I), ("dynamodb",)),
+    (re.compile(r"\belasticsearch\b", re.I), ("elasticsearch",)),
+    (re.compile(r"\belastic\s+cloud\b", re.I), ("elastic_cloud", "elasticsearch")),
+    (re.compile(r"\bopensearch\b", re.I), ("opensearch",)),
+    (re.compile(
+        r"\b(?:microsoft\s+)?teams\s+as\s+a\s+source\b",
+        re.I,
+    ),
+     ("teams_source",)),
+    (re.compile(
+        r"\b(?:microsoft|office)\s+365\s+as\s+a\s+destination\b"
+        r"|\bm365\s+as\s+a\s+destination\b",
+        re.I,
+    ),
+     ("microsoft_365",)),
+    (re.compile(r"\bmemorystore\b", re.I), ("memorystore", "redis")),
+    (re.compile(r"\bazure\s+sql\s+edge\b", re.I), ("azure_sql_edge", "sqlserver")),
+    (re.compile(r"\bintune\b", re.I), ("intune",)),
+    (re.compile(r"\b(?:microsoft\s+)?defender\b", re.I), ("defender",)),
+    (re.compile(r"\b(?:microsoft\s+)?sentinel\b", re.I), ("sentinel",)),
+    (re.compile(
+        r"\bazure\s+machine\s+learning\b"
+        r"|\bazure\s+ml\b",
+        re.I,
+    ),
+     ("azure_ml",)),
+    (re.compile(r"\bsearch\s+ads\s+360\b|\bsa360\b", re.I), ("search_ads_360",)),
+    (re.compile(r"\bcloud\s+tasks?\b", re.I), ("cloud_tasks",)),
+    (re.compile(r"\bvpc\s+service\s+controls?\b", re.I), ("vpc_sc",)),
+    (re.compile(r"\bazure\s+firewall\b", re.I), ("azure_firewall",)),
+    (re.compile(
+        r"\bcampaign\s+manager(?:\s+360)?\b"
+        r"|\bcm360\b",
+        re.I,
+    ),
+     ("campaign_manager",)),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -1195,7 +1265,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("mfa", "login")),
     (re.compile(
-        r"\bservice\s+principal(?:\s+for\s+azure)?\b"
+        r"\bservice\s+principal(?:\s+for\s+azure)?\b(?!\s+sql)"
         r"|\bazure\s+service\s+principal\b",
         re.I,
     ),
@@ -2064,6 +2134,96 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bsynapse\s+link\b", re.I),
         ("warehouse", "driver"),
+    ),
+    (
+        re.compile(r"\bazure\s+table\b|\btable\s+storage\b", re.I),
+        ("blob", "adls", "azure_blob"),
+    ),
+    (
+        re.compile(r"\bazure\s+queue\b|\bqueue\s+storage\b", re.I),
+        ("blob", "adls", "azure_blob"),
+    ),
+    (
+        re.compile(
+            r"\bsql\s+server\s+on\s+(?:an?\s+)?azure\s+vms?\b"
+            r"|\bsql\s+server\s+on\s+azure\s+(?:virtual\s+machines?|vms?)\b",
+            re.I,
+        ),
+        ("postgresql", "flexible", "postgres"),
+    ),
+    (
+        re.compile(r"\bsplunk\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(r"\btableau\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(
+            r"\bdata\s+lake\s+gen\s*2\b"
+            r"|\badls\s+gen\s*2\b"
+            r"|\bazure\s+data\s+lake\b",
+            re.I,
+        ),
+        ("kusto", "explorer"),
+    ),
+    (
+        re.compile(
+            r"\bservice\s+principal\s+for\s+azure\s+sql\b"
+            r"|\bazure\s+sql\b.{0,40}\bservice\s+principal\b"
+            r"|\bservice\s+principal\b.{0,40}\bazure\s+sql\b",
+            re.I,
+        ),
+        ("adls", "blob", "principal", "service_account", "tenant"),
+    ),
+    (
+        re.compile(r"\belastic\s+cloud\b", re.I),
+        ("bigtable", "opensearch"),
+    ),
+    (
+        re.compile(r"\bopensearch\b", re.I),
+        ("elasticsearch", "elastic"),
+    ),
+    (
+        re.compile(r"\b(?:microsoft\s+)?teams\s+as\s+a\s+source\b", re.I),
+        ("graph", "webhook"),
+    ),
+    (
+        re.compile(
+            r"\b(?:microsoft|office)\s+365\s+as\s+a\s+destination\b"
+            r"|\bm365\s+as\s+a\s+destination\b",
+            re.I,
+        ),
+        ("excel_online", "excel"),
+    ),
+    (
+        re.compile(r"\bintune\b|\bdefender\b|\bsentinel\b", re.I),
+        ("teams_dest", "team", "webhook"),
+    ),
+    (
+        re.compile(r"\bazure\s+machine\s+learning\b|\bazure\s+ml\b", re.I),
+        ("openai", "hybrid", "llm"),
+    ),
+    (
+        re.compile(r"\bsearch\s+ads\s+360\b|\bsa360\b", re.I),
+        ("search", "openai", "google_ads"),
+    ),
+    (
+        re.compile(r"\bcloud\s+tasks?\b", re.I),
+        ("cloud_run", "dataflow", "pubsub"),
+    ),
+    (
+        re.compile(r"\bvpc\s+service\s+controls?\b", re.I),
+        ("privatelink", "private", "link"),
+    ),
+    (
+        re.compile(r"\bazure\s+firewall\b", re.I),
+        ("allowlist", "cidr", "browser"),
+    ),
+    (
+        re.compile(r"\bcampaign\s+manager(?:\s+360)?\b|\bcm360\b", re.I),
+        ("secret", "manager", "google_ads"),
     ),
     # Bare Private Link is not Job Theater.
     (

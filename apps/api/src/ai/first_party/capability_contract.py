@@ -2681,6 +2681,94 @@ def synapse_link_shipped() -> bool:
     return False
 
 
+def dynamodb_is_transfer_ready() -> bool:
+    return "dynamodb" in _transfer_ready_drivers()
+
+
+def elasticsearch_is_transfer_ready() -> bool:
+    return "elasticsearch" in _transfer_ready_drivers()
+
+
+def azure_table_storage_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_table", "table_storage", "tablestorage"})
+
+
+def azure_queue_storage_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_queue", "queue_storage", "queuestorage"})
+
+
+def splunk_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"splunk"})
+
+
+def tableau_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"tableau"})
+
+
+def elastic_cloud_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"elastic_cloud", "elasticcloud"})
+
+
+def opensearch_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"opensearch"})
+
+
+def azure_sql_service_principal_shipped() -> bool:
+    try:
+        from connectors.sqlserver import test_sqlserver
+    except Exception:
+        return False
+    names = {name.lower() for name in inspect.signature(test_sqlserver).parameters}
+    return bool(names & {"tenant_id", "client_id", "client_secret", "service_principal"})
+
+
+def teams_source_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"teams", "ms_teams"})
+
+
+def microsoft_365_dest_shipped() -> bool:
+    return bool(
+        _transfer_ready_drivers()
+        & {"microsoft_365", "office365", "m365", "excel_online", "onedrive", "sharepoint"}
+    )
+
+
+def intune_shipped() -> bool:
+    return False
+
+
+def defender_shipped() -> bool:
+    return False
+
+
+def sentinel_shipped() -> bool:
+    return False
+
+
+def azure_ml_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_ml", "azureml"})
+
+
+def search_ads_360_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"search_ads_360", "sa360"})
+
+
+def cloud_tasks_shipped() -> bool:
+    return False
+
+
+def vpc_service_controls_shipped() -> bool:
+    return False
+
+
+def azure_firewall_shipped() -> bool:
+    return False
+
+
+def campaign_manager_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"campaign_manager", "cm360"})
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -3165,6 +3253,351 @@ def synapse_link_card() -> CapabilityCard | None:
     )
 
 
+def azure_table_storage_card() -> CapabilityCard | None:
+    if azure_table_storage_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Table Storage",
+        text=(
+            "Datawrap does not ship Azure Table Storage as a transfer-ready "
+            "driver (table_storage is false). azure_table "
+            "Azure Blob / ADLS is a different object store."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_queue_storage_card() -> CapabilityCard | None:
+    if azure_queue_storage_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Queue Storage",
+        text=(
+            "Datawrap does not ship Azure Queue Storage as a transfer-ready "
+            "driver (queue_storage is false). azure_queue "
+            "Azure Blob / ADLS is a different object store."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def sqlserver_azure_vm_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support SQL Server on Azure VMs",
+        text=(
+            "Yes — SQL Server on Azure VMs is the SQL Server driver "
+            "(sqlserver / sqlserver_azure_vm). "
+            "It is not Flexible Server and not Azure Database for PostgreSQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def splunk_destination_card() -> CapabilityCard | None:
+    if splunk_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Splunk as a destination",
+        text=(
+            "Datawrap does not ship Splunk as a transfer-ready destination "
+            "(splunk is false). A warehouse driver card is not a Splunk writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def tableau_destination_card() -> CapabilityCard | None:
+    if tableau_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Tableau as a destination",
+        text=(
+            "Datawrap does not ship Tableau as a transfer-ready destination "
+            "(tableau is false). A warehouse driver card is not a Tableau writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_data_lake_gen2_card() -> CapabilityCard | None:
+    if not adls_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Data Lake Gen2",
+        text=(
+            "Yes — Azure Data Lake Gen2 is the ADLS driver "
+            "(adls / data_lake_gen2). "
+            "It is not Azure Data Explorer and not Kusto."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_sql_service_principal_card() -> CapabilityCard | None:
+    if azure_sql_service_principal_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use a service principal for Azure SQL",
+        text=(
+            "Azure SQL does not accept an ADLS service principal "
+            "(azure_sql_sp is false). "
+            "Connect Azure SQL as sqlserver with username and password."
+        ),
+        source_module="connectors/sqlserver.py · test_sqlserver",
+        category="connectors",
+    )
+
+
+def dynamodb_card() -> CapabilityCard | None:
+    if not dynamodb_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon DynamoDB",
+        text=(
+            "Yes — DynamoDB is a transfer-ready driver (dynamodb). "
+            "Catalog tile count is not the proof; unique_driver_types is."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def elasticsearch_card() -> CapabilityCard | None:
+    if not elasticsearch_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Elasticsearch",
+        text=(
+            "Yes — Elasticsearch is a transfer-ready driver (elasticsearch). "
+            "Elastic Cloud is hosted Elasticsearch, not a separate SKU."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def elastic_cloud_card() -> CapabilityCard | None:
+    if elastic_cloud_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Elastic Cloud",
+        text=(
+            "Elastic Cloud is not its own transfer-ready driver "
+            "(elastic_cloud is false). "
+            "Connect the cluster as Elasticsearch."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def opensearch_card() -> CapabilityCard | None:
+    if opensearch_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support OpenSearch",
+        text=(
+            "Datawrap does not ship OpenSearch as a transfer-ready driver "
+            "(opensearch is false). Elasticsearch is a different driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def teams_source_card() -> CapabilityCard | None:
+    if teams_source_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Teams as a source",
+        text=(
+            "Datawrap does not ship Teams as a transfer-ready source "
+            "(teams_source is false). "
+            "Incoming webhooks are a notification channel, not a reader."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_365_destination_card() -> CapabilityCard | None:
+    if microsoft_365_dest_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft 365 as a destination",
+        text=(
+            "Microsoft 365 is not a destination driver "
+            "(microsoft_365 is false). "
+            "A suite name is not a write driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def memorystore_card() -> CapabilityCard | None:
+    if not redis_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Memorystore",
+        text=(
+            "Yes — Memorystore is the Redis driver (redis / memorystore). "
+            "It is not a separate memorystore SKU."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_sql_edge_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure SQL Edge",
+        text=(
+            "Yes — Azure SQL Edge is the SQL Server driver "
+            "(sqlserver / azure_sql_edge). "
+            "It is not a separate edge SKU."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def intune_card() -> CapabilityCard | None:
+    if intune_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Intune",
+        text=(
+            "Datawrap does not ship Microsoft Intune as a transfer-ready "
+            "driver (intune is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def defender_card() -> CapabilityCard | None:
+    if defender_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Defender",
+        text=(
+            "Datawrap does not ship Microsoft Defender as a transfer-ready "
+            "driver (defender is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def sentinel_card() -> CapabilityCard | None:
+    if sentinel_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Sentinel",
+        text=(
+            "Datawrap does not ship Microsoft Sentinel as a transfer-ready "
+            "driver (sentinel is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_ml_card() -> CapabilityCard | None:
+    if azure_ml_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Machine Learning as a destination",
+        text=(
+            "Datawrap does not ship Azure Machine Learning as a transfer "
+            "destination (azure_ml is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def search_ads_360_card() -> CapabilityCard | None:
+    if search_ads_360_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Search Ads 360",
+        text=(
+            "Datawrap does not ship Search Ads 360 as a transfer-ready "
+            "source (search_ads_360 is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_tasks_card() -> CapabilityCard | None:
+    if cloud_tasks_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Tasks",
+        text=(
+            "Datawrap does not ship Cloud Tasks as a transfer destination "
+            "(cloud_tasks is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def vpc_service_controls_card() -> CapabilityCard | None:
+    if vpc_service_controls_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support VPC Service Controls",
+        text=(
+            "Datawrap does not ship VPC Service Controls "
+            "(vpc_sc is false). That is a GCP perimeter, not a connect field."
+        ),
+        source_module="connectors/postgresql.py · test_postgresql",
+        category="connectors",
+    )
+
+
+def azure_firewall_card() -> CapabilityCard | None:
+    if azure_firewall_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Firewall",
+        text=(
+            "Datawrap does not ship Azure Firewall as a connect option "
+            "(azure_firewall is false)."
+        ),
+        source_module="src/routers/workspace_router.py · allowlist",
+        category="connectors",
+    )
+
+
+def campaign_manager_card() -> CapabilityCard | None:
+    if campaign_manager_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Campaign Manager",
+        text=(
+            "Datawrap does not ship Campaign Manager 360 as a transfer-ready "
+            "source (campaign_manager is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -3339,6 +3772,30 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         azure_analysis_services_card,
         cloud_sql_auth_proxy_card,
         synapse_link_card,
+        azure_table_storage_card,
+        azure_queue_storage_card,
+        sqlserver_azure_vm_card,
+        splunk_destination_card,
+        tableau_destination_card,
+        azure_data_lake_gen2_card,
+        azure_sql_service_principal_card,
+        dynamodb_card,
+        elasticsearch_card,
+        elastic_cloud_card,
+        opensearch_card,
+        teams_source_card,
+        microsoft_365_destination_card,
+        memorystore_card,
+        azure_sql_edge_card,
+        intune_card,
+        defender_card,
+        sentinel_card,
+        azure_ml_card,
+        search_ads_360_card,
+        cloud_tasks_card,
+        vpc_service_controls_card,
+        azure_firewall_card,
+        campaign_manager_card,
         column_level_lineage_card,
     ):
         card = builder()

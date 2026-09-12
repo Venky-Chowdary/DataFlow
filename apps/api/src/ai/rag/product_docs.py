@@ -735,8 +735,19 @@ def _section_intent_bonus(
         bonus += 6.0 if cloud_sql_ask else -3.2
     if cloud_sql_ask and title == "do you support sql server":
         bonus -= 6.0
-    azure_sql_ask = bool(re.search(r"\bazure\s+sql\b", analysis.text, re.I))
-    if "azure sql" in title:
+    azure_sql_edge_ask = bool(re.search(r"\bazure\s+sql\s+edge\b", analysis.text, re.I))
+    azure_sql_sp_ask = bool(
+        re.search(r"\bservice\s+principal\b", analysis.text, re.I)
+        and re.search(r"\bazure\s+sql\b", analysis.text, re.I)
+    )
+    azure_sql_ask = bool(
+        re.search(r"\bazure\s+sql\b", analysis.text, re.I)
+        and not azure_sql_edge_ask
+        and not azure_sql_sp_ask
+    )
+    if title == "do you support azure sql":
+        bonus += 6.0 if azure_sql_ask else -6.0
+    elif "azure sql" in title and "edge" not in title and "service principal" not in title:
         bonus += 6.0 if azure_sql_ask else -6.0
     if azure_sql_ask and "azure synapse" in title:
         bonus -= 6.0
@@ -875,8 +886,12 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) else -3.2
     if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) and "azure sql" in title:
         bonus -= 6.0
+    table_storage_ask = bool(re.search(r"\bazure\s+table\b|\btable\s+storage\b", analysis.text, re.I))
+    queue_storage_ask = bool(re.search(r"\bazure\s+queue\b|\bqueue\s+storage\b", analysis.text, re.I))
     if "azure blob" in title:
         bonus += 6.0 if re.search(r"\bblob\b", analysis.text, re.I) else -3.2
+        if table_storage_ask or queue_storage_ask:
+            bonus -= 6.0
     if "azure cache for redis" in title:
         bonus += 6.0 if re.search(r"\bredis\b", analysis.text, re.I) else -3.2
     flexible_ask = bool(re.search(r"\bflexible\s+server\b", analysis.text, re.I))
@@ -884,6 +899,20 @@ def _section_intent_bonus(
         bonus += 6.0 if flexible_ask else -3.2
     if flexible_ask and "cloud sql" in title:
         bonus -= 6.0
+    sqlserver_vm_ask = bool(
+        re.search(
+            r"\bsql\s+server\s+on\s+(?:an?\s+)?azure\s+vms?\b"
+            r"|\bsql\s+server\s+on\s+azure\s+(?:virtual\s+machines?|vms?)\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "sql server on azure" in title:
+        bonus += 6.0 if sqlserver_vm_ask else -6.0
+    if sqlserver_vm_ask and "flexible server" in title:
+        bonus -= 6.0
+    if sqlserver_vm_ask and title == "do you support sql server":
+        bonus -= 3.2
     if "firebase" in title:
         bonus += 6.0 if re.search(r"\bfirebase\b", analysis.text, re.I) else -3.2
     if "firestore" in title:
@@ -974,6 +1003,95 @@ def _section_intent_bonus(
         bonus -= 6.0
     if "synapse link" in title:
         bonus += 6.0 if re.search(r"\bsynapse\s+link\b", analysis.text, re.I) else -3.2
+    if "table storage" in title:
+        bonus += 6.0 if table_storage_ask else -6.0
+    if "queue storage" in title:
+        bonus += 6.0 if queue_storage_ask else -6.0
+    if "splunk" in title:
+        bonus += 6.0 if re.search(r"\bsplunk\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bsplunk\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "tableau" in title:
+        bonus += 6.0 if re.search(r"\btableau\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btableau\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    gen2_ask = bool(
+        re.search(
+            r"\bdata\s+lake\s+gen\s*2\b"
+            r"|\badls\s+gen\s*2\b"
+            r"|\bazure\s+data\s+lake\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "data lake gen2" in title:
+        bonus += 6.0 if gen2_ask else -3.2
+    if gen2_ask and ("kusto" in title or "data explorer" in title):
+        bonus -= 6.0
+    if title == "can i use a service principal for azure sql":
+        bonus += 6.0 if azure_sql_sp_ask else -6.0
+    if title == "can i use a service principal for azure" and azure_sql_sp_ask:
+        bonus -= 6.0
+    if "amazon dynamodb" in title or title.endswith("dynamodb"):
+        bonus += 6.0 if re.search(r"\bdynamodb\b|\bdynamo\s+db\b", analysis.text, re.I) else -3.2
+    if title == "do you support elasticsearch":
+        bonus += 6.0 if re.search(r"\belasticsearch\b", analysis.text, re.I) else -3.2
+    if "elastic cloud" in title:
+        bonus += 6.0 if re.search(r"\belastic\s+cloud\b", analysis.text, re.I) else -3.2
+    if re.search(r"\belastic\s+cloud\b", analysis.text, re.I) and "bigtable" in title:
+        bonus -= 6.0
+    if "opensearch" in title:
+        bonus += 6.0 if re.search(r"\bopensearch\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bopensearch\b", analysis.text, re.I) and title == "do you support elasticsearch":
+        bonus -= 6.0
+    if "teams as a source" in title:
+        bonus += 6.0 if re.search(r"\bteams\s+as\s+a\s+source\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bteams\s+as\s+a\s+source\b", analysis.text, re.I) and "microsoft graph" in title:
+        bonus -= 6.0
+    if "microsoft 365 as a destination" in title:
+        bonus += 6.0 if re.search(r"\b(?:microsoft|office)\s+365\b|\bm365\b", analysis.text, re.I) else -3.2
+    if re.search(
+        r"\b(?:microsoft|office)\s+365\s+as\s+a\s+destination\b",
+        analysis.text,
+        re.I,
+    ) and "excel online" in title:
+        bonus -= 6.0
+    if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", analysis.text, re.I) and (
+        "microsoft 365 as a destination" in title
+    ):
+        bonus -= 6.0
+    if "memorystore" in title:
+        bonus += 6.0 if re.search(r"\bmemorystore\b", analysis.text, re.I) else -3.2
+    if "azure sql edge" in title:
+        bonus += 6.0 if azure_sql_edge_ask else -6.0
+    if azure_sql_edge_ask and title == "do you support azure sql":
+        bonus -= 6.0
+    if "intune" in title:
+        bonus += 6.0 if re.search(r"\bintune\b", analysis.text, re.I) else -3.2
+    if "defender" in title:
+        bonus += 6.0 if re.search(r"\bdefender\b", analysis.text, re.I) else -3.2
+    if "sentinel" in title:
+        bonus += 6.0 if re.search(r"\bsentinel\b", analysis.text, re.I) else -3.2
+    if "azure machine learning" in title:
+        bonus += 6.0 if re.search(r"\bmachine\s+learning\b|\bazure\s+ml\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmachine\s+learning\b|\bazure\s+ml\b", analysis.text, re.I) and "azure openai" in title:
+        bonus -= 6.0
+    if "search ads 360" in title:
+        bonus += 6.0 if re.search(r"\bsearch\s+ads\s+360\b|\bsa360\b", analysis.text, re.I) else -3.2
+    if "cloud tasks" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+tasks?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+tasks?\b", analysis.text, re.I) and "cloud run" in title:
+        bonus -= 6.0
+    if "vpc service controls" in title:
+        bonus += 6.0 if re.search(r"\bvpc\s+service\s+controls?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bvpc\s+service\s+controls?\b", analysis.text, re.I) and (
+        "privatelink" in title or "private link" in title
+    ):
+        bonus -= 6.0
+    if "azure firewall" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+firewall\b", analysis.text, re.I) else -3.2
+    if "campaign manager" in title:
+        bonus += 6.0 if re.search(r"\bcampaign\s+manager\b|\bcm360\b", analysis.text, re.I) else -3.2
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

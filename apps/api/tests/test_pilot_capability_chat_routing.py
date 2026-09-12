@@ -57,6 +57,14 @@ def _names(question: str) -> list[str]:
         "do you support Outlook as a destination",
         "do you support Azure PostgreSQL Flexible Server",
         "do you support Firebase",
+        "do you support Azure Table Storage",
+        "do you support Splunk as a destination",
+        "do you support Tableau as a destination",
+        "do you support Azure Data Lake Gen2",
+        "do you support Amazon DynamoDB",
+        "do you support Elasticsearch",
+        "can I use a service principal for Azure SQL",
+        "do you support SQL Server on Azure VMs",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
