@@ -53,6 +53,10 @@ def _names(question: str) -> list[str]:
         "do you support Looker as a destination",
         "do you support Azure Database for PostgreSQL",
         "do you support Google Cloud Dataflow",
+        "do you support GKE as a destination",
+        "do you support Outlook as a destination",
+        "do you support Azure PostgreSQL Flexible Server",
+        "do you support Firebase",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

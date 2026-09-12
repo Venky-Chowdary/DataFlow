@@ -457,6 +457,10 @@ def gcs_is_transfer_ready() -> bool:
     return "gcs" in _transfer_ready_drivers()
 
 
+def redis_is_transfer_ready() -> bool:
+    return "redis" in _transfer_ready_drivers()
+
+
 def scd2_is_canonical() -> bool:
     try:
         from services.sync_cursor import CANONICAL_SYNC_MODES
@@ -2561,6 +2565,606 @@ def blue_green_cutover_card() -> CapabilityCard | None:
     )
 
 
+def firebase_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"firebase", "firestore"})
+
+
+def bigtable_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"bigtable", "cloud_bigtable"})
+
+
+def dataproc_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dataproc"})
+
+
+def entra_pim_shipped() -> bool:
+    return False
+
+
+def gke_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gke", "kubernetes"})
+
+
+def outlook_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"outlook", "exchange"})
+
+
+def youtube_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"youtube"})
+
+
+def google_ads_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"google_ads", "googleads"})
+
+
+def google_drive_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gdrive", "google_drive", "drive"})
+
+
+def google_docs_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gdocs", "google_docs"})
+
+
+def google_analytics_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"ga", "google_analytics", "ga4"})
+
+
+def cloud_run_shipped() -> bool:
+    return False
+
+
+def stream_analytics_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"stream_analytics", "asa"})
+
+
+def microsoft_lists_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"lists", "microsoft_lists"})
+
+
+def github_enterprise_dest_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"github", "github_enterprise"})
+
+
+def bq_dts_shipped() -> bool:
+    return False
+
+
+def bq_linked_dataset_shipped() -> bool:
+    return False
+
+
+def cloud_kms_connect_shipped() -> bool:
+    return False
+
+
+def app_engine_shipped() -> bool:
+    return False
+
+
+def data_catalog_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"data_catalog", "datacatalog"})
+
+
+def cloud_build_shipped() -> bool:
+    return False
+
+
+def artifact_registry_shipped() -> bool:
+    return False
+
+
+def cloud_functions_shipped() -> bool:
+    return False
+
+
+def azure_files_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_files", "azurefiles"})
+
+
+def log_analytics_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"log_analytics", "loganalytics"})
+
+
+def azure_ai_search_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_ai_search", "cognitive_search"})
+
+
+def azure_analysis_services_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"ssas", "analysis_services"})
+
+
+def cloud_sql_auth_proxy_shipped() -> bool:
+    return False
+
+
+def synapse_link_shipped() -> bool:
+    return False
+
+
+def azure_blob_card() -> CapabilityCard | None:
+    if not adls_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Blob Storage",
+        text=(
+            "Yes — Azure Blob Storage uses the ADLS driver (adls / azure_blob). "
+            "unique_driver_types includes adls, not a separate blob driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_redis_card() -> CapabilityCard | None:
+    if not redis_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Cache for Redis",
+        text=(
+            "Yes — Azure Cache for Redis is the Redis driver (redis). "
+            "It is not Synapse."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_flexible_postgres_card() -> CapabilityCard | None:
+    if not postgresql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure PostgreSQL Flexible Server",
+        text=(
+            "Yes — Azure PostgreSQL Flexible Server is the PostgreSQL driver "
+            "(postgresql / azure_flexible_server). "
+            "It is not Cloud SQL and not Azure SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def firebase_card() -> CapabilityCard | None:
+    if firebase_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Firebase",
+        text=(
+            "Datawrap does not ship Firebase or Firestore as a transfer-ready "
+            "driver (firebase_ready is false). fireba"
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def firestore_card() -> CapabilityCard | None:
+    if firebase_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Firestore",
+        text=(
+            "Datawrap does not ship Firestore as a transfer-ready driver "
+            "(firestore is false). Firebase is not a connect path."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bigtable_card() -> CapabilityCard | None:
+    if bigtable_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Bigtable",
+        text=(
+            "Datawrap does not ship Cloud Bigtable as a transfer-ready driver "
+            "(bigtable is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def dataproc_card() -> CapabilityCard | None:
+    if dataproc_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Dataproc",
+        text=(
+            "Datawrap does not run Dataproc (dataproc is false). "
+            "Spark jobs stay outside the write engine."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def entra_pim_card() -> CapabilityCard | None:
+    if entra_pim_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Entra PIM",
+        text=(
+            "Datawrap does not ship Entra Privileged Identity Management "
+            "(entra_pim is false). SSO is SAML/OIDC, not PIM elevation."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
+def gke_card() -> CapabilityCard | None:
+    if gke_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support GKE as a destination",
+        text=(
+            "Datawrap does not ship GKE as a transfer destination "
+            "(gke is false). A warehouse driver card is not a GKE writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def outlook_card() -> CapabilityCard | None:
+    if outlook_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Outlook as a destination",
+        text=(
+            "Datawrap does not ship Outlook as a transfer-ready destination "
+            "(outlook is false). A warehouse driver card is not an Outlook writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def youtube_card() -> CapabilityCard | None:
+    if youtube_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support YouTube as a source",
+        text=(
+            "Datawrap does not ship YouTube as a transfer-ready source "
+            "(youtube is false). BigQuery is not a YouTube connector."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_ads_card() -> CapabilityCard | None:
+    if google_ads_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Ads as a source",
+        text=(
+            "Datawrap does not ship Google Ads as a transfer-ready source "
+            "(google_ads is false). Pub/Sub is not an Ads connector."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_drive_card() -> CapabilityCard | None:
+    if google_drive_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I write to Google Drive",
+        text=(
+            "Datawrap does not ship Google Drive as a transfer-ready "
+            "destination (google_drive is false). Pub/Sub is not a Drive writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_docs_card() -> CapabilityCard | None:
+    if google_docs_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Docs as a destination",
+        text=(
+            "Datawrap does not ship Google Docs as a transfer-ready "
+            "destination (google_docs is false). Pub/Sub is not a Docs writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_analytics_card() -> CapabilityCard | None:
+    if google_analytics_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Analytics",
+        text=(
+            "Datawrap does not ship Google Analytics as a transfer-ready "
+            "source (google_analytics is false). Pub/Sub is not a GA connector."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_run_card() -> CapabilityCard | None:
+    if cloud_run_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Run as a destination",
+        text=(
+            "Datawrap does not ship Cloud Run as a transfer destination "
+            "(cloud_run is false). Cloud Dataflow is not Cloud Run."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def stream_analytics_card() -> CapabilityCard | None:
+    if stream_analytics_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Stream Analytics",
+        text=(
+            "Datawrap does not ship Azure Stream Analytics "
+            "(stream_analytics is false). Cosmos is not Stream Analytics."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_lists_card() -> CapabilityCard | None:
+    if microsoft_lists_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Lists",
+        text=(
+            "Datawrap does not ship Microsoft Lists as a transfer-ready "
+            "destination (microsoft_lists is false). Teams is not Lists."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def exchange_online_card() -> CapabilityCard | None:
+    if outlook_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Exchange Online",
+        text=(
+            "Datawrap does not ship Exchange Online as a transfer-ready "
+            "destination (exchange_online is false). Excel Online is not Exchange."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def github_enterprise_dest_card() -> CapabilityCard | None:
+    if github_enterprise_dest_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support GitHub Enterprise as a destination",
+        text=(
+            "Datawrap does not ship GitHub Enterprise as a transfer destination "
+            "(github_enterprise is false). GitHub Actions can call /api/v1; "
+            "that is not a GitHub writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bq_dts_card() -> CapabilityCard | None:
+    if bq_dts_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support BigQuery Data Transfer Service",
+        text=(
+            "Datawrap does not ship BigQuery Data Transfer Service "
+            "(bq_dts is false). The BigQuery driver is transfer-ready; "
+            "DTS is not a connect field."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bq_linked_dataset_card() -> CapabilityCard | None:
+    if bq_linked_dataset_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use a BigQuery linked dataset",
+        text=(
+            "Datawrap does not ship BigQuery linked datasets as a connect "
+            "option (bq_linked_dataset is false). "
+            "OpenLineage dataset grain is not a linked dataset."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_kms_card() -> CapabilityCard | None:
+    if cloud_kms_connect_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud KMS",
+        text=(
+            "Datawrap does not ship Cloud KMS as a connect option "
+            "(cloud_kms is false). Settings → Enterprise → BYOK wraps "
+            "connector secrets; it is not a Cloud KMS destination."
+        ),
+        source_module="src/routers/workspace_router.py · byok",
+        category="connectors",
+    )
+
+
+def app_engine_card() -> CapabilityCard | None:
+    if app_engine_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support App Engine",
+        text=(
+            "Datawrap does not ship App Engine as a transfer destination "
+            "(app_engine is false). An IP allowlist is not App Engine."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def data_catalog_card() -> CapabilityCard | None:
+    if data_catalog_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Data Catalog",
+        text=(
+            "Datawrap does not ship Google Data Catalog as a connect option "
+            "(data_catalog is false). Iceberg catalog mode is not Data Catalog."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_build_card() -> CapabilityCard | None:
+    if cloud_build_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Build",
+        text=(
+            "Datawrap does not run Cloud Build (cloud_build is false). "
+            "A browser build is not Cloud Build."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def artifact_registry_card() -> CapabilityCard | None:
+    if artifact_registry_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Artifact Registry",
+        text=(
+            "Datawrap does not ship Artifact Registry "
+            "(artifact_registry is false). A Kafka schema registry URL "
+            "is not Artifact Registry."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_functions_card() -> CapabilityCard | None:
+    if cloud_functions_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Functions",
+        text=(
+            "Datawrap does not ship Cloud Functions as a transfer destination "
+            "(cloud_functions is false). It is not Cloud SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_files_card() -> CapabilityCard | None:
+    if azure_files_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Files",
+        text=(
+            "Datawrap does not ship Azure Files as a transfer-ready driver "
+            "(azure_files is false). Synapse is not Azure Files."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def log_analytics_card() -> CapabilityCard | None:
+    if log_analytics_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Log Analytics",
+        text=(
+            "Datawrap does not ship Azure Log Analytics as a destination "
+            "(log_analytics is false). Job Theater logs are not Log Analytics."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_ai_search_card() -> CapabilityCard | None:
+    if azure_ai_search_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure AI Search",
+        text=(
+            "Datawrap does not ship Azure AI Search as a transfer destination "
+            "(azure_ai_search is false). Azure OpenAI is not AI Search."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_analysis_services_card() -> CapabilityCard | None:
+    if azure_analysis_services_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Analysis Services",
+        text=(
+            "Datawrap does not ship Azure Analysis Services / SSAS "
+            "(analysis_services is false). Service Bus is not SSAS."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_sql_auth_proxy_card() -> CapabilityCard | None:
+    if cloud_sql_auth_proxy_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud SQL Auth Proxy",
+        text=(
+            "Datawrap does not ship Cloud SQL Auth Proxy as a connect field "
+            "(cloud_sql_auth_proxy is false). Connect the instance as "
+            "MySQL or PostgreSQL."
+        ),
+        source_module="connectors/postgresql.py · test_postgresql",
+        category="connectors",
+    )
+
+
+def synapse_link_card() -> CapabilityCard | None:
+    if synapse_link_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Synapse Link",
+        text=(
+            "Datawrap does not ship Azure Synapse Link "
+            "(synapse_link is false). The Synapse warehouse driver is "
+            "also not transfer-ready."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -2701,6 +3305,40 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         power_platform_card,
         conditional_access_card,
         cloud_composer_card,
+        azure_blob_card,
+        azure_redis_card,
+        azure_flexible_postgres_card,
+        firebase_card,
+        firestore_card,
+        bigtable_card,
+        dataproc_card,
+        entra_pim_card,
+        gke_card,
+        outlook_card,
+        youtube_card,
+        google_ads_card,
+        google_drive_card,
+        google_docs_card,
+        google_analytics_card,
+        cloud_run_card,
+        stream_analytics_card,
+        microsoft_lists_card,
+        exchange_online_card,
+        github_enterprise_dest_card,
+        bq_dts_card,
+        bq_linked_dataset_card,
+        cloud_kms_card,
+        app_engine_card,
+        data_catalog_card,
+        cloud_build_card,
+        artifact_registry_card,
+        cloud_functions_card,
+        azure_files_card,
+        log_analytics_card,
+        azure_ai_search_card,
+        azure_analysis_services_card,
+        cloud_sql_auth_proxy_card,
+        synapse_link_card,
         column_level_lineage_card,
     ):
         card = builder()

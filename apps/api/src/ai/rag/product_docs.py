@@ -737,7 +737,7 @@ def _section_intent_bonus(
         bonus -= 6.0
     azure_sql_ask = bool(re.search(r"\bazure\s+sql\b", analysis.text, re.I))
     if "azure sql" in title:
-        bonus += 6.0 if azure_sql_ask else -3.2
+        bonus += 6.0 if azure_sql_ask else -6.0
     if azure_sql_ask and "azure synapse" in title:
         bonus -= 6.0
     gcs_ask = bool(
@@ -875,6 +875,105 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) else -3.2
     if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) and "azure sql" in title:
         bonus -= 6.0
+    if "azure blob" in title:
+        bonus += 6.0 if re.search(r"\bblob\b", analysis.text, re.I) else -3.2
+    if "azure cache for redis" in title:
+        bonus += 6.0 if re.search(r"\bredis\b", analysis.text, re.I) else -3.2
+    flexible_ask = bool(re.search(r"\bflexible\s+server\b", analysis.text, re.I))
+    if "flexible server" in title:
+        bonus += 6.0 if flexible_ask else -3.2
+    if flexible_ask and "cloud sql" in title:
+        bonus -= 6.0
+    if "firebase" in title:
+        bonus += 6.0 if re.search(r"\bfirebase\b", analysis.text, re.I) else -3.2
+    if "firestore" in title:
+        bonus += 6.0 if re.search(r"\bfirestore\b", analysis.text, re.I) else -3.2
+    if "bigtable" in title:
+        bonus += 6.0 if re.search(r"\bbigtable\b", analysis.text, re.I) else -3.2
+    if "dataproc" in title:
+        bonus += 6.0 if re.search(r"\bdataproc\b", analysis.text, re.I) else -3.2
+    if "entra pim" in title or "privileged identity" in title:
+        bonus += 6.0 if re.search(r"\bpim\b|\bprivileged\s+identity\b", analysis.text, re.I) else -3.2
+    if "gke as a destination" in title:
+        bonus += 6.0 if re.search(r"\bgke\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgke\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "outlook as a destination" in title:
+        bonus += 6.0 if re.search(r"\boutlook\b", analysis.text, re.I) else -3.2
+    if re.search(r"\boutlook\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "youtube" in title:
+        bonus += 6.0 if re.search(r"\byoutube\b", analysis.text, re.I) else -3.2
+    if re.search(r"\byoutube\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "google ads" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+ads\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+ads\b", analysis.text, re.I) and "pub/sub" in title:
+        bonus -= 6.0
+    if "google drive" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+drive\b", analysis.text, re.I) else -3.2
+    if "google docs" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+docs\b", analysis.text, re.I) else -3.2
+    if "google analytics" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+analytics\b|\bga4\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+(?:drive|docs|analytics)\b", analysis.text, re.I) and "pub/sub" in title:
+        bonus -= 6.0
+    if "cloud run" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+run\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+run\b", analysis.text, re.I) and "dataflow" in title:
+        bonus -= 6.0
+    if "stream analytics" in title:
+        bonus += 6.0 if re.search(r"\bstream\s+analytics\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bstream\s+analytics\b", analysis.text, re.I) and "cosmos" in title:
+        bonus -= 6.0
+    if "microsoft lists" in title:
+        bonus += 6.0 if re.search(r"\blists\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmicrosoft\s+lists\b", analysis.text, re.I) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "exchange online" in title:
+        bonus += 6.0 if re.search(r"\bexchange\s+online\b", analysis.text, re.I) else -6.0
+    if re.search(r"\bexchange\s+online\b", analysis.text, re.I) and "excel online" in title:
+        bonus -= 6.0
+    if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", analysis.text, re.I) and "exchange online" in title:
+        bonus -= 6.0
+    if "github enterprise as a destination" in title:
+        bonus += 6.0 if re.search(r"\bgithub\s+enterprise\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgithub\s+enterprise\s+as\s+a\s+destination\b", analysis.text, re.I) and "github actions" in title:
+        bonus -= 6.0
+    if "data transfer service" in title:
+        bonus += 6.0 if re.search(r"\bdata\s+transfer\b|\bdts\b", analysis.text, re.I) else -3.2
+    if "linked dataset" in title:
+        bonus += 6.0 if re.search(r"\blinked\s+dataset\b", analysis.text, re.I) else -3.2
+    if re.search(r"\blinked\s+dataset\b", analysis.text, re.I) and "openlineage" in title:
+        bonus -= 6.0
+    if "cloud kms" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+kms\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+kms\b", analysis.text, re.I) and "byok" in title:
+        bonus -= 6.0
+    if "app engine" in title:
+        bonus += 6.0 if re.search(r"\bapp\s+engine\b", analysis.text, re.I) else -3.2
+    if "data catalog" in title:
+        bonus += 6.0 if re.search(r"\bdata\s+catalog\b", analysis.text, re.I) else -3.2
+    if "cloud build" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+build\b", analysis.text, re.I) else -3.2
+    if "artifact registry" in title:
+        bonus += 6.0 if re.search(r"\bartifact\s+registry\b", analysis.text, re.I) else -3.2
+    if "cloud functions" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+functions?\b", analysis.text, re.I) else -3.2
+    if "azure files" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+files\b", analysis.text, re.I) else -3.2
+    if "log analytics" in title:
+        bonus += 6.0 if re.search(r"\blog\s+analytics\b", analysis.text, re.I) else -3.2
+    if "azure ai search" in title:
+        bonus += 6.0 if re.search(r"\bai\s+search\b|\bcognitive\s+search\b", analysis.text, re.I) else -3.2
+    if "analysis services" in title:
+        bonus += 6.0 if re.search(r"\banalysis\s+services\b|\bssas\b", analysis.text, re.I) else -3.2
+    if "auth proxy" in title or "sql proxy" in title:
+        bonus += 6.0 if re.search(r"\bproxy\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+sql\s+(?:auth\s+)?proxy\b", analysis.text, re.I) and title == "do you support cloud sql":
+        bonus -= 6.0
+    if "synapse link" in title:
+        bonus += 6.0 if re.search(r"\bsynapse\s+link\b", analysis.text, re.I) else -3.2
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

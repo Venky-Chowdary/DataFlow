@@ -156,6 +156,16 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Power Platform",
         "Do you support Azure Conditional Access",
         "Do you support Cloud Composer",
+        "Do you support Azure Blob Storage",
+        "Do you support Azure Cache for Redis",
+        "Do you support Azure PostgreSQL Flexible Server",
+        "Do you support Firebase",
+        "Do you support GKE as a destination",
+        "Do you support Outlook as a destination",
+        "Do you support YouTube as a source",
+        "Do you support Microsoft Lists",
+        "Do you support Cloud KMS",
+        "Do you support Azure Synapse Link",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

@@ -1006,6 +1006,85 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("cloud_composer", "airflow")),
     (re.compile(
+        r"\bazure\s+blob\b"
+        r"|\bblob\s+storage\b",
+        re.I,
+    ),
+     ("azure_blob", "adls")),
+    (re.compile(
+        r"\bazure\s+cache\s+for\s+redis\b"
+        r"|\bazure\s+redis\b",
+        re.I,
+    ),
+     ("azure_redis", "redis")),
+    (re.compile(
+        r"\bflexible\s+server\b"
+        r"|\bazure\s+postgresql\s+flexible\b",
+        re.I,
+    ),
+     ("azure_flexible_server", "postgresql")),
+    (re.compile(r"\bfirebase\b", re.I), ("firebase", "firebase_ready", "fireba")),
+    (re.compile(r"\bfirestore\b", re.I), ("firestore",)),
+    (re.compile(r"\bbigtable\b", re.I), ("bigtable",)),
+    (re.compile(r"\bdataproc\b", re.I), ("dataproc",)),
+    (re.compile(
+        r"\bentra\s+pim\b"
+        r"|\bprivileged\s+identity\s+management\b",
+        re.I,
+    ),
+     ("entra_pim",)),
+    (re.compile(r"\bgke\b|\bgoogle\s+kubernetes\b", re.I), ("gke",)),
+    (re.compile(r"\boutlook\b", re.I), ("outlook",)),
+    (re.compile(r"\byoutube\b", re.I), ("youtube",)),
+    (re.compile(r"\bgoogle\s+ads\b", re.I), ("google_ads",)),
+    (re.compile(r"\bgoogle\s+drive\b", re.I), ("google_drive",)),
+    (re.compile(r"\bgoogle\s+docs\b", re.I), ("google_docs",)),
+    (re.compile(r"\bgoogle\s+analytics\b|\bga4\b", re.I), ("google_analytics",)),
+    (re.compile(r"\bcloud\s+run\b", re.I), ("cloud_run",)),
+    (re.compile(r"\bstream\s+analytics\b", re.I), ("stream_analytics",)),
+    (re.compile(r"\bmicrosoft\s+lists\b", re.I), ("microsoft_lists",)),
+    (re.compile(r"\bexchange\s+online\b", re.I), ("exchange_online",)),
+    (re.compile(
+        r"\bgithub\s+enterprise\s+as\s+a\s+destination\b"
+        r"|\bgithub\s+enterprise\s+as\s+a\s+dest",
+        re.I,
+    ),
+     ("github_enterprise",)),
+    (re.compile(
+        r"\bbigquery\s+data\s+transfer\b"
+        r"|\bbq\s+dts\b",
+        re.I,
+    ),
+     ("bq_dts",)),
+    (re.compile(r"\blinked\s+dataset\b", re.I), ("bq_linked_dataset",)),
+    (re.compile(r"\bcloud\s+kms\b", re.I), ("cloud_kms",)),
+    (re.compile(r"\bapp\s+engine\b", re.I), ("app_engine",)),
+    (re.compile(r"\bdata\s+catalog\b", re.I), ("data_catalog",)),
+    (re.compile(r"\bcloud\s+build\b", re.I), ("cloud_build",)),
+    (re.compile(r"\bartifact\s+registry\b", re.I), ("artifact_registry",)),
+    (re.compile(r"\bcloud\s+functions?\b", re.I), ("cloud_functions",)),
+    (re.compile(r"\bazure\s+files\b", re.I), ("azure_files",)),
+    (re.compile(r"\blog\s+analytics\b", re.I), ("log_analytics",)),
+    (re.compile(
+        r"\bazure\s+ai\s+search\b"
+        r"|\bcognitive\s+search\b",
+        re.I,
+    ),
+     ("azure_ai_search",)),
+    (re.compile(
+        r"\bazure\s+analysis\s+services\b"
+        r"|\bssas\b",
+        re.I,
+    ),
+     ("analysis_services",)),
+    (re.compile(
+        r"\bcloud\s+sql\s+auth\s+proxy\b"
+        r"|\bcloud\s+sql\s+proxy\b",
+        re.I,
+    ),
+     ("cloud_sql_auth_proxy",)),
+    (re.compile(r"\bsynapse\s+link\b", re.I), ("synapse_link",)),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -1781,7 +1860,7 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     # Excel Online is not the file-format list.
     (
         re.compile(r"\bexcel\s+online\b|\bexcel\s+365\b", re.I),
-        ("format", "csv", "parquet", "xlsx"),
+        ("format", "csv", "parquet", "xlsx", "exchange"),
     ),
     # IAM assume-role is not Private Link and not an RBAC role count.
     (
@@ -1885,6 +1964,106 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bcloud\s+composer\b", re.I),
         ("azure", "sql", "cloud_sql"),
+    ),
+    (
+        re.compile(r"\bflexible\s+server\b|\bazure\s+postgresql\s+flexible\b", re.I),
+        ("cloud", "sql", "sqlserver"),
+    ),
+    (
+        re.compile(r"\bgke\b|\bgoogle\s+kubernetes\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(r"\boutlook\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(r"\byoutube\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+ads\b", re.I),
+        ("pubsub", "bigquery"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+drive\b|\bgoogle\s+docs\b|\bgoogle\s+analytics\b", re.I),
+        ("pubsub",),
+    ),
+    (
+        re.compile(r"\bcloud\s+run\b", re.I),
+        ("dataflow", "pubsub"),
+    ),
+    (
+        re.compile(r"\bstream\s+analytics\b", re.I),
+        ("cosmos", "mongo", "preimage"),
+    ),
+    (
+        re.compile(r"\bmicrosoft\s+lists\b", re.I),
+        ("team", "webhook"),
+    ),
+    (
+        re.compile(r"\bexchange\s+online\b", re.I),
+        ("excel", "workbook"),
+    ),
+    (
+        re.compile(r"\bgithub\s+enterprise\s+as\s+a\s+destination\b", re.I),
+        ("actions", "airflow"),
+    ),
+    (
+        re.compile(r"\bbigquery\s+data\s+transfer\b|\bbq\s+dts\b", re.I),
+        ("service_account", "credential"),
+    ),
+    (
+        re.compile(r"\blinked\s+dataset\b", re.I),
+        ("openlineage", "lineage"),
+    ),
+    (
+        re.compile(r"\bcloud\s+kms\b", re.I),
+        ("byok", "wrap", "secret"),
+    ),
+    (
+        re.compile(r"\bapp\s+engine\b", re.I),
+        ("allowlist", "cidr", "vanity"),
+    ),
+    (
+        re.compile(r"\bdata\s+catalog\b", re.I),
+        ("iceberg", "merge", "upsert"),
+    ),
+    (
+        re.compile(r"\bcloud\s+build\b", re.I),
+        ("chromium", "firefox", "safari", "browser"),
+    ),
+    (
+        re.compile(r"\bartifact\s+registry\b", re.I),
+        ("schema", "registry", "kafka"),
+    ),
+    (
+        re.compile(r"\bcloud\s+functions?\b", re.I),
+        ("cloud", "sql"),
+    ),
+    (
+        re.compile(r"\bazure\s+files\b", re.I),
+        ("synapse",),
+    ),
+    (
+        re.compile(r"\blog\s+analytics\b", re.I),
+        ("theater", "job", "tab"),
+    ),
+    (
+        re.compile(r"\bazure\s+ai\s+search\b|\bcognitive\s+search\b", re.I),
+        ("openai", "hybrid"),
+    ),
+    (
+        re.compile(r"\bazure\s+analysis\s+services\b|\bssas\b", re.I),
+        ("service_bus", "bus"),
+    ),
+    (
+        re.compile(r"\bcloud\s+sql\s+auth\s+proxy\b|\bcloud\s+sql\s+proxy\b", re.I),
+        ("driver",),
+    ),
+    (
+        re.compile(r"\bsynapse\s+link\b", re.I),
+        ("warehouse", "driver"),
     ),
     # Bare Private Link is not Job Theater.
     (
