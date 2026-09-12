@@ -356,3 +356,20 @@ def test_the_head_of_the_noun_phrase_is_checked_and_not_only_the_first_word():
     assert "formats" in _PLATFORM_NOUNS
     assert "file" not in _PLATFORM_NOUNS
     assert parse_aggregation_request("count file formats") is None
+
+
+def test_the_operators_own_warehouse_is_a_scope_and_not_the_catalog():
+    """Only the plural belongs to the catalog.
+
+    Rejecting the singular too cost "how many datasets in the warehouse" its
+    live read: with ``in the warehouse`` read as a catalog question there was
+    nothing left to count. The definite singular names the operator's store.
+    """
+    from src.ai.copilot.aggregate_tools import _PLATFORM_NOUNS, parse_aggregation_request
+
+    assert "warehouses" in _PLATFORM_NOUNS
+    assert "warehouse" not in _PLATFORM_NOUNS
+    assert parse_aggregation_request("how many warehouses do you support") is None
+    scoped = parse_aggregation_request("how many datasets in the warehouse")
+    assert scoped is not None
+    assert scoped.table == "warehouse", scoped

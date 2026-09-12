@@ -90,8 +90,12 @@ _PLATFORM_NOUNS = frozenset({
     # sources on Demo Orders", where the operator really does mean a table of
     # that name, still reaches the aggregator.
     "source", "sources", "destination", "destinations",
-    "format", "formats", "engine", "engines", "warehouse", "warehouses",
+    "format", "formats", "engine", "engines",
     "role", "roles", "gate", "gates", "mode", "modes",
+    # Plural only. "How many warehouses do you support" asks what the catalog
+    # carries; "how many datasets in the warehouse" is the operator naming
+    # their own store as the scope of a live read.
+    "warehouses",
 })
 
 
