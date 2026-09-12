@@ -40,6 +40,7 @@ from src.ai.rag.lexical_index import identifier_shingles, normalize  # noqa: E40
 from src.ai.rag.product_docs import (  # noqa: E402
     MAX_SECTION_CHARS,
     ProductDocHit,
+    _COUNTING_TITLE_BONUS,
     _ROLE_MATRIX_DOC,
     _section_intent_bonus,
     _select_covering,
@@ -504,6 +505,84 @@ def test_every_composed_answer_cites_where_it_came_from():
     assert "Preflight gates explained" in answer
 
 
+
+# --- a count is published under a heading that asks for one ------------------
+#
+# ``count`` had no branch of its own, so it fell into the definitional family
+# and paid "Core gates (before write)" the +3.0 its nine named cards earn for a
+# definition. G1 reads "Source readable", which was enough for "how many
+# sources can you connect to" to lead with a gate description while the passage
+# that states "30 sources and 30 destinations" was not even in the evidence
+# window.
+
+
+def _counting_chunk():
+    """The generated passage whose heading asks how many there are."""
+    for chunk in retrieval_passages():
+        if (chunk.section_title or "").strip().lower().startswith("how many"):
+            return chunk
+    raise AssertionError("no counting passage in the corpus")
+
+
+def _gates_chunk():
+    for chunk in retrieval_passages():
+        if "core gates" in (chunk.section_title or "").strip().lower():
+            return chunk
+    raise AssertionError("no core-gates passage in the corpus")
+
+
+def test_a_count_question_prefers_the_heading_that_publishes_a_number():
+    question = analyze_query("how many connectors do you support")
+    assert question.ask == "count", question.ask
+    assert _section_intent_bonus(_counting_chunk(), question) == pytest.approx(
+        _COUNTING_TITLE_BONUS
+    )
+
+
+def test_a_count_question_no_longer_pays_the_gate_list_a_definition_bonus():
+    """The measured defect, stated as the prior that caused it."""
+    question = analyze_query("how many sources can you connect to")
+    assert question.ask == "count", question.ask
+    assert _section_intent_bonus(_gates_chunk(), question) <= 0.0
+
+
+def test_the_gate_list_keeps_its_bonus_for_the_asks_that_earned_it():
+    """Enumeration and definition are what the nine named cards answer."""
+    gates = _gates_chunk()
+    for question in ("what are the preflight gates", "what is a preflight gate"):
+        analysis = analyze_query(question)
+        assert analysis.ask in {"enumeration", "definition"}, analysis.ask
+        assert _section_intent_bonus(gates, analysis) > 0.0, question
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "how many sources can you connect to",
+        "how many file formats can you read",
+        "how many connectors do you support",
+        "how many connectors are live",
+        "how many sync modes are there",
+        "how many roles are there",
+        # Known gap, measured rather than assumed: "how many destinations do
+        # you support" still opens from the transfer wizard. The counting
+        # passage is rank 1 for it at a retrieval depth of 24 and outside the
+        # window at 12, and the served limit is 4 — so the fusion normalization
+        # is depth-sensitive for a one-term question, which is a wider change
+        # than this prior.
+    ],
+)
+def test_a_cardinality_question_leads_with_a_number(question):
+    """On the served evidence window, which is four passages, not the default.
+
+    Reaching the passage is not enough for a count: the number has to be in the
+    sentence the operator reads first.
+    """
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer(question, limit=4)) or "").split()
+    )
+    lead = body.split(". ")[0]
+    assert re.search(r"\b\d[\d,]*\b", lead), lead[:220]
 
 # --- what counts as answering "how many" -------------------------------------
 

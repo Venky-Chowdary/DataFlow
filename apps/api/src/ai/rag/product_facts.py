@@ -691,10 +691,14 @@ def _connector_catalog_section() -> GeneratedSection | None:
         "credentials stay on the server.",
     ]
     if databases:
+        # Counted in the same sentence that lists them, from the same tuple, so
+        # the number cannot disagree with the list an operator can see. Asked
+        # "how many file formats can you read", the answer opened with the
+        # format list and never said how many there were — the list is the
+        # right sentence, it just made the operator count it themselves.
         lines.append(
-            "Database and warehouse engines the transfer engine dispatches on: "
-            + ", ".join(databases)
-            + "."
+            f"Database and warehouse engines the transfer engine dispatches on, "
+            f"{len(databases)} of them: " + ", ".join(databases) + "."
         )
         lines.append(
             "A warehouse destination such as bigquery, snowflake or databricks is "
@@ -703,7 +707,10 @@ def _connector_catalog_section() -> GeneratedSection | None:
             "using it in a transfer."
         )
     if files:
-        lines.append("File and document formats it can read or write: " + ", ".join(files) + ".")
+        lines.append(
+            f"File and document formats it can read or write, {len(files)} of "
+            f"them: " + ", ".join(files) + "."
+        )
     lines.append(
         "The catalog tile count is not the same as the number of transfer-ready "
         "drivers; a tile is transfer-live only when it carries transfer-ready "
@@ -798,9 +805,88 @@ def _catalog_count_section() -> GeneratedSection | None:
     ]
     return GeneratedSection(
         doc_title="Connections & engines",
-        section_title="How many connectors are transfer-ready",
+        # The heading names all three things the section counts. Titled only
+        # "How many connectors are transfer-ready" it answered "how many
+        # sources can you connect to" and "how many destinations do you
+        # support" — both stated in its last sentence — from the transfer
+        # wizard instead, because those two words appear once here and on every
+        # step label there, and the heading prior had nothing to weigh against
+        # that.
+        section_title=(
+            "How many connectors, sources and destinations are transfer-ready"
+        ),
         text="\n".join(lines),
         source_module="services/catalog_service.py",
+        category="connectors",
+    )
+
+
+def _inventory_count_section() -> GeneratedSection | None:
+    """How many of each enumerable thing there are — its own section, as the rule says.
+
+    The corpus enumerates and does not count. "How many sync modes are there"
+    opened with "A sync mode says what the engine reads and how it writes" and
+    left the operator to count nine paragraphs; "how many roles are there"
+    opened with "Datawrap authorization is role-based".
+
+    Counting them inside the sections that list them was measured first and was
+    worse. A count sentence at the front of the sync-mode grid took a slot in
+    the six-sentence answer, and "what is change data capture" — whose answer
+    is one of those paragraphs — stopped mentioning CDC at all. One section per
+    question an operator asks is the rule this corpus already follows, and it
+    is the rule for the same reason here.
+
+    Short on purpose, for the reason ``_catalog_count_section`` is short: BM25
+    length normalization decides whether a passage ranks for its own question,
+    and this one has to beat every passage that merely uses the noun.
+    """
+    counts: list[str] = []
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+
+        described = [m for m in CANONICAL_SYNC_MODES if _SYNC_MODE_BEHAVIOUR.get(m)]
+        if described:
+            counts.append(f"{len(described)} sync modes")
+    except Exception:
+        pass
+    try:
+        from services.rbac import role_names
+
+        roles = list(role_names())
+        if roles:
+            counts.append(f"{len(roles)} roles ({', '.join(roles)})")
+    except Exception:
+        pass
+    try:
+        import registry
+
+        formats = [str(getattr(f, "value", f)) for f in getattr(registry, "FILE_FORMATS", ())]
+        engines = [str(getattr(d, "value", d)) for d in getattr(registry, "DATABASE_TYPES", ())]
+        if engines:
+            counts.append(f"{len(engines)} database and warehouse engines")
+        if formats:
+            counts.append(f"{len(formats)} file and document formats")
+    except Exception:
+        pass
+    if not counts:
+        return None
+
+    # One sentence, and it is the answer. A second sentence explaining that the
+    # numbers come from the registry took the lead away from the numbers
+    # themselves for "what are the roles in this product" — provenance belongs
+    # in ``source_module``, which is where the citation reads it from.
+    lines = [
+        "There are " + ", ".join(counts[:-1]) + f" and {counts[-1]}."
+        if len(counts) > 1
+        else f"There are {counts[0]}.",
+        "Connector totals are counted separately, because a catalog tile is "
+        "not a transfer-ready driver.",
+    ]
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="How many sync modes, roles, engines and formats there are",
+        text="\n".join(lines),
+        source_module="services/sync_cursor.py · services/rbac.py · registry.py",
         category="connectors",
     )
 
@@ -1281,6 +1367,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _row_ledger_section,
         _connector_catalog_section,
         _catalog_count_section,
+        _inventory_count_section,
         _aggregation_section,
         _quarantine_section,
         _job_phase_section,

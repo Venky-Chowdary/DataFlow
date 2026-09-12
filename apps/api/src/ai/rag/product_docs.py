@@ -409,6 +409,19 @@ _DEFINITIONAL_TITLE = (
     "what happens",
 )
 
+#: Headings that publish a number, for the ask that wants one.
+_COUNTING_TITLE = (
+    "how many",
+    "how much",
+)
+
+#: Swept over an 18-phrasing cardinality set and the 158-case answer audit.
+#: The knee is 2.0, where "how many sources can you connect to" flips from a
+#: preflight gate description to "30 sources and 30 destinations"; 2.0 through
+#: 9.0 are indistinguishable on both sets, so this sits above the knee with
+#: margin, and the audit is unchanged at 118 leading across the whole sweep.
+_COUNTING_TITLE_BONUS = 3.2
+
 #: The generated role matrix, whose every chunk is one role crossed with the
 #: verb list for that role. It therefore holds the vocabulary of nearly any
 #: operator question — "read the audit log", "start transfers", "cancel, retry
@@ -481,6 +494,7 @@ def _section_intent_bonus(
         return _ROLE_MATRIX_OFF_ASK
 
     title = (chunk.section_title or "").strip().lower()
+    counting = title.startswith(_COUNTING_TITLE)
     heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))
     on_subject = any(
         is_subject_term(term) and _covers(term, heading)
@@ -495,6 +509,23 @@ def _section_intent_bonus(
     ask = analysis.ask
 
     bonus = 0.0
+    if ask == "count":
+        # A count is published under a heading that asks for one. Left in the
+        # definitional family below, a count ask paid "Core gates (before
+        # write)" the +3.0 its nine named cards earn for a definition — and G1
+        # reads "Source readable", so "how many sources can you connect to" led
+        # with a gate description while the passage that states "30 sources and
+        # 30 destinations" was not even in the evidence window.
+        if counting:
+            bonus += _COUNTING_TITLE_BONUS
+        if is_procedure:
+            bonus -= 2.8
+        return bonus
+    # No mirrored penalty for a counting heading on the other asks. A -3.0 and
+    # a -6.0 were both measured and neither moved the cardinality set or the
+    # audit by a single case: the counting sections are one sentence long, so
+    # the corpus's one-section-per-question rule already keeps them in their
+    # lane without a constant to tune.
     if ask == "procedure":
         if is_procedure:
             bonus += 3.0

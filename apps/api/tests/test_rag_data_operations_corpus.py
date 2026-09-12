@@ -170,7 +170,7 @@ def test_the_tile_count_is_stated_as_tiles_and_the_planned_share_with_it() -> No
     from services.catalog_service import catalog_summary
 
     summary = catalog_summary()
-    text = _section("How many connectors are transfer-ready").text
+    text = _section("How many connectors, sources and destinations are transfer-ready").text
     assert f"{summary['catalog_tile_total']} connector tiles in total" in text
     assert f"{summary['planned']} are planned" in text
     assert "the overclaim this product refuses to make" in text
@@ -188,7 +188,7 @@ def test_the_counts_are_their_own_section_under_their_own_question() -> None:
     """
     titles = {section.section_title for section in generated_sections()}
     assert "Which engines you can connect" in titles
-    assert "How many connectors are transfer-ready" in titles
+    assert "How many connectors, sources and destinations are transfer-ready" in titles
 
 
 def test_the_count_section_stays_short_enough_to_rank_for_its_own_question() -> None:
@@ -199,7 +199,7 @@ def test_the_count_section_stays_short_enough_to_rank_for_its_own_question() -> 
     "how many connectors do you support" — below three sections that say
     nothing about counts — and the Pilot retrieves four, so it was cut off.
     """
-    text = _section("How many connectors are transfer-ready").text
+    text = _section("How many connectors, sources and destinations are transfer-ready").text
     assert len(text.split()) < 120, f"{len(text.split())} words is back over the bar"
 
 
@@ -428,3 +428,89 @@ def test_an_aggregation_question_leads_with_the_aggregation_passage(
     body = compose_product_answer(answer)
     assert body.strip(), f"{question!r} composed nothing"
     assert _AGGREGATE_SECTION in body, body[:300]
+
+
+# --------------------------------------------------------------------------
+# The corpus enumerates; now it also counts
+# --------------------------------------------------------------------------
+
+_INVENTORY_SECTION = "How many sync modes, roles, engines and formats there are"
+
+
+def test_every_count_is_read_from_the_registry_that_enforces_it() -> None:
+    """A retyped number is how documentation falls behind the product."""
+    from services.rbac import role_names
+    from services.sync_cursor import CANONICAL_SYNC_MODES
+    from src.ai.rag.product_facts import _SYNC_MODE_BEHAVIOUR
+
+    text = _section(_INVENTORY_SECTION).text
+    modes = [m for m in CANONICAL_SYNC_MODES if _SYNC_MODE_BEHAVIOUR.get(m)]
+    assert f"{len(modes)} sync modes" in text
+    assert f"{len(list(role_names()))} roles" in text
+
+
+def test_the_counts_keep_the_tile_caveat_off_the_driver_number() -> None:
+    """A catalog tile is not a transfer-ready driver, and this section says so."""
+    text = _section(_INVENTORY_SECTION).text.lower()
+    assert "catalog tile is not a transfer-ready driver" in text
+
+
+def test_the_counting_section_is_one_sentence_of_answer() -> None:
+    """A second sentence of provenance took the lead away from the numbers.
+
+    Measured: with "Each number is counted from the registry the engine
+    dispatches on…" in the passage, "what are the roles in this product" opened
+    with that sentence instead of the one naming the roles, and the audit lost
+    a case to it. Provenance belongs in ``source_module``, which is what the
+    citation renders.
+    """
+    section = _section(_INVENTORY_SECTION)
+    assert len(section.text.split()) < 60, section.text
+    assert "counted from the registry" not in section.text
+    assert section.source_module
+
+
+def test_counting_them_inside_the_listing_sections_was_the_worse_option() -> None:
+    """The sections that enumerate must not also open with a total.
+
+    A count sentence at the front of the sync-mode grid took a slot in the
+    six-sentence answer, and "what is change data capture" — whose answer is
+    one of those paragraphs — stopped mentioning CDC at all.
+    """
+    for title in ("What each sync mode does", "What each role can do"):
+        text = _section(title).text
+        assert not text.lstrip().startswith("There are"), title
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("how many sync modes are there", "sync modes"),
+        ("what is the number of sync modes", "sync modes"),
+        ("how many roles are there", "roles"),
+    ],
+)
+def test_a_cardinality_question_is_led_by_the_count(
+    question: str, expected: str
+) -> None:
+    """Named-fixture floor. Each of these opened with a definition before."""
+    import re
+
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer(question, limit=4)) or "").split()
+    )
+    lead = body.split(". ")[0]
+    assert re.search(r"\b\d[\d,]*\b", lead), lead[:200]
+    assert expected in lead, lead[:200]
+
+
+def test_change_data_capture_still_leads_with_the_capture_answer() -> None:
+    """The case the in-place counts cost, kept as the guard that it did."""
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer("what is change data capture", limit=4)) or "").split()
+    )
+    assert "capture changes" in body.split(". ")[0], body[:200]
