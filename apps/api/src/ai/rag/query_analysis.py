@@ -112,7 +112,13 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"\b(?:difference\s+between|vs\.?|versus|compared\s+to|"
             r"which\s+(?:one\s+)?(?:should|is\s+better)|"
-            r"better\s+than|instead\s+of)\b",
+            r"better\s+than|instead\s+of)\b"
+            # The noun sits between the interrogative and the verb — "which
+            # *sync mode* should I pick", "which *mode* is better for a big
+            # table". Without it the enumeration rule below claimed both, and a
+            # request for a recommendation was answered with the whole list.
+            r"|\bwhich\s+(?:\w+\s+){1,3}"
+            r"(?:should|is\s+better|works?\s+better|do\s+you\s+recommend)\b",
             re.I,
         ),
     ),
@@ -123,6 +129,38 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"|\b(?:fail|failed|failing|failure|error|errors|broke|broken|stuck|"
             r"blocked|refused|rejected|mismatch|crash|crashed|timeout|timed\s+out)\b"
             r"|\bnot\s+working\b|\bwhat\s+went\s+wrong\b",
+            re.I,
+        ),
+    ),
+    (
+        # A request to be told what there is. Ahead of ``procedure`` and
+        # ``capability`` because the verb an operator hangs a listing question
+        # on is usually one of theirs: "which engines can I *connect* to" was a
+        # procedure and opened on the steps for connecting Cursor to MCP, and
+        # "what sync modes do you *support*" was a capability and opened on the
+        # definition of a sync mode instead of naming one.
+        #
+        # The head noun has to be **plural**. The old rule accepted the
+        # singular, which made "what is a sync mode" an enumeration — a
+        # definition answered with a list — and the interrogative has to open
+        # the question, so "how do I list my connectors" stays a procedure.
+        "enumeration",
+        re.compile(
+            r"^\s*(?:so\s+)?(?:what|which|list|show\s+me|tell\s+me)\b[^?]*?\b"
+            r"(?:modes|options|types|gates|roles|connectors|connections|kinds|"
+            r"policies|phases|steps|permissions|engines|formats|destinations|"
+            r"sources|warehouses|databases|guarantees|limits)\b"
+            r"|^\s*(?:please\s+)?(?:list|show\s+me)\s+(?:all\s+)?"
+            r"(?:the\s+|my\s+|your\s+)?"
+            r"(?:modes|gates|roles|options|types|connectors|policies)\b"
+            # "Which gate blocks a lossy type change" picks one member out of a
+            # set, and the answer is in the same list as the whole set — so the
+            # singular is allowed here, where ``which`` opens the question and
+            # cannot be introducing a definition the way "what is" does.
+            r"|^\s*which\s+(?:\w+\s+){0,3}"
+            r"(?:mode|option|type|gate|role|connector|policy|phase|step|"
+            r"permission|engine|format)\b"
+            r"|\ball\s+(?:the\s+)?(?:modes?|gates?|roles?|options?|types?)\b",
             re.I,
         ),
     ),
@@ -142,17 +180,6 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"^\s*(?:can|could|does|do|is|are|will|would|should)\s+"
             r"(?:you|i|we|it|this|datawrap|dataflow|pilot|the\s+\w+)\b"
             r"|\bdo\s+you\s+support\b|\bis\s+it\s+possible\b|\bsupported\b",
-            re.I,
-        ),
-    ),
-    (
-        "enumeration",
-        re.compile(
-            r"\b(?:list|which|what|explain|describe|show|how\s+many)\s+(?:\w+\s+){0,3}"
-            r"(?:modes?|options?|types?|gates?|roles?|connectors?|kinds?|"
-            r"policies|policys?|phases?|steps?|permissions?|"
-            r"are\s+there|do\s+you\s+support|are\s+available)\b"
-            r"|\ball\s+(?:the\s+)?(?:modes?|gates?|roles?|options?|types?)\b",
             re.I,
         ),
     ),

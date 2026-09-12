@@ -121,6 +121,64 @@ def test_a_cardinality_question_is_not_the_enumeration_it_looks_like():
     assert classify_ask("how do I add a connector") == "procedure"
 
 
+# --- a listing question, whatever verb the operator hung it on ---------------
+#
+# The verb an operator reaches for when asking to be told what there is belongs
+# to another ask. "What sync modes do you *support*" was a ``capability`` and
+# opened with the definition of a sync mode without naming one; "which engines
+# can I *connect* to" was a ``procedure`` and opened with the steps for
+# connecting Cursor to the MCP server.
+
+LISTING_QUESTIONS = [
+    "what sync modes do you support",
+    "which sync modes do you support",
+    "which engines can I connect to",
+    "what connectors do you support",
+    "what file formats do you support",
+    "which destinations can I write to",
+    "what schema change policies are there",
+    "what validation modes are there",
+    "what roles are there",
+    # Singular, but ``which`` opens it: picking one member out of a set is
+    # answered from the same list as the whole set.
+    "which preflight gate blocks a lossy type change",
+    "which gate blocks a lossy change",
+]
+
+#: Questions the listing rule must not claim, and what they actually ask.
+NOT_LISTING = [
+    # A definition. The old rule accepted a singular head noun, so "what is a
+    # sync mode" was an enumeration — a definition answered with a list.
+    ("what is a sync mode", "definition"),
+    ("what is a preflight gate", "definition"),
+    # A recommendation. The noun sits between the interrogative and the verb,
+    # which the comparison rule did not allow, so the listing rule took both
+    # and answered "which should I use" with all nine modes.
+    ("which mode should I pick for a nightly load", "comparison"),
+    ("which sync mode is better for a big table", "comparison"),
+    ("which connector do you recommend for postgres", "comparison"),
+    # Steps, not an inventory.
+    ("how do I list my connectors", "procedure"),
+    ("how do I connect a postgres database", "procedure"),
+    # A number, not the names.
+    ("how many roles are there", "count"),
+    ("how many sync modes are there", "count"),
+    # Something is wrong, which is a different question from what exists.
+    ("what gates failed on my transfer", "diagnosis"),
+    ("why did my gates fail", "diagnosis"),
+]
+
+
+@pytest.mark.parametrize("question", LISTING_QUESTIONS)
+def test_a_request_to_be_told_what_there_is_is_an_enumeration(question):
+    assert classify_ask(question) == "enumeration", question
+
+
+@pytest.mark.parametrize(("question", "ask"), NOT_LISTING)
+def test_the_listing_rule_claims_only_listing_questions(question, ask):
+    assert classify_ask(question) == ask, question
+
+
 def test_a_comparison_frame_carries_no_subject_signal():
     """"Difference" and "between" are the frame, not the subject.
 
