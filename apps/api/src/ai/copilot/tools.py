@@ -1417,6 +1417,10 @@ class DataPilotTools:
                     "Rewrite quarantine rows in place from chat "
                     "(I open Transfer Studio Fix with your Confirm)",
                     "Delete connectors, jobs, or data",
+                    "Run dbt Cloud or use dbt as the transfer engine "
+                    "(transform projects can export a dbt starter pack)",
+                    "Open an SSH tunnel or bastion in front of a database "
+                    "(SFTP is a file connector)",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [

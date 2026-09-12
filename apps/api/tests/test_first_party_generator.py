@@ -90,11 +90,15 @@ def test_rice_is_an_unrelated_subject() -> None:
     )
 
 
-def test_align_pairs_do_not_teach_dbt_or_ssh() -> None:
-    blob = " ".join(f"{p.query} {p.gold}" for p in align_pairs()).lower()
-    assert "dbt" not in blob
-    assert "ssh" not in blob
-    assert "tunnel" not in blob
+def test_align_pairs_only_name_dbt_and_ssh_as_honest_absences() -> None:
+    for pair in align_pairs():
+        blob = f"{pair.query} {pair.gold}".lower()
+        if "dbt" in blob:
+            assert "dbt cloud" in pair.gold.lower()
+            assert "wal_level" not in pair.gold.lower()
+        if "ssh" in blob or "bastion" in pair.query.lower():
+            assert "ssh tunnel" in pair.gold.lower()
+            assert "wal_level" not in pair.gold.lower()
 
 
 @pytest.fixture

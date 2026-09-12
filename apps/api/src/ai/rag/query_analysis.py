@@ -433,6 +433,19 @@ def is_cdc_delivery_question(text: str) -> bool:
 # Multi-word operator phrases that only mean something together. Matched on the
 # normalized question before single-term expansion.
 _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    # Competitor-adjacent asks must not inherit CDC / Studio vocabulary.
+    # Without these, "SSH tunnel to postgres" opened Query Playground and
+    # wal_level, and "dbt Cloud" opened a connector-credentials step.
+    (re.compile(r"\bdbt(?:\s+cloud)?\b", re.I),
+     ("dbt", "complement", "export")),
+    (re.compile(
+        r"\bssh\s+tunnels?\b"
+        r"|\bbastion(?:\s+host)?\b"
+        r"|\bjump\s+hosts?\b"
+        r"|\bconnect through (?:an?\s+)?(?:ssh|bastion|tunnel)\b",
+        re.I,
+    ),
+     ("ssh", "tunnel", "bastion")),
     (re.compile(r"\bbad\s+(?:row|record|data)s?\b", re.I),
      ("quarantine", "reject", "invalid", "dlq")),
     (re.compile(r"\b(?:row|record)s?\s+(?:ledger|accounting|balance)\b", re.I),

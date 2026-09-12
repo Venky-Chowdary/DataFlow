@@ -60,6 +60,8 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"gate", "preflight", "validat", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9"}),
     frozenset({"iceberg", "mor", "cow", "merge"}),
     frozenset({"replica", "identity", "tombston", "delet"}),
+    frozenset({"dbt", "complement", "export"}),
+    frozenset({"ssh", "tunnel", "bastion", "jump"}),
 )
 
 

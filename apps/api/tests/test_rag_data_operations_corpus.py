@@ -842,6 +842,22 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "do we have our own llm",
             ("own local engine",),
         ),
+        (
+            "can I use dbt with datawrap?",
+            ("does not run dbt", "dbt cloud"),
+        ),
+        (
+            "do you support dbt Cloud?",
+            ("does not run dbt",),
+        ),
+        (
+            "do you open an SSH tunnel to postgres?",
+            ("does not open ssh", "tunnel"),
+        ),
+        (
+            "can I connect through a bastion host?",
+            ("does not open ssh", "bastion"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -898,6 +914,8 @@ def test_the_how_to_passages_are_generated() -> None:
         "What Query Playground is",
         "How Datawrap differs from Airbyte and Fivetran",
         "Does Pilot use ChatGPT or a third-party LLM",
+        "Does Datawrap run dbt Cloud",
+        "Does Datawrap open SSH tunnels",
         "Where bad rows end up",
         "How the snapshot hands off to the CDC stream",
         "What happens to a delete in CDC",

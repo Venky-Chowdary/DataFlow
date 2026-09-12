@@ -2149,6 +2149,42 @@ def _query_playground_section() -> GeneratedSection:
     )
 
 
+def _dbt_capability_section() -> GeneratedSection | None:
+    """dbt Cloud is not the transfer engine — from export honesty."""
+    try:
+        from ..first_party.capability_contract import dbt_card
+    except Exception:
+        return None
+    card = dbt_card()
+    if card is None:
+        return None
+    return GeneratedSection(
+        doc_title="What Datawrap is",
+        section_title=card.title,
+        text=card.text,
+        source_module=card.source_module,
+        category=card.category,
+    )
+
+
+def _ssh_tunnel_capability_section() -> GeneratedSection | None:
+    """SSH tunnels are not on the Postgres connect path."""
+    try:
+        from ..first_party.capability_contract import ssh_tunnel_card
+    except Exception:
+        return None
+    card = ssh_tunnel_card()
+    if card is None:
+        return None
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title=card.title,
+        text=card.text,
+        source_module=card.source_module,
+        category=card.category,
+    )
+
+
 def _pilot_engine_section() -> GeneratedSection | None:
     """First-party copy-grounded engine is the default brain; vendors stay opt-in.
 
@@ -2458,6 +2494,8 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _cancel_transfer_section,
         _query_playground_section,
         _pilot_engine_section,
+        _dbt_capability_section,
+        _ssh_tunnel_capability_section,
         _competitor_wedge_section,
         _connect_postgres_section,
         _rest_api_section,

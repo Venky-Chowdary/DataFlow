@@ -31,6 +31,9 @@ _CHAT_PREFIXES: tuple[str, ...] = (
     "honestly ",
     "idk but ",
     "what about this: ",
+    "can we ",
+    "does this product support ",
+    "is there support for ",
 )
 
 # Surface substitutions that do not add a new product. Each left-hand side
@@ -60,6 +63,12 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("gotta have logical wal for pg cdc", "do i need wal_level logical"),
     ("where do bad rows go", "where do bad rows end up"),
     ("is _df_lsn how you skip dupes", "is cdc exactly-once or at-least-once"),
+    ("can I use dbt with datawrap", "does datawrap run dbt cloud"),
+    ("do you support dbt cloud", "does datawrap run dbt cloud"),
+    ("can we run our dbt models after the load", "does datawrap run dbt cloud"),
+    ("do you open an ssh tunnel to postgres", "does datawrap open ssh tunnels"),
+    ("can I connect through a bastion host", "does datawrap open ssh tunnels"),
+    ("do you support ssh tunnels", "does datawrap open ssh tunnels"),
 )
 
 

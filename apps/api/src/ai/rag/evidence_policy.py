@@ -153,6 +153,9 @@ def subject_aliases() -> frozenset[str]:
             "backfill",
             "iceberg",
             "chatgpt",
+            "dbt",
+            "ssh",
+            "bastion",
         }
     )
     try:
