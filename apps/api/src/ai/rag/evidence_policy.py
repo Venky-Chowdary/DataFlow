@@ -185,6 +185,19 @@ def subject_aliases() -> frozenset[str]:
             "session",
             "unity",
             "mssql",
+            "redshift",
+            "synapse",
+            "oracle",
+            "mongodb",
+            "postgresql",
+            "collision",
+            "hosted",
+            "gcp",
+            "workload_identity",
+            "workload",
+            "column_lineage",
+            "sharing",
+            "goldengate",
         }
     )
     try:

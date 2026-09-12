@@ -241,7 +241,7 @@
       "category": "Connectors",
       "section_id": "native",
       "section_title": "Native drivers & SQLAlchemy",
-      "text": "Native drivers & SQLAlchemy\n**PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **Redshift**, **S3**, **CSV**, **JSON**, and more ship with upsert and incremental where supported. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers."
+      "text": "Native drivers & SQLAlchemy\n**PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV**, and **JSON** ship with upsert and incremental where supported. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers."
     },
     {
       "id": "help-pipelines#overview",

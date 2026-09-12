@@ -2378,15 +2378,20 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
     cards = _core_gate_cards()
     if len(cards) < 2:
         return None
-    first = cards[0].split(" — ")[0].strip()
-    last = cards[-1].split(" — ")[0].strip()
+    def _gate_num(line: str) -> int:
+        digits = "".join(ch for ch in line[1:] if ch.isdigit())
+        return int(digits or 0)
+
+    ordered = sorted(cards, key=_gate_num)
+    first = ordered[0].split(" — ")[0].strip()
+    last = ordered[-1].split(" — ")[0].strip()
     return GeneratedSection(
         doc_title="Preflight gates explained",
         section_title="Which preflight gates run before a write",
         text=(
-            f"{first} through {last} are the {len(cards)} core preflight gates "
+            f"{first} through {last} are the {len(ordered)} core preflight gates "
             f"Validate runs before any write; G3 Schema contract is the one "
-            f"that blocks a lossy type change. " + " ".join(cards)
+            f"that blocks a lossy type change. " + " ".join(ordered)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",

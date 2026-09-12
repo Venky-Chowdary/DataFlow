@@ -126,6 +126,23 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support databricks as a destination", "do you support databricks as a destination"),
     ("can I use databricks unity catalog", "do you support databricks as a destination"),
     ("do you support delta lake", "do you support delta lake"),
+    ("do you support snowflake as a destination", "do you support snowflake as a destination"),
+    ("do you support oracle as a destination", "do you support oracle as a destination"),
+    ("do you support postgres as a destination", "do you support postgres as a destination"),
+    ("do you support mongodb", "do you support mongodb"),
+    ("do you support s3 as a destination", "do you support s3 as a destination"),
+    ("do you support redshift as a destination", "do you support redshift as a destination"),
+    ("can I land tables in redshift", "do you support redshift as a destination"),
+    ("do you support azure synapse", "do you support azure synapse"),
+    ("what happens on a unique key collision", "what happens on a unique key collision"),
+    ("what if two source rows have the same key", "what happens on a unique key collision"),
+    ("where is my data stored", "where is my data stored"),
+    ("do you support byok", "do you support byok"),
+    ("can I bring my own encryption key", "do you support byok"),
+    ("can I use a gcp service account", "can I use a gcp service account"),
+    ("can I use workload identity", "can I use workload identity"),
+    ("do you support private service connect", "does datawrap use aws privatelink"),
+    ("do you support column-level lineage", "do you support column-level lineage"),
 )
 
 

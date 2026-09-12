@@ -218,7 +218,9 @@ def test_composed_answer_quotes_the_sections_and_names_them():
 def test_definitional_preflight_ranks_core_gates_not_the_procedure():
     hits = product_doc_search("what are the preflight gates")
     assert hits
-    assert "core gates" in hits[0].chunk.section_title.lower()
+    title = hits[0].chunk.section_title.lower()
+    assert "core gates" in title or "preflight gates" in title
+    assert not title.startswith("procedure:")
     answer = compose_documented_answer(hits)
     assert "G1 " in answer
     assert "Where:" not in answer

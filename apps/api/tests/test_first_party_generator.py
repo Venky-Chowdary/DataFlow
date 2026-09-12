@@ -164,6 +164,30 @@ def test_upsert_merge_and_airbyte_pack_do_not_snap_to_neighbors() -> None:
         "can I set a custom domain",
         "do you support IP allowlists",
     )
+    assert introduces_unrelated_subjects(
+        "do you support Snowflake as a destination",
+        "does datawrap use snowflake secure sharing",
+    )
+    assert drops_distinctive_subjects(
+        "do you support Oracle as a destination",
+        "does datawrap embed oracle goldengate",
+    )
+    assert drops_distinctive_subjects(
+        "do you support Postgres as a destination",
+        "do i need wal_level logical",
+    )
+    assert drops_distinctive_subjects(
+        "can I use Workload Identity",
+        "does postgres cdc need replica identity full",
+    )
+    assert drops_distinctive_subjects(
+        "do you support Redshift as a destination",
+        "do you support BigQuery as a destination",
+    )
+    assert introduces_unrelated_subjects(
+        "where is my data stored",
+        "what a contract is",
+    )
 
 
 def test_rice_is_an_unrelated_subject() -> None:

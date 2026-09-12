@@ -138,9 +138,8 @@ def ssh_tunnel_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Does Datawrap open SSH tunnels",
         text=(
-            "Datawrap does not open SSH tunnels for database connections — "
-            "Postgres and MySQL take host, port, and credentials directly, "
-            "with no bastion or jump host on the connect path. "
+            "Datawrap does not open SSH tunnels — drivers take host, port, "
+            "and credentials with no bastion or jump host. "
             f"{sftp}"
         ),
         source_module="connectors/postgresql.py · test_postgresql",
@@ -161,8 +160,7 @@ def debezium_card() -> CapabilityCard | None:
         title="Does Datawrap embed Debezium",
         text=(
             "Datawrap does not embed Debezium, is not a Kafka Connect "
-            "replacement, and does not run Flink CDC as the capture engine "
-            "— native Postgres, MySQL, and Mongo CDC run without them. "
+            "replacement, and does not run Flink CDC as the capture engine. "
             "A thin optional topic-envelope bridge can consume an existing "
             "Connect-plus-Debezium feed; that bridge is not required for "
             "native CDC."
@@ -211,10 +209,10 @@ def privatelink_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Does Datawrap use AWS PrivateLink",
         text=(
-            "Datawrap does not ship AWS PrivateLink or VPC peering as a "
-            "connect option — database connections take host, port, and "
-            "credentials. "
-            "SSH tunnels are also not on that connect path."
+            "Datawrap does not ship AWS PrivateLink or GCP Private Service "
+            "Connect as a connect option — database connections take host, "
+            "port, and credentials. "
+            "VPC peering is also not on that connect path."
         ),
         source_module="connectors/postgresql.py · test_postgresql",
         category="connectors",
@@ -239,8 +237,7 @@ def goldengate_card() -> CapabilityCard:
     return CapabilityCard(
         title="Does Datawrap embed Oracle GoldenGate",
         text=(
-            "Datawrap does not embed Oracle GoldenGate — Oracle is a "
-            "database engine a transfer can connect to, and native CDC is "
+            "Datawrap does not embed Oracle GoldenGate — native CDC is "
             "Datawrap's own reader, not GoldenGate capture."
         ),
         source_module="apps/api/registry.py · DATABASE_TYPES",
@@ -272,9 +269,8 @@ def snowflake_sharing_card() -> CapabilityCard:
     return CapabilityCard(
         title="Does Datawrap use Snowflake Secure Sharing",
         text=(
-            "Datawrap does not implement Snowflake Secure Data Sharing — a "
-            "Snowflake destination is a warehouse connection (credentials, "
-            "Test, Save), not a share consumer or provider."
+            "Datawrap does not implement Snowflake Secure Data Sharing — "
+            "there is no share consumer or provider path."
         ),
         source_module="apps/api/registry.py · DATABASE_TYPES",
         category="connectors",
@@ -430,6 +426,73 @@ def databricks_is_transfer_ready() -> bool:
 def delta_lake_is_transfer_ready() -> bool:
     drivers = _transfer_ready_drivers()
     return bool(drivers & {"delta", "delta_lake"})
+
+
+def snowflake_is_transfer_ready() -> bool:
+    return "snowflake" in _transfer_ready_drivers()
+
+
+def oracle_is_transfer_ready() -> bool:
+    return "oracle" in _transfer_ready_drivers()
+
+
+def postgresql_is_transfer_ready() -> bool:
+    return "postgresql" in _transfer_ready_drivers()
+
+
+def mongodb_is_transfer_ready() -> bool:
+    return "mongodb" in _transfer_ready_drivers()
+
+
+def s3_is_transfer_ready() -> bool:
+    return "s3" in _transfer_ready_drivers()
+
+
+def redshift_is_transfer_ready() -> bool:
+    return bool(_transfer_ready_drivers() & {"redshift", "amazon_redshift"})
+
+
+def synapse_is_transfer_ready() -> bool:
+    return bool(
+        _transfer_ready_drivers() & {"synapse", "azure_synapse", "azuresynapse"}
+    )
+
+
+def bigquery_service_account_shipped() -> bool:
+    try:
+        from connectors.bigquery_conn import get_client
+    except Exception:
+        return False
+    return "service_account" in inspect.signature(get_client).parameters
+
+
+def source_duplicate_probe_shipped() -> bool:
+    try:
+        from services.source_duplicate_probe import probe_source_duplicate_keys
+        from services.destination_key_collision_probe import (
+            probe_destination_key_collisions,
+        )
+    except Exception:
+        return False
+    return callable(probe_source_duplicate_keys) and callable(
+        probe_destination_key_collisions
+    )
+
+
+def byok_wraps_connector_secrets() -> bool:
+    try:
+        from services import byok_key_manager
+    except Exception:
+        return False
+    return callable(getattr(byok_key_manager, "create_key", None))
+
+
+def gcp_workload_identity_shipped() -> bool:
+    return False
+
+
+def column_level_lineage_emitted() -> bool:
+    return False
 
 
 def scd1_is_canonical() -> bool:
@@ -619,7 +682,7 @@ def viewer_secrets_card() -> CapabilityCard | None:
         title="Can a viewer see secrets",
         text=(
             "A viewer cannot see secrets — SSO certificates, provider keys, "
-            "API keys, and BYOK stay behind workspace.manage. "
+            "and API keys stay behind workspace.manage. "
             "A viewer can read jobs, connectors, and audit events; YAML export "
             "does not include credentials."
         ),
@@ -705,8 +768,7 @@ def snowflake_key_pair_card() -> CapabilityCard | None:
         title="Can I connect Snowflake with a private key",
         text=(
             "Yes — Snowflake accepts key-pair auth: a private_key selects "
-            "auth_mode key_pair on the Snowflake (and SFTP) connect path. "
-            "That is a connector credential, not BYOK and not AWS PrivateLink."
+            "auth_mode key_pair on the Snowflake connect path."
         ),
         source_module="services/connector_auth.py · infer_auth_mode",
         category="connectors",
@@ -997,6 +1059,172 @@ def delta_lake_card() -> CapabilityCard | None:
     )
 
 
+def _ready_driver_card(title: str, name: str) -> CapabilityCard:
+    return CapabilityCard(
+        title=title,
+        text=(
+            f"Yes — {name} is a transfer-ready driver, so a transfer can "
+            f"use it as a source or a destination. "
+            "Catalog tile count is not the proof; unique_driver_types is."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def snowflake_destination_card() -> CapabilityCard | None:
+    if not snowflake_is_transfer_ready():
+        return None
+    return _ready_driver_card(
+        "Do you support Snowflake as a destination", "Snowflake"
+    )
+
+
+def oracle_destination_card() -> CapabilityCard | None:
+    if not oracle_is_transfer_ready():
+        return None
+    return _ready_driver_card("Do you support Oracle as a destination", "Oracle")
+
+
+def postgres_destination_card() -> CapabilityCard | None:
+    if not postgresql_is_transfer_ready():
+        return None
+    return _ready_driver_card(
+        "Do you support Postgres as a destination", "PostgreSQL"
+    )
+
+
+def mongodb_destination_card() -> CapabilityCard | None:
+    if not mongodb_is_transfer_ready():
+        return None
+    return _ready_driver_card("Do you support MongoDB", "MongoDB")
+
+
+def s3_destination_card() -> CapabilityCard | None:
+    if not s3_is_transfer_ready():
+        return None
+    return _ready_driver_card("Do you support S3 as a destination", "S3")
+
+
+def redshift_destination_card() -> CapabilityCard | None:
+    if redshift_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Redshift as a destination",
+        text=(
+            "Redshift is not a transfer-ready driver — unique_driver_types "
+            "does not include redshift. "
+            "A help list or catalog tile is not a live writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def synapse_destination_card() -> CapabilityCard | None:
+    if synapse_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Synapse",
+        text=(
+            "Azure Synapse is not a transfer-ready driver — "
+            "unique_driver_types does not include synapse. "
+            "A catalog tile is not a live writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def unique_key_collision_card() -> CapabilityCard | None:
+    if not source_duplicate_probe_shipped():
+        return None
+    return CapabilityCard(
+        title="What happens on a unique key collision",
+        text=(
+            "A unique key collision is blocked at Gate-9 when two source "
+            "rows share a key or the source probe finds duplicate keys, "
+            "and append also blocks when those keys already exist at the "
+            "destination. "
+            "Upsert updates the existing key instead of inserting a second row."
+        ),
+        source_module=(
+            "services/source_duplicate_probe.py · "
+            "services/destination_key_collision_probe.py"
+        ),
+        category="transfer",
+    )
+
+
+def data_location_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Where is my data stored",
+        text=(
+            "Datawrap does not host your table data — rows land in the "
+            "destination you connected. "
+            "Secrets stay in the connection store, not in the transfer YAML."
+        ),
+        source_module="services/connector_store.py · destination write path",
+        category="enterprise",
+    )
+
+
+def byok_card() -> CapabilityCard | None:
+    if not byok_wraps_connector_secrets():
+        return None
+    return CapabilityCard(
+        title="Do you support BYOK",
+        text=(
+            "Yes — Settings → Enterprise → BYOK wraps newly saved connector "
+            "secrets when a tenant key is active. "
+            "That is secret wrapping, not destination-table encryption."
+        ),
+        source_module="services/byok_key_manager.py · create_key",
+        category="enterprise",
+    )
+
+
+def gcp_service_account_card() -> CapabilityCard | None:
+    if not bigquery_is_transfer_ready() or not bigquery_service_account_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use a GCP service account",
+        text=(
+            "Yes — a GCP service account is a BigQuery connector credential: "
+            "service_account JSON on the BigQuery connect path."
+        ),
+        source_module="connectors/bigquery_conn.py · get_client",
+        category="connectors",
+    )
+
+
+def workload_identity_card() -> CapabilityCard | None:
+    if gcp_workload_identity_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I use Workload Identity",
+        text=(
+            "Datawrap does not ship GCP Workload Identity as a connect option."
+        ),
+        source_module="connectors/bigquery_conn.py · get_client",
+        category="connectors",
+    )
+
+
+def column_level_lineage_card() -> CapabilityCard | None:
+    if column_level_lineage_emitted():
+        return None
+    return CapabilityCard(
+        title="Do you support column-level lineage",
+        text=(
+            "Datawrap does not emit column-level lineage — events are run "
+            "and dataset grain."
+        ),
+        source_module="services/lineage_telemetry.py · emit_run_started",
+        category="proof",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -1042,6 +1270,19 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         sqlserver_card,
         databricks_destination_card,
         delta_lake_card,
+        snowflake_destination_card,
+        oracle_destination_card,
+        postgres_destination_card,
+        mongodb_destination_card,
+        s3_destination_card,
+        redshift_destination_card,
+        synapse_destination_card,
+        unique_key_collision_card,
+        data_location_card,
+        byok_card,
+        gcp_service_account_card,
+        workload_identity_card,
+        column_level_lineage_card,
     ):
         card = builder()
         if card is not None:

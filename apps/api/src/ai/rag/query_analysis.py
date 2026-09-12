@@ -741,6 +741,82 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bdelta\s+lake\b", re.I),
      ("delta",)),
     (re.compile(
+        r"\bredshift\b",
+        re.I,
+    ),
+     ("redshift",)),
+    (re.compile(
+        r"\bazure\s+synapse\b"
+        r"|\bsynapse\s+as\s+a\s+destination\b",
+        re.I,
+    ),
+     ("synapse",)),
+    (re.compile(
+        r"\bsnowflake\s+as\s+a\s+destination\b"
+        r"|\bdo\s+you\s+support\s+snowflake\b",
+        re.I,
+    ),
+     ("snowflake", "driver")),
+    (re.compile(
+        r"\boracle\s+as\s+a\s+destination\b"
+        r"|\bdo\s+you\s+support\s+oracle(?!\s+goldengate)\b",
+        re.I,
+    ),
+     ("oracle", "driver")),
+    (re.compile(
+        r"\bpostgres(?:ql)?\s+as\s+a\s+destination\b"
+        r"|\bdo\s+you\s+support\s+postgres(?:ql)?\b",
+        re.I,
+    ),
+     ("postgresql", "driver")),
+    (re.compile(
+        r"\bdo\s+you\s+support\s+mongodb\b"
+        r"|\bmongodb\s+as\s+a\s+(?:source|destination)\b",
+        re.I,
+    ),
+     ("mongodb", "driver")),
+    (re.compile(
+        r"\bs3\s+as\s+a\s+destination\b"
+        r"|\bdo\s+you\s+support\s+s3\b",
+        re.I,
+    ),
+     ("s3", "driver")),
+    (re.compile(
+        r"\bunique\s+key\s+collision\b"
+        r"|\bduplicate\s+keys?\b"
+        r"|\btwo\s+source\s+rows\b",
+        re.I,
+    ),
+     ("collision", "duplicate")),
+    (re.compile(
+        r"\bwhere\s+is\s+my\s+data\s+stored\b"
+        r"|\bwhere\s+do\s+you\s+store\s+my\s+data\b"
+        r"|\bdo\s+you\s+host\s+my\s+data\b",
+        re.I,
+    ),
+     ("hosted",)),
+    (re.compile(
+        r"\bworkload\s+identity\b",
+        re.I,
+    ),
+     ("workload_identity",)),
+    (re.compile(
+        r"\bprivate\s+service\s+connect\b",
+        re.I,
+    ),
+     ("privatelink",)),
+    (re.compile(
+        r"\bcolumn[\s-]level\s+lineage\b",
+        re.I,
+    ),
+     ("column_lineage",)),
+    (re.compile(
+        r"\bgcp\s+service\s+account\b"
+        r"|\bgoogle\s+service\s+account\b",
+        re.I,
+    ),
+     ("gcp", "bigquery")),
+    (re.compile(
         r"\bestuary\b"
         r"|(?<!custom\s)\bfivetran\b(?!\s+connector)(?!\s+pack)"
         r"|(?<!custom\s)\bairbyte\b(?!\s+connector)(?!\s+cdk)(?!\s+pack)",
@@ -968,6 +1044,22 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bscd\s*(?:type\s*)?[12]\b", re.I),
         ("type",),
+    ),
+    # "Workload Identity" is GCP. Left as ``identity`` it retrieved
+    # Postgres REPLICA IDENTITY FULL.
+    (
+        re.compile(r"\bworkload\s+identity\b", re.I),
+        ("identity",),
+    ),
+    # "Private Service Connect" shares ``connect`` with Kafka Connect.
+    (
+        re.compile(r"\bprivate\s+service\s+connect\b", re.I),
+        ("connect", "service"),
+    ),
+    # Column-level vs OpenLineage run/dataset grain.
+    (
+        re.compile(r"\bcolumn[\s-]level\s+lineage\b", re.I),
+        ("lineage",),
     ),
     # "SLA for job runtime" names a warranty this product does not publish.
     # Left as content terms it retrieved the Airbyte pack card on ``runtime``

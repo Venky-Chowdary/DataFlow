@@ -73,6 +73,19 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support SQL Server",
         "Do you support Databricks as a destination",
         "Do you support Delta Lake",
+        "Do you support Snowflake as a destination",
+        "Do you support Oracle as a destination",
+        "Do you support Postgres as a destination",
+        "Do you support MongoDB",
+        "Do you support S3 as a destination",
+        "Do you support Redshift as a destination",
+        "Do you support Azure Synapse",
+        "What happens on a unique key collision",
+        "Where is my data stored",
+        "Do you support BYOK",
+        "Can I use a GCP service account",
+        "Can I use Workload Identity",
+        "Do you support column-level lineage",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
