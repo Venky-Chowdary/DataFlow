@@ -2149,6 +2149,39 @@ def _query_playground_section() -> GeneratedSection:
     )
 
 
+def _pilot_engine_section() -> GeneratedSection | None:
+    """First-party engine is the default brain; third-party LLMs stay opt-in.
+
+    Operators ask "are you ChatGPT" and "do you use OpenAI". The rule lives in
+    ``pilot_engine_decision``: local unless the operator saves a key and
+    selects hybrid. Generating the passage from that function keeps the
+    answer from drifting into "we are ChatGPT".
+    """
+    try:
+        from ..llm.provider import resolve_pilot_engine
+    except Exception:
+        return None
+    try:
+        resolve_pilot_engine()
+    except Exception:
+        return None
+    return GeneratedSection(
+        doc_title="What Datawrap is",
+        section_title="Does Pilot use ChatGPT or a third-party LLM",
+        text=(
+            "Datawrap Pilot answers with its own local engine by default — "
+            "a third-party LLM (OpenAI, Anthropic, or Ollama) is optional "
+            "polish the operator turns on in Settings → AI, and it never "
+            "supplies transfer, aggregate, or Confirm facts. "
+            "DATAFLOW_PILOT_ENGINE and Settings → AI can select hybrid "
+            "wording; they do not move tools, gates, or proofs off the "
+            "first-party engine."
+        ),
+        source_module="src/ai/llm/provider.py · pilot_engine_decision",
+        category="product",
+    )
+
+
 def _competitor_wedge_section() -> GeneratedSection:
     """Airbyte/Fivetran are how operators ask the wedge, not off-subject names."""
     return GeneratedSection(
@@ -2420,6 +2453,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _who_can_start_section,
         _cancel_transfer_section,
         _query_playground_section,
+        _pilot_engine_section,
         _competitor_wedge_section,
         _connect_postgres_section,
         _rest_api_section,

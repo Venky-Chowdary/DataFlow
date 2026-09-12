@@ -2735,9 +2735,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Datawrap Pilot** — I help with analytics, routes, schema "
-                    "risk, mappings, jobs, and fixes inside Datawrap. I answer from "
-                    "your workspace first; I never invent warehouse facts.",
+                    "I'm **Datawrap Pilot** — Datawrap's own local engine. I help "
+                    "with analytics, routes, schema risk, mappings, jobs, and fixes. "
+                    "A third-party LLM is optional polish in Settings → AI; I never "
+                    "invent warehouse facts and I never need a cloud key to answer.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:

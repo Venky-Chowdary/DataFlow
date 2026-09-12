@@ -148,6 +148,13 @@ def test_rewrite_does_not_create_terms_for_an_off_subject_question() -> None:
     analysis = analyze_query("hey whats the capital of France lol")
     assert "wal_level" not in analysis.expansions
     assert "cdc" not in analysis.expansions
+    chatgpt = analyze_query("are you chatgpt")
+    assert "wal_level" not in chatgpt.expansions
+    assert "cdc" not in chatgpt.expansions
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    names = [n for n, _ in infer_tools_from_message("are you chatgpt")]
+    assert "explain_product" in names
 
 
 def _lead(question: str) -> str:
@@ -174,3 +181,5 @@ def test_chat_wrappers_still_lead_on_the_documented_subject() -> None:
     assert "viewer" in _lead("can read-only users export yaml")
     assert "binlog_format" in _lead("bin log format row for mysql?")
     assert "slot" in _lead("repl slot?")
+    assert "local engine" in _lead("are you chatgpt")
+    assert "third-party" in _lead("do you use a generative llm")

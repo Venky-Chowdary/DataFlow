@@ -830,6 +830,18 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "is _df_lsn how you skip dupes",
             ("_df_lsn",),
         ),
+        (
+            "are you chatgpt",
+            ("local engine", "third-party"),
+        ),
+        (
+            "do you use openai by default",
+            ("local engine",),
+        ),
+        (
+            "do we have our own llm",
+            ("own local engine",),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -885,6 +897,7 @@ def test_the_how_to_passages_are_generated() -> None:
         "Procedure: cancel a running transfer",
         "What Query Playground is",
         "How Datawrap differs from Airbyte and Fivetran",
+        "Does Pilot use ChatGPT or a third-party LLM",
         "Where bad rows end up",
         "How the snapshot hands off to the CDC stream",
         "What happens to a delete in CDC",

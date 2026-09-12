@@ -1385,9 +1385,9 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Primary brain is Datawrap's local Pilot engine "
-                    "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
-                    "add-ons only — not required."
+                    "First-party brain is Datawrap's own local Pilot engine "
+                    "(NL → tools → compose). OpenAI / Anthropic / Ollama stay "
+                    "opt-in polish — never required, never the source of transfer facts."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1588,13 +1588,16 @@ class DataPilotTools:
                     r"|\blocal\s+only\b"
                     r"|\b(?:don'?t|do\s+not|never)\s+use\s+(?:openai|anthropic|ollama|cloud)\b"
                     r"|\bare\s+you\s+local\b"
+                    r"|\bare\s+you\s+chat\s*gpt\b"
+                    r"|\b(?:use|using|need)\s+(?:chatgpt|openai|anthropic|a\s+third[\s-]?party)\b"
+                    r"|\b(?:our|your)\s+own\s+(?:llm|engine|model)\b"
+                    r"|\bgenerative\s+llm\b"
                 ),
                 "local_primary",
                 (
-                    "Yes. **Datawrap Pilot local engine is primary** — NL → tools → compose works with no "
-                    "OpenAI, Anthropic, or Ollama key. Optional `DATAFLOW_PILOT_ENGINE=hybrid` can polish "
-                    "narration with a cloud/local LLM, but transfers, aggregates, schema, and Confirm "
-                    "do not require them."
+                    "Datawrap Pilot's **own local engine** is the default brain — NL → tools → compose "
+                    "with no OpenAI, Anthropic, or Ollama key. A third-party LLM is optional polish "
+                    "you turn on in Settings → AI; it never supplies transfer, aggregate, or Confirm facts."
                 ),
             ),
         ]
@@ -1640,6 +1643,8 @@ class DataPilotTools:
                 r"^\s*what\s+is\s+cdc\b", lower
             ):
                 curated = None
+        if curated and curated[0] == "local_primary" and retrieved.answerable:
+            curated = None
         if retrieved.answerable:
             documented = compose_product_answer(retrieved)
             return ToolResult(
@@ -2664,7 +2669,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"\b(?:dataflow|datawrap|datatransfer|data transfer|gdpr|hipaa|"
             r"airbyte|fivetran|move (?:my |the )?data|sync data|"
             r"schema types?|semantic types?|type system|logical types?|"
-            r"openai|anthropic|ollama|api key|accurate)\b",
+            r"openai|anthropic|ollama|chatgpt|chat\s*gpt|api key|accurate)\b",
             text,
         )
     )
@@ -2695,6 +2700,10 @@ def _looks_like_product_howto(lower: str) -> bool:
     ):
         return True
     if re.search(r"\b(?:need|require)\s+(?:an?\s+)?(?:openai|anthropic|ollama|api)\s+key\b", text):
+        return True
+    if re.search(r"\b(?:chat\s*gpt|chatgpt|generative\s+llm|third[\s-]?party\s+(?:llm|model))\b", text):
+        return True
+    if re.search(r"\b(?:our|your)\s+own\s+(?:llm|engine|model)\b", text):
         return True
     if re.search(r"\b(?:append|upsert|cdc|full refresh)\s+mode\b", text):
         return True

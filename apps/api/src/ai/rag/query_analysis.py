@@ -541,6 +541,14 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("pause", "pipeline", "schedule")),
     (re.compile(r"\b(?:airbyte|fivetran|estuary|debezium)\b", re.I),
      ("semantic", "mapping", "quarantine", "checksum")),
+    (re.compile(
+        r"\b(?:chat\s*gpt|chatgpt|openai|anthropic|"
+        r"third[\s-]?party\s+(?:llm|model|engine)|"
+        r"generative\s+llm|"
+        r"(?:our|your)\s+own\s+(?:llm|engine|model))\b",
+        re.I,
+    ),
+     ("local", "engine", "polish", "hybrid")),
     (CDC_DELIVERY_RE, ("cdc", "least", "once", "idempotent", "lsn")),
     (re.compile(r"\b_df_lsn\b|\bdf[\s_]?lsn\b", re.I),
      ("lsn", "idempotent", "cdc")),
@@ -839,7 +847,7 @@ _SLANG_FRAMES: tuple[tuple[str, str], ...] = (
 _PRODUCT_FRAGMENT = re.compile(
     r"^\s*(?P<term>g[1-9]|wal_level|pgoutput|gtid|binlog_format|"
     r"replica\s+identity(?:\s+full)?|_df_lsn|replication\s+slots?|"
-    r"type_locked|standing\s+authority|quarantine|"
+    r"type_locked|standing\s+authority|quarantine|chatgpt|"
     r"pre-?images?|toast)\s*[?.!]?\s*$",
     re.I,
 )
