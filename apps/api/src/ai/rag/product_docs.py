@@ -1172,7 +1172,9 @@ def _section_intent_bonus(
     azure_mysql_neighbor_ask = bool(
         re.search(
             r"\bhdinsight\b|\bexpressroute\b|\bexpress\s+route\b"
-            r"|\bazure\s+cdn\b|\bazure\s+blueprints?\b|\bazure\s+automation\b",
+            r"|\bazure\s+cdn\b|\bazure\s+blueprints?\b|\bazure\s+automation\b"
+            r"|\bazure\s+relay\b|\bremote\s+rendering\b|\bazure\s+quantum\b"
+            r"|\bazure\s+orbital\b|\bazure\s+local\b",
             analysis.text,
             re.I,
         )
@@ -1380,6 +1382,46 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\brds\s+for\s+sql\s+server\b", analysis.text, re.I) else -6.0
     if re.search(r"\brds\s+for\s+sql\s+server\b", analysis.text, re.I) and (
         "rds for postgresql" in title or title == "do you support sql server"
+    ):
+        bonus -= 6.0
+    if "cloud dns" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+dns\b", analysis.text, re.I) else -3.2
+    if "cloud domains" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+domains?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+dns\b|\bcloud\s+domains?\b", analysis.text, re.I) and "custom domain" in title:
+        bonus -= 6.0
+    if "natural language api" in title:
+        bonus += 6.0 if re.search(r"\bnatural\s+language\s+api\b", analysis.text, re.I) else -3.2
+    if "api gateway" in title:
+        bonus += 6.0 if re.search(r"\bapi\s+gateway\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bnatural\s+language\s+api\b|\bapi\s+gateway\b", analysis.text, re.I) and "rest api" in title:
+        bonus -= 6.0
+    if "mariadb" in title:
+        bonus += 6.0 if re.search(r"\bmariadb\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmariadb\b", analysis.text, re.I) and "azure database for postgresql" in title:
+        bonus -= 6.0
+    if "azure relay" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+relay\b", analysis.text, re.I) else -3.2
+    if "remote rendering" in title:
+        bonus += 6.0 if re.search(r"\bremote\s+rendering\b", analysis.text, re.I) else -3.2
+    if "azure quantum" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+quantum\b", analysis.text, re.I) else -3.2
+    if "azure orbital" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+orbital\b", analysis.text, re.I) else -3.2
+    if "azure local" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+local\b", analysis.text, re.I) else -3.2
+    if "windows 365" in title:
+        bonus += 6.0 if re.search(r"\bwindows\s+365\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bwindows\s+365\b", analysis.text, re.I) and "scd type 2" in title:
+        bonus -= 6.0
+    if "test plans" in title:
+        bonus += 6.0 if re.search(r"\btest\s+plans\b", analysis.text, re.I) else -3.2
+    if re.search(r"\btest\s+plans\b", analysis.text, re.I) and "without confirm" in title:
+        bonus -= 6.0
+    if "dedicated sql pool" in title:
+        bonus += 6.0 if re.search(r"\bdedicated\s+sql\s+pool\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdedicated\s+sql\s+pool\b", analysis.text, re.I) and (
+        "azure database for postgresql" in title or "flexible server" in title
     ):
         bonus -= 6.0
     if "azure data factory" in title:

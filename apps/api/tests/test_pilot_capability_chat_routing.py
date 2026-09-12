@@ -80,6 +80,14 @@ def _names(question: str) -> list[str]:
         "do you support Amazon RDS for SQL Server",
         "do you support Azure Logic Apps",
         "do you support Copilot Studio as a destination",
+        "do you support Cloud DNS",
+        "do you support Natural Language API",
+        "do you support Azure Database for MariaDB",
+        "do you support Azure Relay",
+        "do you support Windows 365 as a destination",
+        "do you support API Gateway",
+        "do you support Azure Test Plans",
+        "do you support Azure Dedicated SQL Pool",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

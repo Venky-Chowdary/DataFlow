@@ -1270,6 +1270,19 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bidentity\s+platform\b", re.I), ("identity_platform",)),
     (re.compile(r"\bpub[\s/-]?sub\s+lite\b", re.I), ("pubsub_lite",)),
     (re.compile(r"\brds\s+for\s+sql\s+server\b", re.I), ("rds_sqlserver", "sqlserver")),
+    (re.compile(r"\bcloud\s+dns\b", re.I), ("cloud_dns",)),
+    (re.compile(r"\bcloud\s+domains?\b", re.I), ("cloud_domains",)),
+    (re.compile(r"\bnatural\s+language\s+api\b", re.I), ("natural_language_api",)),
+    (re.compile(r"\bmariadb\b", re.I), ("azure_mariadb",)),
+    (re.compile(r"\bazure\s+relay\b", re.I), ("azure_relay",)),
+    (re.compile(r"\bremote\s+rendering\b", re.I), ("azure_remote_rendering",)),
+    (re.compile(r"\bazure\s+quantum\b", re.I), ("azure_quantum",)),
+    (re.compile(r"\bazure\s+orbital\b", re.I), ("azure_orbital",)),
+    (re.compile(r"\bazure\s+local\b", re.I), ("azure_local",)),
+    (re.compile(r"\bwindows\s+365\b", re.I), ("windows_365",)),
+    (re.compile(r"\bapi\s+gateway\b", re.I), ("api_gateway",)),
+    (re.compile(r"\btest\s+plans\b", re.I), ("azure_test_plans",)),
+    (re.compile(r"\bdedicated\s+sql\s+pool\b", re.I), ("azure_dedicated_sql_pool",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2545,6 +2558,38 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\brds\s+for\s+sql\s+server\b", re.I),
         ("postgresql", "rds_postgresql", "aurora"),
+    ),
+    (
+        re.compile(r"\bcloud\s+dns\b|\bcloud\s+domains?\b", re.I),
+        ("custom_domain", "vanity", "dns"),
+    ),
+    (
+        re.compile(r"\bnatural\s+language\s+api\b|\bapi\s+gateway\b", re.I),
+        ("rest", "api", "bearer"),
+    ),
+    (
+        re.compile(r"\bmariadb\b", re.I),
+        ("postgresql", "azure_database_postgresql"),
+    ),
+    (
+        re.compile(
+            r"\bazure\s+relay\b|\bremote\s+rendering\b|\bazure\s+quantum\b"
+            r"|\bazure\s+orbital\b|\bazure\s+local\b",
+            re.I,
+        ),
+        ("mysql", "azure_database_mysql", "principal"),
+    ),
+    (
+        re.compile(r"\bwindows\s+365\b", re.I),
+        ("scd2", "excel_online"),
+    ),
+    (
+        re.compile(r"\btest\s+plans\b", re.I),
+        ("confirm",),
+    ),
+    (
+        re.compile(r"\bdedicated\s+sql\s+pool\b", re.I),
+        ("postgresql", "azure_database_postgresql", "azure_flexible_server"),
     ),
     # Bare Private Link is not Job Theater.
     (

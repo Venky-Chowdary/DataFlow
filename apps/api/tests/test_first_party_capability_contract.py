@@ -208,6 +208,19 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Amazon RDS for SQL Server",
         "Do you support Copilot Studio as a destination",
         "Do you support Azure Policy",
+        "Do you support Cloud DNS",
+        "Do you support Cloud Domains",
+        "Do you support Natural Language API",
+        "Do you support Azure Database for MariaDB",
+        "Do you support Azure Relay",
+        "Do you support Azure Remote Rendering",
+        "Do you support Azure Quantum",
+        "Do you support Azure Orbital",
+        "Do you support Azure Local",
+        "Do you support Windows 365 as a destination",
+        "Do you support API Gateway",
+        "Do you support Azure Test Plans",
+        "Do you support Azure Dedicated SQL Pool",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

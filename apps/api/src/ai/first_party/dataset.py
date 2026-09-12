@@ -359,6 +359,19 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support identity platform", "do you support identity platform"),
     ("do you support pub/sub lite", "do you support pub/sub lite"),
     ("do you support amazon rds for sql server", "do you support amazon rds for sql server"),
+    ("do you support cloud dns", "do you support cloud dns"),
+    ("do you support cloud domains", "do you support cloud domains"),
+    ("do you support natural language api", "do you support natural language api"),
+    ("do you support azure database for mariadb", "do you support azure database for mariadb"),
+    ("do you support azure relay", "do you support azure relay"),
+    ("do you support azure remote rendering", "do you support azure remote rendering"),
+    ("do you support azure quantum", "do you support azure quantum"),
+    ("do you support azure orbital", "do you support azure orbital"),
+    ("do you support azure local", "do you support azure local"),
+    ("do you support windows 365 as a destination", "do you support windows 365 as a destination"),
+    ("do you support api gateway", "do you support api gateway"),
+    ("do you support azure test plans", "do you support azure test plans"),
+    ("do you support azure dedicated sql pool", "do you support azure dedicated sql pool"),
 )
 
 

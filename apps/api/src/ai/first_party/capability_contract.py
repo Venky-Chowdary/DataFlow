@@ -3049,6 +3049,58 @@ def pubsub_lite_shipped() -> bool:
     return bool(_transfer_ready_drivers() & {"pubsub_lite", "pslite"})
 
 
+def cloud_dns_shipped() -> bool:
+    return False
+
+
+def cloud_domains_shipped() -> bool:
+    return False
+
+
+def natural_language_api_shipped() -> bool:
+    return False
+
+
+def azure_mariadb_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"mariadb", "azure_mariadb"})
+
+
+def azure_relay_shipped() -> bool:
+    return False
+
+
+def azure_remote_rendering_shipped() -> bool:
+    return False
+
+
+def azure_quantum_shipped() -> bool:
+    return False
+
+
+def azure_orbital_shipped() -> bool:
+    return False
+
+
+def azure_local_shipped() -> bool:
+    return False
+
+
+def windows_365_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"windows_365", "w365"})
+
+
+def api_gateway_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"api_gateway", "apigateway"})
+
+
+def azure_test_plans_shipped() -> bool:
+    return False
+
+
+def azure_dedicated_sql_pool_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dedicated_sql_pool", "synapse"})
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -4945,6 +4997,188 @@ def column_level_lineage_card() -> CapabilityCard | None:
     )
 
 
+def cloud_dns_card() -> CapabilityCard | None:
+    if cloud_dns_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud DNS",
+        text=(
+            "Datawrap does not ship Google Cloud DNS as a managed-DNS product "
+            "(cloud_dns is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_domains_card() -> CapabilityCard | None:
+    if cloud_domains_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Domains",
+        text=(
+            "Datawrap does not ship Google Cloud Domains as a registrar product "
+            "(cloud_domains is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def natural_language_api_card() -> CapabilityCard | None:
+    if natural_language_api_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Natural Language API",
+        text=(
+            "Datawrap does not ship Google Cloud Natural Language API "
+            "(natural_language_api is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_mariadb_card() -> CapabilityCard | None:
+    if azure_mariadb_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Database for MariaDB",
+        text=(
+            "Datawrap does not ship Azure Database for MariaDB as a "
+            "transfer-ready driver (azure_mariadb is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_relay_card() -> CapabilityCard | None:
+    if azure_relay_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Relay",
+        text=(
+            "Datawrap does not ship Azure Relay as a transfer-ready driver "
+            "(azure_relay is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_remote_rendering_card() -> CapabilityCard | None:
+    if azure_remote_rendering_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Remote Rendering",
+        text=(
+            "Datawrap does not ship Azure Remote Rendering as a transfer "
+            "destination (azure_remote_rendering is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_quantum_card() -> CapabilityCard | None:
+    if azure_quantum_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Quantum",
+        text=(
+            "Datawrap does not ship Azure Quantum as a transfer-ready driver "
+            "(azure_quantum is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_orbital_card() -> CapabilityCard | None:
+    if azure_orbital_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Orbital",
+        text=(
+            "Datawrap does not ship Azure Orbital as a transfer-ready driver "
+            "(azure_orbital is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_local_card() -> CapabilityCard | None:
+    if azure_local_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Local",
+        text=(
+            "Datawrap does not ship Azure Local as a transfer-ready driver "
+            "(azure_local is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def windows_365_card() -> CapabilityCard | None:
+    if windows_365_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Windows 365 as a destination",
+        text=(
+            "Datawrap does not ship Windows 365 as a transfer-ready "
+            "destination (windows_365 is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def api_gateway_card() -> CapabilityCard | None:
+    if api_gateway_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support API Gateway",
+        text=(
+            "Datawrap does not ship Google Cloud API Gateway as a transfer "
+            "destination (api_gateway is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_test_plans_card() -> CapabilityCard | None:
+    if azure_test_plans_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Test Plans",
+        text=(
+            "Datawrap does not ship Azure Test Plans as a transfer destination "
+            "(azure_test_plans is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_dedicated_sql_pool_card() -> CapabilityCard | None:
+    if azure_dedicated_sql_pool_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Dedicated SQL Pool",
+        text=(
+            "Datawrap does not ship Azure Synapse dedicated SQL pool as a "
+            "transfer-ready destination (azure_dedicated_sql_pool is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def capability_cards() -> tuple[CapabilityCard, ...]:
     """Every honest capability card the chatbot is allowed to speak."""
     cards: list[CapabilityCard] = []
@@ -5205,6 +5439,19 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         pubsub_lite_card,
         rds_sqlserver_card,
         column_level_lineage_card,
+        cloud_dns_card,
+        cloud_domains_card,
+        natural_language_api_card,
+        azure_mariadb_card,
+        azure_relay_card,
+        azure_remote_rendering_card,
+        azure_quantum_card,
+        azure_orbital_card,
+        azure_local_card,
+        windows_365_card,
+        api_gateway_card,
+        azure_test_plans_card,
+        azure_dedicated_sql_pool_card,
     ):
         card = builder()
         if card is not None:
