@@ -184,6 +184,12 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Microsoft Intune",
         "Do you support Cloud Tasks",
         "Do you support VPC Service Controls",
+        "Do you support Amazon Aurora",
+        "Do you support Cloud Armor",
+        "Do you support Azure Arc",
+        "Do you support Qlik as a destination",
+        "Do you support Entra ID Governance",
+        "Do you support Cloud SQL for MySQL",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

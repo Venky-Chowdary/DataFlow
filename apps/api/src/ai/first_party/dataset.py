@@ -285,6 +285,22 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("do you support vpc service controls", "do you support vpc service controls"),
     ("do you support azure firewall", "do you support azure firewall"),
     ("do you support campaign manager", "do you support campaign manager"),
+    ("do you support amazon aurora", "do you support amazon aurora"),
+    ("do you support amazon documentdb", "do you support amazon documentdb"),
+    ("do you support cloud armor", "do you support cloud armor"),
+    ("do you support cloud interconnect", "do you support cloud interconnect"),
+    ("do you support cloud vpn", "do you support cloud vpn"),
+    ("do you support azure arc", "do you support azure arc"),
+    ("do you support azure lighthouse", "do you support azure lighthouse"),
+    ("do you support azure monitor", "do you support azure monitor"),
+    ("do you support azure devops", "do you support azure devops"),
+    ("do you support azure boards", "do you support azure boards"),
+    ("do you support azure migrate", "do you support azure migrate"),
+    ("do you support display & video 360", "do you support display & video 360"),
+    ("do you support cloud storage transfer service", "do you support cloud storage transfer service"),
+    ("do you support qlik as a destination", "do you support qlik as a destination"),
+    ("do you support entra id governance", "do you support entra id governance"),
+    ("do you support cloud sql for mysql", "do you support cloud sql for mysql"),
 )
 
 

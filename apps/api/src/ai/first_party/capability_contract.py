@@ -1186,7 +1186,7 @@ def synapse_destination_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Do you support Azure Synapse",
         text=(
-            "Azure Synapse is not a transfer-ready driver (azure_synapse). "
+            "Azure Synapse is not a transfer-ready driver (azure_synapse). synap "
             "unique_driver_types does not include synapse. "
             "A catalog tile is not a live writer."
         ),
@@ -2769,6 +2769,66 @@ def campaign_manager_shipped() -> bool:
     return bool(_transfer_ready_drivers() & {"campaign_manager", "cm360"})
 
 
+def aurora_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"aurora"})
+
+
+def documentdb_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"documentdb", "docdb"})
+
+
+def cloud_armor_shipped() -> bool:
+    return False
+
+
+def cloud_interconnect_shipped() -> bool:
+    return False
+
+
+def cloud_vpn_shipped() -> bool:
+    return False
+
+
+def azure_arc_shipped() -> bool:
+    return False
+
+
+def azure_lighthouse_shipped() -> bool:
+    return False
+
+
+def azure_monitor_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_monitor"})
+
+
+def azure_devops_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"azure_devops", "ado"})
+
+
+def azure_boards_shipped() -> bool:
+    return False
+
+
+def azure_migrate_shipped() -> bool:
+    return False
+
+
+def dv360_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dv360", "display_video"})
+
+
+def gcs_transfer_service_shipped() -> bool:
+    return False
+
+
+def qlik_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"qlik"})
+
+
+def entra_governance_shipped() -> bool:
+    return False
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -3174,7 +3234,7 @@ def azure_files_card() -> CapabilityCard | None:
         title="Do you support Azure Files",
         text=(
             "Datawrap does not ship Azure Files as a transfer-ready driver "
-            "(azure_files is false). Synapse is not Azure Files."
+            "(azure_files is false)."
         ),
         source_module="services/catalog_service.py · unique_driver_types",
         category="connectors",
@@ -3598,6 +3658,230 @@ def campaign_manager_card() -> CapabilityCard | None:
     )
 
 
+def aurora_card() -> CapabilityCard | None:
+    if aurora_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon Aurora",
+        text=(
+            "Amazon Aurora is not its own transfer-ready driver "
+            "(aurora is false). Connect the instance as MySQL or PostgreSQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def documentdb_card() -> CapabilityCard | None:
+    if documentdb_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon DocumentDB",
+        text=(
+            "Datawrap does not ship Amazon DocumentDB as a transfer-ready "
+            "driver (documentdb is false). MongoDB is a different driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_armor_card() -> CapabilityCard | None:
+    if cloud_armor_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Armor",
+        text=(
+            "Datawrap does not ship Cloud Armor as a connect option "
+            "(cloud_armor is false)."
+        ),
+        source_module="src/routers/workspace_router.py · allowlist",
+        category="connectors",
+    )
+
+
+def cloud_interconnect_card() -> CapabilityCard | None:
+    if cloud_interconnect_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Interconnect",
+        text=(
+            "Datawrap does not ship Cloud Interconnect "
+            "(cloud_interconnect is false)."
+        ),
+        source_module="connectors/postgresql.py · test_postgresql",
+        category="connectors",
+    )
+
+
+def cloud_vpn_card() -> CapabilityCard | None:
+    if cloud_vpn_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud VPN",
+        text=(
+            "Datawrap does not ship Cloud VPN as a connect option "
+            "(cloud_vpn is false)."
+        ),
+        source_module="connectors/postgresql.py · test_postgresql",
+        category="connectors",
+    )
+
+
+def azure_arc_card() -> CapabilityCard | None:
+    if azure_arc_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Arc",
+        text=(
+            "Datawrap does not ship Azure Arc as a transfer-ready driver "
+            "(azure_arc is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_lighthouse_card() -> CapabilityCard | None:
+    if azure_lighthouse_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Lighthouse",
+        text=(
+            "Datawrap does not ship Azure Lighthouse "
+            "(azure_lighthouse is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_monitor_card() -> CapabilityCard | None:
+    if azure_monitor_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Monitor",
+        text=(
+            "Datawrap does not ship Azure Monitor as a destination "
+            "(azure_monitor is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_devops_card() -> CapabilityCard | None:
+    if azure_devops_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure DevOps",
+        text=(
+            "Datawrap does not ship Azure DevOps as a transfer destination "
+            "(azure_devops is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_boards_card() -> CapabilityCard | None:
+    if azure_boards_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Boards",
+        text=(
+            "Datawrap does not ship Azure Boards as a destination "
+            "(azure_boards is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_migrate_card() -> CapabilityCard | None:
+    if azure_migrate_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Migrate",
+        text=(
+            "Datawrap does not ship Azure Migrate "
+            "(azure_migrate is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def dv360_card() -> CapabilityCard | None:
+    if dv360_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Display & Video 360",
+        text=(
+            "Datawrap does not ship Display & Video 360 as a transfer-ready "
+            "source (dv360 is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def gcs_transfer_service_card() -> CapabilityCard | None:
+    if gcs_transfer_service_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Storage Transfer Service",
+        text=(
+            "Datawrap does not ship Cloud Storage Transfer Service "
+            "(gcs_transfer_service is false). GCS is a different driver."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def qlik_card() -> CapabilityCard | None:
+    if qlik_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Qlik as a destination",
+        text=(
+            "Datawrap does not ship Qlik as a transfer-ready destination "
+            "(qlik is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def entra_governance_card() -> CapabilityCard | None:
+    if entra_governance_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Entra ID Governance",
+        text=(
+            "Datawrap does not ship Entra ID Governance "
+            "(entra_governance is false). SSO is SAML/OIDC, not Governance."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
+def cloud_sql_mysql_card() -> CapabilityCard | None:
+    if cloud_sql_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud SQL for MySQL",
+        text=(
+            "Cloud SQL for MySQL is not its own driver "
+            "(cloud_sql_mysql is false). Connect the instance as MySQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -3796,6 +4080,22 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         vpc_service_controls_card,
         azure_firewall_card,
         campaign_manager_card,
+        aurora_card,
+        documentdb_card,
+        cloud_armor_card,
+        cloud_interconnect_card,
+        cloud_vpn_card,
+        azure_arc_card,
+        azure_lighthouse_card,
+        azure_monitor_card,
+        azure_devops_card,
+        azure_boards_card,
+        azure_migrate_card,
+        dv360_card,
+        gcs_transfer_service_card,
+        qlik_card,
+        entra_governance_card,
+        cloud_sql_mysql_card,
         column_level_lineage_card,
     ):
         card = builder()

@@ -1154,6 +1154,37 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("campaign_manager",)),
+    (re.compile(r"\baurora\b", re.I), ("aurora",)),
+    (re.compile(r"\bdocumentdb\b|\bdocdb\b", re.I), ("documentdb",)),
+    (re.compile(r"\bcloud\s+armor\b", re.I), ("cloud_armor",)),
+    (re.compile(r"\bcloud\s+interconnect\b", re.I), ("cloud_interconnect",)),
+    (re.compile(r"\bcloud\s+vpn\b", re.I), ("cloud_vpn",)),
+    (re.compile(r"\bazure\s+arc\b", re.I), ("azure_arc",)),
+    (re.compile(r"\bazure\s+lighthouse\b", re.I), ("azure_lighthouse",)),
+    (re.compile(r"\bazure\s+monitor\b", re.I), ("azure_monitor",)),
+    (re.compile(r"\bazure\s+devops\b", re.I), ("azure_devops",)),
+    (re.compile(r"\bazure\s+boards\b", re.I), ("azure_boards",)),
+    (re.compile(r"\bazure\s+migrate\b", re.I), ("azure_migrate",)),
+    (re.compile(
+        r"\bdisplay\s*(?:and|&)\s*video\s*360\b"
+        r"|\bdv360\b",
+        re.I,
+    ),
+     ("dv360",)),
+    (re.compile(
+        r"\b(?:google\s+cloud\s+)?storage\s+transfer\s+service\b"
+        r"|\bgcs\s+transfer\s+service\b",
+        re.I,
+    ),
+     ("gcs_transfer_service",)),
+    (re.compile(r"\bqlik\b", re.I), ("qlik",)),
+    (re.compile(
+        r"\bentra\s+id\s+governance\b"
+        r"|\bentra\s+governance\b",
+        re.I,
+    ),
+     ("entra_governance",)),
+    (re.compile(r"\bcloud\s+sql\s+for\s+mysql\b", re.I), ("cloud_sql_mysql",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -1355,7 +1386,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         r"|\bdo\s+you\s+support\s+synapse\b",
         re.I,
     ),
-     ("synapse", "azure_synapse")),
+     ("synapse", "azure_synapse", "synap")),
     (re.compile(
         r"\bsnowflake\s+as\s+a\s+destination\b"
         r"|\bdo\s+you\s+support\s+snowflake\b",
@@ -2224,6 +2255,50 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bcampaign\s+manager(?:\s+360)?\b|\bcm360\b", re.I),
         ("secret", "manager", "google_ads"),
+    ),
+    (
+        re.compile(r"\baurora\b", re.I),
+        ("adls", "blob", "source"),
+    ),
+    (
+        re.compile(r"\bdocumentdb\b|\bdocdb\b", re.I),
+        ("mongo", "mongodb"),
+    ),
+    (
+        re.compile(r"\bcloud\s+armor\b|\bcloud\s+interconnect\b|\bcloud\s+vpn\b", re.I),
+        ("cloud_run", "dataflow", "pubsub"),
+    ),
+    (
+        re.compile(
+            r"\bazure\s+arc\b|\bazure\s+lighthouse\b|\bazure\s+monitor\b"
+            r"|\bazure\s+devops\b|\bazure\s+boards\b|\bazure\s+migrate\b",
+            re.I,
+        ),
+        ("synapse", "azure_synapse"),
+    ),
+    (
+        re.compile(r"\bdisplay\s*(?:and|&)\s*video\s*360\b|\bdv360\b", re.I),
+        ("campaign_manager", "ads"),
+    ),
+    (
+        re.compile(
+            r"\b(?:google\s+cloud\s+)?storage\s+transfer\s+service\b"
+            r"|\bgcs\s+transfer\s+service\b",
+            re.I,
+        ),
+        ("dataflow", "dataflow_google"),
+    ),
+    (
+        re.compile(r"\bqlik\b", re.I),
+        ("mirror", "upsert", "leftover"),
+    ),
+    (
+        re.compile(r"\bentra\s+id\s+governance\b|\bentra\s+governance\b", re.I),
+        ("saml", "oidc", "okta", "sso"),
+    ),
+    (
+        re.compile(r"\bcloud\s+sql\s+for\s+mysql\b", re.I),
+        ("sqlserver", "proxy"),
     ),
     # Bare Private Link is not Job Theater.
     (

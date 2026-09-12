@@ -759,6 +759,14 @@ def _section_intent_bonus(
         bonus += 6.0 if azure_sql_ask else -6.0
     if azure_sql_ask and "azure synapse" in title:
         bonus -= 6.0
+    synapse_ask = bool(
+        re.search(r"\bsynapse\b", analysis.text, re.I)
+        and not re.search(r"\bsynapse\s+link\b", analysis.text, re.I)
+    )
+    if title == "do you support azure synapse":
+        bonus += 6.0 if synapse_ask else -6.0
+    if synapse_ask and "azure files" in title:
+        bonus -= 6.0
     gcs_ask = bool(
         re.search(
             r"\bgcs\b|\bgoogle\s+cloud\s+storage\b",
@@ -1100,6 +1108,67 @@ def _section_intent_bonus(
         bonus += 6.0 if re.search(r"\bazure\s+firewall\b", analysis.text, re.I) else -3.2
     if "campaign manager" in title:
         bonus += 6.0 if re.search(r"\bcampaign\s+manager\b|\bcm360\b", analysis.text, re.I) else -3.2
+    if "amazon aurora" in title:
+        bonus += 6.0 if re.search(r"\baurora\b", analysis.text, re.I) else -3.2
+    if re.search(r"\baurora\b", analysis.text, re.I) and "adls as a destination" in title:
+        bonus -= 6.0
+    if "documentdb" in title:
+        bonus += 6.0 if re.search(r"\bdocumentdb\b|\bdocdb\b", analysis.text, re.I) else -3.2
+    if "cloud armor" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+armor\b", analysis.text, re.I) else -3.2
+    if "cloud interconnect" in title:
+        bonus += 6.0 if re.search(r"\binterconnect\b", analysis.text, re.I) else -3.2
+    if "cloud vpn" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+vpn\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+armor\b|\bcloud\s+interconnect\b|\bcloud\s+vpn\b", analysis.text, re.I) and "cloud run" in title:
+        bonus -= 6.0
+    if "azure arc" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+arc\b", analysis.text, re.I) else -3.2
+    if "azure lighthouse" in title:
+        bonus += 6.0 if re.search(r"\blighthouse\b", analysis.text, re.I) else -3.2
+    if "azure monitor" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+monitor\b", analysis.text, re.I) else -3.2
+    if "azure devops" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+devops\b", analysis.text, re.I) else -3.2
+    if "azure boards" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+boards\b", analysis.text, re.I) else -3.2
+    if "azure migrate" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+migrate\b", analysis.text, re.I) else -3.2
+    if re.search(
+        r"\bazure\s+arc\b|\bazure\s+lighthouse\b|\bazure\s+monitor\b"
+        r"|\bazure\s+devops\b|\bazure\s+boards\b|\bazure\s+migrate\b",
+        analysis.text,
+        re.I,
+    ) and "azure synapse" in title:
+        bonus -= 6.0
+    if "display & video 360" in title or "dv360" in title:
+        bonus += 6.0 if re.search(r"\bdv360\b|\bdisplay\s*(?:and|&)\s*video\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdv360\b|\bdisplay\s*(?:and|&)\s*video\b", analysis.text, re.I) and "campaign manager" in title:
+        bonus -= 6.0
+    if "storage transfer service" in title:
+        bonus += 6.0 if re.search(r"\btransfer\s+service\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bstorage\s+transfer\s+service\b", analysis.text, re.I) and (
+        "dataflow" in title or "gcs as a destination" in title
+    ):
+        bonus -= 6.0
+    if "qlik" in title:
+        bonus += 6.0 if re.search(r"\bqlik\b", analysis.text, re.I) else -3.2
+    entra_gov_ask = bool(
+        re.search(r"\bentra\s+id\s+governance\b|\bentra\s+governance\b", analysis.text, re.I)
+    )
+    if "entra id governance" in title:
+        bonus += 6.0 if entra_gov_ask else -6.0
+    if entra_gov_ask and (
+        "procedure: get access" in title or title.startswith("procedure: get access")
+    ):
+        bonus -= 6.0
+    cloud_sql_mysql_ask = bool(re.search(r"\bcloud\s+sql\s+for\s+mysql\b", analysis.text, re.I))
+    if "cloud sql for mysql" in title:
+        bonus += 6.0 if cloud_sql_mysql_ask else -6.0
+    if cloud_sql_mysql_ask and title == "do you support cloud sql":
+        bonus -= 6.0
+    if cloud_sql_ask and not cloud_sql_mysql_ask and "cloud sql for mysql" in title:
+        bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

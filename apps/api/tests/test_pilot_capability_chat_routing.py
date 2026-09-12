@@ -65,6 +65,10 @@ def _names(question: str) -> list[str]:
         "do you support Elasticsearch",
         "can I use a service principal for Azure SQL",
         "do you support SQL Server on Azure VMs",
+        "can I use Aurora as a source",
+        "do you support Qlik as a destination",
+        "do you support Cloud Armor",
+        "do you support Azure DevOps",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
