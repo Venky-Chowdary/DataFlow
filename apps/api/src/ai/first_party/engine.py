@@ -85,6 +85,15 @@ _SUBJECT_FAMILIES: tuple[frozenset[str], ...] = (
     frozenset({"incremental", "cursor"}),
     frozenset({"principal", "adls", "service_account"}),
     frozenset({"bigquery"}),
+    frozenset({"parallel", "inflight"}),
+    frozenset({"scd1"}),
+    frozenset({"residency"}),
+    frozenset({"session", "ttl"}),
+    frozenset({"custom_domain", "vanity"}),
+    frozenset({"sqlserver", "mssql"}),
+    frozenset({"databricks", "unity"}),
+    frozenset({"delta"}),
+    frozenset({"full_refresh"}),
 )
 
 

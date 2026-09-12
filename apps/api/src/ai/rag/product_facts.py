@@ -1107,6 +1107,18 @@ def _connector_catalog_section() -> GeneratedSection | None:
     if not databases and not files:
         return None
 
+    ready: set[str] = set()
+    try:
+        from services.catalog_service import catalog_summary
+
+        ready = {
+            str(d).lower()
+            for d in (catalog_summary().get("unique_driver_types") or ())
+            if d
+        }
+    except Exception:
+        ready = set()
+
     lines = [
         "A connection names one source or destination endpoint and its "
         "credentials. You add one under Connectors, or paste a connection URL "
@@ -1123,12 +1135,22 @@ def _connector_catalog_section() -> GeneratedSection | None:
             f"Database and warehouse engines the transfer engine dispatches on, "
             f"{len(databases)} of them: " + ", ".join(databases) + "."
         )
-        lines.append(
-            "A warehouse destination such as bigquery, snowflake or databricks is "
-            "configured the same way as a database: pick the type under "
-            "Connectors, give it credentials, then Test the connection before "
-            "using it in a transfer."
-        )
+        # Name only transfer-ready warehouses. A catalog tile for Databricks
+        # or Redshift is not a live writer — listing them here stole those
+        # honesty cards and invented a destination.
+        live_warehouses = [
+            name
+            for name in ("bigquery", "snowflake", "databricks", "redshift")
+            if name in ready
+        ]
+        if live_warehouses:
+            shown = " or ".join(live_warehouses)
+            lines.append(
+                f"A warehouse destination such as {shown} is "
+                "configured the same way as a database: pick the type under "
+                "Connectors, give it credentials, then Test the connection before "
+                "using it in a transfer."
+            )
     if files:
         lines.append(
             f"File and document formats it can read or write, {len(files)} of "
@@ -1146,19 +1168,12 @@ def _connector_catalog_section() -> GeneratedSection | None:
     # to agree with the number the rest of the product reports; deriving them
     # from the catalog tiles listed 31 of the 46 — every tile-backed driver, and
     # none of the file formats a transfer can also run on.
-    try:
-        from services.catalog_service import catalog_summary
-
-        drivers = sorted(
-            str(d) for d in (catalog_summary().get("unique_driver_types") or ()) if d
+    if ready:
+        drivers = sorted(ready)
+        lines.append(
+            f"Transfer-ready drivers — the ones a transfer can actually run "
+            f"on today, {len(drivers)} of them: " + ", ".join(drivers) + "."
         )
-        if drivers:
-            lines.append(
-                f"Transfer-ready drivers — the ones a transfer can actually run "
-                f"on today, {len(drivers)} of them: " + ", ".join(drivers) + "."
-            )
-    except Exception:
-        pass
     return GeneratedSection(
         doc_title="Connections & engines",
         section_title="Which engines you can connect",

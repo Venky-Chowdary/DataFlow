@@ -63,6 +63,16 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "What is the difference between incremental and upsert",
         "Do you support BigQuery as a destination",
         "Can I use a service principal for Azure",
+        "Can I run transfers in parallel",
+        "What happens if two jobs write the same table",
+        "What is the difference between full refresh and incremental",
+        "Do you support SCD1",
+        "What is session timeout",
+        "Can I set a custom domain",
+        "Do you support data residency",
+        "Do you support SQL Server",
+        "Do you support Databricks as a destination",
+        "Do you support Delta Lake",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
@@ -303,3 +313,66 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "string" not in bq_lead
     assert "service principal" in azure_lead
     assert "schema registry" not in azure_lead
+    parallel = compose_product_answer(
+        retrieve_product_answer("can I run transfers in parallel", limit=4)
+    ) or ""
+    two_jobs = compose_product_answer(
+        retrieve_product_answer("what happens if two jobs write the same table", limit=4)
+    ) or ""
+    full_refresh = compose_product_answer(
+        retrieve_product_answer("what is the difference between full refresh and incremental", limit=4)
+    ) or ""
+    scd1 = compose_product_answer(
+        retrieve_product_answer("do you support SCD1", limit=4)
+    ) or ""
+    session = compose_product_answer(
+        retrieve_product_answer("what is session timeout", limit=4)
+    ) or ""
+    domain = compose_product_answer(
+        retrieve_product_answer("can I set a custom domain", limit=4)
+    ) or ""
+    residency = compose_product_answer(
+        retrieve_product_answer("do you support data residency", limit=4)
+    ) or ""
+    sqlserver = compose_product_answer(
+        retrieve_product_answer("do you support SQL Server", limit=4)
+    ) or ""
+    databricks = compose_product_answer(
+        retrieve_product_answer("do you support Databricks as a destination", limit=4)
+    ) or ""
+    unity = compose_product_answer(
+        retrieve_product_answer("can I use Databricks Unity Catalog", limit=4)
+    ) or ""
+    delta = compose_product_answer(
+        retrieve_product_answer("do you support Delta Lake", limit=4)
+    ) or ""
+    parallel_lead = parallel.split(". ")[0].lower()
+    two_jobs_lead = two_jobs.split(". ")[0].lower()
+    full_refresh_lead = full_refresh.split(". ")[0].lower()
+    scd1_lead = scd1.split(". ")[0].lower()
+    session_lead = session.split(". ")[0].lower()
+    domain_lead = domain.split(". ")[0].lower()
+    residency_lead = residency.split(". ")[0].lower()
+    sqlserver_lead = sqlserver.split(". ")[0].lower()
+    databricks_lead = databricks.split(". ")[0].lower()
+    unity_lead = unity.split(". ")[0].lower()
+    delta_lead = delta.split(". ")[0].lower()
+    assert "transfer_workers" in parallel_lead
+    assert "who can run" not in parallel_lead
+    assert "destination lock" in two_jobs_lead
+    assert "shared lsn" not in two_jobs_lead
+    assert "whole-source" in full_refresh_lead
+    assert "upsert is a sync mode" not in full_refresh_lead
+    assert "does not ship scd1" in scd1_lead
+    assert "session_timeout_enforced" in session_lead
+    assert "custom_domain" in domain_lead
+    assert "ip allowlist" not in domain_lead
+    assert "data_region" in residency_lead
+    assert "mirror deletes" not in residency_lead
+    assert "sql server is a transfer-ready" in sqlserver_lead
+    assert "change data capture (cdc) is log capture" not in sqlserver_lead
+    assert "not a transfer-ready" in databricks_lead
+    assert "configured the same way as a database" not in databricks_lead
+    assert "unity catalog" in unity_lead
+    assert "does not ship delta lake" in delta_lead
+    assert "service principal" not in delta_lead

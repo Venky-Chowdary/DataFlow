@@ -174,6 +174,17 @@ def subject_aliases() -> frozenset[str]:
             "mfa",
             "principal",
             "audit_read",
+            "scd1",
+            "residency",
+            "sqlserver",
+            "databricks",
+            "delta",
+            "custom_domain",
+            "full_refresh",
+            "parallel",
+            "session",
+            "unity",
+            "mssql",
         }
     )
     try:

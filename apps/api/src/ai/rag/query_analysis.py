@@ -481,7 +481,10 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
                 # What the acronym stands for, which is how it gets asked.
                 r"|\bbring\s+(?:my|your|our)\s+own\b", re.I),
      ("byok", "kms", "encryption", "secret")),
-    (re.compile(r"\bslowly\s+changing\s+dimension\b", re.I),
+    (re.compile(
+        r"\bslowly\s+changing\s+dimension\b(?!\s*(?:type\s*)?1\b)",
+        re.I,
+    ),
      ("scd2", "sync", "mode", "history")),
     (re.compile(r"\bscd\s*(?:type\s*)?2\b", re.I),
      ("scd2", "sync", "mode", "history", "version")),
@@ -648,7 +651,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         r"|\ballowlist(?:ed)?\s+ips?\b",
         re.I,
     ),
-     ("allowlist", "cidr", "custom_domain")),
+     ("allowlist", "cidr")),
     (re.compile(
         r"\brequire\s+mfa\b"
         r"|\bmulti[\s-]?factor\b"
@@ -675,6 +678,68 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("incremental", "upsert", "cursor")),
+    (re.compile(
+        r"\bfull[\s-]?refresh\s+(?:vs\.?|versus|or)\s+incremental\b"
+        r"|\bincremental\s+(?:vs\.?|versus|or)\s+full[\s-]?refresh\b"
+        r"|\bdifference\s+between\s+full[\s-]?refresh\s+and\s+incremental\b",
+        re.I,
+    ),
+     ("full_refresh", "incremental")),
+    (re.compile(
+        r"\bscd\s*(?:type\s*)?1\b"
+        r"|\bslowly\s+changing\s+dimension\s*(?:type\s*)?1\b",
+        re.I,
+    ),
+     ("scd1",)),
+    (re.compile(
+        r"\btransfers?\s+in\s+parallel\b"
+        r"|\brun\s+transfers?\s+in\s+parallel\b"
+        r"|\bhow\s+many\s+transfers?\s+can\s+run\b",
+        re.I,
+    ),
+     ("parallel", "inflight")),
+    (re.compile(
+        r"\btwo\s+jobs?\s+write\b"
+        r"|\bsame\s+(?:destination\s+)?table\b"
+        r"|\bdestination\s+(?:table\s+)?lock\b"
+        r"|\block\s+the\s+destination\b",
+        re.I,
+    ),
+     ("lock", "table")),
+    (re.compile(
+        r"\bdata\s+residency\b"
+        r"|\bpin\s+data\s+to\s+a\s+region\b"
+        r"|\bmulti[\s-]?region\b",
+        re.I,
+    ),
+     ("residency", "data_region")),
+    (re.compile(
+        r"\bsession\s+timeout\b"
+        r"|\btoken\s+ttl\b",
+        re.I,
+    ),
+     ("session", "ttl")),
+    (re.compile(
+        r"\bcustom\s+domain\b"
+        r"|\bvanity\s+(?:host|domain)\b",
+        re.I,
+    ),
+     ("custom_domain", "vanity")),
+    (re.compile(
+        r"\bsql\s+server\b"
+        r"|\bmssql\b"
+        r"|\bazure\s+sql\b",
+        re.I,
+    ),
+     ("sqlserver", "driver")),
+    (re.compile(
+        r"\bdatabricks\b"
+        r"|\bunity\s+catalog\b",
+        re.I,
+    ),
+     ("databricks", "unity")),
+    (re.compile(r"\bdelta\s+lake\b", re.I),
+     ("delta",)),
     (re.compile(
         r"\bestuary\b"
         r"|(?<!custom\s)\bfivetran\b(?!\s+connector)(?!\s+pack)"
@@ -896,6 +961,13 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\b(?:limit|restrict|control)\s+(?:who|access|which\s+\w+\s+can)\b", re.I),
         ("limit", "restrict", "control"),
+    ),
+    # "SCD type 1/2" — the digit is the mode; ``type`` is filler that
+    # otherwise ties every SCD card to the live-tile list and lets SCD1
+    # steal "what is SCD type 2".
+    (
+        re.compile(r"\bscd\s*(?:type\s*)?[12]\b", re.I),
+        ("type",),
     ),
     # "SLA for job runtime" names a warranty this product does not publish.
     # Left as content terms it retrieved the Airbyte pack card on ``runtime``

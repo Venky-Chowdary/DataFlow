@@ -132,6 +132,38 @@ def test_upsert_merge_and_airbyte_pack_do_not_snap_to_neighbors() -> None:
         "do you support IP allowlists",
         "can I require mfa",
     )
+    assert drops_distinctive_subjects(
+        "do you support Delta Lake",
+        "can I use a service principal for azure",
+    )
+    assert drops_distinctive_subjects(
+        "what is the difference between full refresh and incremental",
+        "what is the difference between incremental and upsert",
+    )
+    assert introduces_unrelated_subjects(
+        "do you support SCD1",
+        "what is the difference between upsert and merge",
+    )
+    assert drops_distinctive_subjects(
+        "can I run transfers in parallel",
+        "who can start a transfer",
+    )
+    assert drops_distinctive_subjects(
+        "do you support Databricks as a destination",
+        "which engines you can connect",
+    )
+    assert drops_distinctive_subjects(
+        "can I use Databricks Unity Catalog",
+        "can I use an Iceberg Glue catalog",
+    )
+    assert drops_distinctive_subjects(
+        "what is session timeout",
+        "can I require mfa",
+    )
+    assert drops_distinctive_subjects(
+        "can I set a custom domain",
+        "do you support IP allowlists",
+    )
 
 
 def test_rice_is_an_unrelated_subject() -> None:

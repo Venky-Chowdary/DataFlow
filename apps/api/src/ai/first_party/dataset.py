@@ -111,6 +111,21 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("what is the difference between incremental and upsert", "what is the difference between incremental and upsert"),
     ("do you support bigquery as a destination", "do you support bigquery as a destination"),
     ("can I use a service principal for azure", "can I use a service principal for azure"),
+    ("can I run transfers in parallel", "can I run transfers in parallel"),
+    ("how many transfers can run at once", "can I run transfers in parallel"),
+    ("what happens if two jobs write the same table", "what happens if two jobs write the same table"),
+    ("do you lock the destination during write", "what happens if two jobs write the same table"),
+    ("what is the difference between full refresh and incremental", "what is the difference between full refresh and incremental"),
+    ("do you support scd1", "do you support scd1"),
+    ("is upsert the same as scd1", "do you support scd1"),
+    ("do you support scd type 1", "do you support scd1"),
+    ("what is session timeout", "what is session timeout"),
+    ("can I set a custom domain", "can I set a custom domain"),
+    ("do you support data residency", "do you support data residency"),
+    ("do you support sql server", "do you support sql server"),
+    ("do you support databricks as a destination", "do you support databricks as a destination"),
+    ("can I use databricks unity catalog", "do you support databricks as a destination"),
+    ("do you support delta lake", "do you support delta lake"),
 )
 
 

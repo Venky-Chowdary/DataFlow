@@ -419,6 +419,58 @@ def ip_allowlist_enforced_without_custom_domain() -> bool:
     return False
 
 
+def sqlserver_is_transfer_ready() -> bool:
+    return "sqlserver" in _transfer_ready_drivers()
+
+
+def databricks_is_transfer_ready() -> bool:
+    return "databricks" in _transfer_ready_drivers()
+
+
+def delta_lake_is_transfer_ready() -> bool:
+    drivers = _transfer_ready_drivers()
+    return bool(drivers & {"delta", "delta_lake"})
+
+
+def scd1_is_canonical() -> bool:
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return False
+    return bool({"scd1", "scd_1", "scd_type_1"} & set(CANONICAL_SYNC_MODES))
+
+
+def full_refresh_modes_are_canonical() -> bool:
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+    except Exception:
+        return False
+    return {"full_refresh_overwrite", "full_refresh_append"} <= set(CANONICAL_SYNC_MODES)
+
+
+def destination_table_lock_claimed() -> bool:
+    return False
+
+
+def transfer_workers_default() -> int:
+    """Default concurrent jobs on one worker — worker_fleet TRANSFER_WORKERS."""
+    try:
+        from services.platform_config import getenv_brand
+
+        return max(1, int(getenv_brand("TRANSFER_WORKERS", "8") or "8"))
+    except Exception:
+        return 8
+
+
+def session_timeout_enforced() -> bool:
+    """Token TTL is DATAFLOW_TOKEN_TTL_SEC — tenant.session_timeout_hours is memory."""
+    return False
+
+
+def residency_attestation_claimed() -> bool:
+    return False
+
+
 def watermark_store_honesty() -> dict[str, object]:
     """Default resume token vs opted-in EOS table — not a platform exactly-once claim."""
     try:
@@ -692,9 +744,9 @@ def ip_allowlist_card() -> CapabilityCard | None:
         title="Do you support IP allowlists",
         text=(
             "A tenant IP allowlist (CIDR) is stored on the workspace and is "
-            "enforced only when a custom domain exists; the vanity app host "
-            "never evaluates the list. "
-            "Without a custom domain, ip_allowlist_enforced stays false."
+            "enforced only when a vanity app host is configured; without that "
+            "host the list is never evaluated. "
+            "ip_allowlist_enforced stays false until then."
         ),
         source_module="src/routers/workspace_router.py · ip_allowlist_enforced",
         category="enterprise",
@@ -707,8 +759,8 @@ def require_mfa_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Can I require MFA",
         text=(
-            "The workspace can record mfa_required as policy memory; login MFA "
-            "is not wired, so mfa_enforced is false. "
+            "You can require MFA as policy memory only; login MFA is not "
+            "wired, so mfa_enforced is false. "
             "Saving the flag does not challenge sign-in."
         ),
         source_module="src/routers/workspace_router.py · mfa_enforced",
@@ -771,13 +823,176 @@ def azure_service_principal_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="Can I use a service principal for Azure",
         text=(
-            "Yes — Azure Data Lake / Blob connections accept a service "
+            "Yes — ADLS and Azure Blob connections accept a service "
             "principal via service_account JSON (tenant_id, client_id, "
             "client_secret) on the ADLS connect path. "
             "That is a connector credential, not Azure AD SSO as the "
             "transfer writer."
         ),
         source_module="connectors/adls_common.py · _service_principal_credential",
+        category="connectors",
+    )
+
+
+def parallel_transfers_card() -> CapabilityCard:
+    workers = transfer_workers_default()
+    return CapabilityCard(
+        title="Can I run transfers in parallel",
+        text=(
+            f"Yes — you can run transfers in parallel: TRANSFER_WORKERS "
+            f"(default {workers}) bounds in-flight jobs on one worker. "
+            "Inside one transfer, PARALLEL_WORKERS chunks overlap reads and "
+            "writes. That is job and chunk concurrency, not a destination "
+            "table lock."
+        ),
+        source_module="services/worker_fleet.py · TRANSFER_WORKERS",
+        category="transfer",
+    )
+
+
+def two_jobs_same_table_card() -> CapabilityCard | None:
+    if destination_table_lock_claimed():
+        return None
+    return CapabilityCard(
+        title="What happens if two jobs write the same table",
+        text=(
+            "Two jobs can write the same destination table; Datawrap does not "
+            "take an exclusive destination lock. "
+            "Key-idempotent upsert is last-writer-wins on the key."
+        ),
+        source_module="src/transfer/stream.py · no destination table lock",
+        category="transfer",
+    )
+
+
+def full_refresh_versus_incremental_card() -> CapabilityCard | None:
+    if not full_refresh_modes_are_canonical() or not incremental_modes_are_canonical():
+        return None
+    return CapabilityCard(
+        title="What is the difference between full refresh and incremental",
+        text=(
+            "Full refresh is a whole-source read (full_refresh_append inserts "
+            "every row; full_refresh_overwrite replaces the destination). "
+            "Incremental modes are cursor-bounded and only read rows past the "
+            "saved cursor. Full refresh is not a synonym for incremental."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def scd1_card() -> CapabilityCard | None:
+    if scd1_is_canonical():
+        return None
+    return CapabilityCard(
+        title="Do you support SCD1",
+        text=(
+            "Datawrap does not ship SCD1 as a sync mode. "
+            "Current-state writes use upsert or mirror; SCD2 is the "
+            "history-keeping mode."
+        ),
+        source_module="services/sync_cursor.py · CANONICAL_SYNC_MODES",
+        category="transfer",
+    )
+
+
+def session_timeout_card() -> CapabilityCard | None:
+    if session_timeout_enforced():
+        return None
+    return CapabilityCard(
+        title="What is session timeout",
+        text=(
+            "Session timeout is recorded as session_timeout_hours; "
+            "session_timeout_enforced is false because the timeout is not "
+            "wired. "
+            "Token lifetime is DATAFLOW_TOKEN_TTL_SEC."
+        ),
+        source_module="src/routers/workspace_router.py · session_timeout_enforced",
+        category="enterprise",
+    )
+
+
+def custom_domain_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Can I set a custom domain",
+        text=(
+            "Yes — a tenant can set a custom domain (tenant.custom_domain, "
+            "for example data.customer.com) and point DNS at the Datawrap "
+            "web host. "
+            "API CORS accepts that origin via TenantAwareCORSMiddleware."
+        ),
+        source_module="src/routers/workspace_router.py · custom_domain_cors",
+        category="enterprise",
+    )
+
+
+def data_residency_card() -> CapabilityCard | None:
+    if residency_attestation_claimed():
+        return None
+    return CapabilityCard(
+        title="Do you support data residency",
+        text=(
+            "A workspace records data_region for data residency; that is not "
+            "a signed multi-region residency attestation. "
+            "Destination-region fail-closed runs only when "
+            "DATAFLOW_RESIDENCY_STRICT is on or the tenant is not on the "
+            "default region."
+        ),
+        source_module="src/routers/transfer_router.py · _residency_check",
+        category="enterprise",
+    )
+
+
+def sqlserver_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support SQL Server",
+        text=(
+            "Yes — SQL Server is a transfer-ready driver, so a transfer can "
+            "use it as a source or a destination. "
+            "Catalog tile count is not the proof; unique_driver_types is."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def databricks_destination_card() -> CapabilityCard | None:
+    if databricks_is_transfer_ready():
+        return CapabilityCard(
+            title="Do you support Databricks as a destination",
+            text=(
+                "Yes — Databricks is a transfer-ready driver, so a transfer "
+                "can use it as a destination. "
+                "Catalog tile count is not the proof; unique_driver_types is."
+            ),
+            source_module="services/catalog_service.py · unique_driver_types",
+            category="connectors",
+        )
+    return CapabilityCard(
+        title="Do you support Databricks as a destination",
+        text=(
+            "Databricks is not a transfer-ready driver, and Unity Catalog is "
+            "not a connect option — unique_driver_types does not include it. "
+            "A catalog tile or generic_sql dialect alias is not a live writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def delta_lake_card() -> CapabilityCard | None:
+    if delta_lake_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Delta Lake",
+        text=(
+            "Datawrap does not ship Delta Lake as a transfer-ready driver — "
+            "unique_driver_types does not include delta or delta_lake. "
+            "A type-system alias is not a live table-format writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
         category="connectors",
     )
 
@@ -817,6 +1032,16 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         incremental_versus_upsert_card,
         bigquery_destination_card,
         azure_service_principal_card,
+        parallel_transfers_card,
+        two_jobs_same_table_card,
+        full_refresh_versus_incremental_card,
+        scd1_card,
+        session_timeout_card,
+        custom_domain_card,
+        data_residency_card,
+        sqlserver_card,
+        databricks_destination_card,
+        delta_lake_card,
     ):
         card = builder()
         if card is not None:
