@@ -419,18 +419,19 @@ def _shape_bonus(ask: str, sentence: str, analysis=None) -> float:
             low = sentence.lower()
             job_actions = distinctive & {"resume", "cancel", "retry", "pause"}
             capture = distinctive & {
-                "snapshot", "stream", "handoff", "cdc", "wal", "lsn",
+                "snapshot", "stream", "handoff", "cdc", "wal", "lsn", "lag",
             }
             hits = {term for term in distinctive if term in low}
-            if job_actions and capture:
-                # "how do I resume if it crashes between snapshot and stream"
-                # names a Theater verb and a capture phase. The cancel/resume
-                # button sentence matches *resume* and used to beat the
-                # handoff sentence that actually answers.
+            if capture:
+                # "how do I see CDC lag" expands onto *theater*, so the cancel
+                # button sentence used to take the +2.2 for naming Job Theater
+                # and bury the lag sentence that actually answers.
                 if hits & capture:
                     bonus += 2.2
                 else:
                     bonus -= 1.6
+            elif job_actions and hits & job_actions:
+                bonus += 2.2
             elif distinctive and hits:
                 bonus += 2.2
             elif distinctive:

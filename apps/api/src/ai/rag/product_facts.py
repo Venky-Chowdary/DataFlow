@@ -630,6 +630,345 @@ def _snapshot_handoff_section() -> GeneratedSection:
     )
 
 
+def _postgres_cdc_prereq_section() -> GeneratedSection:
+    """wal_level=logical is the server switch the capability module names."""
+    try:
+        from services.cdc_capability import CAUSE_SERVER_NOT_CONFIGURED, _remedy
+    except Exception:
+        remedy = (
+            "Set wal_level=logical and restart PostgreSQL to capture DELETEs."
+        )
+    else:
+        remedy = _remedy("postgresql", CAUSE_SERVER_NOT_CONFIGURED)
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Does Postgres CDC need wal_level=logical",
+        text=(
+            f"Yes — Postgres CDC needs wal_level=logical. {remedy} "
+            "Until the server emits a logical change log the stream cannot "
+            "carry DELETEs."
+        ),
+        source_module="services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _replication_slot_section() -> GeneratedSection:
+    """A slot is a source-side resource, not a destination table."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What a replication slot is",
+        text=(
+            "A PostgreSQL CDC schedule owns a replication slot on the source. "
+            "The slot holds WAL until the stream consumes it; leaving an unused "
+            "slot retains WAL forever and can exhaust max_replication_slots. "
+            "Deleting the schedule drops the slot unless another route still "
+            "needs it or a consumer is attached."
+        ),
+        source_module="services/cdc_capture_release.py · services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _pgoutput_plugin_section() -> GeneratedSection:
+    """The plugin the slot is created with."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What plugin Postgres CDC uses",
+        text=(
+            "Postgres CDC uses the pgoutput logical-decoding plugin "
+            "(falling back to test_decoding when pgoutput cannot be loaded). "
+            "The plugin is recorded on the replication slot, not picked from "
+            "the destination write tiles."
+        ),
+        source_module="services/cdc_capability.py · connectors/pgoutput_decoder.py",
+        category="transfer",
+    )
+
+
+def _cdc_schedule_delete_section() -> GeneratedSection:
+    """Deleting the schedule is a slot-release question, not a row delete."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What happens if I delete a CDC schedule",
+        text=(
+            "Deleting a CDC schedule drops its source replication slot — "
+            "SELECT pg_drop_replication_slot on PostgreSQL — unless another "
+            "schedule on the same route still needs it or the slot has an "
+            "attached consumer. Fivetran/Estuary drop the slot on connector "
+            "deletion; Airbyte leaves it to the operator."
+        ),
+        source_module="services/cdc_capture_release.py",
+        category="transfer",
+    )
+
+
+def _toast_cdc_section() -> GeneratedSection:
+    """Unchanged TOAST columns must not be upserted as nulls."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Do unchanged TOAST columns get dropped on a CDC update",
+        text=(
+            "No — when pgoutput marks an unchanged TOAST column as omitted, "
+            "the write merges the old tuple so the destination is not wiped "
+            "to null. A sparse update with no old tuple is refused as "
+            "toast_incomplete rather than applied."
+        ),
+        source_module="services/cdc_toast.py",
+        category="transfer",
+    )
+
+
+def _replica_identity_section() -> GeneratedSection:
+    """UPDATE/DELETE old keys — the reader requires FULL, not DEFAULT."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Does Postgres CDC need REPLICA IDENTITY FULL",
+        text=(
+            "Yes — Postgres CDC needs REPLICA IDENTITY FULL so UPDATE and "
+            "DELETE emit old keys and unchanged TOAST columns. The reader "
+            "runs ALTER TABLE … REPLICA IDENTITY FULL; without it a sparse "
+            "update is refused as toast_incomplete rather than applied."
+        ),
+        source_module="connectors/postgresql_change_stream.py · services/cdc_toast.py",
+        category="transfer",
+    )
+
+
+def _mysql_cdc_prereq_section() -> GeneratedSection:
+    """ROW + FULL image is the MySQL switch the capability module names."""
+    try:
+        from services.cdc_capability import CAUSE_SERVER_NOT_CONFIGURED, _remedy
+    except Exception:
+        remedy = (
+            "Set log_bin=ON, binlog_format=ROW, binlog_row_image=FULL to "
+            "capture DELETEs."
+        )
+    else:
+        remedy = _remedy("mysql", CAUSE_SERVER_NOT_CONFIGURED)
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Does MySQL CDC need binlog_format=ROW",
+        text=(
+            f"Yes — MySQL CDC needs binlog_format=ROW. {remedy} "
+            "STATEMENT or MIXED format cannot carry a row image."
+        ),
+        source_module="services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _publication_section() -> GeneratedSection:
+    """A publication is the table-set the slot decodes, not the slot itself."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What a publication is",
+        text=(
+            "A publication is the PostgreSQL object that names which tables "
+            "a CDC replication slot decodes. The schedule owns both the "
+            "publication and the slot; deleting the schedule drops the "
+            "publication unless another route still needs it."
+        ),
+        source_module="services/cdc_capture_release.py",
+        category="transfer",
+    )
+
+
+def _cdc_privilege_section() -> GeneratedSection:
+    """REPLICATION grant, not superuser — from the privilege remedy."""
+    try:
+        from services.cdc_capability import CAUSE_PRIVILEGE, _remedy
+    except Exception:
+        remedy = (
+            "Grant the connection user REPLICATION (ALTER ROLE <user> "
+            "REPLICATION) and allow a replication entry in pg_hba.conf."
+        )
+    else:
+        remedy = _remedy("postgresql", CAUSE_PRIVILEGE)
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What privileges the Postgres CDC user needs",
+        text=(
+            f"The Postgres CDC user needs a REPLICATION grant, not superuser — "
+            f"{remedy}"
+        ),
+        source_module="services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _slot_quota_section() -> GeneratedSection:
+    """Slot exhaustion fails closed — from the quota remedy."""
+    try:
+        from services.cdc_capability import CAUSE_SLOT_QUOTA, _remedy
+    except Exception:
+        remedy = (
+            "Free an unused logical slot or raise max_replication_slots and "
+            "restart PostgreSQL."
+        )
+    else:
+        remedy = _remedy("postgresql", CAUSE_SLOT_QUOTA)
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What happens if max_replication_slots is exhausted",
+        text=(
+            f"When max_replication_slots is exhausted the CDC attach fails "
+            f"closed. {remedy} Continuing would silently stop carrying deletes."
+        ),
+        source_module="services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _mongo_preimage_section() -> GeneratedSection:
+    """Deletes need pre-images or an _id key — from the Mongo remedy."""
+    try:
+        from services.cdc_capability import CAUSE_MONGO_PREIMAGE_DISABLED, _remedy
+
+        remedy = _remedy("mongodb", CAUSE_MONGO_PREIMAGE_DISABLED)
+    except Exception:
+        remedy = (
+            "Enable change-stream pre-images on the collection so delete "
+            "events carry the business key, or key the pipeline on _id."
+        )
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Does Mongo CDC need change-stream pre-images",
+        text=(
+            f"Yes — Mongo CDC needs change-stream pre-images so a delete "
+            f"carries the business key. {remedy}"
+        ),
+        source_module="services/cdc_capability.py",
+        category="transfer",
+    )
+
+
+def _iceberg_write_section() -> GeneratedSection:
+    """MoR vs CoW — read from the writer that applies the kernel."""
+    return GeneratedSection(
+        doc_title="Destinations",
+        section_title="Does Iceberg upsert use merge-on-read",
+        text=(
+            "Iceberg overwrite and replace stay copy-on-write; upsert and CDC "
+            "writes use merge-on-read equality-delete files plus a new data "
+            "file at the same snapshot sequence. Catalog mode also MERGEs "
+            "through Table.upsert; a missing data-file fails closed."
+        ),
+        source_module="connectors/iceberg_writer.py · connectors/iceberg_mor.py",
+        category="transfer",
+    )
+
+
+def _semantic_mapping_type_section() -> GeneratedSection:
+    """How Map picks a type — not a schema-change policy."""
+    try:
+        from services.semantic_mapper import IDENTITY_PASSTHROUGH_CONFIDENCE
+    except Exception:
+        identity_floor = "0.84"
+    else:
+        identity_floor = str(IDENTITY_PASSTHROUGH_CONFIDENCE)
+    return GeneratedSection(
+        doc_title="Semantic column mapping",
+        section_title="How semantic column mapping decides a type",
+        text=(
+            "Semantic column mapping decides a type from synonym matches and "
+            "a calibrated confidence — not from a schema-change policy. "
+            "Automapping is BM25 plus a semantic token graph, then a "
+            "Hungarian assignment; an optional ML baseline can boost "
+            f"high-confidence predictions. Identity passthrough is "
+            f"{identity_floor} and still requires_review when the pair is "
+            "marked for review."
+        ),
+        source_module="services/semantic_mapper.py",
+        category="mapping",
+    )
+
+
+def _pii_mask_section() -> GeneratedSection:
+    """mask_pii / hash_pii / redact are the transforms the engine applies."""
+    return GeneratedSection(
+        doc_title="Transforms",
+        section_title="Can I mask PII before a write",
+        text=(
+            "Yes — a mapping can mask, hash or redact PII before the write: "
+            "set the column transform to mask_pii, hash_pii or redact. The "
+            "transfer redacts those source columns in the row payload; logs "
+            "and Theater samples are masked the same way."
+        ),
+        source_module="services/pii_guard.py",
+        category="transfer",
+    )
+
+
+def _gtid_section() -> GeneratedSection:
+    """GTID is a MySQL resume token, not a Postgres LSN."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="What GTID is on a MySQL CDC route",
+        text=(
+            "GTID is a MySQL CDC resume token: the high water mark is kept as "
+            "a binlog file and position or GTID, so a recurring pipeline "
+            "continues from the last committed event rather than re-reading "
+            "the log."
+        ),
+        source_module="services/cdc_snapshot_resume.py · services/checkpoint_service.py",
+        category="transfer",
+    )
+
+
+def _cdc_add_column_section() -> GeneratedSection:
+    """A new source column mid-stream is drift, not a snapshot handoff."""
+    return GeneratedSection(
+        doc_title="Schema drift & policy",
+        section_title="What happens if I add a column during CDC",
+        text=(
+            "Adding a column during CDC is schema drift on the live stream, "
+            "not a snapshot handoff. The new column is not applied silently."
+        ),
+        source_module="services/schedule_store.py · SCHEMA_POLICIES",
+        category="transfer",
+    )
+
+
+def _cdc_backfill_section() -> GeneratedSection:
+    """A backfill is a separate run — the live watermark is not rewound."""
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Can I backfill after CDC has started",
+        text=(
+            "Yes — a backfill of an earlier range is a separate run rather "
+            "than a rewind of the live CDC watermark. The live route keeps "
+            "reading from the watermark its last tick left."
+        ),
+        source_module="services/cdc_snapshot_resume.py · services/checkpoint_service.py",
+        category="transfer",
+    )
+
+
+def _cdc_lag_section() -> GeneratedSection:
+    """Theater lag is byte-honest, not heartbeat-green."""
+    try:
+        from services.cdc_lag_honesty import BYTE_WARN, CATCH_UP_BYTES
+    except Exception:
+        warn, caught = "16 MiB", "1 MiB"
+    else:
+        warn = f"{BYTE_WARN // (1024 * 1024)} MiB"
+        caught = f"{CATCH_UP_BYTES // (1024 * 1024)} MiB"
+    return GeneratedSection(
+        doc_title="Job Theater & proof",
+        section_title="Procedure: see CDC lag on Job Theater",
+        text=(
+            f"CDC lag is on Job Theater as WAL/binlog byte lag and, when a "
+            f"source commit timestamp is proven, seconds. A heartbeat proves "
+            f"the consumer is alive — never that replication is caught up — "
+            f"and a fake 0s lag is never invented. Caught-up is under "
+            f"{caught}; Theater warns from {warn}."
+        ),
+        source_module="services/cdc_lag_honesty.py · Job Theater",
+        category="jobs",
+    )
+
+
 def _cdc_delete_section() -> GeneratedSection:
     """A CDC delete is not the definition of the mode."""
     return GeneratedSection(
@@ -964,6 +1303,44 @@ def _destination_count_section() -> GeneratedSection | None:
         text=f"There are {len(dests)} destinations a transfer can write to.",
         source_module="src/transfer/connector_capabilities.py",
         category="connectors",
+    )
+
+
+def _sync_mode_count_section() -> GeneratedSection | None:
+    """'How many sync modes' is a number, not the definition of a mode."""
+    try:
+        from services.sync_cursor import CANONICAL_SYNC_MODES
+
+        described = [m for m in CANONICAL_SYNC_MODES if _SYNC_MODE_BEHAVIOUR.get(m)]
+    except Exception:
+        described = []
+    if not described:
+        return None
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="How many sync modes are there",
+        text=f"There are {len(described)} sync modes.",
+        source_module="services/sync_cursor.py",
+        category="transfer",
+    )
+
+
+def _role_count_section() -> GeneratedSection | None:
+    """'How many roles' is a number, not the RBAC definition."""
+    try:
+        from services.rbac import role_names
+
+        roles = list(role_names())
+    except Exception:
+        roles = []
+    if not roles:
+        return None
+    return GeneratedSection(
+        doc_title="Roles & permissions",
+        section_title="How many roles are there",
+        text=f"There are {len(roles)} roles.",
+        source_module="services/rbac.py",
+        category="enterprise",
     )
 
 
@@ -1359,10 +1736,10 @@ def _create_new_mapping_section() -> GeneratedSection:
         section_title="What a create-new mapping is",
         text=(
             "A create-new mapping is when the destination table does not exist "
-            "yet and is created for you — primary keys, NOT NULL, identity and "
+            "yet and is created for you — it is not a 93% identity score on a "
+            "table that already exists. Primary keys, NOT NULL, identity and "
             "indexes are carried, and unsupported aspects are certified rather "
-            "than silently omitted. It is not a 93% identity score on a table "
-            "that already exists."
+            "than silently omitted."
         ),
         source_module="services/schema_fidelity.py",
         category="transfer",
@@ -1689,6 +2066,21 @@ def _standing_authority_section() -> GeneratedSection:
     )
 
 
+def _limit_connector_visibility_section() -> GeneratedSection:
+    """Who can see a connector is RBAC, not the Team invite wizard."""
+    return GeneratedSection(
+        doc_title="Roles & permissions",
+        section_title="Can I limit who sees a connector",
+        text=(
+            "Yes — RBAC permission connector.read is what limits who sees a "
+            "connector. A viewer can read saved connections; an editor or "
+            "admin can create and edit them."
+        ),
+        source_module="services/rbac.py",
+        category="enterprise",
+    )
+
+
 def _who_can_start_section() -> GeneratedSection:
     """'Who is allowed to start a transfer' is not an Execute click."""
     try:
@@ -1812,6 +2204,20 @@ def _rest_api_section() -> GeneratedSection:
         ),
         source_module="docs/API_VERSIONING.md · help-api#endpoints",
         category="api",
+    )
+
+
+def _viewer_export_yaml_section() -> GeneratedSection:
+    """A viewer can export YAML — that is a read, not a write."""
+    return GeneratedSection(
+        doc_title="GitOps & YAML export",
+        section_title="Can a viewer export YAML",
+        text=(
+            "Yes — a viewer can export YAML. Export YAML is a read of the "
+            "schedule or pipeline manifest and does not include credentials."
+        ),
+        source_module="apps/cli/dataflow_cli · services/rbac.py",
+        category="enterprise",
     )
 
 
@@ -1960,6 +2366,24 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _throughput_section,
         _capture_mode_section,
         _snapshot_handoff_section,
+        _postgres_cdc_prereq_section,
+        _replication_slot_section,
+        _pgoutput_plugin_section,
+        _cdc_schedule_delete_section,
+        _toast_cdc_section,
+        _replica_identity_section,
+        _mysql_cdc_prereq_section,
+        _publication_section,
+        _cdc_privilege_section,
+        _slot_quota_section,
+        _mongo_preimage_section,
+        _iceberg_write_section,
+        _semantic_mapping_type_section,
+        _pii_mask_section,
+        _gtid_section,
+        _cdc_add_column_section,
+        _cdc_backfill_section,
+        _cdc_lag_section,
         _cdc_delete_section,
         _delete_semantics_section,
         _lineage_section,
@@ -1969,6 +2393,8 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _catalog_count_section,
         _destination_list_section,
         _destination_count_section,
+        _sync_mode_count_section,
+        _role_count_section,
         _inventory_count_section,
         _aggregation_section,
         _quarantine_section,
@@ -1976,6 +2402,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _transform_filter_section,
         _job_phase_section,
         _gitops_section,
+        _viewer_export_yaml_section,
         _type_carrier_section,
         _numeric_overflow_section,
         _timezone_section,
@@ -1989,6 +2416,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _stop_type_change_section,
         _type_locked_section,
         _standing_authority_section,
+        _limit_connector_visibility_section,
         _who_can_start_section,
         _cancel_transfer_section,
         _query_playground_section,

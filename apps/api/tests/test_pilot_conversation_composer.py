@@ -265,6 +265,38 @@ def test_infer_tools_briefing_and_general():
     assert "explain_product" in names
     assert "start_transfer_studio" not in names
 
+    names = [n for n, _ in infer_tools_from_message("what plugin does postgres CDC use")]
+    assert "recommend_sync_mode" not in names
+    assert "explain_product" in names or "search_knowledge" in names
+
+    names = [n for n, _ in infer_tools_from_message("does a green connector test skip validate")]
+    assert "explain_product" in names
+    assert "list_connectors" not in names
+
+    names = [n for n, _ in infer_tools_from_message("can a viewer export YAML")]
+    assert "explain_product" in names or names == []
+    from src.ai.copilot.tools import _looks_like_unsupported_mutation
+
+    assert not _looks_like_unsupported_mutation("can a viewer export yaml")
+    assert not _looks_like_unsupported_mutation(
+        "what happens if I delete a CDC schedule"
+    )
+
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "do I need REPLICA IDENTITY FULL for postgres CDC"
+        )
+    ]
+    assert "recommend_sync_mode" not in names
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "do I need binlog_format ROW for mysql CDC"
+        )
+    ]
+    assert "recommend_sync_mode" not in names
+
 
 def test_brief_workspace_is_permissioned_like_other_reads():
     assert "brief_workspace" in {d["name"] for d in TOOL_DEFINITIONS}

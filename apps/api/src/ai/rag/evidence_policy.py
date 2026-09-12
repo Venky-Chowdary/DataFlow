@@ -140,6 +140,20 @@ def subject_aliases() -> frozenset[str]:
     except Exception:
         extra.update({"viewer", "editor", "operator", "admin"})
     extra.update(f"g{i}" for i in range(1, 10))
+    extra.update(
+        {
+            "wal_level",
+            "pgoutput",
+            "toast",
+            "replication",
+            "publication",
+            "gtid",
+            "binlog",
+            "preimage",
+            "backfill",
+            "iceberg",
+        }
+    )
     try:
         # The logical type space is an enum the engine dispatches on, so a
         # question about booleans, arrays, decimals or binary names a subject

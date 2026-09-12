@@ -532,6 +532,26 @@ NATURAL_QUESTIONS: list[Case] = [
         "natural",
         ("handoff", "log position"),
     ),
+    (
+        "do I need wal_level logical for postgres CDC",
+        "natural",
+        ("wal_level", "logical"),
+    ),
+    (
+        "what is a replication slot",
+        "natural",
+        ("replication slot", "slot"),
+    ),
+    (
+        "how do I see CDC lag",
+        "natural",
+        ("lag", "theater"),
+    ),
+    (
+        "does a green connector test skip validate",
+        "natural",
+        ("does not skip", "does **not** skip"),
+    ),
 ]
 
 SUITES: dict[str, list[Case]] = {

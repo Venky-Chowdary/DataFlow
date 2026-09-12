@@ -730,6 +730,82 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "how do I stop a type change from being applied",
             ("type_locked",),
         ),
+        (
+            "do I need wal_level logical for postgres CDC",
+            ("wal_level", "logical"),
+        ),
+        (
+            "what is a replication slot",
+            ("replication slot",),
+        ),
+        (
+            "what plugin does postgres CDC use",
+            ("pgoutput",),
+        ),
+        (
+            "what happens if I delete a CDC schedule",
+            ("replication slot",),
+        ),
+        (
+            "is a 93% identity mapping a create-new",
+            ("93%", "create-new"),
+        ),
+        (
+            "does a green connector test skip validate",
+            ("does **not** skip",),
+        ),
+        (
+            "how do I see CDC lag",
+            ("lag", "theater"),
+        ),
+        (
+            "what is effectively once",
+            ("at-least-once",),
+        ),
+        (
+            "do unchanged TOAST columns get dropped on a postgres CDC update",
+            ("toast",),
+        ),
+        (
+            "can a viewer export YAML",
+            ("viewer", "yaml"),
+        ),
+        (
+            "how does semantic column mapping decide a type",
+            ("confidence", "synonym"),
+        ),
+        (
+            "do I need REPLICA IDENTITY FULL for postgres CDC",
+            ("replica identity", "full"),
+        ),
+        (
+            "do I need binlog_format ROW for mysql CDC",
+            ("binlog_format", "row"),
+        ),
+        (
+            "what is a publication",
+            ("publication",),
+        ),
+        (
+            "can I write Iceberg with merge-on-read",
+            ("merge-on-read",),
+        ),
+        (
+            "can I mask PII before a write",
+            ("mask", "pii"),
+        ),
+        (
+            "what happens if I add a column during CDC",
+            ("schema drift",),
+        ),
+        (
+            "can I limit who sees a connector",
+            ("rbac", "connector"),
+        ),
+        (
+            "what semantic roles do you detect",
+            ("amount", "email"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -790,5 +866,23 @@ def test_the_how_to_passages_are_generated() -> None:
         "What happens to a delete in CDC",
         "What a create-new mapping is",
         "Procedure: export a schedule as YAML",
+        "Does Postgres CDC need wal_level=logical",
+        "What a replication slot is",
+        "What plugin Postgres CDC uses",
+        "What happens if I delete a CDC schedule",
+        "Do unchanged TOAST columns get dropped on a CDC update",
+        "Procedure: see CDC lag on Job Theater",
+        "How many sync modes are there",
+        "How many roles are there",
+        "Does Postgres CDC need REPLICA IDENTITY FULL",
+        "Does MySQL CDC need binlog_format=ROW",
+        "What a publication is",
+        "What privileges the Postgres CDC user needs",
+        "Does Iceberg upsert use merge-on-read",
+        "How semantic column mapping decides a type",
+        "Can I mask PII before a write",
+        "Can a viewer export YAML",
+        "What happens if I add a column during CDC",
+        "Can I limit who sees a connector",
     ):
         assert title in titles, title

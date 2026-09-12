@@ -2639,6 +2639,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"|what\s+should\s+i\s+(?:use|pick|choose|do)\b"
             r"|when\s+should\s+i\b"
             r"|do\s+you\s+support\b"
+            r"|does\s+.{3,48}?\s+skip\b"
             r"|is\s+it\s+possible\b"
             r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
             r"|what\s+happens\s+(?:to|when|if)\b"
@@ -2931,6 +2932,7 @@ _EXPLANATORY_QUESTION = re.compile(
     r"|\bhow\s+to\b"
     r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
     r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
+    r"|\bwhat\s+happens\s+(?:if|when|to)\b"
     r"|\bwalk\s+me\s+through\b"
     r"|\bexplain\s+how\b",
     re.I,
@@ -2942,9 +2944,10 @@ _EXPLANATORY_QUESTION = re.compile(
 # schedule as YAML" was answered with "I can't export files yet" — a documented
 # capability denied.
 _SUPPORTED_EXPORT = re.compile(
-    r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract)\b"
+    r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract|ya?ml)\b"
+    r"|\bexport\s+(?:as\s+)?ya?ml\b"
     r"|\b(?:schedule|pipeline|manifest|contract)\b[^.?!]{0,40}\bas\s+ya?ml\b"
-    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest)\b",
+    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest|export)\b",
     re.I,
 )
 
@@ -4078,7 +4081,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
             ]
-        elif not bare_open_connectors:
+        elif not bare_open_connectors and not re.search(
+            r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b|"
+            r"\bskip\s+(?:validat\w*|preflight)\b|"
+            r"\benough\s+to\s+skip\b",
+            lower,
+        ):
             planned.append(("list_connectors", {}))
             planned = [
                 (n, a) for n, a in planned
@@ -4600,7 +4608,28 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             )
         ) or (
             any(w in lower for w in ("sync mode", "write mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge"))
-            and any(w in lower for w in ("recommend", "suggest", "choose", "which", "best for", "should", "enable", "use", "make it", "switch"))
+            and (
+                any(
+                    w in lower
+                    for w in (
+                        "recommend",
+                        "suggest",
+                        "choose",
+                        "which",
+                        "best for",
+                        "should",
+                        "enable",
+                        "make it",
+                        "switch",
+                    )
+                )
+                or bool(
+                    re.search(
+                        r"\buse\s+(?:cdc|upsert|append|incremental|overwrite)\b",
+                        lower,
+                    )
+                )
+            )
         )
     ):
         planned.append(("recommend_sync_mode", {
@@ -5447,6 +5476,28 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "start_transfer_studio",
             }
         ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "what plugin does postgres CDC use" used to recommend a sync mode
+    # because it contains both ``cdc`` and the verb ``use``.
+    if re.search(
+        r"\b(?:pgoutput|wal[\s_]?level|replication\s+slot|output\s+plugin|"
+        r"cdc\s+lag|toast|replica\s+identity|binlog[\s_]?format|"
+        r"binlog[\s_]?row[\s_]?image|publication|max[\s_]?replication[\s_]?slots|"
+        r"pre[\s-]?images?|merge[\s-]?on[\s-]?read|copy[\s-]?on[\s-]?write|gtid)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if re.search(
+        r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b.+\bskip\b|"
+        r"\bskip\s+(?:validat\w*|preflight)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "list_connectors"]
         if not any(n == "explain_product" for n, _ in planned):
             planned.append(("explain_product", {"query": message[:240]}))
 

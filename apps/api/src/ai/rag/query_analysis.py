@@ -166,7 +166,21 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             # the role matrix and opened on the viewer-negative PII sentence.
             r"|^\s*who\s+can\b"
             r"|^\s*who\s+is\s+allowed\b"
-            r"|^\s*can\s+a(?:n)?\s+(?:viewer|editor|admin|operator|approver)\b",
+            # A role plus a generic permission verb is a request for the
+            # role matrix. "Can a viewer export YAML" names a product
+            # action, not the list of roles, and must stay a capability.
+            r"|^\s*can\s+a(?:n)?\s+(?:viewer|editor|admin|operator|approver)\s+"
+            r"(?:start|run|approve|accept|authorize|create|delete|cancel|retry)\b",
+            re.I,
+        ),
+    ),
+    (
+        # "Can a viewer export YAML" is a yes/no about one permission, not
+        # the role matrix and not the export wizard. ``export`` in the
+        # procedure rule below would otherwise open on the GitOps steps.
+        "capability",
+        re.compile(
+            r"^\s*can\s+a(?:n)?\s+(?:viewer|editor|admin|operator|approver)\b",
             re.I,
         ),
     ),
@@ -265,6 +279,17 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "resume": ("schedule", "pipeline", "enabled", "resume"),
     "handoff": ("snapshot", "stream", "capture", "lsn"),
     "wal": ("log", "capture", "postgres", "write"),
+    "wal_level": ("logical", "cdc", "postgres", "wal"),
+    "pgoutput": ("plugin", "logical", "cdc", "postgres"),
+    "toast": ("pgoutput", "cdc", "unchanged"),
+    "lag": ("watermark", "theater", "cdc", "wal"),
+    "publication": ("publication", "slot", "cdc", "postgres"),
+    "gtid": ("gtid", "binlog", "mysql", "watermark"),
+    "binlog": ("binlog", "mysql", "cdc", "row"),
+    "preimage": ("preimage", "changestream", "mongo", "delete"),
+    "backfill": ("backfill", "watermark", "cdc", "resume"),
+    "mask": ("pii", "redact", "mask", "hash"),
+    "redact": ("pii", "redact", "mask"),
     "tombstone": ("delete", "soft", "cdc"),
     "create-new": ("schema", "certificate", "identity"),
     # Permissions
@@ -388,7 +413,8 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
 # "If I run the same CDC change twice" used to plan list_jobs because it
 # says "run", and the empty-history sentence then became the lead.
 CDC_DELIVERY_RE = re.compile(
-    r"\b(?:exactly[\s-]?once|at[\s-]?least[\s-]?once|idempotent|"
+    r"\b(?:exactly[\s-]?once|at[\s-]?least[\s-]?once|effectively[\s-]?once|"
+    r"idempotent|"
     r"redeliver|(?:same|identical)\s+(?:change|event|record)|"
     r"run(?:ning)?\s+(?:it|the\s+same).{0,32}twice)\b",
     re.I,
@@ -523,8 +549,56 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(?:cdc\s+)?deletes?\b.+\b(?:cdc|stream|log)\b"
                 r"|\bdelete\s+in\s+cdc\b", re.I),
      ("tombstone", "delete", "cdc", "soft")),
-    (re.compile(r"\bcreate[\s-]?new\b", re.I),
+    (re.compile(r"\bcreate[\s-]?new\b"
+                r"|\b93\s*%\s+identity\b"
+                r"|\bidentity\s+mapping\b", re.I),
      ("create-new", "schema", "certificate", "identity")),
+    (re.compile(r"\bwal[\s_]?level\b", re.I),
+     ("wal_level", "logical", "cdc", "postgres")),
+    (re.compile(r"\breplication\s+slots?\b", re.I),
+     ("slot", "wal", "cdc", "postgres")),
+    (re.compile(r"\bpgoutput\b|\boutput\s+plugin\b|\bcdc\s+plugin\b", re.I),
+     ("pgoutput", "logical", "cdc", "postgres")),
+    (re.compile(r"\btoast\b", re.I),
+     ("toast", "pgoutput", "cdc")),
+    (re.compile(r"\bcdc\s+lag\b|\breplication\s+lag\b", re.I),
+     ("lag", "watermark", "theater", "wal")),
+    (re.compile(r"\bgreen\s+test\b|\btest\s+passed\b.+\bskip\b"
+                r"|\bskip\s+(?:validat|preflight)", re.I),
+     ("preflight", "validate", "test")),
+    (re.compile(r"\breplica\s+identity\b", re.I),
+     ("replica", "identity", "full", "toast", "cdc")),
+    (re.compile(r"\bbinlog[\s_]?format\b|\bbinlog[\s_]?row[\s_]?image\b", re.I),
+     ("binlog", "row", "mysql", "cdc")),
+    (re.compile(r"\bpublication\b", re.I),
+     ("publication", "slot", "cdc", "postgres")),
+    (re.compile(r"\bmax[\s_]?replication[\s_]?slots\b", re.I),
+     ("slot", "quota", "cdc", "postgres")),
+    (re.compile(r"\b(?:change[\s-]?stream\s+)?pre[\s-]?images?\b", re.I),
+     ("preimage", "changestream", "mongo", "delete")),
+    (re.compile(r"\bmerge[\s-]?on[\s-]?read\b|\bcopy[\s-]?on[\s-]?write\b", re.I),
+     ("iceberg", "merge", "upsert", "overwrite")),
+    (re.compile(r"\bsemantic\s+column\s+mapping\b|\bhow\s+does\s+mapping\b", re.I),
+     ("semantic", "synonym", "confidence")),
+    (re.compile(r"\bwho\s+sees\s+a\s+connector\b"
+                r"|\blimit\s+who\s+sees\b", re.I),
+     ("viewer", "rbac", "permission", "connector")),
+    (re.compile(r"\bmask\s+pii\b|\bhash\s+pii\b|\bredact\s+pii\b", re.I),
+     ("pii", "mask", "redact", "hash")),
+    (re.compile(r"\bgtid\b", re.I),
+     ("gtid", "binlog", "mysql", "watermark")),
+    (re.compile(r"\bbackfill\b", re.I),
+     ("backfill", "watermark", "cdc", "resume")),
+    (re.compile(r"\badd(?:ing)?\s+a\s+column\b"
+                r"|\bcolumn\s+during\s+cdc\b"
+                r"|\bnew\s+column\s+during\b", re.I),
+     ("schema", "drift", "policy", "column")),
+    (re.compile(r"\bcdc\s+(?:user\s+)?privileges?\b"
+                r"|\bprivileges?.{0,48}(?:cdc|postgres|postgresql)\b"
+                r"|\b(?:postgres|postgresql|cdc).{0,48}privileges?\b"
+                r"|\balter\s+role\b"
+                r"|\breplication\s+(?:grant|privilege|client|slave)\b", re.I),
+     ("replication", "grant", "privilege", "cdc")),
 )
 
 
