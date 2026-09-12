@@ -102,6 +102,15 @@ def test_explain_product_does_not_prepend_uncited_faq_over_docs():
     assert not (o.get("answer") or "").startswith("Preflight has **9 gates**")
 
 
+def test_upsert_key_question_still_leads_with_the_key_requirement():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("does upsert need a primary key")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "reliable key" in lead or "updates existing" in lead
+
+
 def test_cdc_aspect_is_not_buried_under_the_mode_definition():
     from src.ai.rag.answer_composer import split_sentences
 

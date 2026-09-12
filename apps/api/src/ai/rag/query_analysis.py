@@ -499,7 +499,9 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(?:nobody|no[\s-]?one)\s+is\s+watching\b"
                 r"|\bwithout\s+watching\b|\bunattended\b", re.I),
      ("unattended", "authorize", "signed", "schedule")),
-    (re.compile(r"\btype[\s_-]?locked\b", re.I),
+    (re.compile(r"\btype[\s_-]?locked\b"
+                r"|\bstop\s+a\s+type\s+change\b"
+                r"|\btype\s+change\s+from\s+being\s+applied\b", re.I),
      ("type_locked", "schema", "policy", "type")),
     (re.compile(r"\b(?:end|ended)\s+up\b"
                 r"|\bwhere\s+do\s+(?:the\s+)?(?:bad|rejected|failed)\s+rows\b", re.I),

@@ -1643,6 +1643,21 @@ def _pause_schedule_section() -> GeneratedSection:
     )
 
 
+def _stop_type_change_section() -> GeneratedSection:
+    """'How do I stop a type change' is type_locked, not propagate_all."""
+    return GeneratedSection(
+        doc_title="Schema drift & policy",
+        section_title="Procedure: stop a type change with type_locked",
+        text=(
+            "Stop a type change from being applied with schema policy "
+            "type_locked — it rejects type changes outright, and a column "
+            "whose type moved fails the run instead of being cast."
+        ),
+        source_module="services/schedule_store.py · SCHEMA_POLICIES",
+        category="transfer",
+    )
+
+
 def _type_locked_section() -> GeneratedSection:
     """Own heading so the snake_case policy name is a subject, not a refusal."""
     return GeneratedSection(
@@ -1650,8 +1665,8 @@ def _type_locked_section() -> GeneratedSection:
         section_title="What type_locked rejects",
         text=(
             "Schema policy type_locked rejects type changes outright — a column "
-            "whose type moved fails the run instead of being cast. "
-            "Use it when a destination type must stay the one Validate signed."
+            "whose type moved fails the run instead of being cast, so use it "
+            "when a destination type must stay the one Validate signed."
         ),
         source_module="services/schedule_store.py · SCHEMA_POLICIES",
         category="transfer",
@@ -1797,6 +1812,20 @@ def _rest_api_section() -> GeneratedSection:
         ),
         source_module="docs/API_VERSIONING.md · help-api#endpoints",
         category="api",
+    )
+
+
+def _export_schedule_yaml_section() -> GeneratedSection:
+    """'Export a schedule as YAML' is not the checksum archive."""
+    return GeneratedSection(
+        doc_title="GitOps & YAML export",
+        section_title="Procedure: export a schedule as YAML",
+        text=(
+            "Export a schedule as YAML from the schedule detail drawer with "
+            "Export YAML — a GitOps read that does not include credentials."
+        ),
+        source_module="apps/cli/dataflow_cli · schedules export route",
+        category="enterprise",
     )
 
 
@@ -1957,6 +1986,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _certificate_aspect_section,
         _pipeline_cadence_section,
         _pause_schedule_section,
+        _stop_type_change_section,
         _type_locked_section,
         _standing_authority_section,
         _who_can_start_section,
@@ -1965,6 +1995,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _competitor_wedge_section,
         _connect_postgres_section,
         _rest_api_section,
+        _export_schedule_yaml_section,
         _export_proof_section,
         _test_passed_preflight_section,
         _preflight_gates_list_section,

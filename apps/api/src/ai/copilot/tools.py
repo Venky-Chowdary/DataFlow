@@ -1633,10 +1633,11 @@ class DataPilotTools:
         # ``\bcdc\b`` also matches "what happens to a delete in CDC" and
         # "hand off from snapshot to the CDC stream". The one-sentence mode
         # definition then buried the cited handoff / tombstone cards.
+        # Only the CDC snippet is suppressed here — upsert/append still
+        # lead with their curated key/insert definitions.
         if curated and curated[0] == "sync_mode" and retrieved.answerable:
-            if not re.search(
-                r"^\s*what\s+is\s+(?:cdc|full\s+refresh|overwrite|append)\b",
-                lower,
+            if re.search(r"\bcdc\b", lower) and not re.search(
+                r"^\s*what\s+is\s+cdc\b", lower
             ):
                 curated = None
         if retrieved.answerable:

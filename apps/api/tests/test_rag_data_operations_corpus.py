@@ -722,6 +722,14 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "how do I resume if the job crashes between snapshot and stream",
             ("handoff", "boundary"),
         ),
+        (
+            "how do I export a schedule as YAML",
+            ("detail drawer",),
+        ),
+        (
+            "how do I stop a type change from being applied",
+            ("type_locked",),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -771,6 +779,7 @@ def test_the_how_to_passages_are_generated() -> None:
         "What is the difference between append and overwrite",
         "Which preflight gates run before a write",
         "What type_locked rejects",
+        "Procedure: stop a type change with type_locked",
         "Can pipelines run unattended while nobody is watching",
         "Who is allowed to start a transfer",
         "Procedure: cancel a running transfer",
@@ -780,5 +789,6 @@ def test_the_how_to_passages_are_generated() -> None:
         "How the snapshot hands off to the CDC stream",
         "What happens to a delete in CDC",
         "What a create-new mapping is",
+        "Procedure: export a schedule as YAML",
     ):
         assert title in titles, title
