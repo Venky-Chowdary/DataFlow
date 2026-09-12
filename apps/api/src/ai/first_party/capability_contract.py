@@ -716,32 +716,18 @@ def require_mfa_card() -> CapabilityCard | None:
     )
 
 
-def _watermark_store_text() -> str:
-    honesty = watermark_store_honesty()
-    table = honesty.get("eos_table") or "_df_cdc_eos_watermarks"
-    return (
-        "The CDC watermark is stored as the resume token (binlog, GTID, "
-        "LSN, or SCN) kept with the job. "
-        f"An opted-in exactly-once route also persists the committed "
-        f"position in `{table}` on the destination; exactly-once is not "
-        "claimed platform-wide."
-    )
-
-
 def cdc_watermark_store_card() -> CapabilityCard | None:
+    # Resume token only. The opted-in EOS table name lives on the delivery
+    # section — repeating `_df_cdc_eos_watermarks` here put ``cdc`` in a
+    # short card and crowded "is CDC exactly once" off its own lead.
     return CapabilityCard(
-        title="Where is the CDC watermark stored",
-        text=_watermark_store_text(),
-        source_module="services/cdc_exactly_once.py · WATERMARK_TABLE",
-        category="transfer",
-    )
-
-
-def set_watermark_card() -> CapabilityCard | None:
-    """Same store fact — the heading operators use when they say 'set'."""
-    return CapabilityCard(
-        title="Can I set a watermark",
-        text=_watermark_store_text(),
+        title="Where is the watermark stored",
+        text=(
+            "The CDC watermark is stored as the resume token (binlog, GTID, "
+            "LSN, or SCN) kept with the job. "
+            "Operators do not type a watermark by hand; the next tick reads "
+            "the token the last tick left."
+        ),
         source_module="services/cdc_exactly_once.py · WATERMARK_TABLE",
         category="transfer",
     )
@@ -828,7 +814,6 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         ip_allowlist_card,
         require_mfa_card,
         cdc_watermark_store_card,
-        set_watermark_card,
         incremental_versus_upsert_card,
         bigquery_destination_card,
         azure_service_principal_card,

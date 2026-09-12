@@ -189,8 +189,8 @@ _SYNC_MODE_BEHAVIOUR: dict[str, str] = {
     "cdc": (
         "is a log-based read that streams inserts, updates and deletes from the "
         "source log rather than re-reading the table. The default delivery "
-        "guarantee is at-least-once upsert, so the write path must be "
-        "idempotent on the key"
+        "guarantee is at-least-once upsert, not exactly-once, so the write "
+        "path must be idempotent on the key"
     ),
     "scd2": (
         "is a history-keeping write: one source identity becomes several "
@@ -490,9 +490,9 @@ def _resume_section() -> GeneratedSection | None:
             "change-tracking version, depending on the source engine. The "
             "snapshot's last-key marker is cleared when the stream takes over, "
             "so the two can never be confused.",
-            "Both survive between runs. A recurring pipeline reads from the "
-            "watermark its last tick left, and a backfill of an earlier range is "
-            "a separate run rather than a rewind of the live one.",
+            "Both survive between runs. A recurring pipeline continues from the "
+            "resume token its last tick left, and a backfill of an earlier range "
+            "is a separate run rather than a rewind of the live one.",
         ]
     )
     return GeneratedSection(
