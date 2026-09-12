@@ -195,8 +195,19 @@ _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
         ("role", 1.2),
         ("procedure:", -1.0),
     ),
-    "diagnosis": (("phas", 1.2), ("checksum", 1.2), ("quarantine", 1.2), ("drift", 1.2)),
-    "comparison": (("mode", 1.8), ("what is", 0.8)),
+    "diagnosis": (
+        ("phas", 1.2),
+        ("checksum", 1.2),
+        ("quarantine", 1.2),
+        ("drift", 1.2),
+        ("preflight", 1.4),
+    ),
+    "comparison": (
+        ("mode", 1.8),
+        ("what is", 0.8),
+        ("difference", 2.0),
+        ("overwrite", 1.6),
+    ),
     # "Do you preserve column order" asks what the product guarantees, and a
     # wizard step cannot answer that. Unpenalized, the sample-transfer tutorial
     # answered it with "wait until the file chip shows Sample-Orders.csv" —

@@ -900,10 +900,37 @@ def _destination_list_section() -> GeneratedSection | None:
         # actually lists the destinations.
         text=(
             f"Destinations a transfer can write to, {len(dests)} of them. "
-            f"They are: " + ", ".join(dests) + ". "
+            f"They are the destinations the product supports: "
+            + ", ".join(dests)
+            + ". "
             "A destination-only store such as a vector database is in this "
             "list and not among the sources."
         ),
+        source_module="src/transfer/connector_capabilities.py",
+        category="connectors",
+    )
+
+
+def _destination_count_section() -> GeneratedSection | None:
+    """How many destinations — its own heading, so a count ask can find it.
+
+    The listing section says the number in passing. Titled "Which destinations
+    you can write to" it is not a counting heading, and "how many destinations
+    do you support" retrieved Destination-step captions instead. One short
+    counting passage is the same split the catalog already uses for connectors.
+    """
+    try:
+        from src.transfer.connector_capabilities import dest_live_driver_types
+
+        dests = [str(d) for d in dest_live_driver_types() if d]
+    except Exception:
+        dests = []
+    if not dests:
+        return None
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="How many destinations do you support",
+        text=f"There are {len(dests)} destinations a transfer can write to.",
         source_module="src/transfer/connector_capabilities.py",
         category="connectors",
     )
@@ -1614,10 +1641,11 @@ def _test_passed_preflight_section() -> GeneratedSection:
     """A green connector Test is reachability, not a skipped Validate."""
     return GeneratedSection(
         doc_title="Add & manage connectors",
-        section_title="Why a connector Test passed does not skip preflight",
+        section_title="Procedure: Test passed does not skip preflight",
         text=(
             "A green Test passed on Connectors does **not** skip preflight — "
-            "Validate still runs the full gate set before any production write. "
+            "Validate still runs the full gate set, so a transfer can still "
+            "fail before any production write. "
             "Test means the driver reached the system; it does not stand in "
             "for mapping, schema, or checksum gates."
         ),
@@ -1626,11 +1654,67 @@ def _test_passed_preflight_section() -> GeneratedSection:
     )
 
 
+def _core_gate_cards() -> list[str]:
+    """G1–G9 as the product publishes them — engine table, else the help cards."""
+    try:
+        from preflight.gates import PREFLIGHT_GATES
+
+        cards: list[str] = []
+        for index, (gid, spec) in enumerate(PREFLIGHT_GATES, start=1):
+            name = getattr(spec, "title", None) or getattr(spec, "name", None) or str(gid)
+            cards.append(f"G{index} {name}")
+        if cards:
+            return cards
+    except Exception:
+        pass
+    try:
+        import json
+        from pathlib import Path
+
+        raw = json.loads(Path(__file__).with_name("help_corpus.json").read_text(encoding="utf-8"))
+        chunks = raw.get("chunks") if isinstance(raw, dict) else raw
+        for section in chunks or []:
+            if (section.get("section_title") or "") == "Core gates (before write)":
+                return [
+                    line.strip()
+                    for line in (section.get("text") or "").splitlines()
+                    if line.startswith("G") and len(line) > 2 and line[1].isdigit()
+                ]
+    except Exception:
+        pass
+    return []
+
+
+def _preflight_gates_list_section() -> GeneratedSection | None:
+    """The nine named cards, short enough that a listing ask can retrieve them.
+
+    "What are the preflight gates" and "explain the preflight gates" lost the
+    Core gates passage once Validate-adjacent procedures entered the fusion
+    window. One short section whose heading asks the listing question, and
+    whose first sentence names G1 and G9, is the same pattern destinations use.
+    """
+    cards = _core_gate_cards()
+    if len(cards) < 2:
+        return None
+    first = cards[0].split(" — ")[0].strip()
+    last = cards[-1].split(" — ")[0].strip()
+    return GeneratedSection(
+        doc_title="Preflight gates explained",
+        section_title="Which preflight gates run before a write",
+        text=(
+            f"{first} through {last} are the {len(cards)} core preflight gates "
+            f"Validate runs before any write. " + " ".join(cards)
+        ),
+        source_module="preflight.gates · help-preflight#gates",
+        category="transfer",
+    )
+
+
 def _blocked_validate_section() -> GeneratedSection:
     """The remediations, not the 'use this path' caption."""
     return GeneratedSection(
         doc_title="Preflight gates explained",
-        section_title="Procedure: remap or Accept risk for a blocked Validate gate",
+        section_title="Procedure: remap or Accept risk when Validate is blocked",
         text=(
             "When Validate is blocked, open the failing gate for suggested "
             "fixes, remap columns, or Accept risk for an intentional cast — "
@@ -1677,6 +1761,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _connector_catalog_section,
         _catalog_count_section,
         _destination_list_section,
+        _destination_count_section,
         _inventory_count_section,
         _aggregation_section,
         _quarantine_section,
@@ -1696,6 +1781,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _rest_api_section,
         _export_proof_section,
         _test_passed_preflight_section,
+        _preflight_gates_list_section,
         _blocked_validate_section,
         _webhooks_section,
     )

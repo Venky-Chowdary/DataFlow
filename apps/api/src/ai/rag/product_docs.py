@@ -491,6 +491,17 @@ _GATE_QUESTION = re.compile(r"\bgates?\b|\bpreflight\b", re.I)
 _CORE_GATES_ON_ASK = 3.0
 _CORE_GATES_OFF_ASK = 6.0
 
+#: The UTC policy section and the TIMESTAMP-range section share ``timestamp``.
+#: A question about where timestamps are stored wants UTC / offset label;
+#: a question about 2038 wants the range. Same pattern as the gate cards.
+_TIMEZONE_QUESTION = re.compile(
+    r"\b(?:timezone|time\s*zones?|utc|offset\s+label)\b",
+    re.I,
+)
+_TIMESTAMP_RANGE_TITLE = ("range", "instant carrier")
+_TIMEZONE_TITLE_ON_ASK = 3.2
+_TIMEZONE_TITLE_OFF_ASK = 3.2
+
 #: Verbs and container nouns that appear on almost every procedure heading.
 #: A heading that only shares these with the question is weakly on-subject —
 #: "Procedure: connect Cursor" for "how do I connect a postgres database",
@@ -659,6 +670,12 @@ def _section_intent_bonus(
             bonus += _CORE_GATES_ON_ASK
         else:
             bonus -= _CORE_GATES_OFF_ASK
+    timezone_title = "utc" in title or "time zone" in title
+    range_title = any(needle in title for needle in _TIMESTAMP_RANGE_TITLE)
+    if timezone_title and _TIMEZONE_QUESTION.search(analysis.text):
+        bonus += _TIMEZONE_TITLE_ON_ASK
+    if range_title and _TIMEZONE_QUESTION.search(analysis.text):
+        bonus -= _TIMEZONE_TITLE_OFF_ASK
     return bonus
 
 

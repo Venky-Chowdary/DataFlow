@@ -102,6 +102,18 @@ def test_explain_product_does_not_prepend_uncited_faq_over_docs():
     assert not (o.get("answer") or "").startswith("Preflight has **9 gates**")
 
 
+def test_an_append_vs_overwrite_question_is_not_the_append_only_faq():
+    """The curated append snippet matched on ``append`` and became the lead."""
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("what is the difference between append and overwrite")
+    answer = (tr.output or {}).get("answer") or ""
+    lead = (split_sentences(answer) or [answer])[0].lower()
+    assert "insert-only" in lead
+    assert "replaces the destination" in lead
+
+
 def test_pilot_chat_knowledge_fixture_pass_rate():
     """End-to-end: documented cited, off-topic refused at 0.2, no invented counts."""
     agent = DataPilotAgent()

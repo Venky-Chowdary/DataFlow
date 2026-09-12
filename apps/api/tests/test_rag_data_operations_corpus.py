@@ -667,6 +667,14 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "what timezone are timestamps stored in",
             ("utc", "offset label"),
         ),
+        (
+            "what are the preflight gates",
+            ("g1", "g9"),
+        ),
+        (
+            "explain the preflight gates",
+            ("g1", "g9"),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(
@@ -709,9 +717,11 @@ def test_the_how_to_passages_are_generated() -> None:
         "Procedure: connect a PostgreSQL database",
         "Procedure: call the /api/v1 endpoints",
         "Procedure: export checksum proof for an auditor",
-        "Why a connector Test passed does not skip preflight",
-        "Procedure: remap or Accept risk for a blocked Validate gate",
+        "Procedure: Test passed does not skip preflight",
+        "How many destinations do you support",
+        "Procedure: remap or Accept risk when Validate is blocked",
         "Webhooks",
         "What is the difference between append and overwrite",
+        "Which preflight gates run before a write",
     ):
         assert title in titles, title

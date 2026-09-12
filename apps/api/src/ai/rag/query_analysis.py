@@ -309,9 +309,12 @@ _CONCEPT_EXPANSIONS: dict[str, tuple[str, ...]] = {
     # An operator writes "timezone" as one word; the documentation's heading
     # words are "time" and "zone", so the single token matched no subject and a
     # question the timezone policy answers in detail was refused outright.
-    "timezone": ("timestamp", "zone", "instant", "offset", "temporal", "utc"),
-    "tz": ("timestamp", "zone", "instant", "offset", "utc"),
-    "utc": ("timestamp", "zone", "instant", "offset", "utc"),
+    # ``instant`` is the range-passage word (2038 / bare TIMESTAMP). Expanding
+    # timezone onto it made "what timezone are timestamps stored in" open on
+    # that range sentence while the UTC sentence sat first in retrieval.
+    "timezone": ("timestamp", "zone", "offset", "temporal", "utc"),
+    "tz": ("timestamp", "zone", "offset", "utc"),
+    "utc": ("timestamp", "zone", "offset", "utc"),
     "timestamp": ("timestamp", "zone", "instant", "datetime", "temporal"),
     "null": ("null", "nullable", "empty", "missing", "coerced"),
     "nullable": ("null", "nullable", "empty", "missing"),

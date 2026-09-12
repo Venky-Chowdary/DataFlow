@@ -1609,6 +1609,17 @@ class DataPilotTools:
             ((intent, answer) for pattern, intent, answer in direct if pattern.search(lower)),
             None,
         )
+        # A comparison names both sides. The curated snippets are one-sided
+        # definitions ("**Append** adds…", "**Overwrite** replaces…"), so
+        # prepending one buried "what is the difference between append and
+        # overwrite" under the append-only paragraph.
+        if curated and (
+            "difference" in lower
+            or ("append" in lower and "overwrite" in lower)
+            or " vs " in lower
+            or " versus " in lower
+        ):
+            curated = None
 
         # The shipped operator documentation plus the passages generated from the
         # product's own enforcing modules, retrieved hybrid and judged by the
