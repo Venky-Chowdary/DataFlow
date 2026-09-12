@@ -320,6 +320,18 @@ def test_infer_tools_briefing_and_general():
         )
         == "does Mongo CDC need change-stream pre-images"
     )
+    assert (
+        resolve_knowledge_engine_followup(
+            "same question but for mysql",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "do I need binlog_format ROW for mysql CDC"
+    )
 
 
 def test_brief_workspace_is_permissioned_like_other_reads():

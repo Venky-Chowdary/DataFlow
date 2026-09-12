@@ -416,7 +416,11 @@ CDC_DELIVERY_RE = re.compile(
     r"\b(?:exactly[\s-]?once|at[\s-]?least[\s-]?once|effectively[\s-]?once|"
     r"idempotent|"
     r"redeliver|(?:same|identical)\s+(?:change|event|record)|"
-    r"run(?:ning)?\s+(?:it|the\s+same).{0,32}twice)\b",
+    r"run(?:ning)?\s+(?:it|the\s+same).{0,32}twice|"
+    r"_df_lsn|df[\s_]?lsn|"
+    r"skip\s+dup(?:e|licate)s?|"
+    r"replay.{0,32}same\s+(?:change|event|record)|"
+    r"same\s+(?:change|event|record).{0,24}replay)\b",
     re.I,
 )
 
@@ -538,6 +542,12 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(?:airbyte|fivetran|estuary|debezium)\b", re.I),
      ("semantic", "mapping", "quarantine", "checksum")),
     (CDC_DELIVERY_RE, ("cdc", "least", "once", "idempotent", "lsn")),
+    (re.compile(r"\b_df_lsn\b|\bdf[\s_]?lsn\b", re.I),
+     ("lsn", "idempotent", "cdc")),
+    (re.compile(r"\bskip\s+dup(?:e|licate)s?\b", re.I),
+     ("lsn", "idempotent", "cdc")),
+    (re.compile(r"\blogical\s+decoding\b", re.I),
+     ("wal_level", "pgoutput", "logical")),
     (re.compile(r"\bg([1-9])\b", re.I),
      ("gate", "preflight", "validate", "schema")),
     (re.compile(r"\bhand[\s-]?off\b"
@@ -719,13 +729,23 @@ def frame_words(question: str) -> frozenset[str]:
 # is spelled so retrieval can find the sentence that already exists.
 _CHAT_PREFIX = re.compile(
     r"^\s*(?:hey|hi|hello|yo|sup|so|ok(?:ay)?|um+|uh+|well|"
-    r"listen|look|quick(?:\s+question)?|question|"
-    r"pls|please|just\s+wondering|kinda\s+confused|"
-    r"real(?:ly)?\s+quick|real\s+talk)[,:]?\s+",
+    r"wait\s+so|so\s+wait|"
+    r"listen|look|"
+    r"i\s+was\s+(?:just\s+)?wondering|"
+    r"just\s+wondering|"
+    r"can\s+you\s+tell\s+me(?:\s+if|\s+whether)?|"
+    r"could\s+you\s+tell\s+me(?:\s+if|\s+whether)?|"
+    r"do\s+you\s+know(?:\s+if|\s+whether)?|"
+    r"any\s+idea(?:\s+if|\s+whether)?|"
+    r"quick(?:\s+question|\s+q)?|question|"
+    r"pls|please|kinda\s+confused|"
+    r"real(?:ly)?\s+quick|real\s+talk|"
+    r"q)[,:]?\s+",
     re.I,
 )
 _CHAT_SUFFIX = re.compile(
-    r"[\s,]+(?:right|yeah|yes|no|pls|please|thanks|thx|lol|lmk|idk)\s*[?.!]*\s*$",
+    r"[\s,]+(?:right|yeah|yes|no|pls|please|thanks|thx|lol|lmk|idk|"
+    r"or\s+nah|or\s+what|tho|though|tbh)\s*[?.!]*\s*$",
     re.I,
 )
 _PLAIN_ENGLISH = re.compile(
@@ -736,10 +756,22 @@ _PLAIN_ENGLISH = re.compile(
     re.I,
 )
 _SLANG_FRAMES: tuple[tuple[str, str], ...] = (
+    (r"\bdo\s+i\s+gotta\s+have\b", "do I need"),
     (r"\bgotta\s+have\b", "do I need"),
     (r"\bdo\s+i\s+gotta\b", "do I need"),
     (r"\bgotta\s+flip\b", "need"),
     (r"\bgotta\b", "need"),
+    (r"\bhow\s+come\b", "why"),
+    (r"\beven\s+a\s+thing\b", ""),
+    (r"\b(?:need|require)\s+logical\s+decoding\b", "need wal_level logical"),
+    (r"\bskip\s+dup(?:e|licate)s?\b", "skip duplicates on _df_lsn"),
+    (r"\bdupes?\b", "duplicates"),
+    (r"\breplay.{0,32}same\s+(?:change|event|record)\b",
+     "run the same CDC change twice"),
+    (r"\bsame\s+(?:change|event|record).{0,24}replay\b",
+     "run the same CDC change twice"),
+    (r"\bwhere\s+do\s+(?:the\s+)?(?:bad|rejected|failed)\s+rows\s+go\b",
+     "where do bad rows end up"),
     (r"\bgonna\b", "going to"),
     (r"\bwanna\b", "want to"),
     (r"\bdunno\b", "do not know"),
@@ -784,6 +816,30 @@ _SLANG_FRAMES: tuple[tuple[str, str], ...] = (
     (r"\bposgres\b", "postgres"),
 )
 
+# A bare product identifier plus "?" is how operators ask for a definition.
+# ChatGPT treats the fragment as "what is X". We only do it for names the
+# product actually documents — "rice?" must stay "rice?".
+_PRODUCT_FRAGMENT = re.compile(
+    r"^\s*(?P<term>g[1-9]|wal_level|pgoutput|gtid|binlog_format|"
+    r"replica\s+identity(?:\s+full)?|_df_lsn|replication\s+slots?|"
+    r"type_locked|pre-?images?|toast)\s*[?.!]?\s*$",
+    re.I,
+)
+
+# ChatGPT restores the dropped auxiliary. "where bad rows go" is the same
+# question as "where do bad rows go"; without `do` it retrieved Job Theater.
+_WHERE_BARE = re.compile(
+    r"^\s*where\s+(?!do\b|does\b|did\b|can\b|is\b|are\b|will\b|would\b|"
+    r"should\b|were\b|was\b)(.+?)\s+(go|end\s+up|land)\b",
+    re.I,
+)
+
+_ROLE_CAN_FRAMES: tuple[tuple[str, str], ...] = (
+    (r"\bviewers\s+can\b", "can a viewer"),
+    (r"\beditors\s+can\b", "can an editor"),
+    (r"\badmins\s+can\b", "can an admin"),
+)
+
 
 def rewrite_operator_question(question: str) -> str:
     """The wording the operator meant, before retrieval or tool routing.
@@ -797,7 +853,7 @@ def rewrite_operator_question(question: str) -> str:
     if not text:
         return ""
     text = _PLAIN_ENGLISH.sub("", text)
-    for _ in range(3):
+    for _ in range(4):
         nxt = _CHAT_PREFIX.sub("", text)
         if nxt == text:
             break
@@ -805,6 +861,23 @@ def rewrite_operator_question(question: str) -> str:
     text = _CHAT_SUFFIX.sub("", text).strip()
     for pattern, replacement in _SLANG_FRAMES:
         text = re.sub(pattern, replacement, text, flags=re.I)
+    for pattern, replacement in _ROLE_CAN_FRAMES:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    fragment = _PRODUCT_FRAGMENT.match(text)
+    if fragment:
+        text = f"what is {fragment.group('term')}"
+    bare = _WHERE_BARE.match(text)
+    if bare:
+        verb = bare.group(2)
+        if verb.lower() == "go":
+            verb = "end up"
+        text = f"where do {bare.group(1).strip()} {verb}" + text[bare.end():]
+    text = re.sub(
+        r"\bwhere\s+do\s+(?:the\s+)?(?:bad|rejected|failed)\s+rows\s+go\b",
+        "where do bad rows end up",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\s+", " ", text).strip()
     return text or (question or "").strip()
 

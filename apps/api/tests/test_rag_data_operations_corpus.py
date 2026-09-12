@@ -818,6 +818,18 @@ def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
             "hey can viewers download the pipeline yaml",
             ("viewer", "yaml"),
         ),
+        (
+            "can you tell me if viewers can export yaml",
+            ("viewer", "yaml"),
+        ),
+        (
+            "i was wondering where bad rows go",
+            ("quarantine",),
+        ),
+        (
+            "is _df_lsn how you skip dupes",
+            ("_df_lsn",),
+        ),
     ],
 )
 def test_the_lead_names_the_outcome_the_question_asked_for(

@@ -128,7 +128,12 @@ _CDC_PRIOR = re.compile(
     re.I,
 )
 _ENGINE_FOLLOWUP = re.compile(
-    r"^\s*(?:(?:what|how)\s+about|and(?:\s+for)?|same\s+for|how\s+about)\s+"
+    r"^\s*(?:"
+    r"(?:what|how)\s+about|"
+    r"and(?:\s+(?:for|what\s+about))?|"
+    r"same\s+(?:for|thing(?:\s+but)?\s+for|question(?:\s+but)?\s+for)|"
+    r"how\s+about"
+    r")\s+"
     r"(?:for\s+)?"
     r"(?P<eng>mysql|maria(?:db)?|postgres(?:ql)?|pg|mongo(?:db)?|"
     r"sql\s*server|mssql|oracle)\s*[?.!]?\s*$",
