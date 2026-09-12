@@ -69,6 +69,7 @@ def test_product_answer_is_not_prefixed_with_connector_miss() -> None:
         ToolResult(
             name="list_connector_objects",
             success=False,
+            output={},
             error='No connector matched "redshift".',
         )
     )
