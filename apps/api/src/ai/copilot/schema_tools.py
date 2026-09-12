@@ -9,6 +9,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .example_phrases import (
+    example_connector_name,
+    example_dest_connector_name,
+    example_table_name,
+)
+
 
 class AmbiguousConnectorError(Exception):
     """More than one saved connector matches — ask the user which one."""
@@ -302,19 +308,37 @@ def _safe_connector(connector_id: str = "", name: str = "", tool: str = "schema"
         conn = _connector_dict(connector_id, name)
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, error=exc.message)
+    if not conn and not (connector_id or "").strip() and not (name or "").strip():
+        # Nothing was named and there is nothing to choose between: asking
+        # "which connector?" when the workspace holds exactly one is a
+        # dead-end, not a safeguard. A wrong *name* still errors below.
+        conn = _only_saved_connector()
     if not conn:
-        from .example_phrases import example_connector_name
-
         ex = example_connector_name()
         return None, _tool_result(
             tool,
             success=False,
             error=(
                 "Connector not found. Name a saved connector, e.g. "
-                f'"columns on airports in {ex}".'
+                f'"columns on {example_table_name()} in {ex}".'
             ),
         )
     return conn, None
+
+
+def _only_saved_connector() -> dict[str, Any] | None:
+    """The single saved connector, or None when there are zero or several."""
+    try:
+        from services.connector_store import list_connectors
+
+        saved = list(list_connectors() or [])
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return None
+    if len(saved) != 1:
+        return None
+    only = saved[0]
+    return only.to_dict() if hasattr(only, "to_dict") else dict(only)
 
 
 def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
@@ -571,7 +595,10 @@ def introspect_connector_schema(
         return _tool_result(
             "introspect_connector_schema",
             success=False,
-            error='Which table or collection? Example: "schema of airports on Local Postgres".',
+            error=(
+                "Which table or collection? Example: "
+                f'"schema of {example_table_name()} on {example_connector_name()}".'
+            ),
         )
     conn, err = _safe_connector(connector_id, connector_name, "introspect_connector_schema")
     if err:
@@ -680,7 +707,8 @@ def diff_schemas(
             success=False,
             error=(
                 "Need a source table. Example: "
-                '"diff airports on Local Postgres vs data on LocalMongoDB".'
+                f'"diff {example_table_name()} on {example_connector_name()} '
+                f'vs {example_table_name()} on {example_dest_connector_name()}".'
             ),
         )
     src = introspect_connector_schema(source_connector_id, source_connector_name, src_table)

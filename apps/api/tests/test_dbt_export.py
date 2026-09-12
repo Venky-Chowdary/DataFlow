@@ -1,6 +1,6 @@
 """dbt export hook — complement warehouse ELT, not a dbt Cloud product."""
 
-from services.dbt_export import export_dbt_files
+from services.dbt_export import dbt_export_honesty, export_dbt_files
 from services.transform_models import DataTest, TransformModel
 from services.transform_store import TransformProject
 
@@ -28,6 +28,7 @@ def test_export_dbt_includes_sources_and_models():
         ],
     )
     pack = export_dbt_files(project)
+    assert pack["honesty"] == dbt_export_honesty()
     assert pack["honesty"]["is_dbt_cloud"] is False
     assert pack["file_count"] >= 4
     files = pack["files"]

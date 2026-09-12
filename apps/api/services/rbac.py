@@ -237,6 +237,21 @@ def role_permissions(role: str) -> set[str]:
     return _ROLE_PERMISSIONS.get(normalize_role(role), _ROLE_PERMISSIONS["viewer"])
 
 
+def role_names() -> tuple[str, ...]:
+    """The closed role set, least to most authority.
+
+    Public so surfaces that have to *describe* the model — Pilot answering "what
+    can a viewer do" — read the same table the middleware enforces, instead of
+    prose that drifts from it.
+    """
+    return ("viewer", "operator", "editor", "admin")
+
+
+def all_permissions() -> tuple[str, ...]:
+    """Every permission the role table can grant, sorted for stable rendering."""
+    return tuple(sorted(_ALL_PERMISSIONS))
+
+
 def has_permission(user: dict[str, str] | None, permission: str) -> bool:
     if not user:
         return False

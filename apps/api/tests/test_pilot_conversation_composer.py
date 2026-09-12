@@ -50,6 +50,12 @@ def test_dialogue_acts_cover_copilot_turns():
     assert classify_dialogue_act("what is the capital of France") == "general"
     assert classify_dialogue_act("show my jobs") == "workspace"
     assert classify_dialogue_act("plan a transfer of orders") == "workspace"
+    assert classify_dialogue_act("what's the status") == "briefing"
+    assert classify_dialogue_act("what is the status of my workspace") == "briefing"
+    # "what is the status of my last transfer" matched the sitrep pattern on
+    # "what is the status" and opened with the workspace briefing instead of
+    # the last job.
+    assert classify_dialogue_act("what is the status of my last transfer") == "workspace"
 
 
 def test_tell_me_everything_about_a_table_is_not_a_sitrep():
@@ -242,6 +248,119 @@ def test_infer_tools_briefing_and_general():
     assert "explain_product" in names or "profile_quality_rules" in names
     assert "list_datasets" not in names
 
+    names = [n for n, _ in infer_tools_from_message("who is allowed to start a transfer")]
+    assert "explain_product" in names
+    assert "start_transfer_studio" not in names
+
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "if I run the same CDC change twice is it safe"
+        )
+    ]
+    assert "explain_product" in names
+    assert "list_jobs" not in names
+
+    names = [n for n, _ in infer_tools_from_message("can a viewer start a transfer")]
+    assert "explain_product" in names
+    assert "start_transfer_studio" not in names
+
+    names = [n for n, _ in infer_tools_from_message("what plugin does postgres CDC use")]
+    assert "recommend_sync_mode" not in names
+    assert "explain_product" in names or "search_knowledge" in names
+
+    names = [n for n, _ in infer_tools_from_message("does a green connector test skip validate")]
+    assert "explain_product" in names
+    assert "list_connectors" not in names
+
+    names = [n for n, _ in infer_tools_from_message("can a viewer export YAML")]
+    assert "explain_product" in names or names == []
+    from src.ai.copilot.tools import _looks_like_unsupported_mutation
+
+    assert not _looks_like_unsupported_mutation("can a viewer export yaml")
+    assert not _looks_like_unsupported_mutation(
+        "what happens if I delete a CDC schedule"
+    )
+    assert not _looks_like_unsupported_mutation("who can export audit logs")
+    assert not _looks_like_unsupported_mutation("can I export audit logs as CSV")
+    names = [n for n, _ in infer_tools_from_message("who can export audit logs")]
+    assert "search_knowledge" in names or "explain_product" in names
+
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "do I need REPLICA IDENTITY FULL for postgres CDC"
+        )
+    ]
+    assert "recommend_sync_mode" not in names
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "do I need binlog_format ROW for mysql CDC"
+        )
+    ]
+    assert "recommend_sync_mode" not in names
+
+    names = [
+        n
+        for n, _ in infer_tools_from_message(
+            "gotta have logical wal for pg cdc right?"
+        )
+    ]
+    assert "explain_product" in names
+    assert "recommend_sync_mode" not in names
+
+    from src.ai.copilot.followup import resolve_knowledge_engine_followup
+
+    assert (
+        resolve_knowledge_engine_followup(
+            "and for mongo?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Postgres CDC uses the pgoutput plugin.",
+                }
+            ],
+        )
+        == "does Mongo CDC need change-stream pre-images"
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "same question but for mysql",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "do I need binlog_format ROW for mysql CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "what about deletes?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "what happens to a delete in CDC"
+    )
+    assert (
+        resolve_knowledge_engine_followup(
+            "do I need that?",
+            [
+                {
+                    "role": "assistant",
+                    "content": "Yes — Postgres CDC needs wal_level=logical.",
+                }
+            ],
+        )
+        == "do I need wal_level logical for postgres CDC"
+    )
+
 
 def test_brief_workspace_is_permissioned_like_other_reads():
     assert "brief_workspace" in {d["name"] for d in TOOL_DEFINITIONS}
@@ -380,3 +499,18 @@ def test_briefing_through_agent_uses_tool_not_faq(monkeypatch):
     assert "job_deadbee" in resp.answer or "failed" in resp.answer.lower()
     assert "650" not in resp.answer
     assert "99%" not in resp.answer
+
+
+def test_an_inventory_read_is_not_prefixed_with_filler():
+    """The tool prose already opens with the finding.
+
+    "Here's what I found." cost "how many connectors do I have" and "list my
+    connectors" their first line: the operator read four words of filler
+    before "You have **2 saved connector(s)**".
+    """
+    from src.ai.copilot.conversation_composer import weave_tool_answer
+
+    body = "You have **2 saved connector(s)**.\n\n• **Demo Orders** (sqlite)"
+    woven = weave_tool_answer("list my connectors", [body], act="workspace")
+    assert woven.startswith("You have **2 saved connector(s)**")
+    assert "Here's what I found" not in woven

@@ -103,6 +103,19 @@ def _schema_yml(project: TransformProject) -> str:
     return "\n".join(lines)
 
 
+def dbt_export_honesty() -> dict[str, Any]:
+    """The claim the export hook is allowed to make — not a dbt Cloud product.
+
+    Pilot reads this so "do you support dbt Cloud" cannot drift from the
+    pack the transform router actually writes.
+    """
+    return {
+        "is_dbt_cloud": False,
+        "is_managed_elt": False,
+        "purpose": "Complement warehouse ELT with sources/models hooks after a governed load",
+    }
+
+
 def export_dbt_files(project: TransformProject) -> dict[str, Any]:
     """Return a portable dbt starter pack for a transform project.
 
@@ -140,11 +153,7 @@ def export_dbt_files(project: TransformProject) -> dict[str, Any]:
         "project_name": project.name,
         "file_count": len(files),
         "files": files,
-        "honesty": {
-            "is_dbt_cloud": False,
-            "is_managed_elt": False,
-            "purpose": "Complement warehouse ELT with sources/models hooks after a governed load",
-        },
+        "honesty": dbt_export_honesty(),
     }
 
 

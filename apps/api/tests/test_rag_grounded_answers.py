@@ -30,11 +30,16 @@ from src.ai.rag.lexical_index import Bm25Index, content_terms, normalize, tokeni
 from src.ai.rag.product_docs import (  # noqa: E402
     HELP_CORPUS_PATH,
     compose_documented_answer,
+    compose_product_answer,
+    retrieve_product_answer,
+    load_generated_chunks,
+    load_help_corpus_chunks,
     load_product_doc_chunks,
     nearest_articles,
     product_doc_search,
     spoken_doc_excerpt,
 )
+from src.ai.rag.query_analysis import analyze_query  # noqa: E402
 from src.ai.rag.retriever import RetrievalResult  # noqa: E402
 
 DOCUMENTED_QUESTIONS = [
@@ -59,13 +64,33 @@ OFF_TOPIC_QUESTIONS = [
 
 def test_help_corpus_is_present_and_self_consistent():
     payload = json.loads(HELP_CORPUS_PATH.read_text(encoding="utf-8"))
-    chunks = load_product_doc_chunks()
+    help_chunks = load_help_corpus_chunks()
     assert payload["chunk_count"] == len(payload["chunks"])
-    assert len(chunks) == payload["chunk_count"]
-    assert chunks, "an empty corpus means Pilot can answer nothing from documentation"
-    for chunk in chunks:
+    assert len(help_chunks) == payload["chunk_count"]
+    assert help_chunks, "an empty corpus means Pilot can answer nothing from documentation"
+    for chunk in help_chunks:
         assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
         assert chunk.href.startswith("#/help/")
+
+
+def test_generated_chunks_extend_the_help_corpus_without_replacing_it():
+    """Facts generated from the enforcing modules are additive and attributed.
+
+    They exist because whole subjects the product *has* — the role table, the
+    sync-mode grid, the row ledger — had no retrievable passage, and writing
+    prose copies of them would let the documentation drift from the code that
+    enforces them.
+    """
+    help_chunks = load_help_corpus_chunks()
+    generated = load_generated_chunks()
+    every = load_product_doc_chunks()
+
+    assert generated, "generated product facts must not be empty"
+    assert len(every) == len(help_chunks) + len(generated)
+    assert {c.id for c in help_chunks}.isdisjoint({c.id for c in generated})
+    for chunk in generated:
+        assert chunk.generated and chunk.source_module
+        assert chunk.id and chunk.doc_title and chunk.section_title and chunk.text
 
 
 # --- lexical index ----------------------------------------------------------
@@ -73,8 +98,22 @@ def test_help_corpus_is_present_and_self_consistent():
 def test_short_names_normalize_onto_the_documented_spelling():
     assert normalize("postgres") == "postgresql"
     assert normalize("mongo") == "mongodb"
-    assert tokenize("Postgres tables") == ["postgresql", "table"]
+    assert tokenize("Postgres tables") == ["postgresql", normalize("table")]
+    assert tokenize("tables") == tokenize("table")
     assert tokenize("batches") == tokenize("batch")
+    # English drops a silent -e before -ed/-ing, so the base form has to meet
+    # the stem those suffixes already produce or the product's own verbs never
+    # find their own past tense.
+    for base, inflected in (
+        ("delete", "deleted"),
+        ("quarantine", "quarantined"),
+        ("validate", "validated"),
+        ("schedule", "scheduling"),
+        ("reconcile", "reconciled"),
+        ("store", "stored"),
+        ("write", "writing"),
+    ):
+        assert tokenize(base) == tokenize(inflected), base
     assert tokenize("policies") == tokenize("policy")
     assert "full_refresh" in tokenize("use full_refresh here")
 
@@ -83,6 +122,53 @@ def test_stopwords_carry_no_signal_and_domain_words_do():
     terms = content_terms("How do I fix a failing gate?")
     assert "how" not in terms and "do" not in terms
     assert "gate" in terms and "fix" in terms
+
+
+def test_use_is_part_of_the_question_frame_not_its_subject():
+    """"How do I use the API" is about the API, not about using.
+
+    The corpus writes "Use this path when…" as the opening of unrelated
+    procedures, so scored as a subject term ``use`` made every imperative step
+    in the corpus a candidate: the question was answered from "Preflight gates
+    → Procedure: fix a blocked gate" instead of "API reference → Core
+    endpoints". It joins ``show``, ``tell`` and ``explain``, which were already
+    read as framing.
+    """
+    assert content_terms("how do I use the API") == ["api"]
+    assert content_terms("which sync mode should I use") == ["sync", "mode"]
+    # The nouns survive — only the verb is framing.
+    assert "usage" not in content_terms("how do I use the API")
+
+
+def test_the_bring_my_own_frame_leaves_only_the_subject():
+    """"Can I bring my own encryption key" is a question about the key.
+
+    ``own`` is a possessive intensifier in all ten of its corpus occurrences
+    and ``bring`` appears once, in a sentence about Pilot and MCP that this
+    question kept being answered from.
+    """
+    assert content_terms("can I bring my own encryption key") == ["encryption", "key"]
+    assert content_terms("can I use my own domain") == ["domain"]
+
+
+def test_both_senses_of_key_reach_their_own_subject():
+    """``key`` is the most overloaded word in a data-movement product.
+
+    "Can I use my own encryption key" was answered from sync mode upsert —
+    "key-idempotently: new keys insert, known keys update" says the word three
+    times — while the BYOK section it asked about ranked below. The identity
+    sense had a phrase expansion and the encryption sense did not.
+    """
+    encryption = compose_product_answer(
+        retrieve_product_answer("can I use my own encryption key")
+    ).lower()
+    assert "byok" in encryption and "kms" in encryption
+    assert "sync mode" not in encryption
+
+    identity = compose_product_answer(
+        retrieve_product_answer("which sync mode needs a primary key")
+    ).lower()
+    assert "primary key" in identity and "sync mode" in identity
 
 
 def test_grounding_counts_terms_the_corpus_cannot_answer():
@@ -132,7 +218,9 @@ def test_composed_answer_quotes_the_sections_and_names_them():
 def test_definitional_preflight_ranks_core_gates_not_the_procedure():
     hits = product_doc_search("what are the preflight gates")
     assert hits
-    assert "core gates" in hits[0].chunk.section_title.lower()
+    title = hits[0].chunk.section_title.lower()
+    assert "core gates" in title or "preflight gates" in title
+    assert not title.startswith("procedure:")
     answer = compose_documented_answer(hits)
     assert "G1 " in answer
     assert "Where:" not in answer
@@ -565,3 +653,29 @@ def test_suggest_transforms_does_not_invent_parse_date_or_iso_from_a_date_name()
     assert "standardize_iso8601" not in out.transformations
     assert out.transformations == []
     assert "identity" in out.answer.lower() or "no invented parse" in out.answer.lower()
+
+
+def test_restriction_verb_is_the_frame_not_the_subject():
+    """``limit`` means two different things and the stemmer cannot tell them apart.
+
+    "Can I limit who sees a connector" was answered with the four connector
+    maturity labels, because "**Beta** — works with known limits" matches the
+    noun sense in a short sentence that normalizes well. It outscored "Every
+    role is one of viewer, operator, editor or admin" by more than two to one,
+    so it was the lead rather than padding — no relevance floor could remove it.
+
+    Next to who/access the word cannot be the noun, so it stops counting as a
+    subject term there and the permissions vocabulary carries the question.
+    """
+    answer = compose_product_answer(
+        retrieve_product_answer("can I limit who sees a connector")
+    ).lower()
+    assert "viewer" in answer
+    assert "catalog presence only" not in answer
+    assert "transfer-ready" not in answer
+
+
+def test_the_noun_sense_of_limit_is_still_a_subject_term():
+    """The frame rule is scoped to the restriction sense, not to the word."""
+    assert "limit" in analyze_query("what are the limits of a beta connector").terms
+    assert "limit" not in analyze_query("can I limit who sees a connector").terms

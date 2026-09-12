@@ -39,7 +39,9 @@ _THANKS = re.compile(
 _BRIEFING = re.compile(
     r"\b(?:"
     r"what(?:'s| is)\s+going\s+on|"
-    r"what(?:'s| is)\s+(?:the\s+)?(?:status|state|health)|"
+    r"what(?:'s| is)\s+(?:the\s+)?(?:status|state|health)"
+    r"(?:\s+of\s+(?:my\s+|the\s+)?(?:workspace|platform|environment|everything))?"
+    r"(?!\s+of\b)|"
     r"(?:give\s+me|write|draft)\s+(?:a\s+)?(?:briefing|status\s+report|sitrep|summary)|"
     r"(?:workspace|ops|operational)\s+(?:briefing|summary|status|overview)|"
     r"summarize\s+(?:my\s+)?(?:workspace|pipelines?|jobs?|connectors?|everything)|"

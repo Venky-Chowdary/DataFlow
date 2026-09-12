@@ -102,6 +102,75 @@ def test_explain_product_does_not_prepend_uncited_faq_over_docs():
     assert not (o.get("answer") or "").startswith("Preflight has **9 gates**")
 
 
+def test_upsert_key_question_still_leads_with_the_key_requirement():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("does upsert need a primary key")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "reliable key" in lead or "updates existing" in lead
+
+
+def test_cdc_aspect_is_not_buried_under_the_mode_definition():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    for question, needle in (
+        ("what happens to a delete in CDC", "tombstone"),
+        ("how do you hand off from snapshot to the CDC stream", "handoff"),
+    ):
+        tr = tools._explain_product(question)
+        answer = (tr.output or {}).get("answer") or ""
+        lead = (split_sentences(answer) or [answer])[0].lower()
+        assert "streams inserts/updates/deletes" not in lead, question
+        assert needle in lead, (question, lead[:200])
+
+
+def test_named_gate_leads_with_that_card_not_the_gate_count():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("what is G3")
+    answer = (tr.output or {}).get("answer") or ""
+    lead = (split_sentences(answer) or [answer])[0].lower()
+    assert not lead.startswith("preflight has")
+    assert "g3" in lead
+    assert "schema contract" in lead
+
+
+def test_upsert_versus_merge_is_not_the_curated_upsert_faq():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("is upsert the same as merge")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "upsert is a sync mode" in lead
+    assert "merge into" in lead
+    assert not lead.startswith("**upsert**")
+
+
+def test_iceberg_merge_on_read_is_not_the_upsert_versus_merge_card():
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("does iceberg use merge on read")
+    lead = (split_sentences((tr.output or {}).get("answer") or "") or [""])[0].lower()
+    assert "copy-on-write" in lead or lead.startswith("iceberg overwrite")
+    assert "upsert is a sync mode" not in lead
+
+
+def test_an_append_vs_overwrite_question_is_not_the_append_only_faq():
+    """The curated append snippet matched on ``append`` and became the lead."""
+    from src.ai.rag.answer_composer import split_sentences
+
+    tools = DataPilotTools()
+    tr = tools._explain_product("what is the difference between append and overwrite")
+    answer = (tr.output or {}).get("answer") or ""
+    lead = (split_sentences(answer) or [answer])[0].lower()
+    assert "insert-only" in lead
+    assert "replaces the destination" in lead
+
+
 def test_pilot_chat_knowledge_fixture_pass_rate():
     """End-to-end: documented cited, off-topic refused at 0.2, no invented counts."""
     agent = DataPilotAgent()
@@ -153,8 +222,18 @@ def test_pilot_spoken_english_on_named_faq_fixture():
     q = "what does quarantine mean"
     resp = agent.chat(q)
     answer = resp.answer or ""
+    # The two things a definition of quarantine has to say, rather than one
+    # section's wording of them. Both the FAQ line and the quarantine article
+    # say them, and which of the two survives de-duplication is a retrieval
+    # detail: the FAQ's "isolated with the column, value, and reason — never
+    # silently dropped" is a one-line restatement of the article's opening, so
+    # once the stemmer let the two agree on their verbs the FAQ line was
+    # correctly read as redundant and dropped from the composed answer.
+    not_dropped = "silently dropped" in answer or "disappears silently" in answer
+    what_was_wrong = "column" in answer and "value" in answer
     ok = (
-        "never silently dropped" in answer
+        not_dropped
+        and what_was_wrong
         and "Source:" in answer
         and "Where:" not in answer
         and "Open the job" not in answer

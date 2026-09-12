@@ -83,6 +83,19 @@ _PLATFORM_NOUNS = frozenset({
     "contract", "contracts", "dataset", "datasets",
     "table", "tables", "collection", "collections", "column", "columns",
     "workspace", "workspaces", "preflight", "quarantine",
+    # The product's own inventory, which the documentation counts and no
+    # warehouse holds a table of. "How many sources can you connect to" and
+    # "how many file formats can you read" are questions about the catalog, and
+    # the rejection only applies when no connector was named — so "count
+    # sources on Demo Orders", where the operator really does mean a table of
+    # that name, still reaches the aggregator.
+    "source", "sources", "destination", "destinations",
+    "format", "formats", "engine", "engines",
+    "role", "roles", "gate", "gates", "mode", "modes",
+    # Plural only. "How many warehouses do you support" asks what the catalog
+    # carries; "how many datasets in the warehouse" is the operator naming
+    # their own store as the scope of a live read.
+    "warehouses",
 })
 
 
@@ -131,6 +144,23 @@ _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
     (r"(?:sum|total)(?: of)?", "sum"),
     (r"(?:minimum|min|lowest|smallest|earliest)(?: of)?", "min"),
     (r"(?:maximum|max|highest|largest|biggest|latest)(?: of)?", "max"),
+    # A breakdown that names no measure is a count per group: "break down orders
+    # by region" asks how many orders each region has. Without this the parser
+    # returned None, the turn was still recognised as a read of the operator's
+    # table, and it reached no tool at all — so the reply was a refusal to a
+    # question the engine can answer exactly. Last in the list so a stated
+    # measure keeps its metric: "sum amount by region" is still a sum.
+    # The verb needs something to group. Followed directly by ``by`` it is not a
+    # verb at all but the name of the SQL clause, and "what does group by do" is
+    # a question about the clause — it parsed as an aggregation and answered a
+    # documentation question with a connector error, the same way "what does
+    # quarantine mean" once did.
+    (
+        r"(?:break(?:\s+\w+)?\s+down|breakdown|group(?:ed)?|"
+        r"bucket(?:ed)?|segment(?:ed)?|split|roll(?:ed)?\s*up|tally)"
+        r"(?!\s+by\b)",
+        "count",
+    ),
 )
 
 _ASCENDING_HINTS = ("ascending", "lowest", "smallest", "bottom", "least", "fewest")
@@ -155,6 +185,52 @@ def _asks_for_a_definition(text: str) -> bool:
     return bool(_DEFINITIONAL_RE.search(text)) and not _STATISTICAL_MEAN_RE.search(text)
 
 
+# The operation named rather than commanded. A determiner in front of the
+# measure makes it the noun the question is *about* — "does **a breakdown**
+# include null values", "is **the count** exact or a sample" — where a request
+# uses it as a verb ("break down orders by region") or applies it to data ("the
+# count of orders by status").
+#
+# Measured over HTTP: both of those routed to the aggregator, which had nothing
+# to aggregate and answered "Connector not found" over the top of the
+# documentation that states the rule they asked about. Worse than a bare miss,
+# because the measure tail is read as a column name and the rest of the English
+# became one: "does a breakdown include null values" planned a count over a
+# table called `include null values`.
+#
+# Decided before any slot filling, for that reason — once the tail has been
+# mined for a column there is an invented subject to mistake for a real one.
+# Paired with the question naming no data at all, so "does the count include
+# nulls on Demo Orders" and "is the total revenue in orders" still reach the
+# aggregator, and "show me the count", which reads the same way and is a real
+# request, is untouched.
+_ABOUT_THE_OPERATION_RE = re.compile(
+    r"\b(?:is|are|does|do|can|could|will|would|should)\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|mean|min|minimum|max|maximum|"
+    r"breakdown|break\s*down|aggregate|aggregation|group(?:ing)?)\b"
+    r"|\bwhat\s+does\s+(?:a|an|the)\s+"
+    r"(?:count|sum|total|average|avg|breakdown|break\s*down|aggregate|"
+    r"aggregation|group(?:ing)?)\b",
+    re.I,
+)
+
+
+#: A scope clause is the operator pointing at data — "in orders", "on Demo
+#: Orders". Its absence is what makes a measure word a topic rather than a
+#: request.
+_NAMES_A_SCOPE_RE = re.compile(
+    r"\b(?:on|from|in|inside|within)\s+(?:the\s+)?[A-Za-z_]",
+    re.I,
+)
+
+
+def _asks_about_the_operation(text: str) -> bool:
+    """True when the measure is the subject of the question, not the work to do."""
+    return bool(_ABOUT_THE_OPERATION_RE.search(text)) and not _NAMES_A_SCOPE_RE.search(
+        text
+    )
+
+
 # "top 5 customers by revenue" carries no metric word but is a ranking request:
 # group by the dimension, rank by the measure.
 _RANKING_RE = re.compile(
@@ -177,6 +253,12 @@ _STOP_TOKENS = frozenset({
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
     "that", "this", "to", "and", "or", "be", "been", "get", "got", "show",
     "me", "tell", "currently", "right", "now", "again", "still",
+    # Modals. Without them "how many file formats can you read" and "how many
+    # sources can you connect to" produced tables called `file formats can`
+    # and `sources can` — no error reached the operator, because the
+    # documentation answer led, but every such turn ran a doomed lookup first.
+    # A modal is a fragment of the question, never part of a name.
+    "can", "could", "will", "would", "should", "may", "might", "must", "shall",
 })
 
 # Adjectives that mean a status/state filter, not part of the table name.
@@ -283,7 +365,7 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
         return None
 
-    if _asks_for_a_definition(text):
+    if _asks_for_a_definition(text) or _asks_about_the_operation(text):
         return None
 
     # "orders where amount > 10 on PilotSQLite" — table-first filtered count.
@@ -463,7 +545,14 @@ def _finish_request(
     table_tokens = req.table.lower().split()
     if (
         table_tokens
-        and (req.table.lower() in _PLATFORM_NOUNS or table_tokens[0] in _PLATFORM_NOUNS)
+        and (
+            req.table.lower() in _PLATFORM_NOUNS
+            # First token and last. The head of an English noun phrase is its
+            # final word, so "file formats" is a question about formats; only
+            # the first was checked, and "file" is not a platform noun.
+            or table_tokens[0] in _PLATFORM_NOUNS
+            or table_tokens[-1] in _PLATFORM_NOUNS
+        )
         and not req.connector_name
     ):
         # Platform inventory question — let the jobs/connectors routes answer it.

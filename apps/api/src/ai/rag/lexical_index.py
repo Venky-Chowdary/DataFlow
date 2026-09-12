@@ -48,6 +48,64 @@ ALIASES = {
 
 _SIBILANT_TAILS = ("s", "x", "z", "ch", "sh")
 
+# English doubles a final consonant before ``-ing``/``-ed`` — except these,
+# which are doubled in the base word itself (``install``, ``process``, ``fizz``).
+_NEVER_DOUBLED = ("l", "s", "z")
+
+# Undoing the doubling must not eat a letter the base word has: ``adding`` is
+# not ``ad``. Three characters is the shortest stem in this corpus that the
+# rule has to reach (``map``, ``run``, ``log``).
+_MIN_UNDOUBLED = 3
+
+
+def _undouble(stem: str) -> str:
+    """``mapp`` → ``map``, the consonant English doubles before ``-ing``/``-ed``.
+
+    Without this a question saying "mapping" reached ``mapp`` while every
+    passage saying "map" reached ``map``, so the two never met — measured on
+    "why is my mapping confidence low", which covered a third of its own terms
+    against the section that answers it.
+    """
+    if len(stem) <= _MIN_UNDOUBLED:
+        return stem
+    tail = stem[-1]
+    if tail != stem[-2] or not tail.isalpha() or tail in _NEVER_DOUBLED:
+        return stem
+    return stem[:-1]
+
+
+#: Shortest word to drop a silent ``-e`` from. Below this the two forms are
+#: already the same token, because ``_stem`` leaves short words alone
+#: (``mode``/``modes``, ``role``/``roles``, ``type``/``typed``), and dropping it
+#: would merge unrelated short words instead.
+_MIN_SILENT_E = 5
+
+
+def _drop_silent_e(token: str) -> str:
+    """``delete`` → ``delet``, meeting the form ``-ed`` and ``-ing`` already reach.
+
+    English drops a silent ``-e`` before those suffixes, so stripping the suffix
+    alone leaves two tokens for one word. Measured across this corpus that split
+    most of the product's own verbs from their own past tense: ``quarantine`` and
+    ``quarantined``, ``validate`` and ``validated``, ``create`` and ``created``,
+    ``schedule`` and ``scheduled``, ``reconcile`` and ``reconciled``, ``store``
+    and ``stored``, ``write`` and ``writing``. Asked "what does mirror mode do to
+    deleted rows" the sentence saying mirror "is upsert plus deletion — rows the
+    source no longer has are removed" shared not one term with ``delet``.
+
+    The shorter form wins because that is what the suffix rules already produce,
+    so this only has to move the base form to meet them.
+
+    A vowel before the ``-e`` is left alone: ``value`` and ``queue`` are not a
+    consonant stem with a silent ending, and ``values`` already reaches
+    ``value``.
+    """
+    if len(token) < _MIN_SILENT_E or not token.endswith("e"):
+        return token
+    if token[-2] in "aeiou":
+        return token
+    return token[:-1]
+
 
 def _stem(token: str) -> str:
     """Strip the few English suffixes that split a term from its own documentation.
@@ -56,24 +114,65 @@ def _stem(token: str) -> str:
     it drops the ``s`` alone, so ``tables`` and ``table`` reach the same term instead
     of stemming to ``tabl`` and ``table``.
     """
+    # No English plural ends ``-ss``. Without this, ``process`` was read as a
+    # plural and stemmed to ``proces`` while ``processing`` stemmed to
+    # ``process``, so one word could not find itself.
+    if token.endswith("ss"):
+        return token
     for suffix in ("ies", "ing", "ed", "es", "s"):
         if len(token) > len(suffix) + 3 and token.endswith(suffix):
             if suffix == "ies":
                 return f"{token[:-3]}y"
             if suffix == "es":
                 stem = token[:-2]
-                return stem if stem.endswith(_SIBILANT_TAILS) else token[:-1]
-            return token[: -len(suffix)]
-    return token
+                if stem.endswith(_SIBILANT_TAILS):
+                    return stem
+                return _drop_silent_e(token[:-1])
+            if suffix in ("ing", "ed"):
+                return _undouble(token[: -len(suffix)])
+            return _drop_silent_e(token[: -len(suffix)])
+    return _drop_silent_e(token)
 
 
 def normalize(token: str) -> str:
-    """Canonical index/query form of one token."""
+    """Canonical index/query form of one token.
+
+    A ``snake_case`` identifier is normalized part by part, because the query
+    side reaches it by joining the stems of the words the operator typed. The
+    corpus label ``reverse_etl`` stemmed as one word while "what is reverse ETL"
+    produced ``revers_etl``, so the shingle built to find that label could not.
+    """
+    if "_" in token:
+        return "_".join(normalize(part) if part else part for part in token.split("_"))
     return ALIASES.get(token, _stem(token))
 
 
 # Deliberately small: only words that carry no retrieval signal in operator
 # questions. Domain words ("job", "run", "map") stay — they are the subject here.
+#
+# ``use used using own bring`` is the frame of "how do I use X" and "can I
+# bring my own X". Each of those words is also how the shipped corpus opens a
+# sentence about something else — "Use this path whenever Validate shows a red
+# gate", "rotate their own password", "Pilot and MCP bring the same governed
+# engine" — so read as subject terms they made every such sentence a candidate
+# for every question that used the frame: "how do I use the API" was answered
+# from the preflight procedure, and "can I use my own encryption key" from a
+# sync mode. Checked against the corpus: ``own`` occurs ten times and is a
+# possessive intensifier in all ten. "Bring your own key" still reaches BYOK,
+# as a phrase expansion.
+#
+# ``see`` and ``handle`` are the same kind of frame — "how do you handle X",
+# "who sees X" — and worse, because the question's rarest remaining word decides
+# which sentence opens the answer. "Can I limit who sees a connector" anchored
+# on ``sees`` and opened on "the destination never sees a later chunk before an
+# earlier one"; "how do you handle very large decimals" anchored on ``handle``.
+# Neither verb names anything: what the question is about is its object.
+#
+# ``up`` and ``cannot`` are rare enough in the corpus to look like subjects —
+# IDF 3.68 and 2.34, above ``schedule`` and ``quarantine`` — while carrying
+# none of what the question is about. ``up`` is only ever "set up", "up to 38"
+# or "open up"; ``cannot`` only ever negates the verb beside it, and that verb
+# is the subject term.
 _STOPWORD_WORDS = """
     a an the and or but if then than that this these those there here
     i me my we our you your it its is are was were be been being am
@@ -83,6 +182,9 @@ _STOPWORD_WORDS = """
     what which who whom whose when where why how
     not no nor so too very just also only
     please tell show explain mean means help
+    use used using own bring
+    see sees seen handle handles handled
+    up cannot
     """.split()
 STOPWORDS = frozenset(_STOPWORD_WORDS) | frozenset(normalize(w) for w in _STOPWORD_WORDS)
 
@@ -90,6 +192,50 @@ STOPWORDS = frozenset(_STOPWORD_WORDS) | frozenset(normalize(w) for w in _STOPWO
 def tokenize(text: str) -> list[str]:
     """Normalized word tokens, snake_case preserved so ``full_refresh`` stays one term."""
     return [normalize(t) for t in _TOKEN_RE.findall(str(text or "").lower())]
+
+
+def identifier_shingles(terms: Sequence[str]) -> list[str]:
+    """Underscore-joined runs of adjacent query terms, for the corpus's own labels.
+
+    The documentation names sync modes as single ``snake_case`` tokens, so
+    "what is reverse ETL" matched neither word of the passage that defines
+    ``reverse_etl``. Joining adjacent query terms recovers the label from the
+    words. This is deliberately query-side only: splitting the identifiers in
+    the *index* instead would add ``write`` and ``etl`` to every passage that
+    mentions a sync mode, and those passages then outranked the section the
+    question was actually about.
+    """
+    out: list[str] = []
+    for size in (2, 3):
+        for start in range(len(terms) - size + 1):
+            run = terms[start : start + size]
+            if all(part and "_" not in part for part in run):
+                out.append("_".join(run))
+    return out
+
+
+def adjacent_shingles(text: str) -> set[str]:
+    """Shingles of words that are *literally* adjacent, filler breaking the run.
+
+    ``identifier_shingles`` joins content terms after filler is removed, which
+    is what recovers ``reverse_etl`` from "reverse ETL". Applied to running
+    prose it invents phrases instead: "semantic mapping with confidence"
+    yielded ``map_confidence``, so a feature-list sentence was credited with
+    having said "mapping confidence" and outranked the section that explains
+    what a low confidence score means.
+    """
+    out: set[str] = set()
+    run: list[str] = []
+    for token in tokenize(text):
+        if token in STOPWORDS or len(token) < 2:
+            if len(run) > 1:
+                out.update(identifier_shingles(run))
+            run = []
+            continue
+        run.append(token)
+    if len(run) > 1:
+        out.update(identifier_shingles(run))
+    return out
 
 
 def content_terms(text: str) -> list[str]:

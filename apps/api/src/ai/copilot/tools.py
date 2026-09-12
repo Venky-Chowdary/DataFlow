@@ -11,9 +11,17 @@ from typing import Any, Callable
 from services.value_serializer import json_default
 
 from ..rag.product_docs import (
-    compose_documented_answer,
+    compose_product_answer,
     names_product_subject,
     product_doc_search,
+    retrieve_product_answer,
+)
+from ..rag.query_analysis import (
+    CUSTOM_SLOT_NAME_RE,
+    INCREMENTAL_UPDATED_AT_RE,
+    PAUSE_CDC_RE,
+    classify_ask,
+    is_cdc_delivery_question,
 )
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
@@ -1127,25 +1135,11 @@ class DataPilotTools:
         )
 
     def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from ...services.mongodb_service import get_mongodb_service
-        mongo = get_mongodb_service()
-        jobs = mongo.list_jobs(limit=limit)
-        summary = [
-            {
-                "id": str(j.get("_id", j.get("id", ""))),
-                "source": j.get("source_name", j.get("source_type", "")),
-                "destination": j.get("destination_collection") or j.get("destination_type", ""),
-                "status": j.get("status"),
-                "records": j.get("records_processed", 0),
-                "rejected_rows": j.get("rejected_rows", 0),
-                "error": (j.get("error") or "")[:240] or None,
-                "created_at": str(j.get("created_at", "")),
-            }
-            for j in jobs
-        ]
+        from .job_reads import list_transfer_jobs
+
+        summary, counts, source = list_transfer_jobs(limit=limit)
         # "How many jobs?" must be answered from the whole history — the page we
         # read here is only the window we can show.
-        counts = mongo.count_jobs()
         return ToolResult(
             name="list_jobs",
             success=True,
@@ -1154,15 +1148,16 @@ class DataPilotTools:
                 "count": len(summary),
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
+                "store": source,
             },
         )
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from ...services.mongodb_service import get_mongodb_service
+        from .job_reads import read_transfer_job
 
-        job = get_mongodb_service().get_job((job_id or "").strip())
+        job = read_transfer_job((job_id or "").strip())
         if not job:
             return ToolResult(
                 name="get_job",
@@ -1396,9 +1391,10 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Primary brain is Datawrap's local Pilot engine "
-                    "(NL → tools → compose). OpenAI / Anthropic / Ollama are optional "
-                    "add-ons only — not required."
+                    "First-party brain is Datawrap's own local Pilot engine "
+                    "(dual encoder + copy-grounded pointer-generator, then "
+                    "NL → tools → compose). OpenAI / Anthropic / Ollama stay "
+                    "opt-in polish — never required, never the source of transfer facts."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1427,6 +1423,18 @@ class DataPilotTools:
                     "Rewrite quarantine rows in place from chat "
                     "(I open Transfer Studio Fix with your Confirm)",
                     "Delete connectors, jobs, or data",
+                    "Run dbt Cloud or use dbt as the transfer engine "
+                    "(transform projects can export a dbt starter pack)",
+                    "Open an SSH tunnel or bastion in front of a database "
+                    "(SFTP is a file connector)",
+                    "Invent a legal no-data-loss SLA "
+                    "(bad rows are quarantined; the row ledger must close)",
+                    "Load an Airbyte connector pack or custom Airbyte CDK spec "
+                    "(transfers run Datawrap's own transfer-ready drivers)",
+                    "Invent a signed SOC 2 letter, GDPR DPA, or HIPAA BAA "
+                    "(audit export is diligence, not an attestation)",
+                    "Undo a committed transfer or roll back a load "
+                    "(resume and quarantine replay exist; warehouse restore does not)",
                 ],
                 "tools": [t["name"] for t in TOOL_DEFINITIONS],
                 "screens": [
@@ -1568,7 +1576,13 @@ class DataPilotTools:
                 ),
             ),
             (
-                re.compile(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s+run|nine\s+gates|9\s+gates)\b"),
+                # Listing / count of the set — not a single gate id. "what is G3"
+                # used to match ``g[1-9]`` and the 9-gates blurb buried Schema
+                # contract, the card the operator named.
+                re.compile(
+                    r"\b(?:nine\s+gates|9\s+gates|quality\s+gates|"
+                    r"what\s+(?:are\s+)?(?:the\s+)?(?:preflight\s+)?gates)\b"
+                ),
                 "preflight",
                 (
                     "Preflight has **9 gates** (G1–G9). **G5 Dry run** samples coercion "
@@ -1593,13 +1607,17 @@ class DataPilotTools:
                     r"|\blocal\s+only\b"
                     r"|\b(?:don'?t|do\s+not|never)\s+use\s+(?:openai|anthropic|ollama|cloud)\b"
                     r"|\bare\s+you\s+local\b"
+                    r"|\bare\s+you\s+chat\s*gpt\b"
+                    r"|\b(?:use|using|need)\s+(?:chatgpt|openai|anthropic|a\s+third[\s-]?party)\b"
+                    r"|\b(?:our|your)\s+own\s+(?:llm|engine|model)\b"
+                    r"|\bgenerative\s+llm\b"
                 ),
                 "local_primary",
                 (
-                    "Yes. **Datawrap Pilot local engine is primary** — NL → tools → compose works with no "
-                    "OpenAI, Anthropic, or Ollama key. Optional `DATAFLOW_PILOT_ENGINE=hybrid` can polish "
-                    "narration with a cloud/local LLM, but transfers, aggregates, schema, and Confirm "
-                    "do not require them."
+                    "Datawrap Pilot's **own local engine** is the default brain — a "
+                    "first-party copy-grounded generator (NL → tools → compose) "
+                    "with no OpenAI, Anthropic, or Ollama key. A third-party LLM is optional polish "
+                    "you turn on in Settings → AI; it never supplies transfer, aggregate, or Confirm facts."
                 ),
             ),
         ]
@@ -1607,14 +1625,52 @@ class DataPilotTools:
             ((intent, answer) for pattern, intent, answer in direct if pattern.search(lower)),
             None,
         )
+        # A comparison names both sides. The curated snippets are one-sided
+        # definitions ("**Append** adds…", "**Overwrite** replaces…"), so
+        # prepending one buried "what is the difference between append and
+        # overwrite" under the append-only paragraph.
+        if curated and (
+            "difference" in lower
+            or ("append" in lower and "overwrite" in lower)
+            or " vs " in lower
+            or " versus " in lower
+            or "same as" in lower
+            or ("upsert" in lower and "merge" in lower)
+            or "merge-on-read" in lower
+            or "merge on read" in lower
+        ):
+            curated = None
+        # A named gate (G3) or a listing the docs already answer must not sit
+        # under the uncited 9-gates blurb. The cited Help / generated cards
+        # are the lead; the FAQ is only a fallback when retrieval cannot.
+        if curated and curated[0] == "preflight" and (
+            re.search(r"\bg[1-9]\b|\bgate\s*[1-9]\b", lower)
+        ):
+            curated = None
 
-        # The shipped operator documentation, retrieved lexically with a grounding
-        # floor. Documentation leads even when a curated definition matched: the
-        # curated prose carries no citation, so answering from it alone gave the
-        # operator a confident paragraph they could not trace to any page.
-        doc_hits = product_doc_search(query, limit=3)
-        if doc_hits:
-            documented = compose_documented_answer(doc_hits)
+        # The shipped operator documentation plus the passages generated from the
+        # product's own enforcing modules, retrieved hybrid and judged by the
+        # evidence policy. Documentation leads even when a curated definition
+        # matched: the curated prose carries no citation, so answering from it
+        # alone gave the operator a confident paragraph they could not trace to
+        # any page.
+        retrieved = retrieve_product_answer(query, limit=4)
+        if curated and curated[0] == "preflight" and retrieved.answerable:
+            curated = None
+        # ``\bcdc\b`` also matches "what happens to a delete in CDC" and
+        # "hand off from snapshot to the CDC stream". The one-sentence mode
+        # definition then buried the cited handoff / tombstone cards.
+        # Only the CDC snippet is suppressed here — upsert/append still
+        # lead with their curated key/insert definitions.
+        if curated and curated[0] == "sync_mode" and retrieved.answerable:
+            if re.search(r"\bcdc\b", lower) and not re.search(
+                r"^\s*what\s+is\s+cdc\b", lower
+            ):
+                curated = None
+        if curated and curated[0] == "local_primary" and retrieved.answerable:
+            curated = None
+        if retrieved.answerable:
+            documented = compose_product_answer(retrieved)
             return ToolResult(
                 name="explain_product",
                 success=True,
@@ -1627,9 +1683,13 @@ class DataPilotTools:
                     # No navigate action: the citations below are the control that
                     # opens the article, and a second one only competes with them.
                     "actions": [],
-                    "sources": [hit.as_source() for hit in doc_hits],
+                    "sources": retrieved.sources,
                     "grounded": True,
                     "source": "product_documentation",
+                    # A partial answer is reported as partial so the caller can
+                    # tell an answer with a documented gap from a complete one.
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
                 },
             )
 
@@ -1675,14 +1735,14 @@ class DataPilotTools:
         # Shipped operator documentation answers first, with citations. Embedding
         # similarity alone returned readable-looking fragments the operator could
         # not trace back to any page, so a documented answer looked like a guess.
-        doc_hits = product_doc_search(query, limit=3)
-        if doc_hits:
+        retrieved = retrieve_product_answer(query, limit=4)
+        if retrieved.answerable:
             return ToolResult(
                 name="search_knowledge",
                 success=True,
                 output={
                     "query": query,
-                    "answer": compose_documented_answer(doc_hits),
+                    "answer": compose_product_answer(retrieved),
                     "hits": [
                         {
                             "text": hit.chunk.text[:600],
@@ -1690,13 +1750,15 @@ class DataPilotTools:
                             "type": "product_doc",
                             "summary": hit.chunk.citation,
                         }
-                        for hit in doc_hits
+                        for hit in retrieved.hits
                     ],
-                    "count": len(doc_hits),
+                    "count": len(retrieved.hits),
                     "empty": False,
-                    "sources": [hit.as_source() for hit in doc_hits],
+                    "sources": retrieved.sources,
                     "grounded": True,
                     "source": "product_documentation",
+                    "coverage": retrieved.verdict.outcome,
+                    "evidence": retrieved.verdict.as_dict(),
                 },
             )
 
@@ -2557,6 +2619,25 @@ def _is_meta_pilot_question(lower: str) -> bool:
     return False
 
 
+# Ask types that can only be answered from the documentation. ``definition`` and
+# ``procedure`` are deliberately absent: their patterns overlap with imperative
+# requests ("create a connector", "set up a transfer from A to B") that have
+# their own handlers, and the keyword patterns below already cover the question
+# forms of both.
+_KNOWLEDGE_ASKS = frozenset({"enumeration", "comparison"})
+
+# A question, as opposed to a command. Either it opens with an interrogative or
+# it ends in one — "my connector test passed but the transfer failed, why".
+_INTERROGATIVE = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|how|when|where|which|who|whose|can|could|do|does|did|is|are|"
+    r"was|were|will|would|should|am|any|explain|tell\s+me|remind)\b"
+    r"|\bwhy\s*\?*\s*$"
+    r"|\?\s*$",
+    re.I,
+)
+
+
 def _looks_like_product_howto(lower: str) -> bool:
     """Product how-to / FAQ — answer from curated local FAQ, not RAG or cloud."""
     text = (lower or "").strip()
@@ -2564,26 +2645,68 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
+            # "how do you handle booleans" is the same product question as "how
+            # does Datawrap handle booleans", and the list held every other
+            # person: ``how do i``, ``how does``. Asking the product about
+            # itself in the second person reached no knowledge tool at all.
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how do you|how do we|"
+            r"how does|how to|how are|how is|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
             r"what makes|remind me|meaning of|"
-            r"do i need|is .+ dangerous|how is)\b",
+            r"do i need|how is)\b"
+            # Property and capability questions about the product. "is a green
+            # test on connectors enough to skip validation" is one of these, and
+            # matched nothing, so it collected a connector inventory instead of
+            # the sentence in the FAQ that answers it outright.
+            r"|\bis\s+.{3,48}?\s+(?:enough|the\s+same|different|safe|dangerous|"
+            r"required|optional|supported|reversible|idempotent|lossy)\b"
+            # Advisory shapes. "which sync mode should I pick for a nightly
+            # load" is a product question by any reading, but matched none of
+            # the patterns above, so the advisory tool answered it in one line
+            # with no citation at all.
+            r"|which\s+[\w\s]{0,24}\bshould\s+i\b"
+            r"|what\s+should\s+i\s+(?:use|pick|choose|do)\b"
+            r"|when\s+should\s+i\b"
+            r"|do\s+you\s+support\b"
+            r"|does\s+.{3,48}?\s+skip\b"
+            r"|is\s+it\s+possible\b"
+            r"|^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
+            r"|what\s+(?:are|is)\s+the\s+(?:options?|modes?|types?|gates?|roles?|policies|steps?)\b"
+            r"|what\s+happens\s+(?:to|when|if|on)\b"
+            r"|what\s+if\b"
+            r"|who\s+can\b",
             text,
         )
     )
+    # The retrieval layer already decides what kind of answer a question wants,
+    # and it recognises shapes no keyword list here did: "which preflight gate
+    # blocks a lossy type change" is an enumeration over a documented set.
+    # Sharing that classifier is also how the two surfaces stay in agreement.
+    if not howto and classify_ask(text) in _KNOWLEDGE_ASKS:
+        howto = True
+    # A question shape plus a live-data fetch is still a fetch: "show me the
+    # failed jobs" must answer from Jobs, not from an article about jobs.
+    if howto and _looks_like_live_data_fetch(text):
+        howto = False
+    # Competitor and vendor names, and the phrases about this assistant itself,
+    # are not subjects the documentation has a heading for — they stay listed.
     product = bool(
         re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|data transfer|transfer studio|preflight|"
-            r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
-            r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
+            r"\b(?:dataflow|datawrap|datatransfer|data transfer|gdpr|hipaa|"
+            r"airbyte|fivetran|move (?:my |the )?data|sync data|"
             r"schema types?|semantic types?|type system|logical types?|"
-            r"transfers?|pilot|openai|anthropic|"
-            r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate|mcp|contracts?|reconcile)\b",
+            r"openai|anthropic|ollama|chatgpt|chat\s*gpt|api key|accurate)\b",
             text,
         )
     )
-    if howto and product:
+    # Everything else asks the same corpus-derived subject model the retrieval
+    # layer uses. A hand-maintained keyword list was the second reason ordinary
+    # questions went unanswered: retrieval could answer "what happens to bad
+    # rows" and "what does the viewer role let me do", but the router never
+    # planned a knowledge tool for them because ``row``, ``role`` and
+    # ``checksum`` were not on the list. One subject model, derived from the
+    # corpus, cannot drift from what is retrievable.
+    if howto and (product or names_product_subject(text)):
         return True
     # Bare product identity questions (legacy DataFlow + current Datawrap brand)
     if re.search(r"\bwhat is data(?:flow|wrap|transfer)\b", text):
@@ -2604,6 +2727,10 @@ def _looks_like_product_howto(lower: str) -> bool:
         return True
     if re.search(r"\b(?:need|require)\s+(?:an?\s+)?(?:openai|anthropic|ollama|api)\s+key\b", text):
         return True
+    if re.search(r"\b(?:chat\s*gpt|chatgpt|generative\s+llm|third[\s-]?party\s+(?:llm|model))\b", text):
+        return True
+    if re.search(r"\b(?:our|your)\s+own\s+(?:llm|engine|model)\b", text):
+        return True
     if re.search(r"\b(?:append|upsert|cdc|full refresh)\s+mode\b", text):
         return True
     if re.search(r"\bfull refresh\b.+\b(?:dangerous|safe|overwrite)\b|\b(?:dangerous|safe).+\bfull refresh\b", text):
@@ -2621,6 +2748,52 @@ def _looks_like_product_howto(lower: str) -> bool:
     if re.search(r"\b(?:g[1-9]|gate\s*[1-9]|dry\s*run|9\s+gates|nine\s+gates)\b", text):
         return True
     return False
+
+
+def _asks_about_the_product(message: str) -> bool:
+    """Whether an otherwise unroutable message is a question about this product.
+
+    The gate for the knowledge fallback. It has to be strict about *kind* of
+    message — a live-data fetch, a mutation or a question about the assistant
+    itself each have their own handler and must not be diverted into
+    documentation — but it delegates "is this about the product" to the corpus
+    so it cannot fall behind what the corpus can answer.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower) or _has_explicit_workspace_subject(lower):
+        return False
+    return names_product_subject(message)
+
+
+def _wants_documentation_companion(message: str) -> bool:
+    """Whether a documented explanation belongs *beside* whatever live tool ran.
+
+    An operator asking why something happened, or how to do something, wants
+    both halves: what their workspace says now, and what the product documents.
+    Returning only the live half meant an empty workspace answered "No transfer
+    jobs yet" to a question about where quarantined rows go, and "Name two saved
+    connectors" to a question about losing decimal precision — in both cases the
+    documentation answered outright and was dropped.
+
+    Strict on the *kind* of message: a live-state read, a command, a meta
+    question and an unsupported mutation each already have the right owner.
+    """
+    lower = (message or "").strip().lower()
+    if len(lower) < 8:
+        return False
+    if _is_meta_pilot_question(lower) or _looks_like_unsupported_mutation(lower):
+        return False
+    if _looks_like_live_data_fetch(lower):
+        return False
+    if not _INTERROGATIVE.search(lower):
+        return False
+    if classify_ask(message) == "other" and not _looks_like_product_howto(lower):
+        return False
+    return names_product_subject(message)
 
 
 def _has_explicit_workspace_subject(lower: str) -> bool:
@@ -2789,32 +2962,99 @@ def _summarize_knowledge_hit(text: str) -> str:
     return text[:280]
 
 
+_EXPLANATORY_QUESTION = re.compile(
+    r"\bhow\s+(?:do|can|would|should)\s+(?:i|we|you)\b"
+    r"|\bhow\s+to\b"
+    r"|\bwhere\s+(?:do|can)\s+(?:i|we)\b"
+    r"|\bwhat(?:'s| is)\s+the\s+(?:way|process|procedure|steps?)\b"
+    r"|\bwhat\s+happens\s+(?:if|when|to|on)\b"
+    r"|\bwhat\s+if\b"
+    r"|\bwalk\s+me\s+through\b"
+    r"|\bexplain\s+how\b",
+    re.I,
+)
+
+# "can I land tables in Redshift" is a destination-capability question. The
+# inventory parser otherwise reads ``tables in Redshift`` as "list objects on a
+# saved connector named redshift" and the miss leads the reply.
+_CAPABILITY_TABLE_LANDING = re.compile(
+    r"\b(?:land|write|load|put|send|replicate)\s+(?:the\s+|my\s+|our\s+)?"
+    r"(?:tables?|data|rows|records)\b"
+    r"|\bland\s+(?:in|to|into)\b",
+    re.I,
+)
+
+# "is Slack a connector" is a catalog-capability question. The inventory
+# parser otherwise reads the word ``connector`` as "list my saved
+# connections" and the reply opens on "You have 2 saved connector(s)".
+_IS_A_CONNECTOR_ASK = re.compile(
+    r"^\s*is\s+[\w .+/-]{2,48}\s+a\s+(?:source\s+|destination\s+)?connector\b"
+    r"|^\s*is\s+there\s+(?:a|an)\s+(?!saved\b|my\b)[\w .+/-]{2,48}\s+connector\b",
+    re.I,
+)
+
+# Exporting a *schedule* as YAML is a shipped feature (the GitOps manifest the
+# CLI validates and applies). Exporting *rows* to a file is not something Pilot
+# does. The refusal list keyed on the bare word ``export``, so "how do I export a
+# schedule as YAML" was answered with "I can't export files yet" — a documented
+# capability denied.
+_SUPPORTED_EXPORT = re.compile(
+    r"\bexport\s+(?:the\s+|a\s+|an\s+|my\s+|this\s+)?(?:schedule|pipeline|manifest|contract|ya?ml)\b"
+    r"|\bexport\s+(?:as\s+)?ya?ml\b"
+    r"|\b(?:schedule|pipeline|manifest|contract)\b[^.?!]{0,40}\bas\s+ya?ml\b"
+    r"|\bya?ml\b[^.?!]{0,40}\b(?:schedule|pipeline|manifest|export)\b"
+    # Workspace audit download is GET /api/v1/audit/export, not a file write.
+    r"|\bexport\s+audit\b"
+    r"|\baudit\s+logs?\b",
+    re.I,
+)
+
+
 def _looks_like_unsupported_mutation(lower: str) -> bool:
     """True when the operator asked for delete / export / create-schedule we refuse.
 
     These must never fall into RAG — synonym dumps look like we can do the action.
+
+    A *how-to question* about one of them is not a request to perform it: the
+    honest answer to "how do I delete a connector" is the documented procedure,
+    not a refusal to do something the operator never asked us to do. Capability
+    questions ("can I export rows to CSV") are still refused, because the answer
+    is genuinely no.
     """
+    if _SUPPORTED_EXPORT.search(lower):
+        return False
+    # "write to Excel Online" contains the substring "to excel". That is a
+    # destination-capability ask, not a file export.
+    if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", lower):
+        return False
+    if _EXPLANATORY_QUESTION.search(lower) and names_product_subject(lower):
+        return False
     if any(
         w in lower
         for w in (
             "export ", "export to", "download ", "download as",
-            "save as csv", "save as parquet", "to csv", "to parquet", "to excel",
+            "save as csv", "save as parquet", "to csv", "to parquet",
             "create a new schedule", "create schedule", "create a pipeline",
             "new nightly", "build a cron", "cron pipeline",
             "schedule this transfer", "schedule this nightly", "schedule it nightly",
             # Do NOT match bare "schedule nightly" / "nightly schedule" —
             # those collide with show/open schedule named "Nightly …".
         )
-    ):
+    ) or bool(re.search(r"\bto\s+excel\b(?!\s+(?:online|365))", lower)):
         return True
+    # Plurals are the natural way to ask for a bulk delete ("delete all my
+    # connectors"), and without them the request fell through to the inventory
+    # tool, which listed the connectors and never said that Pilot does not
+    # delete. A destructive ask answered with a listing reads like consent.
     if re.search(
-        r"\b(?:delete|drop|destroy|remove)\b.+\b(?:connector|connection|schedule|pipeline)\b",
+        r"\b(?:delete|drop|destroy|remove)\b.+"
+        r"\b(?:connectors?|connections?|schedules?|pipelines?|jobs?|contracts?)\b",
         lower,
     ):
         return True
-    if re.search(r"\b(?:delete|drop|destroy)\b.+\b(?:table|collection)\b", lower):
+    if re.search(r"\b(?:delete|drop|destroy|truncate)\b.+\b(?:tables?|collections?)\b", lower):
         return True
-    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
+    if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connectors?\b", lower):
         return True
     # Create-schedule only — do not refuse show/run/open schedule <name>.
     if re.search(
@@ -2858,8 +3098,88 @@ def _looks_like_live_data_fetch(lower: str) -> bool:
         lower,
     ):
         return True
+    # ``by <column>`` may sit between the object and its scope: "orders by
+    # region on Audit SQLite" is the same read as "orders on Audit SQLite",
+    # grouped.
     if re.search(
-        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+(?:data\s+)?(?:from|on|in)\b",
+        r"\b(?:users?|orders?|customers?|products?|employees?|invoices?)\s+"
+        r"(?:data\s+)?(?:by\s+\w+\s+)?(?:from|on|in)\b",
+        lower,
+    ):
+        return True
+    # "how many connectors do I have" is a read of the operator's own workspace,
+    # not a question about what a connector is. Without this it collected a
+    # documentation essay in front of the inventory it asked for.
+    #
+    # Kept to questions about *state*. A bare possessive is not enough: "can I
+    # keep my pipelines in git" says "my pipelines" and is asking about the
+    # GitOps export, not for a list of them.
+    if re.search(
+        r"\b(?:do|did|does)\s+(?:i|we)\s+(?:have|own|already\s+have)\b"
+        r"|\bhow\s+many\s+(?:\w+\s+){0,2}(?:do|did)\s+(?:i|we)\b"
+        r"|\b(?:status|state|result|outcome)\s+of\s+(?:my|our|the)\b"
+        r"|\b(?:my|our)\s+(?:last|latest|most\s+recent|current)\s+"
+        r"(?:job|run|transfer|pipeline|schedule|sync)\b",
+        lower,
+    ):
+        return True
+    # A count scoped to a named object is a read of that object, not a question
+    # about what the noun means: "how many tables on sales" counts the
+    # operator's own schema. The scope is what makes it safe — "how many
+    # connectors do you support" names no object of theirs and is a catalog
+    # question, and it is the one the documentation now answers with a number.
+    if re.search(
+        r"\bhow\s+many\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|schemas?|datasets?|objects?|rows?|records?|"
+        r"jobs?|runs?|connections?|pipelines?|schedules?)\b"
+        r"[\w\s]{0,12}?\b(?:on|in|from|under|for)\b\s+\S",
+        lower,
+    ):
+        return True
+    # The declarative form of an inventory read. "list tables on Audit SQLite"
+    # already routed; "what tables are on Audit SQLite" is the same request
+    # phrased as a question, and it answered with a passage about how a datetime
+    # column is created on each engine. The scope preposition followed by a
+    # *named* object is what keeps this off "what tables does the product
+    # support", which names nothing of the operator's, and the article guard
+    # keeps it off "what fields are in an audit event".
+    if re.search(
+        r"\b(?:what|which)\s+(?:\w+\s+){0,2}"
+        r"(?:tables?|columns?|fields?|objects?|collections?|schemas?|views?|"
+        r"datasets?|streams?|topics?)\s+"
+        r"(?:are|is|live|lives|exist|exists|do|does|did|have|has)\b"
+        r"[\w\s']{0,20}?\b(?:on|in|from|under|inside)\b\s+(?!a\s|an\s)\S",
+        lower,
+    ):
+        return True
+    # A grouped aggregate over the operator's own table. "count orders by region
+    # on Audit SQLite" routed because ``orders on`` is a business object with a
+    # scope, but "break down orders by region on Audit SQLite" put the
+    # aggregation verb too far from either for any rule above to see it, and the
+    # turn answered with a passage about snapshot resume. The ``by`` clause and
+    # the scope are both required: "how do you break down a large table" has
+    # neither and stays a documentation question.
+    if re.search(
+        r"\b(?:break\s*(?:down)?|group|bucket|split|segment|count|sum|total|"
+        r"average|avg|tally|roll\s*up)\b[\w\s']{0,40}?\bby\b\s+\w+"
+        r"[\w\s']{0,30}?\b(?:on|in|from)\b\s+(?!a\s|an\s)\S",
+        lower,
+    ):
+        return True
+    # An imperative aimed at the operator's own objects is a read, whatever the
+    # ask classifier makes of it. "List my connectors" is graded an
+    # *enumeration* — true of "what are the sync modes", not of this — so the
+    # how-to branch led the reply with a documentation essay about audit logs
+    # and BYOK and put the inventory the operator asked for underneath it.
+    #
+    # The leading imperative is what makes this safe where a bare possessive is
+    # not: "can I keep my pipelines in git" asks about the GitOps export.
+    if re.search(
+        r"^(?:please\s+)?(?:list|show|display|give\s+me|fetch|get)\s+"
+        r"(?:me\s+)?(?:all\s+(?:of\s+)?|the\s+)?(?:my|our\s+)?\s*"
+        r"(?:saved\s+|existing\s+|current\s+)?"
+        r"(?:connectors?|connections?|jobs?|transfers?|runs?|pipelines?|"
+        r"schedules?|contracts?|datasets?|tables?|collections?)\b",
         lower,
     ):
         return True
@@ -2979,6 +3299,30 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "analyze_result",
     "filter_result",
     "list_connector_objects",
+})
+
+# Tools that answer from the documentation rather than from workspace state.
+_KNOWLEDGE_TOOLS = frozenset({
+    "explain_product",
+    "search_knowledge",
+    "describe_pilot",
+    "explain_mapping_assurance",
+})
+
+# Tools that need the operator to have named a specific object, and that report
+# "not found" when they were planned off a generic question instead.
+_NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
+    "open_schedule",
+    "get_schedule",
+    "run_schedule_now",
+    "open_job",
+    "get_job",
+    "get_preflight_run",
+    "sample_connector_object",
+    "list_connector_objects",
+    "introspect_connector_schema",
+    "aggregate_data",
+    "analyze_dataset",
 })
 
 
@@ -3390,6 +3734,84 @@ def _extract_route_endpoints(text: str) -> tuple[str, str, str]:
     return src, _capture_connector_name(dst), mode
 
 
+# How an operator names a table out loud: "the orders table", "orders". The
+# introspection patterns read the identifier itself, so without allowing the
+# article and the trailing noun the match landed on the word "the" — "show me
+# the schema of the orders table" parsed no table at all and fell through to a
+# documentation answer about schema *policy*.
+_TABLE_REF = r"(?:the\s+|a\s+|this\s+)?([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection))?"
+
+# The word before "rows" is usually the table — but not when it describes the
+# state of the rows. "Replay the quarantined rows on my last job" was planned as
+# a sample of a table named ``quarantined`` on a connector named "my last job",
+# and answered with a refusal to guess which database that was, stacked on top
+# of the real answer. These are the product's own words for a row's state, so
+# the list is bounded by the domain rather than by English.
+_ROW_STATE_WORDS = frozenset(
+    """
+    quarantined rejected refused failed failing bad invalid
+    written read skipped dropped duplicate duplicated missing
+    unaccounted rolled_back replayed changed new stale affected
+    """.split()
+)
+
+_NOT_A_TABLE_NAME = frozenset(
+    {"data", "rows", "me", "some", "the", "my", "all"}
+) | _ROW_STATE_WORDS
+
+
+# A row preview always puts the quantity between the verb and the table:
+# "show me 3 rows from orders", "preview the first 5 rows of orders", "sample
+# some rows from orders". The sample planner grew one literal alternative per
+# phrasing it had seen, so any unlisted combination read the count as the table
+# name and the remainder of the sentence as the connector — "show me 3 rows
+# from orders on Audit SQLite" sampled a table called ``3``. One pattern with
+# an optional count covers the whole family, and the count becomes the limit.
+_SAMPLE_ROWS_RE = re.compile(
+    r"\b(?:show|give\s+me|get|fetch|pull|sample|preview|peek\s+at|display|read)\s+"
+    r"(?:me\s+)?(?:the\s+)?"
+    r"(?:(?:first|top|last)\s+)?"
+    r"(?:(?P<count>\d{1,4})\s+|some\s+|a\s+few\s+)?"
+    r"(?:rows?|records?|documents?|data)\s+(?:of|from|in)\s+"
+    r"(?P<table>[a-zA-Z0-9_.-]+)"
+    r"(?:\s+(?:table|collection))?"
+    r"(?:\s+(?:on|in|from|using)\s+(?P<connector>.+))?$",
+    re.IGNORECASE,
+)
+
+
+# A question *about* something, as opposed to a request to do something.
+# "Can you pause the nightly sync" is a request; "what happens to duplicate
+# primary keys" is not, and the schedule-management verbs include words that are
+# also ordinary adjectives — so that question was planned as "clone the pipeline
+# named primary keys" and answered with "Schedule not found" before the
+# documentation it actually wanted.
+_ASKS_ABOUT_SOMETHING = re.compile(
+    r"^\s*(?:so\s+|and\s+|ok(?:ay)?\s+|but\s+)?"
+    r"(?:what|why|when|where|which|who|whose|how)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_whether_any_exist(lower: str, *objects: str) -> bool:
+    """"Do I have any contracts", "are there any pipelines" — an inventory ask.
+
+    Every listing pattern keyed on an imperative verb (list / show) or on a
+    possessive, so the most natural way to ask whether something exists at all
+    reached no tool and got the generic capability list back instead.
+    """
+    nouns = "|".join(objects)
+    return bool(
+        re.search(
+            rf"\b(?:do|did|have)\s+(?:i|we)\s+(?:have\s+|got\s+|set\s+up\s+)?"
+            rf"(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\b(?:are|is)\s+there\s+(?:any|some)\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b"
+            rf"|\bhave\s+(?:i|we)\s+got\s+(?:\w+\s+){{0,2}}?(?:{nouns})\b",
+            lower,
+        )
+    )
+
+
 def _asks_for_schema(lower: str) -> bool:
     """True when the operator actually asked to see a schema, not just a transfer."""
     return bool(
@@ -3519,29 +3941,15 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
     return ""
 
 
-# High-frequency operator misspellings. A typo must not cost the operator the
-# whole intent: "tranfer" is still a transfer.
-_TYPO_FIXES: tuple[tuple[str, str], ...] = (
-    (r"\btra?ns?fe?r\b", "transfer"),
-    (r"\btrasfer\b", "transfer"),
-    (r"\bmigra?te?\b", "migrate"),
-    (r"\bschdule\b", "schedule"),
-    (r"\bmny\b", "many"),
-    (r"\btbls?\b", "tables"),
-    (r"\bcnt\b", "count"),
-    (r"\bconnectorz\b", "connectors"),
-    (r"\bdbs\b", "databases"),
-    (r"\bpostgress?ql\b", "postgresql"),
-    (r"\bposgres\b", "postgres"),
-)
-
-
 def normalize_operator_typos(message: str) -> str:
-    """Repair common misspellings before any intent parsing."""
-    text = message or ""
-    for pattern, replacement in _TYPO_FIXES:
-        text = re.sub(pattern, replacement, text, flags=re.I)
-    return text
+    """Repair slang and misspellings before any intent parsing.
+
+    One rewrite owns both retrieval and routing. Adding a second typo table
+    here is how "gotta have logical wal" reached tools cleaned and RAG raw.
+    """
+    from ..rag.query_analysis import rewrite_operator_question
+
+    return rewrite_operator_question(message)
 
 
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
@@ -3684,8 +4092,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         q = setup.group(1).strip()
         role = "destination" if "destination" in lower else "source"
         planned.append(("search_connectors", {"query": q[:40], "role": role}))
-    elif re.search(r"\bconnectors?\b|\bconnections?\b", lower) and not any(
-        v in lower for v in ("go to", "take me", "navigate to")
+    elif (
+        re.search(r"\bconnectors?\b|\bconnections?\b", lower)
+        and not any(v in lower for v in ("go to", "take me", "navigate to"))
+        and not _IS_A_CONNECTOR_ASK.search(lower)
     ):
         # "open connectors" is navigate; "find my postgres connector" is search.
         bare_open_connectors = bool(
@@ -3721,7 +4131,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
             ]
-        elif not bare_open_connectors:
+        elif not bare_open_connectors and not re.search(
+            r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b|"
+            r"\bskip\s+(?:validat\w*|preflight)\b|"
+            r"\benough\s+to\s+skip\b",
+            lower,
+        ):
             planned.append(("list_connectors", {}))
             planned = [
                 (n, a) for n, a in planned
@@ -3755,7 +4170,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")):
+    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")) or _asks_whether_any_exist(lower, "schedules?", "pipelines?"):
         planned.append(("list_schedules", {"limit": 20}))
         planned = [
             (n, a) for n, a in planned
@@ -3919,7 +4334,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if not re.search(
         r"\b(?:change\s+data\s+capture|cdc|sync\s+mode|write\s+mode|upsert|append)\b",
         lower,
-    ):
+    ) and not _ASKS_ABOUT_SOMETHING.match(lower):
         manage_sched = re.search(
             r"\b(?:pause|stop|disable|resume|clone|duplicate)\s+"
             r"(?:the\s+)?(?:schedule|pipeline)\s+(.+?)\s*$",
@@ -3949,8 +4364,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
             lower,
         )
-        and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower)
-    ):
+        or _asks_whether_any_exist(lower, "contracts?")
+    ) and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -3989,6 +4404,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and any(w in lower for w in ("list", "show", "recent", "my"))
             and "dataset" not in lower
         )
+        or _asks_whether_any_exist(lower, "jobs?", "transfers?")
     ):
         planned.append(("list_jobs", {"limit": 10}))
         planned = [
@@ -4062,7 +4478,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ) or re.search(r"\bwhy\s+did\s+(?:the\s+)?(?:last\s+)?(?:transfer|job)\s+fail\b", lower) or re.search(
         r"\b(?:status|details?)\s+of\s+(?:my\s+|the\s+)?(?:last\s+)?(?:transfer|job)\b",
         lower,
-    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower):
+    ) or re.search(r"\b(?:open|show|get)\s+(?:my\s+|the\s+)?last\s+(?:job|transfer)\b", lower) or re.search(
+        # Whatever is wanted *from* the operator's last run, the run has to be
+        # fetched first. The literal list above grew a phrase at a time and
+        # still missed "prove the row counts matched on my last transfer" and
+        # "give me the proof for my last transfer": both were recognised as
+        # reads of the workspace and then reached no tool at all, so the reply
+        # asked which table they meant.
+        r"\b(?:my|our|the)\s+(?:last|latest|most\s+recent|previous)\s+"
+        r"(?:job|run|transfer|sync|load|migration)\b",
+        lower,
+    ):
         planned.append(("list_jobs", {"limit": 5}))
         planned = [
             (n, a) for n, a in planned
@@ -4100,9 +4526,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "transfer"}))
 
     if any(w in lower for w in (
-        "new transfer", "start a transfer", "open transfer studio",
+        "new transfer", "open transfer studio",
         "start transfer studio", "open the transfer studio", "launch transfer studio",
     )) and not any(p[0] == "navigate" for p in planned):
+        planned.append(("start_transfer_studio", {}))
+    elif (
+        "start a transfer" in lower
+        and not re.search(
+            r"\bwho\b|\ballowed\b|\bpermission\b|\brole\b"
+            r"|\bviewer\b|\beditor\b|\badmin\b|\boperator\b|\bapprover\b",
+            lower,
+        )
+        and not any(p[0] == "navigate" for p in planned)
+    ):
+        # "who is allowed to start a transfer" names the verb and is a
+        # roles question. Opening Studio there answered the wrong ask.
         planned.append(("start_transfer_studio", {}))
 
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
@@ -4214,13 +4652,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 "switch to cdc",
                 "switch to upsert",
                 "switch to append",
-                "use upsert",
-                "use cdc",
-                "use append",
             )
         ) or (
             any(w in lower for w in ("sync mode", "write mode", "cdc", "incremental", "dedupe", "full refresh", "upsert", "merge"))
-            and any(w in lower for w in ("recommend", "suggest", "choose", "which", "best for", "should", "enable", "use", "make it", "switch"))
+            and (
+                any(
+                    w in lower
+                    for w in (
+                        "recommend",
+                        "suggest",
+                        "choose",
+                        "which",
+                        "best for",
+                        "should",
+                        "enable",
+                        "make it",
+                        "switch",
+                    )
+                )
+                or bool(
+                    re.search(
+                        r"\buse\s+(?:cdc|upsert|append|incremental|overwrite)\b",
+                        lower,
+                    )
+                )
+            )
         )
     ):
         planned.append(("recommend_sync_mode", {
@@ -4250,34 +4706,34 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Skip when we already scheduled schema-policy inspection.
     _policy_planned = any(n == "inspect_schema_policy" for n, _ in planned)
     schema_of = None if _policy_planned else re.search(
-        r"(?:schema|columns|structure)\s+(?:of|for|on)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:schema|columns|structure)\s+(?:of|for|on)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:i\s+need\s+)?(?:the\s+)?schema\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using|living\s+on)\s+(.+))?$",
         lower,
     )
     columns_on = None if _policy_planned else re.search(
-        r"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+([a-zA-Z0-9_.-]+)"
+        rf"(?:what\s+)?columns\s+(?:are\s+)?(?:on|in|for)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"break\s+down\s+the\s+columns?\s+for\s+([a-zA-Z0-9_.-]+)"
+        rf"break\s+down\s+the\s+columns?\s+for\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
         # "what columns does orders have on sales"
-        r"(?:what\s+)?columns\s+does\s+([a-zA-Z0-9_.-]+)\s+have"
+        rf"(?:what\s+)?columns\s+does\s+{_TABLE_REF}\s+have"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
-        r"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+([a-zA-Z0-9_.-]+)"
+        rf"what\s+(?:are\s+the\s+)?columns\s+(?:of|for|in)\s+{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
     describe_table = None if _policy_planned else re.search(
-        r"describe\s+(?:table\s+)?([a-zA-Z0-9_.-]+)"
+        rf"describe\s+(?:table\s+)?{_TABLE_REF}"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     )
@@ -4305,6 +4761,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         # Reject inventory / policy nouns mistaken as table names
         if table.lower() not in {
             "drift", "change", "policy", "tables", "collections", "list", "schema", "schemas",
+            "table", "collection",
         }:
             connector_name = ""
             if m.lastindex and m.lastindex >= 2 and m.group(2):
@@ -4323,6 +4780,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         lower,
     ) or re.search(
         r"(?:tables|tbls|collections|objects|schemas)\s+(?:from|on|in|for|of)\s+(.+)$",
+        lower,
+    ) or re.search(
+        # The copula may sit between the object and its scope: "what tables are
+        # on Audit SQLite" is "tables on Audit SQLite" asked as a question.
+        # Without this the alternatives below had to enumerate every way of
+        # saying it — "do we have", "exist", "are there", "are available" — and
+        # plain "are" is the one they missed, so the turn answered with how a
+        # datetime column is created on each engine.
+        r"(?:tables|tbls|collections|objects|schemas)\s+"
+        r"(?:are|is|live|lives|exist|exists)\s+"
+        r"(?:from|on|in|for|of)\s+(.+)$",
         lower,
     ) or re.search(
         r"(?:can\s+you\s+|could\s+you\s+|please\s+)?"
@@ -4349,7 +4817,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
-    if tables_on and "introspect_connector_schema" not in [p[0] for p in planned]:
+    if (
+        tables_on
+        and "introspect_connector_schema" not in [p[0] for p in planned]
+        and not _CAPABILITY_TABLE_LANDING.search(lower)
+    ):
         cname = _capture_connector_name(tables_on.group(1))
         if cname:
             planned.append(("list_connector_objects", {"connector_name": cname}))
@@ -4406,6 +4878,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         or re.search(r":\s*select\b", lower)
     )
     agg = parse_aggregation_request(message)
+    # "How many gates are there before a write" parses as COUNT(*) over a table
+    # named ``gates``, and the tool then answers a documented question with
+    # "Connector not found". A product question with no connector and no named
+    # workspace object is not a warehouse aggregation.
+    if (
+        agg is not None
+        and not (agg.connector_name or "").strip()
+        and _looks_like_product_howto(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
     if (
         agg is not None
         and not _explicit_sql_intent
@@ -4434,7 +4917,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Sample / analyze live table data
     # Prefer "show the data from <table>" before the generic "show …" pattern —
     # otherwise "show the data from countries" captures table=`data`.
-    sample_m = re.search(
+    rows_m = _SAMPLE_ROWS_RE.search(lower)
+    sample_m = rows_m or re.search(
         r"(?:show|give\s+me|get|fetch|pull)\s+(?:me\s+)?(?:the\s+)?(?:data|rows|records)\s+"
         r"(?:from|in|on)\s+([a-zA-Z0-9_.-]+)"
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
@@ -4489,18 +4973,27 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and not any(w in lower for w in (" to ", " into ", "->"))
             and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
         ):
-            table = (sample_m.group(1) or "").strip()
-            cname = ""
-            if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
-                cname = _capture_connector_name(sample_m.group(2))
+            row_limit = 0
+            if rows_m:
+                table = (rows_m.group("table") or "").strip()
+                cname = _capture_connector_name(rows_m.group("connector") or "")
+                row_limit = int(rows_m.group("count") or 0)
+            else:
+                table = (sample_m.group(1) or "").strip()
+                cname = ""
+                if sample_m.lastindex and sample_m.lastindex >= 2 and sample_m.group(2):
+                    cname = _capture_connector_name(sample_m.group(2))
             # "get tables from X" is inventory, not a table named "tables".
             if table.lower() in {"tables", "collections", "objects", "schemas", "databases"}:
                 if cname and "list_connector_objects" not in [p[0] for p in planned]:
                     planned.append(("list_connector_objects", {"connector_name": cname}))
-            elif table and table not in {"data", "rows", "me", "some", "the", "my", "all"}:
+            elif table and table not in _NOT_A_TABLE_NAME:
                 args = {"table": table, "analyze": "analy" in lower or "profile" in lower}
                 if cname:
                     args["connector_name"] = cname
+                # "show me 3 rows" asked for three, not the default page.
+                if row_limit:
+                    args["limit"] = max(1, min(row_limit, 500))
                 planned.append(("sample_connector_object", args))
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
@@ -4865,7 +5358,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:connector\s+)?([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     ) or re.search(
-        r"\b(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
+        # Anchored to the start of the message, because bare ``test <rest of
+        # line>`` is a noun as often as a verb: "is a green test on connectors
+        # enough to skip validation" was read as a command to test a connector
+        # literally named "on connectors enough to skip validation".
+        r"^(?:please\s+|can\s+you\s+|could\s+you\s+)?"
+        r"(?:test|ping|validate)\s+(?:the\s+)?(?:connector\s+)?"
         r"([A-Za-z][A-Za-z0-9_\- ]{1,48}?)\s*$",
         lower,
     )
@@ -4916,6 +5414,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
             "run_schedule_now", "create_schedule", "introspect_connector_schema",
+            # Advisory tools answer in one line with no citation. "which sync
+            # mode should I pick for a nightly load" got the recommendation and
+            # nothing else — the documentation that justifies it was dropped
+            # because the tool was not on this list.
+            "recommend_sync_mode",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4935,6 +5438,40 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned = [(n, a) for n, a in planned if n != "explain_product"]
     elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
+    elif not planned and _asks_about_the_product(message):
+        # Last resort for a question about a documented subject that matched no
+        # verb pattern: "what happens to bad rows" and "who can approve a PII
+        # gate" planned nothing at all and were answered with "I'm not sure how
+        # to do that yet", while the documentation covered both. Reaching the
+        # knowledge tool is always better than an empty plan — the tool refuses
+        # on its own evidence if the retrieval turns out not to cover it.
+        planned.append(("explain_product", {"query": message[:240]}))
+
+    # A live tool answering alone is only half the answer to a question. This
+    # adds the documentation beside it rather than instead of it, so an empty
+    # workspace cannot turn a documented question into "nothing here yet".
+    if (
+        planned
+        and not ({n for n, _ in planned} & _KNOWLEDGE_TOOLS)
+        and _wants_documentation_companion(message)
+    ):
+        planned.insert(0, ("explain_product", {"query": message[:240]}))
+
+    # "How do I pause a schedule" is a question about the procedure, not a
+    # request to pause a particular schedule. Object-lookup tools ran anyway,
+    # found nothing to look up, and led the reply with "Schedule not found. Ask
+    # for the pipeline name from Pipelines." — error noise in front of a
+    # perfectly good documented answer. Drop them when the ask is explanatory
+    # and names no live object; keep them the moment one is named.
+    if (
+        _EXPLANATORY_QUESTION.search(lower)
+        and not _has_explicit_workspace_subject(lower)
+        and not _looks_like_live_data_fetch(lower)
+        and any(n in _KNOWLEDGE_TOOLS for n, _ in planned)
+    ):
+        planned = [
+            (n, a) for n, a in planned if n not in _NAMED_OBJECT_LOOKUP_TOOLS
+        ]
 
     # A stated transfer is the request; inventory/advice tools that merely share
     # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
@@ -4954,7 +5491,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # Off-topic / general-web asks must not become product RAG. Vocabulary
     # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
     # an explicit knowledge search is.
-    if _act == "general":
+    #
+    # Scoped to a plan that is *only* knowledge: when another tool recognised
+    # the message ("suggest improvements for my data" plans quality profiling),
+    # the message is not an off-topic general-web ask and the knowledge search
+    # is a companion to it, not the answer standing alone.
+    if _act == "general" and {n for n, _ in planned} <= _KNOWLEDGE_TOOLS:
         from ..rag.evidence import names_identifier
 
         explicit_knowledge = bool(
@@ -4970,6 +5512,90 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         )
         if not keep_rag:
             planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+
+    # A CDC redelivery / exactly-once question is knowledge. "If I run the
+    # same CDC change twice" used to plan list_jobs because it says "run",
+    # and the empty-history sentence then became the lead.
+    if is_cdc_delivery_question(message):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in {
+                "list_jobs",
+                "start_transfer",
+                "plan_transfer",
+                "start_transfer_studio",
+            }
+        ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "what plugin does postgres CDC use" used to recommend a sync mode
+    # because it contains both ``cdc`` and the verb ``use``.
+    if re.search(
+        r"\b(?:pgoutput|wal[\s_]?level|replication\s+slot|output\s+plugin|"
+        r"cdc\s+lag|toast|replica\s+identity|binlog[\s_]?format|"
+        r"binlog[\s_]?row[\s_]?image|publication|max[\s_]?replication[\s_]?slots|"
+        r"pre[\s-]?images?|merge[\s-]?on[\s-]?read|copy[\s-]?on[\s-]?write|gtid)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # "pause CDC" contains the substring "use cdc", so the advisory tool
+    # recommended incremental CDC instead of the keep-slot fact.
+    if PAUSE_CDC_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Incremental-by-updated_at is a shipped cursor mode. ``use incremental``
+    # otherwise recommends a workload instead of speaking the card.
+    if INCREMENTAL_UPDATED_AT_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # Custom slot name is derived. The slot-definition expansion would
+    # otherwise recommend a CDC mode.
+    if CUSTOM_SLOT_NAME_RE.search(message):
+        planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if re.search(
+        r"\bgreen\s+(?:connector\s+)?test\b|\btest\s+passed\b.+\bskip\b|"
+        r"\bskip\s+(?:validat\w*|preflight)\b",
+        lower,
+    ):
+        planned = [(n, a) for n, a in planned if n != "list_connectors"]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    if _IS_A_CONNECTOR_ASK.search(lower):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "list_connectors",
+                "list_connector_objects",
+                "search_connectors",
+            )
+        ]
+        if not any(n == "explain_product" for n, _ in planned):
+            planned.append(("explain_product", {"query": message[:240]}))
+
+    # A question about something this product documents must never leave here
+    # with nothing planned. "What string type is created on postgres" named an
+    # engine, so the workspace-subject guard kept the documentation branch from
+    # firing — and no live tool claimed it either, so an answerable question
+    # got the generic capability list. The guard is right to protect ops tools;
+    # it is only wrong when nothing else took the turn.
+    if not planned and _INTERROGATIVE.search(message or "") and names_product_subject(message):
+        planned = [("explain_product", {"query": message[:240]})]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

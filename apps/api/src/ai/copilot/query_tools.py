@@ -15,6 +15,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
+from .example_phrases import example_connector_name as _example_connector
+from .example_phrases import example_table_name as _example_table
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
 
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
@@ -610,7 +612,7 @@ def analyze_stored_result(
             success=False,
             error=(
                 "No stored result to analyze. Sample a table or run a query first "
-                '(e.g. "sample airports on Local Postgres").'
+                f'(e.g. "sample {_example_table()} on {_example_connector()}").'
             ),
         )
     rows = list(doc.get("rows") or [])

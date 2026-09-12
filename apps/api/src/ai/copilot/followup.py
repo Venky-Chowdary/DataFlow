@@ -23,6 +23,7 @@ column, it only reuses one the user already confirmed by asking about it.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from .aggregate_tools import (
@@ -121,6 +122,146 @@ def last_assistant_content(history: list[dict] | None) -> str:
     return ""
 
 
+_CDC_PRIOR = re.compile(
+    r"\b(?:cdc|wal_level|wal|binlog|replication\s+slot|pgoutput|"
+    r"pre-image|replica\s+identity|change[\s-]?stream)\b",
+    re.I,
+)
+_ENGINE_FOLLOWUP = re.compile(
+    r"^\s*(?:"
+    r"(?:what|how)\s+about|"
+    r"and(?:\s+(?:for|what\s+about))?|"
+    r"same\s+(?:for|thing(?:\s+but)?\s+for|question(?:\s+but)?\s+for)|"
+    r"how\s+about"
+    r")\s+"
+    r"(?:for\s+)?"
+    r"(?P<eng>mysql|maria(?:db)?|postgres(?:ql)?|pg|mongo(?:db)?|"
+    r"sql\s*server|mssql|oracle)\s*[?.!]?\s*$",
+    re.I,
+)
+_ENGINE_CANON = {
+    "pg": "postgres",
+    "postgres": "postgres",
+    "postgresql": "postgres",
+    "mysql": "mysql",
+    "mariadb": "mysql",
+    "maria": "mysql",
+    "mongo": "mongo",
+    "mongodb": "mongo",
+    "sql server": "sql server",
+    "sqlserver": "sql server",
+    "mssql": "sql server",
+    "oracle": "oracle",
+}
+_ENGINE_CDC_QUESTION = {
+    "postgres": "do I need wal_level logical for postgres CDC",
+    "mysql": "do I need binlog_format ROW for mysql CDC",
+    "mongo": "does Mongo CDC need change-stream pre-images",
+    "sql server": "do you support SQL Server CDC",
+    "oracle": "do you support Oracle CDC",
+}
+
+# ChatGPT keeps the CDC topic and swaps the *aspect*. "what about deletes?"
+# after a wal_level answer is the delete sentence, not a new job list.
+_SUBJECT_FOLLOWUP = re.compile(
+    r"^\s*(?:"
+    r"(?:what|how)\s+about|"
+    r"and(?:\s+(?:for|what\s+about))?|"
+    r"same\s+(?:for|thing(?:\s+but)?\s+for|question(?:\s+but)?\s+for)|"
+    r"how\s+about"
+    r")\s+"
+    r"(?:for\s+)?"
+    r"(?P<sub>deletes?|lag|toast|replica\s+identity|pgoutput|plugin|"
+    r"replication\s+slots?|slots?|pre-?images?|gtid|publications?|"
+    r"wal_level|binlog(?:_format)?)\s*[?.!]?\s*$",
+    re.I,
+)
+_SUBJECT_CDC_QUESTION = {
+    "delete": "what happens to a delete in CDC",
+    "deletes": "what happens to a delete in CDC",
+    "lag": "how do I see CDC lag",
+    "toast": "do unchanged TOAST columns get dropped on a CDC update",
+    "replica identity": "do I need REPLICA IDENTITY FULL for postgres CDC",
+    "pgoutput": "what plugin does postgres CDC use",
+    "plugin": "what plugin does postgres CDC use",
+    "replication slot": "what is a replication slot",
+    "replication slots": "what is a replication slot",
+    "slot": "what is a replication slot",
+    "slots": "what is a replication slot",
+    "pre-image": "does Mongo CDC need change-stream pre-images",
+    "pre-images": "does Mongo CDC need change-stream pre-images",
+    "preimage": "does Mongo CDC need change-stream pre-images",
+    "preimages": "does Mongo CDC need change-stream pre-images",
+    "gtid": "what is GTID on a MySQL CDC route",
+    "publication": "what is a publication",
+    "publications": "what is a publication",
+    "wal_level": "do I need wal_level logical for postgres CDC",
+    "binlog": "do I need binlog_format ROW for mysql CDC",
+    "binlog_format": "do I need binlog_format ROW for mysql CDC",
+}
+_NEED_THAT = re.compile(
+    r"^\s*(?:do\s+i\s+need\s+that|is\s+that\s+(?:required|needed|necessary))"
+    r"(?:\s+for\s+\w+)?\s*[?.!]?\s*$",
+    re.I,
+)
+
+
+def _rewrite_followup_text(message: str) -> str:
+    try:
+        from ..rag.query_analysis import rewrite_operator_question
+    except Exception:
+        return (message or "").strip()
+    return rewrite_operator_question(message)
+
+
+def resolve_knowledge_engine_followup(
+    message: str,
+    history: list[dict] | None,
+) -> str | None:
+    """'what about mysql?' after a CDC answer is the MySQL prerequisite.
+
+    ChatGPT keeps the prior subject and swaps the engine *or* the aspect
+    (deletes, lag, toast). We do the same only when the last answer was
+    already about capture — otherwise this stays a table/job follow-up
+    and we do not invent a CDC question.
+    """
+    text = _rewrite_followup_text(message)
+    prior = last_assistant_content(history)
+    if not prior or not _CDC_PRIOR.search(prior):
+        return None
+    match = _ENGINE_FOLLOWUP.match(text)
+    if match:
+        raw = re.sub(r"\s+", " ", (match.group("eng") or "").strip().lower())
+        engine = _ENGINE_CANON.get(raw)
+        if engine:
+            return _ENGINE_CDC_QUESTION.get(engine)
+    sub = _SUBJECT_FOLLOWUP.match(text)
+    if sub:
+        key = re.sub(r"\s+", " ", (sub.group("sub") or "").strip().lower())
+        return _SUBJECT_CDC_QUESTION.get(key)
+    if _NEED_THAT.match(text):
+        named = re.search(
+            r"\b(mysql|maria(?:db)?|postgres(?:ql)?|pg|mongo(?:db)?|"
+            r"sql\s*server|mssql|oracle)\b",
+            text,
+            re.I,
+        )
+        if named:
+            raw = re.sub(r"\s+", " ", named.group(1).strip().lower())
+            engine = _ENGINE_CANON.get(raw)
+            if engine:
+                return _ENGINE_CDC_QUESTION.get(engine)
+        if re.search(r"wal_level", prior, re.I):
+            return "do I need wal_level logical for postgres CDC"
+        if re.search(r"binlog", prior, re.I):
+            return "do I need binlog_format ROW for mysql CDC"
+        if re.search(r"replica\s+identity", prior, re.I):
+            return "do I need REPLICA IDENTITY FULL for postgres CDC"
+        if re.search(r"pre-?image", prior, re.I):
+            return "does Mongo CDC need change-stream pre-images"
+    return None
+
+
 def resolve_platform_coreference(
     message: str,
     history: list[dict] | None,
@@ -129,12 +270,39 @@ def resolve_platform_coreference(
     text = _clean(message)
     if not text or not _COREFERENCE_RE.search(text):
         return None
+    # "how do I get the list of rows that failed" contains ``that`` as a
+    # relative pronoun, not as a pointer at a previous turn, and ``failed`` as
+    # part of its own subject. Read as a coreference it became "list the failed
+    # jobs", which on an empty workspace answered a documented question with
+    # "No transfer jobs yet".
+    if has_own_question_frame(text):
+        return None
+    # "If I run the same CDC change twice is it safe" matches ``same`` / ``it``
+    # and used to look like a jobs follow-up because ``runs?`` also matches the
+    # verb *run*. A delivery-semantics question is never a pointer at the last
+    # job list — even when the prior turn happened to mention transfers.
+    from ..rag.query_analysis import is_cdc_delivery_question
+
+    if is_cdc_delivery_question(text):
+        return None
     prior = last_assistant_content(history).lower()
     low = text.lower()
-    jobs_cue = bool(re.search(r"\b(?:jobs?|transfers?|failed|failures|runs?)\b", low)) or (
-        "job" in prior or "transfer" in prior or "pipeline" in prior
+    # Noun *runs* / "the last run", never the verb in "if I run …".
+    jobs_cue = bool(
+        re.search(
+            r"\b(?:jobs?|transfers?|failed|failures|runs)\b"
+            r"|(?:last|this|that|my|the)\s+run\b",
+            low,
+        )
+    ) or ("job" in prior or "transfer" in prior or "pipeline" in prior)
+    # "is it safe" is a dummy pronoun, not a pointer at the last job list.
+    dummy_it = bool(
+        re.search(r"\bis\s+it\s+(?:safe|idempotent|lossy|dangerous|ok|okay|fine)\b", low)
     )
-    if jobs_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", low)) or (
+        bool(re.search(r"\bit\b", low)) and not dummy_it
+    )
+    if jobs_cue and job_pointer:
         return [("list_jobs", {"limit": 10})]
     connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
     if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
@@ -150,6 +318,13 @@ def resolve_table_coreference_tools(
     if not focus or not (focus.table or "").strip():
         return None
     if not _COREFERENCE_RE.search(message or ""):
+        return None
+    # "what schema change policies are there" carries the product's own subject
+    # and an existential ``there``, not a pointer at the remembered table. This
+    # layer runs ahead of ordinary routing, so without the guard it took the
+    # turn away from a correct documentation plan and introspected the last
+    # table the operator happened to count.
+    if asks_its_own_question(message or ""):
         return None
     low = (message or "").lower()
     args: dict[str, Any] = {"table": focus.table}
@@ -224,18 +399,145 @@ _ELLIPTICAL_EDIT_RE = re.compile(
 )
 
 
+# A turn carrying its own interrogative frame *and* its own subject is a
+# question, not a fragment of the previous one. Without this, "where do I find
+# the log for a run" was parsed as the SQL predicate of a remembered
+# aggregation — ``^where\b`` is genuinely how an elliptical filter starts — so
+# every knowledge question asked after a data question came back as a count of
+# the wrong table. Turns containing a coreference ("what about that one") are
+# excluded: those really do lean on the remembered subject.
+_QUESTION_FRAME = re.compile(
+    r"\bhow\s+(?:do|can|does|did|would|should)\s+(?:i|we|you|it)\b"
+    r"|\bhow\s+many\s+\w+(?:\s+\w+){0,2}\s+(?:are|is|do|does)\b"
+    # An auxiliary verb straight after ``where`` is enough on its own: a SQL
+    # predicate puts a column there, so "where do rejected rows go" is asking a
+    # question however its noun phrase is spelled. Requiring a pronoun or
+    # determiner next left that turn looking elliptical, and with a sampled
+    # table in focus it was answered as a filter over those rows —
+    # "I couldn't complete that lookup: Provide a column to filter on."
+    r"|\bwhere\s+(?:do|does|did|can|could|should|would|will|is|are|was|were)\b"
+    r"|\bwhat\s+happens\b"
+    r"|\bwhat\s+(?:is|are|does|do)\s+(?:a|an|the|this|it|each|my|your)\b"
+    r"|\bwhat\s+\w+(?:\s+\w+){0,2}\s+(?:are|is)\s+there\b"
+    r"|\bwhy\s+(?:do|does|did|is|are|was|were|can'?t|cannot)\b"
+    r"|\bwho\s+can\b"
+    r"|\bdo\s+(?:you|i|we)\s+(?:support|have|need|ever)\b"
+    r"|\bis\s+it\s+(?:safe|idempotent|lossy|dangerous)\b"
+    r"|\bif\s+(?:i|we|you)\s+(?:run|replay|redeliver)\b",
+    re.I,
+)
+
+# "how many gates are there" is existential ``there``, not the anaphoric
+# ``there`` that points at a remembered subject, so it must not count as a
+# coreference.
+_EXISTENTIAL_THERE = re.compile(r"\b(?:are|is|was|were)\s+there\b", re.I)
+
+
+def has_own_question_frame(text: str) -> bool:
+    """Whether the text is an interrogative about a subject the product documents.
+
+    Both halves are required. The frame alone would swallow data questions that
+    legitimately inherit the remembered table; the subject alone would swallow
+    "by region", which names a corpus heading word and is still elliptical.
+    """
+    if not text or not _QUESTION_FRAME.search(text):
+        return False
+    try:
+        from ..rag.product_docs import names_product_subject
+    except Exception:
+        return False
+    return names_product_subject(text)
+
+
+def asks_its_own_question(message: str) -> bool:
+    """``has_own_question_frame``, unless the turn points at a remembered subject.
+
+    A pronoun only points *outside* the turn when nothing inside it came first.
+    "Where do rejected rows go and can I replay them" opens its own question and
+    then refers back to the rows it just named; read as a coreference it looked
+    elliptical, and with a sampled table in focus it was answered as a query
+    over those rows instead of from the quarantine documentation.
+    """
+    text = _clean(message)
+    if not text:
+        return False
+    frame = _QUESTION_FRAME.search(text)
+    coref = _COREFERENCE_RE.search(_EXISTENTIAL_THERE.sub(" ", text))
+    if coref and not (frame and frame.start() <= coref.start()):
+        return False
+    return has_own_question_frame(text)
+
+
+# A leading ``where`` is a SQL predicate in "where region = east" and an English
+# interrogative in "where do rejected rows go and can I replay them". The opener
+# cannot tell them apart, and reading it as a predicate routed the second one to
+# ``filter_result`` over whatever table was last sampled, so a documented
+# question about quarantine was answered "I couldn't complete that lookup:
+# Provide a column to filter on."
+_PREDICATE_OPENER = re.compile(r"^(?:filter|where)\b", re.I)
+
+# A predicate puts a column straight after ``where``; an auxiliary verb there
+# means a question. ``filter`` is an imperative and is never interrogative.
+_INTERROGATIVE_PREDICATE = re.compile(
+    r"^where\s+(?:do|does|did|is|are|was|were|can|could|should|would|will|shall"
+    r"|may|might|must|am|have|has|had)\b",
+    re.I,
+)
+
+# What a predicate looks like once the opener is stripped: a comparison, a SQL
+# predicate keyword, or the "column is value" shape of "filter where status is
+# paid".
+_PREDICATE_SHAPE = re.compile(
+    r"[<>]=?|!=|<>|="
+    r"|\bis\s*n[o']?t\b|\bisn'?t\b|\bnot\b"
+    r"|\b(?:is|are)\s+\S+"
+    r"|\b(?:like|between|in|null|empty|blank)\b"
+    r"|\b(?:contains?|starts?\s+with|ends?\s+with|equals?|matches?)\b"
+    r"|\b(?:greater|less|more|fewer|higher|lower)\s+than\b"
+    r"|\bat\s+(?:least|most)\b",
+    re.I,
+)
+
+#: A bare imperative is this long at most. "Filter" or "filter this result" is
+#: an under-specified command, and the tool asking which column is the right
+#: answer to it — unlike a sentence, which has to look like a predicate.
+_BARE_PREDICATE_WORDS = 3
+
+
+def opens_a_row_predicate(message: str, columns: Sequence[str] = ()) -> bool:
+    """Whether a leading ``where``/``filter`` filters stored rows or asks a question.
+
+    ``columns`` are the stored result's own column names when they are known,
+    which settles the cases no general shape can: "where region east" is a
+    predicate precisely because the sampled rows have a ``region``.
+    """
+    text = _clean(message)
+    if not _PREDICATE_OPENER.match(text):
+        return False
+    if _INTERROGATIVE_PREDICATE.match(text):
+        return False
+    if len(_words(text)) <= _BARE_PREDICATE_WORDS:
+        return True
+    if _PREDICATE_SHAPE.search(_PREDICATE_OPENER.sub("", text, count=1)):
+        return True
+    named = {c.strip().lower() for c in columns if c and c.strip()}
+    return bool(named & set(_words(text)))
+
+
 def looks_like_fresh_intent(message: str) -> bool:
     """True when the user clearly started a new request (not a slot fill / typo)."""
     reply = _clean(message)
     if not reply:
         return False
-    return bool(_FRESH_INTENT_RE.search(reply))
+    return bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply)
 
 
 def looks_like_elliptical_edit(message: str) -> bool:
     """True for follow-up edits like \"only paid ones\" / \"and by region?\"."""
     reply = _clean(message)
     if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
+        return False
+    if asks_its_own_question(reply):
         return False
     if _ELLIPTICAL_EDIT_RE.search(reply):
         return True
@@ -369,18 +671,38 @@ def _extract_edit_metric(message: str) -> tuple[str, str]:
     return "", ""
 
 
+# Where a named slot value ends: the next edit clause, punctuation, or the end
+# of the turn. A table switch states the table *last* ("same for products",
+# "what about the invoices table"), so anything else trailing the candidate
+# means the candidate was a modifier and not the subject: the noun in "what
+# about generated columns" was being dropped and its adjective introspected as
+# a table. ``_extract_edit_group_by`` deliberately keeps a shorter tail — ``by``
+# and ``per`` introduce *its* value rather than ending one.
+_VALUE_TAIL = (
+    r"(?=\s+(?:instead|rather|now|too|also|please|and|but|"
+    r"by|per|group(?:ed)?\s+by|from|in|on|for|with|"
+    r"only|just|where|filter|top|bottom|limit)\b"
+    r"|[.,;?!]|$)"
+)
+
+
 def _extract_edit_table(message: str) -> str:
     """"same for products", "now do orders", "what about the invoices table"."""
     m = re.search(
         r"\b(?:same\s+(?:for|on|with)|now\s+(?:do|try|for)|what\s+about|how\s+about|switch\s+to)\s+"
         r"(?:the\s+)?([A-Za-z_][A-Za-z0-9_.]{1,48})"
-        r"(?:\s+(?:table|collection))?\b",
+        r"(?:\s+(?:table|collection))?" + _VALUE_TAIL,
         message,
         re.I,
     )
     if not m:
         return ""
     table = _clean(m.group(1))
+    # "what about it" / "same for that" point at the remembered table; they do
+    # not name a new one. Left to the parser they became a lookup of a table
+    # literally called ``it``.
+    if _COREFERENCE_RE.fullmatch(table):
+        return ""
     banned = _PLATFORM_NOUNS | set(_TEMPORAL_GRAINS) | {
         "average", "avg", "mean", "sum", "total", "count", "min", "max",
         "minimum", "maximum", "distinct", "unique", "amount", "price",
@@ -416,6 +738,8 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     words = _words(text)
     if len(words) > _MAX_FOLLOWUP_WORDS:
         return False
+    if asks_its_own_question(text):
+        return False
     # Self-contained asks name their own table/connector — not elliptical.
     if re.search(
         r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b",
@@ -443,7 +767,7 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
     # "only paid ones" / "just pending" — filter the remembered subject.
     if re.match(r"^(?:only|just)\s+\S+", text, re.I):
         return True
-    if re.match(r"^(?:where|filter)\b", text, re.I):
+    if opens_a_row_predicate(text, focus.columns or ()):
         return True
     # "no grouping" / "drop the group by" removes a slot without naming a subject.
     if _extract_edit_group_by(text)[1]:
@@ -558,6 +882,40 @@ def inherit_focus_slots(
             merged["where"] = focus.where
         out.append((name, merged))
     return out
+
+
+# Tools whose subject is the platform itself — its jobs, connectors, schedules,
+# contracts and datasets. The remembered warehouse table is never a candidate
+# reading of a turn that resolved one of these, so the ellipsis layer must leave
+# such a plan alone. Documentation tools are deliberately absent: "by region"
+# and "how many rows" both fall back to ``explain_product`` and genuinely do
+# need the remembered subject.
+_OWN_SUBJECT_TOOLS = frozenset({
+    "list_jobs",
+    "get_job",
+    "open_job",
+    "list_connectors",
+    "search_connectors",
+    "list_schedules",
+    "get_schedule",
+    "open_schedule",
+    "run_schedule_now",
+    "list_contracts",
+    "list_datasets",
+    "get_preflight_run",
+    "brief_workspace",
+})
+
+
+def names_its_own_subject(planned: list[tuple[str, dict[str, Any]]]) -> bool:
+    """Whether routing already found a subject the working memory cannot supply.
+
+    "How many jobs ran today" is a bare metric phrase, so the elliptical gate
+    fires — but it resolves ``list_jobs``, which means the turn said what it was
+    about. Rewriting it as an edit of the remembered aggregation answered it
+    with a row count of an unrelated table.
+    """
+    return any(name in _OWN_SUBJECT_TOOLS for name, _ in planned or ())
 
 
 _CONNECTOR_SCOPED_TOOLS = frozenset({

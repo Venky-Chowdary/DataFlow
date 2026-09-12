@@ -26,6 +26,8 @@ from .tool_permissions import bind_current_context, is_permission_denial
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
+    _has_explicit_workspace_subject,
+    _looks_like_product_howto,
     format_tool_results_for_llm,
     get_pilot_tools,
     infer_tools_from_message,
@@ -143,6 +145,81 @@ def _fmt_metric_value(value: Any) -> str:
             return f"{int(value):,}"
         return f"{value:,.4f}".rstrip("0").rstrip(".")
     return str(value)
+
+
+_IDISH_COLUMN = re.compile(
+    r"id|customer|name|email|key|code|user|region|status", re.I
+)
+
+
+def _clip_member(value: Any, *, limit: int = 40) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"true", "false"}:
+        return ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _including_clause(members: list[str], *, limit: int = 4) -> str:
+    """Name the values an inventory question asked to see, in the lead sentence.
+
+    Grouped counts and samples used to open on "3 groups" / "3 rows" and put
+    the actual keys in a markdown table the sentence splitter then skipped.
+    The operator asked for those values; they belong in the first sentence.
+    """
+    shown = [m for m in members if m][:limit]
+    if not shown:
+        return ""
+    return " including " + ", ".join(shown)
+
+
+def _group_preview_values(
+    rows: list[dict[str, Any]], dim_key: str, *, limit: int = 4
+) -> list[str]:
+    labels: list[str] = []
+    for row in rows[:limit]:
+        dim = row.get(dim_key) if isinstance(row, dict) else None
+        labels.append("∅" if dim is None else _clip_member(dim, limit=32) or str(dim))
+    return labels
+
+
+def _row_preview_values(
+    rows: list[dict[str, Any]], cols: list[str], *, limit: int = 2
+) -> list[str]:
+    if not rows or not cols:
+        return []
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    ranked = sorted(
+        cols,
+        key=lambda c: (0 if _IDISH_COLUMN.search(str(c)) else 1, cols.index(c)),
+    )
+    values: list[str] = []
+    for col in ranked:
+        text = _clip_member(row.get(col))
+        if text:
+            values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _live_rows_lead(o: dict[str, Any], *, sample: bool) -> str:
+    """First sentence of a sample or query — names a cell, then the table."""
+    cols = list(o.get("columns") or [])
+    rows = list(o.get("rows") or [])
+    title = (
+        f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
+        if sample
+        else f"Query on **{o.get('connector_name')}**"
+    )
+    preview = _including_clause(_row_preview_values(rows, [str(c) for c in cols]))
+    return (
+        f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
+        + (" (truncated)" if o.get("truncated") else "")
+        + f" · {len(cols)} columns · read-only"
+        + f"{preview}."
+    )
 
 
 _GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
@@ -424,19 +501,21 @@ def _render_aggregate(o: dict[str, Any]) -> str:
             lines.append(f"{measure.capitalize()} in {where}{scope}: **{value}**.")
     else:
         groups = int(o.get("group_count") or len(rows))
-        head = (
-            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
-            f"**{groups} group{'s' if groups != 1 else ''}**"
-        )
-        if o.get("truncated"):
-            head += f" (top {len(rows)} shown)"
-        lines.append(head)
         # Result columns come back as the generated aliases; some engines fold
         # case (Snowflake upper-cases), so match them case-insensitively.
         dim_key = cols[0] if cols else str(group_by)
         val_key = next((c for c in cols if c.lower() == alias.lower()), "")
         if not val_key:
             val_key = cols[-1] if len(cols) > 1 else alias
+        preview = _including_clause(_group_preview_values(rows, dim_key))
+        head = (
+            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
+            f"**{groups} group{'s' if groups != 1 else ''}**"
+        )
+        if o.get("truncated"):
+            head += f" (top {len(rows)} shown)"
+        head += f"{preview}."
+        lines.append(head)
         lines.append(f"| `{dim_key}` | `{val_key}` |")
         lines.append("| --- | ---: |")
         for row in rows[:15]:
@@ -461,6 +540,48 @@ def _render_aggregate(o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+#: A tool error that is really a request for the one input the operator left
+#: out. These sentences already read as an answer, so wrapping them in an
+#: apology makes Pilot look like it failed at something it simply has not been
+#: told yet.
+_ASKS_FOR_INPUT = re.compile(
+    r"^(?:i\s+need\b|which\b|name\s+(?:a|the)\b|give\s+(?:me\s+)?(?:a|the)\b|"
+    r"pick\b|tell\s+me\b|choose\b)",
+    re.I,
+)
+
+#: Tools that *do* something. "Lookup" is the wrong word for a failed create.
+_ACTION_TOOL_NAMES = frozenset(
+    {
+        "create_connector",
+        "create_schedule",
+        "run_schedule_now",
+        "start_transfer",
+        "plan_transfer",
+        "plan_transfer_route",
+        "start_transfer_studio",
+        "remediate_validation",
+    }
+)
+
+
+def _failure_reply(failed: list[Any]) -> str:
+    """What to say when every tool that ran failed, in the register of the ask."""
+    errors = [str(getattr(tr, "error", "") or "").strip() for tr in failed]
+    errors = [e for e in errors if e]
+    if not errors:
+        return "I could not complete that."
+    if all(_ASKS_FOR_INPUT.match(e) for e in errors):
+        # Nothing went wrong — Pilot is missing one input and is asking for it.
+        return errors[0] if len(errors) == 1 else "\n".join(f"• {e}" for e in errors)
+    head = (
+        "I could not complete that:"
+        if any(getattr(tr, "name", "") in _ACTION_TOOL_NAMES for tr in failed)
+        else "I couldn't complete that lookup:"
+    )
+    return "\n".join([head, *(f"• {e}" for e in errors)])
+
+
 def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     """Honest fallback when no tool matched — never pretend the question was answered.
 
@@ -481,73 +602,81 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
     src_ex = conn_names[0] if conn_names else example_connector_name(ctx)
     dst_ex = example_dest_connector_name(ctx, source_hint=src_ex)
 
-    suggestions: list[str] = []
+    # Each entry is (headline, what to do about it). The headline matters as
+    # much as the suggestion: "run a transfer from orders to orders_warehouse"
+    # is perfectly understood — the operator named tables where connectors go —
+    # and answering it with "I'm not sure how to do that yet" reads as a pilot
+    # that cannot do transfers at all. Name the missing input instead.
+    options: list[tuple[str, str]] = []
     if any(w in lower for w in ("export", "download", "csv", "parquet", "excel")):
-        suggestions.append(
-            f'I can\'t export files yet — sample the table and use **Query** to pull '
-            f'larger result sets: "sample orders on {src_ex}".'
-        )
+        options.append((
+            "Writing files out is not something I can do yet.",
+            f'Sample the table and use **Query** to pull larger result sets: '
+            f'"sample orders on {src_ex}".',
+        ))
     if _looks_like_live_data_fetch(lower) or re.search(
         r"\b(?:get|fetch|pull|show|sample)\b.+\b(?:from|on|in)\b",
         lower,
     ):
         on_conn = f" on {src_ex}"
-        suggestions.append(
-            f'To pull live rows, name the table and a saved connector: '
-            f'"sample users{on_conn}" or "show orders from {dst_ex}".'
-        )
+        options.append((
+            "I can read that live — I need the table and which saved connector holds it.",
+            f'For example: "sample users{on_conn}" or "show orders from {dst_ex}".',
+        ))
     if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
-        suggestions.append(
-            'I can plan a transfer and stage a start — nothing moves until you Confirm. '
-            f'Try: "plan transfer of orders from {src_ex} to {dst_ex}" or '
-            f'"transfer orders from {src_ex} to {dst_ex} as upsert".'
-        )
+        options.append((
+            "I can run that transfer once I know which saved connector is on each "
+            "side — those names are connectors, not tables.",
+            'Nothing moves until you Confirm. Try: "plan transfer of orders from '
+            f'{src_ex} to {dst_ex}" or "transfer orders from {src_ex} to {dst_ex} '
+            'as upsert".',
+        ))
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
-        suggestions.append(
-            "I only run read-only actions and confirmed connector creates — "
-            "deletes have to be done in the UI so they can't be triggered by a prompt."
-        )
+        options.append((
+            "Deletes are deliberately not something a prompt can trigger.",
+            "I run read-only actions and confirmed connector creates; destructive "
+            "changes have to be made in the UI.",
+        ))
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
-        suggestions.append(
-            'I can create, list and trigger pipelines: "schedule users from '
-            'Local PG to Warehouse daily at 02:00 UTC", "show my pipelines", or '
-            '"run schedule <name> now".'
-        )
+        options.append((
+            "I can do that as a pipeline — I need the route and the cadence.",
+            'For example: "schedule users from Local PG to Warehouse daily at '
+            '02:00 UTC", "show my pipelines", or "run schedule <name> now".',
+        ))
     if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
-        suggestions.append(
-            'For a failed run, paste the job id or say "fix bad data" and I\'ll open '
-            "the remediation path for that transfer."
-        )
-    if not suggestions and any(
+        options.append((
+            "I can open the remediation path — I need to know which run.",
+            'Paste the job id, or say "fix bad data" after selecting the job.',
+        ))
+    if not options and any(
         w in lower for w in ("count", "sum", "average", "avg", "total", "how many", "top ")
     ):
-        suggestions.append(
-            'For live totals name the table and connector: '
-            f'"count of orders by status on {src_ex}" or '
-            f'"average price in products on {src_ex}".'
-        )
-    if not suggestions:
+        options.append((
+            "I can compute that against the live table — name the table and the connector.",
+            f'For example: "count of orders by status on {src_ex}" or '
+            f'"average price in products on {src_ex}".',
+        ))
+    if not options:
         on_conn = f" on {src_ex}" if src_ex and src_ex != "your connector" else ""
-        suggestions.append(
+        options.append((
+            "I did not catch a specific action in that message.",
             "I can count / sum / average live tables, sample and profile rows, "
             "introspect schemas, map columns, list jobs and pipelines, and open "
-            "the right screen."
-        )
-        suggestions.append(
-            f'Try: "how many rows in airports{on_conn}", '
-            f'"schema of airports{on_conn}", '
-            '"show my jobs", or "what can you do?".'
-        )
+            "the right screen.",
+        ))
+        options.append((
+            "",
+            # The examples used to name a fixture table, so the suggestion was
+            # a command the operator's workspace could not run. Listing a
+            # connector's tables is the one live read that always works.
+            f'Try: "list tables{on_conn}", '
+            f'"how many rows in <your table>{on_conn}", '
+            '"show my jobs", or "what can you do?".',
+        ))
 
-    quoted = (message or "").strip()
-    if len(quoted) > 120:
-        quoted = quoted[:117] + "…"
-    head = (
-        f'I\'m not sure how to do “{quoted}” yet.'
-        if quoted
-        else "I didn't catch a specific action in that message."
-    )
-    return head + "\n\n" + "\n".join(f"• {s}" for s in suggestions[:3])
+    head = options[0][0] or "I did not catch a specific action in that message."
+    body = [text for _, text in options[:3] if text]
+    return head + "\n\n" + "\n".join(f"• {s}" for s in body)
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
@@ -1485,8 +1614,11 @@ Draft answer:
             looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
+            names_its_own_subject,
+            opens_a_row_predicate,
             pending_from_assistant_clarification,
             resolve_followup,
+            resolve_knowledge_engine_followup,
             resolve_pending_answer,
             resolve_platform_coreference,
             resolve_table_coreference_tools,
@@ -1494,6 +1626,9 @@ Draft answer:
         from .working_memory import get_working_memory
 
         session_id = self._session_id(data_context)
+        knowledge = resolve_knowledge_engine_followup(message, history)
+        if knowledge:
+            message = knowledge
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:
@@ -1537,7 +1672,7 @@ Draft answer:
         planned = infer_tools_from_message(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
-        if focus and looks_like_followup(message, focus):
+        if focus and looks_like_followup(message, focus) and not names_its_own_subject(planned):
             low = message.lower().strip()
             # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
             for name, args in planned:
@@ -1549,7 +1684,7 @@ Draft answer:
                 if explicit_table and (args or {}).get("connector_name"):
                     return planned
             # Stored-sample row filters stay on filter_result, not a new aggregate.
-            if focus.result_id and re.match(r"^(?:filter|where)\b", low):
+            if focus.result_id and opens_a_row_predicate(low, focus.columns or ()):
                 if planned and any(n == "filter_result" for n, _ in planned):
                     return inherit_focus_slots(planned, focus)
                 return [("filter_result", {"result_id": focus.result_id})]
@@ -1572,7 +1707,7 @@ Draft answer:
                     "analyze that", "analyze this", "profile that", "summarize that",
                 }:
                     return [("analyze_result", {"result_id": focus.result_id})]
-                if re.match(r"^(?:filter|where)\b", low):
+                if opens_a_row_predicate(low, focus.columns or ()):
                     return [("filter_result", {"result_id": focus.result_id})]
         return inherit_focus_slots(planned, focus)
 
@@ -2100,7 +2235,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_schedules" and tr.success:
                 rows = tr.output.get("schedules", [])
                 if rows:
-                    lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
+                    lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
                     for s in rows[:8]:
                         bind = _schedule_bind_phrase(s)
                         lines.append(
@@ -2309,10 +2444,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
+                preview = _including_clause(
+                    [f"`{name}`" for name in objs[:4] if name]
+                )
                 lines = [
                     f"**{o.get('connector_name')}** ({o.get('type')}) — "
                     f"{'connected' if o.get('connected') else 'probe returned'} · "
-                    f"**{o.get('count', len(objs))}** tables/collections:"
+                    f"**{o.get('count', len(objs))}** tables/collections"
+                    f"{preview}."
                 ]
                 for name in objs[:20]:
                     lines.append(f"• `{name}`")
@@ -2324,9 +2463,17 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "introspect_connector_schema" and tr.success:
                 o = tr.output or {}
                 cols = o.get("columns") or []
+                preview = _including_clause(
+                    [
+                        f"`{c.get('name')}`"
+                        for c in cols[:4]
+                        if isinstance(c, dict) and c.get("name")
+                    ]
+                )
                 lines = [
                     f"Live schema **{o.get('connector_name')}**.`{o.get('table')}` "
-                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**:"
+                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**"
+                    f"{preview}."
                 ]
                 for c in cols[:40]:
                     null = "NULL" if c.get("nullable", True) else "NOT NULL"
@@ -2344,15 +2491,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 cols = o.get("columns") or []
                 rows = o.get("rows") or []
-                title = (
-                    f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
-                    if tr.name == "sample_connector_object"
-                    else f"Query on **{o.get('connector_name')}**"
-                )
                 lines = [
-                    f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
-                    + (" (truncated)" if o.get("truncated") else "")
-                    + f" · {len(cols)} columns · read-only"
+                    _live_rows_lead(o, sample=tr.name == "sample_connector_object")
                 ]
                 if o.get("result_id"):
                     lines.append(f"Result ref `{o['result_id']}` (ask to analyze or filter this).")
@@ -2535,7 +2675,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     for w in ("table", "tables", "collections", "objects")
                 )
                 if conns:
-                    lines = [f"You have **{len(conns)} saved connector(s)**:"]
+                    lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
                         lines.append(
                             f"• **{c.get('name')}** ({c.get('type')}) → "
@@ -2597,9 +2737,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Datawrap Pilot** — I help with analytics, routes, schema "
-                    "risk, mappings, jobs, and fixes inside Datawrap. I answer from "
-                    "your workspace first; I never invent warehouse facts.",
+                    "I'm **Datawrap Pilot** — Datawrap's own local engine. I help "
+                    "with analytics, routes, schema risk, mappings, jobs, and fixes. "
+                    "A third-party LLM is optional polish in Settings → AI; I never "
+                    "invent warehouse facts and I never need a cloud key to answer.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:
@@ -2695,18 +2836,44 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
         # Surface failures in plain language — never name internal tools.
         failed = [tr for tr in turn.tool_results if not tr.success and tr.error]
+        product_answered = any(
+            tr.name == "explain_product"
+            and tr.success
+            and str((tr.output or {}).get("answer") or "").strip()
+            for tr in turn.tool_results
+        )
+        asked = (message or "").lower()
+        product_howto = _looks_like_product_howto(asked) and not _has_explicit_workspace_subject(
+            asked
+        )
+
+        def _connector_miss_noise(text: str) -> bool:
+            low = (text or "").lower()
+            return any(
+                needle in low
+                for needle in (
+                    "no connector matched",
+                    "which connector",
+                    "connector not found",
+                    "which saved connector",
+                    "no saved connectors",
+                    "name a saved connector",
+                )
+            )
+
         if failed and not parts:
-            lines = ["I couldn't complete that lookup:"]
-            for tr in failed[:4]:
-                lines.append(f"• {tr.error}")
-            parts.append("\n".join(lines))
+            parts.append(_failure_reply(failed[:4]))
         elif failed and parts:
-            # Mixed success+failure: keep connector/clarification errors visible.
+            # Mixed success+failure: keep connector/clarification errors visible
+            # unless a documented product answer already covers a capability ask
+            # that named no live workspace object.
             for tr in failed:
                 err = (tr.error or "").strip()
                 if not err:
                     continue
                 low = err.lower()
+                if product_answered and product_howto and _connector_miss_noise(err):
+                    continue
                 if (
                     err.startswith("Which ")
                     or "did you mean" in low
@@ -2720,7 +2887,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     break
 
         if turn.needs_clarification and turn.needs_clarification not in "\n".join(parts):
-            parts.insert(0, turn.needs_clarification)
+            if not (
+                product_answered
+                and product_howto
+                and _connector_miss_noise(turn.needs_clarification)
+            ):
+                parts.insert(0, turn.needs_clarification)
 
         if not parts:
             from .dialogue_acts import classify_dialogue_act
@@ -2917,9 +3089,12 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
 
             ex = example_connector_name()
             if ex and ex != "your connector":
-                prompts.append(f"How many rows in airports on {ex}?")
+                # Naming a table here meant suggesting a command against an
+                # object the workspace may not hold. Listing a connector's
+                # tables works on every connector.
+                prompts.append(f"List tables on {ex}")
             else:
-                prompts.append("How many rows in airports on your connector?")
+                prompts.append("Show my connectors")
         except Exception:
             prompts.append("Show my connectors")
         prompts.append("What can you do?")
@@ -2955,8 +3130,8 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             ex = example_connector_name()
             if ex and ex != "your connector":
                 prompts.extend([
-                    f"How many rows in airports on {ex}?",
-                    f"Count of orders by status on {ex}",
+                    f"List tables on {ex}",
+                    f"Give me a workspace briefing",
                 ])
             else:
                 prompts.extend([

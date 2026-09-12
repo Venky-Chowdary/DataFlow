@@ -19,6 +19,25 @@ from .retriever import RetrievalResult
 UNGROUNDED_CONFIDENCE = 0.1
 
 
+def _compose_for_query(query: str, hits: list[ProductDocHit]) -> str:
+    """Question-directed answer over the retrieved sections, or "" if none fits."""
+    if not hits:
+        return ""
+    from .answer_composer import compose_answer
+    from .query_analysis import analyze_query
+
+    sections = [
+        (
+            hit.chunk.section_title,
+            hit.chunk.citation,
+            f"{hit.chunk.href}#{hit.chunk.section_id}",
+            hit.chunk.text,
+        )
+        for hit in hits
+    ]
+    return compose_answer(analyze_query(query), sections)
+
+
 @dataclass
 class RAGResponse:
     """Generated response from RAG pipeline."""
@@ -161,7 +180,10 @@ class DataTransferRAGGenerator:
         retrieval: RetrievalResult,
     ) -> RAGResponse:
         hits = retrieval.product_docs
-        documented = compose_documented_answer(hits)
+        # Compose against the question when there is one: selecting the sentences
+        # that answer it across every retrieved section beats quoting the top of
+        # the two best-ranked ones.
+        documented = _compose_for_query(query, hits) or compose_documented_answer(hits)
         sources = [hit.as_source() for hit in hits]
         confidence = min(0.5 + 0.45 * retrieval.top_grounding, 0.95)
         cited = ", ".join(hit.chunk.citation for hit in hits[:2])
