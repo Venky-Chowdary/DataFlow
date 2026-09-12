@@ -2829,6 +2829,118 @@ def entra_governance_shipped() -> bool:
     return False
 
 
+def hdinsight_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"hdinsight"})
+
+
+def expressroute_shipped() -> bool:
+    return False
+
+
+def ssis_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"ssis"})
+
+
+def ssrs_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"ssrs"})
+
+
+def gmail_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gmail"})
+
+
+def google_calendar_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"gcal", "google_calendar", "calendar"})
+
+
+def azure_cdn_shipped() -> bool:
+    return False
+
+
+def azure_blueprints_shipped() -> bool:
+    return False
+
+
+def azure_automation_shipped() -> bool:
+    return False
+
+
+def bigquery_ml_shipped() -> bool:
+    return False
+
+
+def filestore_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"filestore"})
+
+
+def persistent_disk_shipped() -> bool:
+    return False
+
+
+def datastream_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"datastream"})
+
+
+def dataplex_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"dataplex"})
+
+
+def informatica_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"informatica"})
+
+
+def talend_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"talend"})
+
+
+def matillion_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"matillion"})
+
+
+def google_workspace_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"google_workspace", "gworkspace", "gsuite"})
+
+
+def aks_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"aks"})
+
+
+def azure_functions_shipped() -> bool:
+    return False
+
+
+def azure_batch_shipped() -> bool:
+    return False
+
+
+def cloud_scheduler_shipped() -> bool:
+    return False
+
+
+def vertex_ai_search_shipped() -> bool:
+    return False
+
+
+def business_central_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"business_central"})
+
+
+def application_insights_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"application_insights", "appinsights"})
+
+
+def site_recovery_shipped() -> bool:
+    return False
+
+
+def entra_external_id_shipped() -> bool:
+    return False
+
+
+def azure_ad_b2c_shipped() -> bool:
+    return False
+
+
 def azure_blob_card() -> CapabilityCard | None:
     if not adls_is_transfer_ready():
         return None
@@ -3882,6 +3994,442 @@ def cloud_sql_mysql_card() -> CapabilityCard | None:
     )
 
 
+def hdinsight_card() -> CapabilityCard | None:
+    if hdinsight_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure HDInsight",
+        text=(
+            "Datawrap does not ship Azure HDInsight as a transfer-ready "
+            "driver (hdinsight is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def expressroute_card() -> CapabilityCard | None:
+    if expressroute_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure ExpressRoute",
+        text=(
+            "Datawrap does not ship Azure ExpressRoute as a connect option "
+            "(expressroute is false)."
+        ),
+        source_module="connectors/postgresql.py · test_postgresql",
+        category="connectors",
+    )
+
+
+def ssis_card() -> CapabilityCard | None:
+    if ssis_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support SSIS",
+        text=(
+            "Datawrap does not ship SQL Server Integration Services "
+            "(ssis is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def ssrs_card() -> CapabilityCard | None:
+    if ssrs_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support SSRS",
+        text=(
+            "Datawrap does not ship SQL Server Reporting Services "
+            "(ssrs is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def gmail_card() -> CapabilityCard | None:
+    if gmail_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Gmail as a source",
+        text=(
+            "Datawrap does not ship Gmail as a transfer-ready source "
+            "(gmail is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_calendar_card() -> CapabilityCard | None:
+    if google_calendar_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Calendar as a source",
+        text=(
+            "Datawrap does not ship Google Calendar as a transfer-ready "
+            "source (google_calendar is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_cdn_card() -> CapabilityCard | None:
+    if azure_cdn_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure CDN",
+        text=(
+            "Datawrap does not ship Azure CDN as a transfer destination "
+            "(azure_cdn is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_blueprints_card() -> CapabilityCard | None:
+    if azure_blueprints_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Blueprints",
+        text=(
+            "Datawrap does not ship Azure Blueprints "
+            "(azure_blueprints is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def azure_automation_card() -> CapabilityCard | None:
+    if azure_automation_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Automation",
+        text=(
+            "Datawrap does not ship Azure Automation "
+            "(azure_automation is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def bigquery_ml_card() -> CapabilityCard | None:
+    if bigquery_ml_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support BigQuery ML",
+        text=(
+            "BigQuery ML is not a transfer destination "
+            "(bigquery_ml is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def rds_postgresql_card() -> CapabilityCard | None:
+    if not postgresql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon RDS for PostgreSQL",
+        text=(
+            "Yes — Amazon RDS for PostgreSQL is the PostgreSQL driver "
+            "(postgresql / rds_postgresql). "
+            "It is not Aurora."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def rds_mysql_card() -> CapabilityCard | None:
+    if not mysql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Amazon RDS for MySQL",
+        text=(
+            "Yes — Amazon RDS for MySQL is the MySQL driver "
+            "(mysql / rds_mysql). "
+            "It is not Aurora."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_sql_postgresql_card() -> CapabilityCard | None:
+    if cloud_sql_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud SQL for PostgreSQL",
+        text=(
+            "Cloud SQL for PostgreSQL is not its own driver "
+            "(cloud_sql_postgresql is false). Connect the instance as PostgreSQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def filestore_card() -> CapabilityCard | None:
+    if filestore_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Filestore",
+        text=(
+            "Datawrap does not ship Filestore as a transfer-ready driver "
+            "(filestore is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def persistent_disk_card() -> CapabilityCard | None:
+    if persistent_disk_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Persistent Disk",
+        text=(
+            "Datawrap does not ship Persistent Disk as a transfer-ready "
+            "driver (persistent_disk is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def datastream_card() -> CapabilityCard | None:
+    if datastream_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Datastream",
+        text=(
+            "Datawrap does not ship Cloud Datastream "
+            "(datastream is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def dataplex_card() -> CapabilityCard | None:
+    if dataplex_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Dataplex",
+        text=(
+            "Datawrap does not ship Dataplex as a destination "
+            "(dataplex is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def informatica_card() -> CapabilityCard | None:
+    if informatica_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Informatica as a destination",
+        text=(
+            "Datawrap does not ship Informatica as a transfer destination "
+            "(informatica is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def talend_card() -> CapabilityCard | None:
+    if talend_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Talend as a destination",
+        text=(
+            "Datawrap does not ship Talend as a transfer destination "
+            "(talend is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def matillion_card() -> CapabilityCard | None:
+    if matillion_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Matillion as a destination",
+        text=(
+            "Datawrap does not ship Matillion as a transfer destination "
+            "(matillion is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_workspace_card() -> CapabilityCard | None:
+    if google_workspace_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Workspace as a source",
+        text=(
+            "Datawrap does not ship Google Workspace as a transfer-ready "
+            "source (google_workspace is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def aks_card() -> CapabilityCard | None:
+    if aks_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support AKS as a destination",
+        text=(
+            "Datawrap does not ship AKS as a transfer destination "
+            "(aks is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_functions_card() -> CapabilityCard | None:
+    if azure_functions_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Functions",
+        text=(
+            "Datawrap does not ship Azure Functions as a transfer destination "
+            "(azure_functions is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def azure_batch_card() -> CapabilityCard | None:
+    if azure_batch_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Batch",
+        text=(
+            "Datawrap does not ship Azure Batch "
+            "(azure_batch is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def cloud_scheduler_card() -> CapabilityCard | None:
+    if cloud_scheduler_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud Scheduler",
+        text=(
+            "Datawrap does not ship Cloud Scheduler "
+            "(cloud_scheduler is false)."
+        ),
+        source_module="services/schedule_runner.py · _dispatch_transfer",
+        category="connectors",
+    )
+
+
+def vertex_ai_search_card() -> CapabilityCard | None:
+    if vertex_ai_search_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Vertex AI Search",
+        text=(
+            "Datawrap does not ship Vertex AI Search "
+            "(vertex_ai_search is false)."
+        ),
+        source_module="src/ai/first_party/engine.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def business_central_card() -> CapabilityCard | None:
+    if business_central_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Business Central",
+        text=(
+            "Datawrap does not ship Dynamics 365 Business Central "
+            "(business_central is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def application_insights_card() -> CapabilityCard | None:
+    if application_insights_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Application Insights",
+        text=(
+            "Datawrap does not ship Application Insights "
+            "(application_insights is false)."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def site_recovery_card() -> CapabilityCard | None:
+    if site_recovery_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Site Recovery",
+        text=(
+            "Datawrap does not ship Azure Site Recovery "
+            "(site_recovery is false)."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def entra_external_id_card() -> CapabilityCard | None:
+    if entra_external_id_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Entra External ID",
+        text=(
+            "Datawrap does not ship Entra External ID "
+            "(entra_external_id is false). SSO is SAML/OIDC for the tenant."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
+def azure_ad_b2c_card() -> CapabilityCard | None:
+    if azure_ad_b2c_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure AD B2C",
+        text=(
+            "Datawrap does not ship Azure AD B2C "
+            "(azure_ad_b2c is false). SSO is SAML/OIDC, not B2C."
+        ),
+        source_module="src/routers/workspace_router.py · sso",
+        category="connectors",
+    )
+
+
 def column_level_lineage_card() -> CapabilityCard | None:
     if column_level_lineage_emitted():
         return None
@@ -4096,6 +4644,37 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         qlik_card,
         entra_governance_card,
         cloud_sql_mysql_card,
+        hdinsight_card,
+        expressroute_card,
+        ssis_card,
+        ssrs_card,
+        gmail_card,
+        google_calendar_card,
+        azure_cdn_card,
+        azure_blueprints_card,
+        azure_automation_card,
+        bigquery_ml_card,
+        rds_postgresql_card,
+        rds_mysql_card,
+        cloud_sql_postgresql_card,
+        filestore_card,
+        persistent_disk_card,
+        datastream_card,
+        dataplex_card,
+        informatica_card,
+        talend_card,
+        matillion_card,
+        google_workspace_card,
+        aks_card,
+        azure_functions_card,
+        azure_batch_card,
+        cloud_scheduler_card,
+        vertex_ai_search_card,
+        business_central_card,
+        application_insights_card,
+        site_recovery_card,
+        entra_external_id_card,
+        azure_ad_b2c_card,
         column_level_lineage_card,
     ):
         card = builder()

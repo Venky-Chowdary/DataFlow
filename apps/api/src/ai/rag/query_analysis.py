@@ -1185,6 +1185,52 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("entra_governance",)),
     (re.compile(r"\bcloud\s+sql\s+for\s+mysql\b", re.I), ("cloud_sql_mysql",)),
+    (re.compile(r"\bhdinsight\b", re.I), ("hdinsight",)),
+    (re.compile(r"\bexpressroute\b|\bexpress\s+route\b", re.I), ("expressroute",)),
+    (re.compile(
+        r"\bssis\b"
+        r"|\bsql\s+server\s+integration\s+services\b",
+        re.I,
+    ),
+     ("ssis",)),
+    (re.compile(
+        r"\bssrs\b"
+        r"|\bsql\s+server\s+reporting\s+services\b",
+        re.I,
+    ),
+     ("ssrs",)),
+    (re.compile(r"\bgmail\b", re.I), ("gmail",)),
+    (re.compile(
+        r"\bgoogle\s+calendar\b"
+        r"|\bcalendar\s+as\s+a\s+source\b",
+        re.I,
+    ),
+     ("google_calendar",)),
+    (re.compile(r"\bazure\s+cdn\b", re.I), ("azure_cdn",)),
+    (re.compile(r"\bazure\s+blueprints?\b", re.I), ("azure_blueprints",)),
+    (re.compile(r"\bazure\s+automation\b", re.I), ("azure_automation",)),
+    (re.compile(r"\bbigquery\s+ml\b|\bbqml\b", re.I), ("bigquery_ml",)),
+    (re.compile(r"\brds\s+for\s+postgresql\b|\brds\s+postgres", re.I), ("rds_postgresql", "postgresql")),
+    (re.compile(r"\brds\s+for\s+mysql\b", re.I), ("rds_mysql", "mysql")),
+    (re.compile(r"\bcloud\s+sql\s+for\s+postgresql\b", re.I), ("cloud_sql_postgresql",)),
+    (re.compile(r"\bfilestore\b", re.I), ("filestore",)),
+    (re.compile(r"\bpersistent\s+disk\b", re.I), ("persistent_disk",)),
+    (re.compile(r"\bdatastream\b", re.I), ("datastream",)),
+    (re.compile(r"\bdataplex\b", re.I), ("dataplex",)),
+    (re.compile(r"\binformatica\b", re.I), ("informatica",)),
+    (re.compile(r"\btalend\b", re.I), ("talend",)),
+    (re.compile(r"\bmatillion\b", re.I), ("matillion",)),
+    (re.compile(r"\bgoogle\s+workspace\b|\bgsuite\b", re.I), ("google_workspace",)),
+    (re.compile(r"\baks\b|\bazure\s+kubernetes\b", re.I), ("aks",)),
+    (re.compile(r"\bazure\s+functions?\b", re.I), ("azure_functions",)),
+    (re.compile(r"\bazure\s+batch\b", re.I), ("azure_batch",)),
+    (re.compile(r"\bcloud\s+scheduler\b", re.I), ("cloud_scheduler",)),
+    (re.compile(r"\bvertex\s+ai\s+search\b", re.I), ("vertex_ai_search",)),
+    (re.compile(r"\bbusiness\s+central\b", re.I), ("business_central",)),
+    (re.compile(r"\bapplication\s+insights\b", re.I), ("application_insights",)),
+    (re.compile(r"\bsite\s+recovery\b", re.I), ("site_recovery",)),
+    (re.compile(r"\bentra\s+external\s+id\b", re.I), ("entra_external_id",)),
+    (re.compile(r"\bazure\s+ad\s+b2c\b", re.I), ("azure_ad_b2c",)),
     (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
@@ -2299,6 +2345,94 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (
         re.compile(r"\bcloud\s+sql\s+for\s+mysql\b", re.I),
         ("sqlserver", "proxy"),
+    ),
+    (
+        re.compile(r"\bhdinsight\b|\bexpressroute\b|\bexpress\s+route\b|\bazure\s+cdn\b|\bazure\s+blueprints?\b|\bazure\s+automation\b", re.I),
+        ("mysql", "azure_database_mysql", "principal"),
+    ),
+    (
+        re.compile(r"\bssis\b|\bsql\s+server\s+integration\s+services\b", re.I),
+        ("sqlserver", "driver"),
+    ),
+    (
+        re.compile(r"\bssrs\b|\bsql\s+server\s+reporting\s+services\b", re.I),
+        ("sqlserver", "driver", "power_bi"),
+    ),
+    (
+        re.compile(r"\bgmail\b", re.I),
+        ("bigquery", "warehouse"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+calendar\b|\bcalendar\s+as\s+a\s+source\b", re.I),
+        ("adls", "source", "blob"),
+    ),
+    (
+        re.compile(r"\bbigquery\s+ml\b|\bbqml\b", re.I),
+        ("destination", "warehouse"),
+    ),
+    (
+        re.compile(r"\brds\s+for\s+postgresql\b|\brds\s+postgres|\brds\s+for\s+mysql\b", re.I),
+        ("aurora",),
+    ),
+    (
+        re.compile(r"\bfilestore\b", re.I),
+        ("cloud_run", "data_catalog"),
+    ),
+    (
+        re.compile(r"\bdatastream\b", re.I),
+        ("cloud_run", "dataflow"),
+    ),
+    (
+        re.compile(r"\bdataplex\b|\bmatillion\b", re.I),
+        ("azure_monitor", "monitor"),
+    ),
+    (
+        re.compile(r"\binformatica\b", re.I),
+        ("procedure", "stored"),
+    ),
+    (
+        re.compile(r"\btalend\b", re.I),
+        ("append", "overwrite"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+workspace\b|\bgsuite\b", re.I),
+        ("google_ads", "ads"),
+    ),
+    (
+        re.compile(r"\baks\b|\bazure\s+kubernetes\b", re.I),
+        ("azure_monitor", "monitor"),
+    ),
+    (
+        re.compile(r"\bazure\s+functions?\b", re.I),
+        ("cloud_functions", "cloud"),
+    ),
+    (
+        re.compile(r"\bazure\s+batch\b", re.I),
+        ("cdc_fetch_size", "fetch"),
+    ),
+    (
+        re.compile(r"\bcloud\s+scheduler\b", re.I),
+        ("cloud_run", "dataflow"),
+    ),
+    (
+        re.compile(r"\bvertex\s+ai\s+search\b", re.I),
+        ("azure_ai_search", "search"),
+    ),
+    (
+        re.compile(r"\bbusiness\s+central\b", re.I),
+        ("dynamics365", "dataverse"),
+    ),
+    (
+        re.compile(r"\bentra\s+external\s+id\b", re.I),
+        ("api", "rest"),
+    ),
+    (
+        re.compile(r"\bazure\s+ad\s+b2c\b|\bb2c\b", re.I),
+        ("adls", "principal", "service_account"),
+    ),
+    (
+        re.compile(r"\bcloud\s+sql\s+for\s+postgresql\b", re.I),
+        ("mysql", "proxy"),
     ),
     # Bare Private Link is not Job Theater.
     (

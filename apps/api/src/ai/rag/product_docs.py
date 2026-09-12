@@ -1169,6 +1169,112 @@ def _section_intent_bonus(
         bonus -= 6.0
     if cloud_sql_ask and not cloud_sql_mysql_ask and "cloud sql for mysql" in title:
         bonus -= 6.0
+    azure_mysql_neighbor_ask = bool(
+        re.search(
+            r"\bhdinsight\b|\bexpressroute\b|\bexpress\s+route\b"
+            r"|\bazure\s+cdn\b|\bazure\s+blueprints?\b|\bazure\s+automation\b",
+            analysis.text,
+            re.I,
+        )
+    )
+    if "hdinsight" in title:
+        bonus += 6.0 if re.search(r"\bhdinsight\b", analysis.text, re.I) else -3.2
+    if "expressroute" in title:
+        bonus += 6.0 if re.search(r"\bexpressroute\b|\bexpress\s+route\b", analysis.text, re.I) else -3.2
+    if "ssis" in title or "integration services" in title:
+        bonus += 6.0 if re.search(r"\bssis\b|\bintegration\s+services\b", analysis.text, re.I) else -6.0
+    if "ssrs" in title or "reporting services" in title:
+        bonus += 6.0 if re.search(r"\bssrs\b|\breporting\s+services\b", analysis.text, re.I) else -6.0
+    if re.search(r"\bssis\b|\bintegration\s+services\b|\bssrs\b|\breporting\s+services\b", analysis.text, re.I) and title == "do you support sql server":
+        bonus -= 6.0
+    if "gmail as a source" in title:
+        bonus += 6.0 if re.search(r"\bgmail\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgmail\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "calendar as a source" in title:
+        bonus += 6.0 if re.search(r"\bcalendar\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcalendar\s+as\s+a\s+source\b|\bgoogle\s+calendar\b", analysis.text, re.I) and "adls as a destination" in title:
+        bonus -= 6.0
+    if "azure cdn" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+cdn\b", analysis.text, re.I) else -3.2
+    if "azure blueprints" in title:
+        bonus += 6.0 if re.search(r"\bblueprints?\b", analysis.text, re.I) else -3.2
+    if "azure automation" in title:
+        bonus += 6.0 if re.search(r"\bautomation\b", analysis.text, re.I) else -3.2
+    if azure_mysql_neighbor_ask and "azure database for mysql" in title:
+        bonus -= 6.0
+    if azure_mysql_neighbor_ask and title == "can i use a service principal for azure":
+        bonus -= 6.0
+    if "bigquery ml" in title:
+        bonus += 6.0 if re.search(r"\bbigquery\s+ml\b|\bbqml\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbigquery\s+ml\b|\bbqml\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "rds for postgresql" in title:
+        bonus += 6.0 if re.search(r"\brds\s+for\s+postgresql\b|\brds\s+postgres", analysis.text, re.I) else -3.2
+    if "rds for mysql" in title:
+        bonus += 6.0 if re.search(r"\brds\s+for\s+mysql\b", analysis.text, re.I) else -3.2
+    if re.search(r"\brds\s+for\s+(?:postgresql|mysql)\b", analysis.text, re.I) and "amazon aurora" in title:
+        bonus -= 6.0
+    if "cloud sql for postgresql" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+sql\s+for\s+postgresql\b", analysis.text, re.I) else -6.0
+    if re.search(r"\bcloud\s+sql\s+for\s+postgresql\b", analysis.text, re.I) and title == "do you support cloud sql":
+        bonus -= 6.0
+    if cloud_sql_ask and not re.search(r"\bcloud\s+sql\s+for\s+postgresql\b", analysis.text, re.I) and "cloud sql for postgresql" in title:
+        bonus -= 6.0
+    if "filestore" in title:
+        bonus += 6.0 if re.search(r"\bfilestore\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bfilestore\b", analysis.text, re.I) and "cloud run" in title:
+        bonus -= 6.0
+    if "persistent disk" in title:
+        bonus += 6.0 if re.search(r"\bpersistent\s+disk\b", analysis.text, re.I) else -3.2
+    if "datastream" in title:
+        bonus += 6.0 if re.search(r"\bdatastream\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdatastream\b", analysis.text, re.I) and "cloud run" in title:
+        bonus -= 6.0
+    if "dataplex" in title:
+        bonus += 6.0 if re.search(r"\bdataplex\b", analysis.text, re.I) else -3.2
+    if "informatica" in title:
+        bonus += 6.0 if re.search(r"\binformatica\b", analysis.text, re.I) else -3.2
+    if "talend" in title:
+        bonus += 6.0 if re.search(r"\btalend\b", analysis.text, re.I) else -3.2
+    if "matillion" in title:
+        bonus += 6.0 if re.search(r"\bmatillion\b", analysis.text, re.I) else -3.2
+    if "google workspace as a source" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+workspace\b|\bgsuite\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+workspace\b", analysis.text, re.I) and "google ads" in title:
+        bonus -= 6.0
+    if "aks as a destination" in title:
+        bonus += 6.0 if re.search(r"\baks\b", analysis.text, re.I) else -3.2
+    if "azure functions" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+functions?\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+functions?\b", analysis.text, re.I) and "cloud functions" in title:
+        bonus -= 6.0
+    if "azure batch" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+batch\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+batch\b", analysis.text, re.I) and "cdc fetch size" in title:
+        bonus -= 6.0
+    if "cloud scheduler" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+scheduler\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+scheduler\b", analysis.text, re.I) and "cloud run" in title:
+        bonus -= 6.0
+    if "vertex ai search" in title:
+        bonus += 6.0 if re.search(r"\bvertex\s+ai\s+search\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bvertex\s+ai\s+search\b", analysis.text, re.I) and "azure ai search" in title:
+        bonus -= 6.0
+    if "business central" in title:
+        bonus += 6.0 if re.search(r"\bbusiness\s+central\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbusiness\s+central\b", analysis.text, re.I) and "dynamics 365" in title:
+        bonus -= 6.0
+    if "application insights" in title:
+        bonus += 6.0 if re.search(r"\bapplication\s+insights\b", analysis.text, re.I) else -3.2
+    if "site recovery" in title:
+        bonus += 6.0 if re.search(r"\bsite\s+recovery\b", analysis.text, re.I) else -3.2
+    if "entra external id" in title:
+        bonus += 6.0 if re.search(r"\bentra\s+external\s+id\b", analysis.text, re.I) else -6.0
+    if "azure ad b2c" in title:
+        bonus += 6.0 if re.search(r"\bb2c\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bazure\s+ad\s+b2c\b", analysis.text, re.I) and title == "can i use a service principal for azure":
+        bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

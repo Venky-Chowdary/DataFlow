@@ -190,6 +190,15 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Do you support Qlik as a destination",
         "Do you support Entra ID Governance",
         "Do you support Cloud SQL for MySQL",
+        "Do you support Azure HDInsight",
+        "Do you support SSIS",
+        "Do you support Gmail as a source",
+        "Do you support BigQuery ML",
+        "Do you support Amazon RDS for PostgreSQL",
+        "Do you support Filestore",
+        "Do you support Informatica as a destination",
+        "Do you support AKS as a destination",
+        "Do you support Azure AD B2C",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True
