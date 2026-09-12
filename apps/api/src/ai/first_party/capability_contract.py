@@ -1677,7 +1677,8 @@ def oracle_logminer_card() -> CapabilityCard | None:
         title="Do you support Oracle LogMiner",
         text=(
             "Yes — Oracle CDC reads redo through Oracle LogMiner "
-            "(OracleLogMinerCdc), not GoldenGate. "
+            "(OracleLogMinerCdc). "
+            "That capture plugin is not GoldenGate. "
             "The driver card is not the capture plugin."
         ),
         source_module="connectors/oracle_logminer.py · OracleLogMinerCdc",

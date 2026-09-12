@@ -163,7 +163,7 @@ def _lead(question: str) -> str:
         ("how do I connect Salesforce", ("new connection", "access token"), ("salesforce is a transfer-ready",)),
         ("how do I set up Salesforce", ("new connection",), ("salesforce is a transfer-ready",)),
         ("can I use a read replica for CDC", ("does not connect cdc to a physical standby",), ("replica identity full so update",)),
-        ("do you support Oracle LogMiner", ("logminer",), ("oracle is a transfer-ready", "goldengate")),
+        ("do you support Oracle LogMiner", ("logminer",), ("oracle is a transfer-ready", "does not embed oracle goldengate")),
         ("do you support SQL Server CDC", ("sqlservernativecdc",), ("change data capture (cdc) is log capture",)),
         (
             "can I use change tracking instead of CDC on SQL Server",
