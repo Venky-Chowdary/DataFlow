@@ -415,12 +415,27 @@ _COUNTING_TITLE = (
     "how much",
 )
 
+#: Headings that publish a list, for the ask that wants the members.
+_LISTING_TITLE = (
+    "which ",
+    "what each",
+)
+
 #: Swept over an 18-phrasing cardinality set and the 158-case answer audit.
 #: The knee is 2.0, where "how many sources can you connect to" flips from a
 #: preflight gate description to "30 sources and 30 destinations"; 2.0 through
 #: 9.0 are indistinguishable on both sets, so this sits above the knee with
 #: margin, and the audit is unchanged at 118 leading across the whole sweep.
 _COUNTING_TITLE_BONUS = 3.2
+
+#: And what it costs a heading that publishes a number when the question did
+#: not ask for one. Swept over the 158-case answer audit and a five-phrasing
+#: listing set: 0.0–2.0 leave the audit at 121 and "which engines can I
+#: connect to" still opening on four totals; 4.5 is the knee (122 leading,
+#: engines listing flips); 6.0 is where "what engines do you support" flips
+#: too; 6.0 through 12.0 are indistinguishable on the audit. Sits above the
+#: knee with the same margin the on-ask bonus uses.
+_COUNTING_TITLE_OFF_ASK = 6.0
 
 #: The generated role matrix, whose every chunk is one role crossed with the
 #: verb list for that role. It therefore holds the vocabulary of nearly any
@@ -466,6 +481,16 @@ _PERMISSION_QUESTION = re.compile(
 _ROLE_MATRIX_ON_ASK = 3.2
 _ROLE_MATRIX_OFF_ASK = -6.0
 
+#: The nine named cards. An enumeration ask used to pay them +3.0 whenever
+#: their heading was on subject. "Which destinations can I write to" is on
+#: subject for "Core gates (before write)" because the heading says ``write``,
+#: so the answer opened G1–G3 instead of naming a destination. Same pattern
+#: as the role matrix: the cards keep the prior when the question is about
+#: the gates, and pay the off-ask cost otherwise.
+_GATE_QUESTION = re.compile(r"\bgates?\b|\bpreflight\b", re.I)
+_CORE_GATES_ON_ASK = 3.0
+_CORE_GATES_OFF_ASK = 6.0
+
 
 def _section_intent_bonus(
     chunk: ProductDocChunk,
@@ -495,17 +520,25 @@ def _section_intent_bonus(
 
     title = (chunk.section_title or "").strip().lower()
     counting = title.startswith(_COUNTING_TITLE)
+    listing = title.startswith(_LISTING_TITLE)
+    core_gates = "core gates" in title
     heading = set(content_terms(f"{chunk.doc_title} {chunk.section_title}"))
     on_subject = any(
         is_subject_term(term) and _covers(term, heading)
         for term in analysis.search_terms
     )
     if not on_subject:
+        # The gate cards still have to pay the off-ask cost when they ranked
+        # here on a body word. "Which destinations can I write to" does not
+        # name a gate, so "Core gates (before write)" is not on subject — and
+        # without a penalty it still wins the ranking, because G2 says
+        # "Destination write access".
+        if core_gates and not _GATE_QUESTION.search(analysis.text):
+            return -_CORE_GATES_OFF_ASK
         return 0.0
 
     is_procedure = title.startswith("procedure:")
     definitional = title.startswith(_DEFINITIONAL_TITLE)
-    core_gates = "core gates" in title
     ask = analysis.ask
 
     bonus = 0.0
@@ -521,11 +554,20 @@ def _section_intent_bonus(
         if is_procedure:
             bonus -= 2.8
         return bonus
-    # No mirrored penalty for a counting heading on the other asks. A -3.0 and
-    # a -6.0 were both measured and neither moved the cardinality set or the
-    # audit by a single case: the counting sections are one sentence long, so
-    # the corpus's one-section-per-question rule already keeps them in their
-    # lane without a constant to tune.
+    # A counting heading on any other ask is the wrong container, and a heading
+    # that has to name four inventories to say how many there are of each
+    # overlaps nearly every question about any of them. Asked "which engines
+    # can I connect to", "How many sync modes, roles, engines and formats there
+    # are" outranked "Which engines you can connect" — 2.89 to 2.55 — and the
+    # answer opened with four totals instead of naming one engine.
+    #
+    # Measured twice. When this penalty was first tried, a listing question
+    # phrased "which engines can I connect to" was still classified a
+    # procedure, and at -3.0 and -6.0 it moved neither the cardinality set nor
+    # the audit; the conclusion recorded then was that it was unnecessary. It
+    # was the ask that was wrong, not the penalty.
+    if counting:
+        bonus -= _COUNTING_TITLE_OFF_ASK
     if ask == "procedure":
         if is_procedure:
             bonus += 3.0
@@ -537,8 +579,8 @@ def _section_intent_bonus(
         if is_procedure:
             bonus += 1.6
     elif ask == "enumeration":
-        if core_gates:
-            bonus += 3.0
+        if listing:
+            bonus += 2.4
         if definitional:
             bonus += 1.5
         if is_procedure:
@@ -547,10 +589,13 @@ def _section_intent_bonus(
         # definition · comparison · capability · other
         if definitional:
             bonus += 3.2
-        if core_gates:
-            bonus += 3.0
         if is_procedure:
             bonus -= 2.8
+    if core_gates:
+        if _GATE_QUESTION.search(analysis.text):
+            bonus += _CORE_GATES_ON_ASK
+        else:
+            bonus -= _CORE_GATES_OFF_ASK
     return bonus
 
 

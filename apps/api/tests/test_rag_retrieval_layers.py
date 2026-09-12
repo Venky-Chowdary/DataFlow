@@ -40,7 +40,9 @@ from src.ai.rag.lexical_index import identifier_shingles, normalize  # noqa: E40
 from src.ai.rag.product_docs import (  # noqa: E402
     MAX_SECTION_CHARS,
     ProductDocHit,
+    _CORE_GATES_OFF_ASK,
     _COUNTING_TITLE_BONUS,
+    _COUNTING_TITLE_OFF_ASK,
     _ROLE_MATRIX_DOC,
     _section_intent_bonus,
     _select_covering,
@@ -139,6 +141,8 @@ LISTING_QUESTIONS = [
     "what schema change policies are there",
     "what validation modes are there",
     "what roles are there",
+    "which destinations can I write to",
+    "what destinations do you support",
     # Singular, but ``which`` opens it: picking one member out of a set is
     # answered from the same list as the whole set.
     "which preflight gate blocks a lossy type change",
@@ -613,6 +617,31 @@ def test_the_gate_list_keeps_its_bonus_for_the_asks_that_earned_it():
         assert _section_intent_bonus(gates, analysis) > 0.0, question
 
 
+def test_the_gate_list_pays_the_off_ask_cost_for_a_destination_question():
+    """G2 says "Destination write access"; that is not a list of destinations."""
+    analysis = analyze_query("which destinations can I write to")
+    assert analysis.ask == "enumeration"
+    assert _section_intent_bonus(_gates_chunk(), analysis) == pytest.approx(
+        -_CORE_GATES_OFF_ASK
+    )
+
+
+def test_a_counting_heading_pays_when_the_question_did_not_ask_for_a_number():
+    """The inventory-count heading names every noun, so it overlaps any of them."""
+    analysis = analyze_query("which engines can I connect to")
+    assert analysis.ask == "enumeration"
+    chunk = None
+    for candidate in retrieval_passages():
+        title = (candidate.section_title or "").strip().lower()
+        if title.startswith("how many") and "engines" in title:
+            chunk = candidate
+            break
+    assert chunk is not None
+    assert _section_intent_bonus(chunk, analysis) == pytest.approx(
+        -_COUNTING_TITLE_OFF_ASK
+    )
+
+
 @pytest.mark.parametrize(
     "question",
     [
@@ -622,12 +651,7 @@ def test_the_gate_list_keeps_its_bonus_for_the_asks_that_earned_it():
         "how many connectors are live",
         "how many sync modes are there",
         "how many roles are there",
-        # Known gap, measured rather than assumed: "how many destinations do
-        # you support" still opens from the transfer wizard. The counting
-        # passage is rank 1 for it at a retrieval depth of 24 and outside the
-        # window at 12, and the served limit is 4 — so the fusion normalization
-        # is depth-sensitive for a one-term question, which is a wider change
-        # than this prior.
+        "how many destinations do you support",
     ],
 )
 def test_a_cardinality_question_leads_with_a_number(question):

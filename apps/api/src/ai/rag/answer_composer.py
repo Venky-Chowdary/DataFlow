@@ -184,7 +184,13 @@ _DEFINITIONAL = re.compile(
 _ASK_SECTION_BONUS: dict[str, tuple[tuple[str, float], ...]] = {
     "definition": (("what is", 2.4), ("what are", 2.4), ("core gate", 1.8), ("procedure:", -1.6)),
     "procedure": (("procedure:", 2.4), ("what is", -0.8), ("what are", -0.8)),
-    "enumeration": (("mode", 1.6), ("core gate", 1.6), ("role", 1.2), ("procedure:", -1.0)),
+    "enumeration": (
+        ("which", 2.4),
+        ("mode", 1.6),
+        ("core gate", 1.6),
+        ("role", 1.2),
+        ("procedure:", -1.0),
+    ),
     "diagnosis": (("phas", 1.2), ("checksum", 1.2), ("quarantine", 1.2), ("drift", 1.2)),
     "comparison": (("mode", 1.8), ("what is", 0.8)),
     # "Do you preserve column order" asks what the product guarantees, and a
@@ -502,9 +508,19 @@ def build_candidates(
         anchor_bar = HEADING_ANCHOR_TOP if share >= 1.0 else HEADING_ANCHOR
         heading_match = _heading_match(citation or section_title, typed)
         heading_terms = frozenset(content_terms(citation or section_title))
-        # An enumeration ask is a request for a list, whichever passage holds
-        # it; otherwise the heading has to speak for its items.
-        list_vouched = analysis.ask == "enumeration" or heading_match >= anchor_bar
+        # The heading has to speak for its items, on every ask. An enumeration
+        # ask used to vouch for any list in any retrieved passage, on the
+        # grounds that the question was a request for a list — but it does not
+        # say which list. Asked "which destinations can I write to" the answer
+        # opened "G1 Source readable · G2 Destination write access · G3 Schema
+        # contract": the preflight gate list, vouched by an ask it had nothing
+        # to do with, matching only because G2 says "destination" and "write".
+        #
+        # Nothing is lost, because a question that asks for a list names the
+        # list: "what are the preflight gates" carries both of its terms in the
+        # heading path "Preflight gates explained → Core gates", which clears
+        # the bar on its own.
+        list_vouched = heading_match >= anchor_bar
         for sentence, is_list_item in _split_annotated(text, section_title):
             sentence_terms = content_terms(sentence)
             terms = frozenset(sentence_terms)
@@ -531,8 +547,17 @@ def build_candidates(
             # nothing against "what are the preflight gates", so all nine gates
             # were dropped and the answer talked around them. The heading the
             # question did match is what vouches for its items.
+            # Only a vouched list. Unvouched items used to collect this credit
+            # on a partial heading overlap, which is how "**Destination write
+            # → Query**" outranked "Destinations a transfer can write to, 37
+            # of them" for "which destinations can I write to": the write-mode
+            # caption matched ``write`` in its heading and collected 1.3 it
+            # had not earned, then `_lead` sorted the whole list into source
+            # order and the operator read "**Full append**".
             listed_credit = (
-                LIST_ITEM_CREDIT * heading_match if is_list_item else 0.0
+                LIST_ITEM_CREDIT * heading_match
+                if is_list_item and list_vouched
+                else 0.0
             )
             match = typed_hits + EXPANSION_WEIGHT * expanded_hits
             subject_view = prose_terms
@@ -640,9 +665,12 @@ def select_sentences(
     # purely by source order opened "what is quarantine" with "Open Operations →
     # Jobs → Quarantine on the run", because that section ranked first — an
     # answer has to start with the answer.
-    if best.list_item:
-        # A list item is never hoisted: pulling G5 to the front leaves the
-        # gates reading G5, G1, G2, G3 …
+    if best.list_item and best.list_vouched:
+        # A vouched list is never hoisted: pulling G5 to the front leaves the
+        # gates reading G5, G1, G2, G3 … An *unvouched* list item that happens
+        # to score highest is not a list the question asked for, and sorting
+        # it back into source order is how "**Full append**" opened a
+        # question about destinations.
         chosen.sort(key=lambda c: c.order)
         return chosen
     rest = sorted((c for c in chosen if c is not best), key=lambda c: c.order)

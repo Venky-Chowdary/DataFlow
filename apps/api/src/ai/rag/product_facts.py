@@ -195,9 +195,14 @@ def _sync_modes_section() -> GeneratedSection | None:
         return None
 
     lines = [
-        "A sync mode says what the engine reads and how it writes. These are the "
-        "modes the engine dispatches on; every other spelling is an alias onto "
-        "one of them.",
+        # "names", not "says": the composer's definitional shape test accepts a
+        # copula and a handful of verbs that behave like one, and every line of
+        # the grid below is written to fit it. With the sentence that defines
+        # the *category* left outside the shape, "what is a sync mode" was
+        # answered with the definition of whichever single mode ranked first.
+        "A sync mode names what the engine reads and how it writes. These are "
+        "the modes the engine dispatches on; every other spelling is an alias "
+        "onto one of them.",
     ]
     for mode in sorted(CANONICAL_SYNC_MODES):
         behaviour = _SYNC_MODE_BEHAVIOUR.get(mode)
@@ -272,7 +277,19 @@ def _schema_policy_section() -> GeneratedSection | None:
         from services.schedule_store import SCHEMA_POLICIES
     except Exception:
         return None
+    names = sorted(SCHEMA_POLICIES)
+    listed = (
+        ", ".join(names[:-1]) + f" and {names[-1]}"
+        if len(names) > 1
+        else (names[0] if names else "")
+    )
     lines = [
+        # Named first, because "what schema change policies are there" is a
+        # request for the members. Left as a definition of the category, the
+        # composer opened with a wizard step that happens to bold the words
+        # "Schema change policy" — "Set Validation mode (Strict / Maximum /
+        # Balanced)" — while every policy name sat below it.
+        f"The schema change policies are {listed}.",
         "A schema change policy decides what happens when the source schema "
         "drifts away from the mapping a transfer was validated against. Validate "
         "enforces it as the schema-change-policy gate.",
@@ -832,6 +849,41 @@ def _catalog_count_section() -> GeneratedSection | None:
     )
 
 
+def _destination_list_section() -> GeneratedSection | None:
+    """Which destinations a transfer can write to — its own section.
+
+    "Which destinations can I write to" retrieved the preflight gate list,
+    because G2 is titled "Destination write access" and the nine cards are an
+    enumeration. A heading that asks the same question the operator asked is
+    what the engines listing already does for "which engines can I connect to".
+    """
+    try:
+        from src.transfer.connector_capabilities import dest_live_driver_types
+
+        dests = [str(d) for d in dest_live_driver_types() if d]
+    except Exception:
+        dests = []
+    if not dests:
+        return None
+    return GeneratedSection(
+        doc_title="Connections & engines",
+        section_title="Which destinations you can write to",
+        # Two sentences, and the first is short on purpose. Written as one
+        # 37-name sentence it lost its own question: BM25 length normalization
+        # and the composer's length pivot both prefer a short write-mode
+        # caption ("**Full append** — keep existing rows") over a line that
+        # actually lists the destinations.
+        text=(
+            f"Destinations a transfer can write to, {len(dests)} of them. "
+            f"They are: " + ", ".join(dests) + ". "
+            "A destination-only store such as a vector database is in this "
+            "list and not among the sources."
+        ),
+        source_module="src/transfer/connector_capabilities.py",
+        category="connectors",
+    )
+
+
 def _inventory_count_section() -> GeneratedSection | None:
     """How many of each enumerable thing there are — its own section, as the rule says.
 
@@ -1378,6 +1430,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _row_ledger_section,
         _connector_catalog_section,
         _catalog_count_section,
+        _destination_list_section,
         _inventory_count_section,
         _aggregation_section,
         _quarantine_section,

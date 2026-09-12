@@ -564,3 +564,54 @@ def test_a_question_about_one_mode_leads_with_that_mode(
     )
     assert body, question
     assert expected in body.split(". ")[0].lower(), body[:220]
+
+
+# --------------------------------------------------------------------------
+# Destinations and schema policies: lists the corpus already knew, unpublished
+# --------------------------------------------------------------------------
+
+def test_the_destination_list_is_read_from_the_capability_registry() -> None:
+    from src.transfer.connector_capabilities import dest_live_driver_types
+
+    dests = dest_live_driver_types()
+    text = _section("Which destinations you can write to").text
+    assert str(len(dests)) in text
+    for name in dests[:5]:
+        assert name in text
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "which destinations can I write to",
+        "what destinations do you support",
+        "which destinations do you support",
+    ],
+)
+def test_a_destination_listing_opens_on_the_destinations(question: str) -> None:
+    from src.ai.rag.product_docs import compose_product_answer
+
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer(question, limit=4)) or "").split()
+    )
+    lead = body.split(". ")[0]
+    assert "destination" in lead.lower(), lead[:200]
+    assert "full append" not in lead.lower(), lead[:200]
+    assert "g1" not in lead.lower(), lead[:200]
+
+
+def test_the_schema_change_policies_are_named_in_the_lead() -> None:
+    from src.ai.rag.product_docs import compose_product_answer
+    from services.schedule_store import SCHEMA_POLICIES
+
+    body = " ".join(
+        (
+            compose_product_answer(
+                retrieve_product_answer("what schema change policies are there", limit=4)
+            )
+            or ""
+        ).split()
+    )
+    lead = body.split(". ")[0]
+    for name in SCHEMA_POLICIES:
+        assert name in lead, lead[:220]

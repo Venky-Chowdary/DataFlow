@@ -319,6 +319,44 @@ def test_an_unvouched_list_item_does_not_drag_in_its_siblings() -> None:
     assert select_sentences([picked, sibling]) == [picked]
 
 
+def test_an_unvouched_list_item_earns_no_list_credit() -> None:
+    """Partial heading overlap is not a voucher, so it cannot pay list credit.
+
+    "**Destination write → Query**" matched ``write`` in "Write modes
+    (Advanced)" and collected ``LIST_ITEM_CREDIT * 0.5``. That was enough to
+    outrank "Destinations a transfer can write to, 37 of them" for the
+    question that heading answers.
+    """
+    from src.ai.rag.answer_composer import LIST_ITEM_CREDIT, PHRASE_CREDIT
+
+    sections = [
+        (
+            "Which destinations you can write to",
+            "Connections & engines → Which destinations you can write to",
+            "#/help/dest",
+            "Which destinations you can write to\n"
+            "Destinations a transfer can write to, 37 of them.",
+        ),
+        (
+            "Write modes (Advanced)",
+            "Transfer Studio guide → Write modes (Advanced)",
+            "#/help/write",
+            "Write modes (Advanced)\n"
+            "**Destination write → Query** — one INSERT/MERGE/UPDATE.",
+        ),
+    ]
+    candidates = build_candidates(
+        analyze_query("which destinations can I write to"), sections
+    )
+    dest = next(c for c in candidates if c.text.startswith("Destinations a transfer"))
+    caption = next(c for c in candidates if "Destination write" in c.text)
+    assert dest.score > caption.score, (dest.score, caption.score)
+    assert not caption.list_vouched
+    # The credit is the thing we took away; if it comes back, this assertion
+    # is how we notice before the lead flips.
+    assert LIST_ITEM_CREDIT > PHRASE_CREDIT
+
+
 def test_an_enumeration_ask_vouches_for_the_list_it_asked_for() -> None:
     """"What are the preflight gates" is a request for a list, so it gets one."""
     sections = [
