@@ -15,7 +15,11 @@ os.environ.setdefault("DATAFLOW_PILOT_ENGINE", "local")
 import pytest
 
 from src.ai.copilot.pilot_agent import DataPilotAgent, PilotTurn
-from src.ai.copilot.tools import ToolResult, infer_tools_from_message
+from src.ai.copilot.tools import (
+    ToolResult,
+    _looks_like_unsupported_mutation,
+    infer_tools_from_message,
+)
 
 
 def _names(question: str) -> list[str]:
@@ -44,6 +48,7 @@ def _names(question: str) -> list[str]:
         "can I set the replication slot name",
         "can I use incremental by updated_at",
         "do you support SCD type 2",
+        "can I write to Excel Online",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:
@@ -93,6 +98,11 @@ def test_cursor_mode_asks_do_not_recommend_a_sync_mode(question: str) -> None:
     names = _names(question)
     assert "explain_product" in names, names
     assert "recommend_sync_mode" not in names, names
+
+
+def test_excel_online_is_not_a_file_export_mutation() -> None:
+    assert _looks_like_unsupported_mutation("can I write to excel online") is False
+    assert _looks_like_unsupported_mutation("export rows to excel") is True
 
 
 def test_should_i_use_cdc_still_recommends_a_mode() -> None:

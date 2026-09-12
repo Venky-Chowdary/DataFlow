@@ -3022,20 +3022,24 @@ def _looks_like_unsupported_mutation(lower: str) -> bool:
     """
     if _SUPPORTED_EXPORT.search(lower):
         return False
+    # "write to Excel Online" contains the substring "to excel". That is a
+    # destination-capability ask, not a file export.
+    if re.search(r"\bexcel\s+online\b|\bexcel\s+365\b", lower):
+        return False
     if _EXPLANATORY_QUESTION.search(lower) and names_product_subject(lower):
         return False
     if any(
         w in lower
         for w in (
             "export ", "export to", "download ", "download as",
-            "save as csv", "save as parquet", "to csv", "to parquet", "to excel",
+            "save as csv", "save as parquet", "to csv", "to parquet",
             "create a new schedule", "create schedule", "create a pipeline",
             "new nightly", "build a cron", "cron pipeline",
             "schedule this transfer", "schedule this nightly", "schedule it nightly",
             # Do NOT match bare "schedule nightly" / "nightly schedule" —
             # those collide with show/open schedule named "Nightly …".
         )
-    ):
+    ) or bool(re.search(r"\bto\s+excel\b(?!\s+(?:online|365))", lower)):
         return True
     # Plurals are the natural way to ask for a bulk delete ("delete all my
     # connectors"), and without them the request fell through to the inventory
