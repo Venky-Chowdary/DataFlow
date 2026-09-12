@@ -516,3 +516,59 @@ def test_live_grouped_answer_renders_the_numbers(live_orders):
     assert "∅ (null)" in text, "the NULL group must be visible, not omitted"
     assert "not a sample" in text
     assert "```sql" in text, "operators need the SQL that produced the number"
+
+
+def test_grouped_lead_names_the_group_values():
+    """A grouped count that only said '3 groups' buried the answer in a table.
+
+    The sentence splitter treats a heading with an em-dash and no period as
+    a caption, so the operator read 'Exact server-side aggregate' first.
+    """
+    from src.ai.copilot.pilot_agent import _render_aggregate
+    from src.ai.rag.answer_composer import split_sentences
+
+    text = _render_aggregate(
+        {
+            "metric": "count",
+            "table": "orders",
+            "connector_name": "Audit SQLite",
+            "group_by": "region",
+            "group_count": 3,
+            "rows": [
+                {"region": "emea", "row_count": 4},
+                {"region": "apac", "row_count": 4},
+                {"region": "amer", "row_count": 4},
+            ],
+            "columns": ["region", "row_count"],
+            "metric_alias": "row_count",
+        }
+    )
+    lead = split_sentences(text)[0].lower()
+    assert "emea" in lead
+    assert "apac" in lead
+    assert "amer" in lead
+    assert "3 group" in lead
+
+
+def test_sample_lead_names_a_row_value():
+    from src.ai.copilot.pilot_agent import _live_rows_lead
+    from src.ai.rag.answer_composer import split_sentences
+
+    lead = split_sentences(
+        _live_rows_lead(
+            {
+                "connector_name": "Audit SQLite",
+                "table": "orders",
+                "type": "sqlite",
+                "row_count": 3,
+                "columns": ["id", "customer", "region"],
+                "rows": [
+                    {"id": 1, "customer": "customer-1", "region": "emea"},
+                    {"id": 2, "customer": "customer-2", "region": "apac"},
+                ],
+            },
+            sample=True,
+        )
+    )[0].lower()
+    assert "customer-1" in lead
+    assert "3 rows" in lead

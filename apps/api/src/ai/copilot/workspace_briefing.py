@@ -149,29 +149,25 @@ def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
 def _load_jobs(workspace_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     empty_counts: dict[str, Any] = {"total": 0, "by_status": {}}
     try:
-        from services.mongodb_service import get_mongodb_service
+        from .job_reads import list_transfer_jobs
 
-        mongo = get_mongodb_service()
         # Keep "" as this-workspace/legacy scope — never coerce to None (all workspaces).
-        scope = workspace_id
-        try:
-            counts = mongo.count_jobs(workspace_id=scope)
-        except Exception:
-            counts = empty_counts
-        rows = mongo.list_jobs(limit=25, workspace_id=scope)
+        rows, counts, _source = list_transfer_jobs(
+            limit=25, workspace_id=workspace_id
+        )
         out = []
         for j in rows or []:
             if not isinstance(j, dict):
                 continue
             out.append(
                 {
-                    "id": str(j.get("_id", j.get("id", ""))),
-                    "source": j.get("source_name", j.get("source_type", "")),
-                    "destination": j.get("destination_collection") or j.get("destination_type", ""),
+                    "id": str(j.get("id") or ""),
+                    "source": j.get("source") or "",
+                    "destination": j.get("destination") or "",
                     "status": j.get("status"),
                     "route": {
-                        "source_table": j.get("source_table") or j.get("source_name"),
-                        "dest_table": j.get("destination_collection") or j.get("dest_table"),
+                        "source_table": j.get("source_table") or j.get("source"),
+                        "dest_table": j.get("dest_table") or j.get("destination"),
                     },
                 }
             )

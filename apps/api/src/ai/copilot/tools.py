@@ -1129,25 +1129,11 @@ class DataPilotTools:
         )
 
     def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from ...services.mongodb_service import get_mongodb_service
-        mongo = get_mongodb_service()
-        jobs = mongo.list_jobs(limit=limit)
-        summary = [
-            {
-                "id": str(j.get("_id", j.get("id", ""))),
-                "source": j.get("source_name", j.get("source_type", "")),
-                "destination": j.get("destination_collection") or j.get("destination_type", ""),
-                "status": j.get("status"),
-                "records": j.get("records_processed", 0),
-                "rejected_rows": j.get("rejected_rows", 0),
-                "error": (j.get("error") or "")[:240] or None,
-                "created_at": str(j.get("created_at", "")),
-            }
-            for j in jobs
-        ]
+        from .job_reads import list_transfer_jobs
+
+        summary, counts, source = list_transfer_jobs(limit=limit)
         # "How many jobs?" must be answered from the whole history — the page we
         # read here is only the window we can show.
-        counts = mongo.count_jobs()
         return ToolResult(
             name="list_jobs",
             success=True,
@@ -1156,15 +1142,16 @@ class DataPilotTools:
                 "count": len(summary),
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
+                "store": source,
             },
         )
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from ...services.mongodb_service import get_mongodb_service
+        from .job_reads import read_transfer_job
 
-        job = get_mongodb_service().get_job((job_id or "").strip())
+        job = read_transfer_job((job_id or "").strip())
         if not job:
             return ToolResult(
                 name="get_job",

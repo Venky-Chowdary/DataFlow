@@ -66,6 +66,24 @@ def test_empty_history_asks_for_the_first_transfer():
     assert "No transfer jobs yet" in answer
 
 
+def test_last_transfer_lead_names_that_job_status():
+    from src.ai.rag.answer_composer import split_sentences
+
+    answer = narrate_jobs(
+        {
+            "jobs": _jobs(1, "completed") + _jobs(1, "failed"),
+            "count": 2,
+            "total": 2,
+            "status_counts": {"completed": 1, "failed": 1},
+        },
+        "what is the status of my last transfer",
+    )
+    lead = split_sentences(answer)[0].lower()
+    assert "last transfer job" in lead
+    assert "completed" in lead
+    assert "failed" not in lead
+
+
 def test_missing_total_falls_back_to_the_window_without_inventing_a_number():
     answer = narrate_jobs({"jobs": _jobs(2), "count": 2}, "how many jobs")
     assert "**2** transfer job(s)" in answer

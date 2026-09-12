@@ -5,9 +5,17 @@ tool counted, never from the page of rows it could show — a five-row excerpt
 presented as the answer contradicted the Jobs page and lost the operator's trust.
 """
 
+import re
+
 FAILED_STATUSES = frozenset({"failed", "cancelled", "canceled", "error"})
 
 _FAILURE_WORDS = ("fail", "failed", "failure", "error", "broken")
+
+_LAST_TRANSFER = re.compile(
+    r"\b(?:last|latest|most\s+recent)\s+(?:transfer|job|run|sync)\b"
+    r"|\bstatus of (?:my\s+|the\s+)?(?:last\s+|latest\s+)?(?:transfer|job|run)\b",
+    re.I,
+)
 
 _SHOW_LIMIT = 5
 
@@ -67,6 +75,23 @@ def narrate_jobs(output: dict, message: str | None) -> str:
             return "\n".join(lines)
         lines = [f"None of your **{total:,}** job(s) failed. Most recent:"]
         lines += [_bullet(j) for j in jobs[:_SHOW_LIMIT]]
+        return "\n".join(lines)
+
+    if _LAST_TRANSFER.search(message or ""):
+        latest = jobs[0]
+        lines = [
+            f"Your last transfer job `{latest.get('id', '?')}` is "
+            f"**{str(latest.get('status') or '?').upper()}** — "
+            f"{latest.get('source', '?')} → {latest.get('destination', '?')} "
+            f"({int(latest.get('records') or 0):,} records)."
+        ]
+        err = str(latest.get("error") or "").strip()
+        if err:
+            lines.append(f"Error: {err}")
+        rest = jobs[1:_SHOW_LIMIT]
+        if rest:
+            lines.append("Earlier jobs:")
+            lines += [_bullet(j) for j in rest]
         return "\n".join(lines)
 
     lines = [f"You have **{total:,}** transfer job(s). Most recent:"]

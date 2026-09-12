@@ -145,6 +145,81 @@ def _fmt_metric_value(value: Any) -> str:
     return str(value)
 
 
+_IDISH_COLUMN = re.compile(
+    r"id|customer|name|email|key|code|user|region|status", re.I
+)
+
+
+def _clip_member(value: Any, *, limit: int = 40) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"true", "false"}:
+        return ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _including_clause(members: list[str], *, limit: int = 4) -> str:
+    """Name the values an inventory question asked to see, in the lead sentence.
+
+    Grouped counts and samples used to open on "3 groups" / "3 rows" and put
+    the actual keys in a markdown table the sentence splitter then skipped.
+    The operator asked for those values; they belong in the first sentence.
+    """
+    shown = [m for m in members if m][:limit]
+    if not shown:
+        return ""
+    return " including " + ", ".join(shown)
+
+
+def _group_preview_values(
+    rows: list[dict[str, Any]], dim_key: str, *, limit: int = 4
+) -> list[str]:
+    labels: list[str] = []
+    for row in rows[:limit]:
+        dim = row.get(dim_key) if isinstance(row, dict) else None
+        labels.append("∅" if dim is None else _clip_member(dim, limit=32) or str(dim))
+    return labels
+
+
+def _row_preview_values(
+    rows: list[dict[str, Any]], cols: list[str], *, limit: int = 2
+) -> list[str]:
+    if not rows or not cols:
+        return []
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    ranked = sorted(
+        cols,
+        key=lambda c: (0 if _IDISH_COLUMN.search(str(c)) else 1, cols.index(c)),
+    )
+    values: list[str] = []
+    for col in ranked:
+        text = _clip_member(row.get(col))
+        if text:
+            values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _live_rows_lead(o: dict[str, Any], *, sample: bool) -> str:
+    """First sentence of a sample or query — names a cell, then the table."""
+    cols = list(o.get("columns") or [])
+    rows = list(o.get("rows") or [])
+    title = (
+        f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
+        if sample
+        else f"Query on **{o.get('connector_name')}**"
+    )
+    preview = _including_clause(_row_preview_values(rows, [str(c) for c in cols]))
+    return (
+        f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
+        + (" (truncated)" if o.get("truncated") else "")
+        + f" · {len(cols)} columns · read-only"
+        + f"{preview}."
+    )
+
+
 _GATE_ICON = {"pass": "✓", "block": "✗", "warn": "!", "skip": "–"}
 
 
@@ -424,19 +499,21 @@ def _render_aggregate(o: dict[str, Any]) -> str:
             lines.append(f"{measure.capitalize()} in {where}{scope}: **{value}**.")
     else:
         groups = int(o.get("group_count") or len(rows))
-        head = (
-            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
-            f"**{groups} group{'s' if groups != 1 else ''}**"
-        )
-        if o.get("truncated"):
-            head += f" (top {len(rows)} shown)"
-        lines.append(head)
         # Result columns come back as the generated aliases; some engines fold
         # case (Snowflake upper-cases), so match them case-insensitively.
         dim_key = cols[0] if cols else str(group_by)
         val_key = next((c for c in cols if c.lower() == alias.lower()), "")
         if not val_key:
             val_key = cols[-1] if len(cols) > 1 else alias
+        preview = _including_clause(_group_preview_values(rows, dim_key))
+        head = (
+            f"{measure.capitalize()} in {where}{scope} grouped by `{group_by}` — "
+            f"**{groups} group{'s' if groups != 1 else ''}**"
+        )
+        if o.get("truncated"):
+            head += f" (top {len(rows)} shown)"
+        head += f"{preview}."
+        lines.append(head)
         lines.append(f"| `{dim_key}` | `{val_key}` |")
         lines.append("| --- | ---: |")
         for row in rows[:15]:
@@ -2361,10 +2438,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
+                preview = _including_clause(
+                    [f"`{name}`" for name in objs[:4] if name]
+                )
                 lines = [
                     f"**{o.get('connector_name')}** ({o.get('type')}) — "
                     f"{'connected' if o.get('connected') else 'probe returned'} · "
-                    f"**{o.get('count', len(objs))}** tables/collections:"
+                    f"**{o.get('count', len(objs))}** tables/collections"
+                    f"{preview}."
                 ]
                 for name in objs[:20]:
                     lines.append(f"• `{name}`")
@@ -2376,9 +2457,17 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "introspect_connector_schema" and tr.success:
                 o = tr.output or {}
                 cols = o.get("columns") or []
+                preview = _including_clause(
+                    [
+                        f"`{c.get('name')}`"
+                        for c in cols[:4]
+                        if isinstance(c, dict) and c.get("name")
+                    ]
+                )
                 lines = [
                     f"Live schema **{o.get('connector_name')}**.`{o.get('table')}` "
-                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**:"
+                    f"({o.get('type')}) — **{o.get('column_count', len(cols))} columns**"
+                    f"{preview}."
                 ]
                 for c in cols[:40]:
                     null = "NULL" if c.get("nullable", True) else "NOT NULL"
@@ -2396,15 +2485,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 cols = o.get("columns") or []
                 rows = o.get("rows") or []
-                title = (
-                    f"Live sample **{o.get('connector_name')}**.`{o.get('table')}`"
-                    if tr.name == "sample_connector_object"
-                    else f"Query on **{o.get('connector_name')}**"
-                )
                 lines = [
-                    f"{title} ({o.get('type')}) — **{o.get('row_count', len(rows))} rows**"
-                    + (" (truncated)" if o.get("truncated") else "")
-                    + f" · {len(cols)} columns · read-only"
+                    _live_rows_lead(o, sample=tr.name == "sample_connector_object")
                 ]
                 if o.get("result_id"):
                     lines.append(f"Result ref `{o['result_id']}` (ask to analyze or filter this).")
