@@ -915,6 +915,97 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     ),
      ("blue_green_cutover",)),
     (re.compile(
+        r"\bazure\s+database\s+for\s+postgresql\b"
+        r"|\bazure\s+db\s+for\s+postgres",
+        re.I,
+    ),
+     ("azure_database_postgresql", "postgresql")),
+    (re.compile(
+        r"\bazure\s+database\s+for\s+mysql\b"
+        r"|\bazure\s+db\s+for\s+mysql\b",
+        re.I,
+    ),
+     ("azure_database_mysql", "mysql")),
+    (re.compile(
+        r"\bcloud\s+sql\s+for\s+sql\s+server\b",
+        re.I,
+    ),
+     ("cloud_sql_sqlserver",)),
+    (re.compile(
+        r"\bonedrive\b",
+        re.I,
+    ),
+     ("onedrive",)),
+    (re.compile(
+        r"\blooker\s+studio\b",
+        re.I,
+    ),
+     ("looker_studio",)),
+    (re.compile(
+        r"\blooker\b(?!\s+studio)",
+        re.I,
+    ),
+     ("looker",)),
+    (re.compile(
+        r"\bbigquery\s+omni\b",
+        re.I,
+    ),
+     ("bigquery_omni",)),
+    (re.compile(
+        r"\bgoogle\s+sheets\b"
+        r"|\bsheets\s+as\s+a\s+destination\b",
+        re.I,
+    ),
+     ("google_sheets",)),
+    (re.compile(
+        r"\balloydb\b",
+        re.I,
+    ),
+     ("alloydb",)),
+    (re.compile(
+        r"\bmicrosoft\s+graph\b"
+        r"|\bms\s+graph\b",
+        re.I,
+    ),
+     ("microsoft_graph",)),
+    (re.compile(
+        r"\bazure\s+openai\b",
+        re.I,
+    ),
+     ("azure_openai",)),
+    (re.compile(
+        r"\bazure\s+data\s+explorer\b"
+        r"|\bkusto\b",
+        re.I,
+    ),
+     ("kusto",)),
+    (re.compile(
+        r"\bevent\s+grid\b",
+        re.I,
+    ),
+     ("event_grid",)),
+    (re.compile(
+        r"\bgoogle\s+(?:cloud\s+)?dataflow\b"
+        r"|\bcloud\s+dataflow\b",
+        re.I,
+    ),
+     ("dataflow_google",)),
+    (re.compile(
+        r"\bpower\s+platform\b",
+        re.I,
+    ),
+     ("power_platform",)),
+    (re.compile(
+        r"\bconditional\s+access\b",
+        re.I,
+    ),
+     ("conditional_access",)),
+    (re.compile(
+        r"\bcloud\s+composer\b",
+        re.I,
+    ),
+     ("cloud_composer", "airflow")),
+    (re.compile(
         r"\bsnapshot\s+handoff\b"
         r"|\bhand\s+off\s+from\s+snapshot\b"
         r"|\bhow\s+do\s+i\s+do\s+the\s+snapshot\s+handoff\b",
@@ -1726,6 +1817,74 @@ _FRAME_PHRASES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
             re.I,
         ),
         ("pause", "activate", "cadence"),
+    ),
+    (
+        re.compile(r"\bazure\s+database\s+for\s+postgresql\b", re.I),
+        ("cloud", "sql", "sqlserver", "mysql"),
+    ),
+    (
+        re.compile(r"\bazure\s+database\s+for\s+mysql\b", re.I),
+        ("cloud", "sql", "sqlserver", "postgresql"),
+    ),
+    (
+        re.compile(r"\bcloud\s+sql\s+for\s+sql\s+server\b", re.I),
+        ("mysql", "postgresql", "azure"),
+    ),
+    (
+        re.compile(r"\bonedrive\b", re.I),
+        ("bigquery", "sharepoint", "warehouse"),
+    ),
+    (
+        re.compile(r"\blooker\s+studio\b", re.I),
+        ("studio", "transfer", "bigquery"),
+    ),
+    (
+        re.compile(r"\blooker\b(?!\s+studio)", re.I),
+        ("bigquery", "studio"),
+    ),
+    (
+        re.compile(r"\bbigquery\s+omni\b", re.I),
+        ("driver", "destination"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+sheets\b", re.I),
+        ("pubsub", "excel"),
+    ),
+    (
+        re.compile(r"\balloydb\b", re.I),
+        ("cloud", "sql"),
+    ),
+    (
+        re.compile(r"\bmicrosoft\s+graph\b|\bms\s+graph\b", re.I),
+        ("team", "webhook", "alert"),
+    ),
+    (
+        re.compile(r"\bazure\s+openai\b", re.I),
+        ("hybrid", "llm", "chatgpt", "pilot", "engine"),
+    ),
+    (
+        re.compile(r"\bazure\s+data\s+explorer\b|\bkusto\b", re.I),
+        ("adf", "factory", "synapse"),
+    ),
+    (
+        re.compile(r"\bevent\s+grid\b", re.I),
+        ("hubs", "event_hubs", "lineage"),
+    ),
+    (
+        re.compile(r"\bgoogle\s+(?:cloud\s+)?dataflow\b|\bcloud\s+dataflow\b", re.I),
+        ("pubsub", "datawrap"),
+    ),
+    (
+        re.compile(r"\bpower\s+platform\b", re.I),
+        ("power_bi", "powerbi", "fabric"),
+    ),
+    (
+        re.compile(r"\bconditional\s+access\b", re.I),
+        ("synapse", "allowlist", "cidr"),
+    ),
+    (
+        re.compile(r"\bcloud\s+composer\b", re.I),
+        ("azure", "sql", "cloud_sql"),
     ),
     # Bare Private Link is not Job Theater.
     (

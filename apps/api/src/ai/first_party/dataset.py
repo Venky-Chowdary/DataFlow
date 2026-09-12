@@ -210,6 +210,23 @@ _CANONICAL_ALIGNS: tuple[tuple[str, str], ...] = (
     ("can I do a blue-green cutover", "can I do a blue-green cutover"),
     ("do you support scd type 2", "do you support scd type 2"),
     ("can I use incremental by updated_at", "can I use incremental by updated_at"),
+    ("do you support azure database for postgresql", "do you support azure database for postgresql"),
+    ("do you support azure database for mysql", "do you support azure database for mysql"),
+    ("do you support cloud sql for sql server", "do you support cloud sql for sql server"),
+    ("do you support onedrive as a destination", "do you support onedrive as a destination"),
+    ("do you support looker as a destination", "do you support looker as a destination"),
+    ("do you support looker studio", "do you support looker studio"),
+    ("do you support bigquery omni", "do you support bigquery omni"),
+    ("can I write to google sheets", "can I write to google sheets"),
+    ("do you support alloydb", "do you support alloydb"),
+    ("do you support microsoft graph as a source", "do you support microsoft graph as a source"),
+    ("do you support azure openai as a destination", "do you support azure openai as a destination"),
+    ("do you support azure data explorer", "do you support azure data explorer"),
+    ("do you support azure event grid", "do you support azure event grid"),
+    ("do you support google cloud dataflow", "do you support google cloud dataflow"),
+    ("do you support power platform", "do you support power platform"),
+    ("do you support azure conditional access", "do you support azure conditional access"),
+    ("do you support cloud composer", "do you support cloud composer"),
 )
 
 

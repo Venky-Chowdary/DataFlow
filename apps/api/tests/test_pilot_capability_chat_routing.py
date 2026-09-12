@@ -49,6 +49,10 @@ def _names(question: str) -> list[str]:
         "can I use incremental by updated_at",
         "do you support SCD type 2",
         "can I write to Excel Online",
+        "do you support OneDrive as a destination",
+        "do you support Looker as a destination",
+        "do you support Azure Database for PostgreSQL",
+        "do you support Google Cloud Dataflow",
     ],
 )
 def test_capability_asks_do_not_plan_named_object_lookups(question: str) -> None:

@@ -139,6 +139,23 @@ def test_generated_sections_include_the_capability_cards() -> None:
         "Can I do a blue-green cutover",
         "Do you support SCD type 2",
         "Can I use incremental by updated_at",
+        "Do you support Azure Database for PostgreSQL",
+        "Do you support Azure Database for MySQL",
+        "Do you support Cloud SQL for SQL Server",
+        "Do you support OneDrive as a destination",
+        "Do you support Looker as a destination",
+        "Do you support Looker Studio",
+        "Do you support BigQuery Omni",
+        "Can I write to Google Sheets",
+        "Do you support AlloyDB",
+        "Do you support Microsoft Graph as a source",
+        "Do you support Azure OpenAI as a destination",
+        "Do you support Azure Data Explorer",
+        "Do you support Azure Event Grid",
+        "Do you support Google Cloud Dataflow",
+        "Do you support Power Platform",
+        "Do you support Azure Conditional Access",
+        "Do you support Cloud Composer",
     ):
         assert title in titles, title
     assert transfer_requires_confirm() is True

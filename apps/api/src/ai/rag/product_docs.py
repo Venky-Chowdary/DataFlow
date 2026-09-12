@@ -808,6 +808,73 @@ def _section_intent_bonus(
             bonus -= 6.0
     if "blue-green" in title or "blue green" in title:
         bonus += 6.0 if re.search(r"\bblue[\s-]green\b|\bzero[\s-]downtime\s+cutover\b", analysis.text, re.I) else -3.2
+    azure_pg_ask = bool(re.search(r"\bazure\s+database\s+for\s+postgresql\b", analysis.text, re.I))
+    if "azure database for postgresql" in title:
+        bonus += 6.0 if azure_pg_ask else -3.2
+    if azure_pg_ask and "cloud sql" in title:
+        bonus -= 6.0
+    azure_my_ask = bool(re.search(r"\bazure\s+database\s+for\s+mysql\b", analysis.text, re.I))
+    if "azure database for mysql" in title:
+        bonus += 6.0 if azure_my_ask else -3.2
+    if azure_my_ask and "cloud sql" in title:
+        bonus -= 6.0
+    cloud_sql_mssql_ask = bool(re.search(r"\bcloud\s+sql\s+for\s+sql\s+server\b", analysis.text, re.I))
+    if "cloud sql for sql server" in title:
+        bonus += 6.0 if cloud_sql_mssql_ask else -3.2
+    if cloud_sql_mssql_ask and title == "do you support cloud sql":
+        bonus -= 6.0
+    if "onedrive" in title:
+        bonus += 6.0 if re.search(r"\bonedrive\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bonedrive\b", analysis.text, re.I) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    looker_studio_ask = bool(re.search(r"\blooker\s+studio\b", analysis.text, re.I))
+    if "looker studio" in title:
+        bonus += 6.0 if looker_studio_ask else -3.2
+    looker_ask = bool(re.search(r"\blooker\b", analysis.text, re.I)) and not looker_studio_ask
+    if title == "do you support looker as a destination":
+        bonus += 6.0 if looker_ask else -3.2
+    if (looker_ask or looker_studio_ask) and "bigquery as a destination" in title:
+        bonus -= 6.0
+    if "bigquery omni" in title:
+        bonus += 6.0 if re.search(r"\bbigquery\s+omni\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bbigquery\s+omni\b", analysis.text, re.I) and title == "do you support bigquery as a destination":
+        bonus -= 6.0
+    if "google sheets" in title:
+        bonus += 6.0 if re.search(r"\bgoogle\s+sheets\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+sheets\b", analysis.text, re.I) and "pub/sub" in title:
+        bonus -= 6.0
+    if "alloydb" in title:
+        bonus += 6.0 if re.search(r"\balloydb\b", analysis.text, re.I) else -3.2
+    if "microsoft graph" in title:
+        bonus += 6.0 if re.search(r"\bgraph\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bmicrosoft\s+graph\b|\bms\s+graph\b", analysis.text, re.I) and "teams as a destination" in title:
+        bonus -= 6.0
+    if "azure openai" in title:
+        bonus += 6.0 if re.search(r"\bazure\s+openai\b", analysis.text, re.I) else -3.2
+    if "azure data explorer" in title or title.endswith("kusto"):
+        bonus += 6.0 if re.search(r"\bdata\s+explorer\b|\bkusto\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bdata\s+explorer\b|\bkusto\b", analysis.text, re.I) and "azure data factory" in title:
+        bonus -= 6.0
+    if "event grid" in title:
+        bonus += 6.0 if re.search(r"\bevent\s+grid\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bevent\s+grid\b", analysis.text, re.I) and "event hubs" in title:
+        bonus -= 6.0
+    if "google cloud dataflow" in title:
+        bonus += 6.0 if re.search(r"\bdataflow\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bgoogle\s+(?:cloud\s+)?dataflow\b|\bcloud\s+dataflow\b", analysis.text, re.I) and "pub/sub" in title:
+        bonus -= 6.0
+    if "power platform" in title:
+        bonus += 6.0 if re.search(r"\bpower\s+platform\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bpower\s+platform\b", analysis.text, re.I) and "power bi" in title:
+        bonus -= 6.0
+    if "conditional access" in title:
+        bonus += 6.0 if re.search(r"\bconditional\s+access\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bconditional\s+access\b", analysis.text, re.I) and "azure synapse" in title:
+        bonus -= 6.0
+    if "cloud composer" in title:
+        bonus += 6.0 if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) else -3.2
+    if re.search(r"\bcloud\s+composer\b", analysis.text, re.I) and "azure sql" in title:
+        bonus -= 6.0
     if "azure data factory" in title:
         bonus += 6.0 if re.search(r"\bdata\s+factory\b|\badf\b", analysis.text, re.I) else -3.2
     if "adls as a destination" in title:

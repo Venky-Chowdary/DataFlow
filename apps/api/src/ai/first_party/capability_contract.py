@@ -441,6 +441,10 @@ def postgresql_is_transfer_ready() -> bool:
     return "postgresql" in _transfer_ready_drivers()
 
 
+def mysql_is_transfer_ready() -> bool:
+    return "mysql" in _transfer_ready_drivers()
+
+
 def mongodb_is_transfer_ready() -> bool:
     return "mongodb" in _transfer_ready_drivers()
 
@@ -2241,6 +2245,307 @@ def custom_slot_name_card() -> CapabilityCard | None:
     )
 
 
+def onedrive_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"onedrive", "one_drive"})
+
+
+def looker_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"looker", "looker_studio"})
+
+
+def bigquery_omni_shipped() -> bool:
+    return False
+
+
+def google_sheets_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"sheets", "google_sheets", "gsheets"})
+
+
+def alloydb_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"alloydb", "alloy_db"})
+
+
+def microsoft_graph_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"graph", "microsoft_graph", "msgraph"})
+
+
+def azure_openai_shipped() -> bool:
+    return False
+
+
+def kusto_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"kusto", "adx", "azure_data_explorer"})
+
+
+def event_grid_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"eventgrid", "event_grid"})
+
+
+def google_dataflow_shipped() -> bool:
+    return False
+
+
+def power_platform_shipped() -> bool:
+    return bool(_transfer_ready_drivers() & {"powerplatform", "power_platform", "dataverse"})
+
+
+def conditional_access_shipped() -> bool:
+    return False
+
+
+def azure_database_postgresql_card() -> CapabilityCard | None:
+    if not postgresql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Database for PostgreSQL",
+        text=(
+            "Yes — Azure Database for PostgreSQL is the PostgreSQL driver "
+            "(postgresql / azure_database_postgresql). "
+            "It is not Cloud SQL and not Azure SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_database_mysql_card() -> CapabilityCard | None:
+    if not mysql_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Database for MySQL",
+        text=(
+            "Yes — Azure Database for MySQL is the MySQL driver "
+            "(mysql / azure_database_mysql). "
+            "It is not Cloud SQL and not Azure SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def cloud_sql_sqlserver_card() -> CapabilityCard | None:
+    if not sqlserver_is_transfer_ready():
+        return None
+    return CapabilityCard(
+        title="Do you support Cloud SQL for SQL Server",
+        text=(
+            "Cloud SQL for SQL Server is not its own driver "
+            "(cloud_sql_sqlserver is false). "
+            "Connect the instance as SQL Server (sqlserver). It is not Azure SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def onedrive_card() -> CapabilityCard | None:
+    if onedrive_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support OneDrive as a destination",
+        text=(
+            "Datawrap does not ship OneDrive as a transfer-ready destination "
+            "(onedrive is false). "
+            "A warehouse driver card is not a OneDrive writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def looker_card() -> CapabilityCard | None:
+    if looker_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Looker as a destination",
+        text=(
+            "Datawrap does not ship Looker as a transfer-ready destination "
+            "(looker is false). "
+            "BigQuery is not a Looker writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def looker_studio_card() -> CapabilityCard | None:
+    if looker_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Looker Studio",
+        text=(
+            "Datawrap does not ship Looker Studio as a transfer destination "
+            "(looker_studio is false). "
+            "Transfer Studio is not Looker Studio."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def bigquery_omni_card() -> CapabilityCard | None:
+    if bigquery_omni_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support BigQuery Omni",
+        text=(
+            "BigQuery Omni is not a separate connect option "
+            "(bigquery_omni is false). "
+            "The BigQuery driver is transfer-ready; Omni multi-cloud is not "
+            "a connect field."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_sheets_card() -> CapabilityCard | None:
+    if google_sheets_shipped():
+        return None
+    return CapabilityCard(
+        title="Can I write to Google Sheets",
+        text=(
+            "Datawrap does not ship Google Sheets as a transfer-ready "
+            "destination (google_sheets is false). "
+            "Pub/Sub is not a Sheets writer."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def alloydb_card() -> CapabilityCard | None:
+    if alloydb_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support AlloyDB",
+        text=(
+            "AlloyDB is not its own transfer-ready driver (alloydb is false). "
+            "Connect the instance as PostgreSQL. It is not Cloud SQL."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def microsoft_graph_card() -> CapabilityCard | None:
+    if microsoft_graph_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Microsoft Graph as a source",
+        text=(
+            "Datawrap does not ship Microsoft Graph as a transfer-ready "
+            "source (microsoft_graph is false). "
+            "Teams alerts are not Graph."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def azure_openai_card() -> CapabilityCard | None:
+    if azure_openai_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure OpenAI as a destination",
+        text=(
+            "Datawrap does not ship Azure OpenAI as a transfer destination "
+            "(azure_openai is false). "
+            "Settings → AI Hybrid is wording polish, not an Azure OpenAI write."
+        ),
+        source_module="src/ai/first_party/engine.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def kusto_card() -> CapabilityCard | None:
+    if kusto_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Data Explorer",
+        text=(
+            "Datawrap does not ship Azure Data Explorer / Kusto as a "
+            "transfer-ready driver (kusto is false). "
+            "Azure Data Factory is not Kusto."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def event_grid_card() -> CapabilityCard | None:
+    if event_grid_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Event Grid",
+        text=(
+            "Datawrap does not ship Azure Event Grid as a transfer-ready "
+            "driver (event_grid is false). "
+            "Event Hubs is not Event Grid."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def google_dataflow_card() -> CapabilityCard | None:
+    if google_dataflow_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Google Cloud Dataflow",
+        text=(
+            "Datawrap does not run Google Cloud Dataflow "
+            "(dataflow_google is false). "
+            "Pub/Sub is not Dataflow, and Datawrap is not Cloud Dataflow."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="connectors",
+    )
+
+
+def power_platform_card() -> CapabilityCard | None:
+    if power_platform_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Power Platform",
+        text=(
+            "Datawrap does not ship Power Platform as a transfer destination "
+            "(power_platform is false). "
+            "Power BI is not Power Platform."
+        ),
+        source_module="services/catalog_service.py · unique_driver_types",
+        category="connectors",
+    )
+
+
+def conditional_access_card() -> CapabilityCard | None:
+    if conditional_access_shipped():
+        return None
+    return CapabilityCard(
+        title="Do you support Azure Conditional Access",
+        text=(
+            "Datawrap does not ship Azure Conditional Access as a network "
+            "control (conditional_access is false). "
+            "It is not Synapse and not an IP allowlist."
+        ),
+        source_module="src/routers/workspace_router.py · ip_allowlist",
+        category="connectors",
+    )
+
+
+def cloud_composer_card() -> CapabilityCard | None:
+    return CapabilityCard(
+        title="Do you support Cloud Composer",
+        text=(
+            "Datawrap does not run Cloud Composer or Airflow DAGs "
+            "(cloud_composer is false). "
+            "An external orchestrator can call /api/v1 after Confirm."
+        ),
+        source_module="src/ai/copilot/transfer_tools.py · start_transfer",
+        category="product",
+    )
+
+
 def blue_green_cutover_card() -> CapabilityCard | None:
     if blue_green_cutover_shipped():
         return None
@@ -2379,6 +2684,23 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         aws_iam_role_card,
         custom_slot_name_card,
         blue_green_cutover_card,
+        azure_database_postgresql_card,
+        azure_database_mysql_card,
+        cloud_sql_sqlserver_card,
+        onedrive_card,
+        looker_card,
+        looker_studio_card,
+        bigquery_omni_card,
+        google_sheets_card,
+        alloydb_card,
+        microsoft_graph_card,
+        azure_openai_card,
+        kusto_card,
+        event_grid_card,
+        google_dataflow_card,
+        power_platform_card,
+        conditional_access_card,
+        cloud_composer_card,
         column_level_lineage_card,
     ):
         card = builder()
