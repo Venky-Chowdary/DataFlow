@@ -853,6 +853,54 @@ def _owe_subjects(
     return out
 
 
+# A lead that says the asked-for thing is not there settles the question.
+_SETTLED_NEGATIVE = re.compile(
+    r"\b(?:is|are) not (?:a |an |its own )?(?:transfer-ready|shipped|a connect option|"
+    r"supported|separate)\b|\b(?:does|do) not (?:ship|include|support)\b|\bnot shipped\b",
+    re.I,
+)
+# A sentence that tells the operator how to do it.
+_INSTRUCTIONAL = re.compile(
+    r"^\s*(?:Click|Pick|Open|Connect|Then|Enter|Paste|Choose)\b"
+    r"|\bconfigured the same way\b|\bConnect the instance\b|\bclick Test\b",
+    re.I,
+)
+# Capability cards are written as a question about one named thing.
+_CAPABILITY_CARD = re.compile(r"^(?:do you|does \w+|can i|is \w+ supported)\b", re.I)
+
+
+def _prune_tails(analysis: QueryAnalysis, chosen: list[Candidate]) -> list[Candidate]:
+    """Drop supporting sentences the lead has already made wrong or off-topic.
+
+    Two tails measured in browser QA. "Can I connect Databricks" opened
+    correctly on "Databricks is not a transfer-ready driver" and then explained
+    how to configure a warehouse destination — instructions for a thing the
+    lead just said cannot be done. "How do I connect a postgres database"
+    opened on the procedure and then borrowed "Connect the instance as MySQL or
+    PostgreSQL" from the Aurora and Cloud SQL capability cards, whose subjects
+    the question never named. Neither is a ranking error the lead can fix; the
+    lead is right and the tail is judged relative to it.
+    """
+    if not chosen:
+        return chosen
+    lead = chosen[0]
+    settled = bool(_SETTLED_NEGATIVE.search(lead.text))
+    asked = {t for t in analysis.terms if is_subject_term(t)}
+    out = [lead]
+    for cand in chosen[1:]:
+        if settled and cand.section_title != lead.section_title and _INSTRUCTIONAL.search(cand.text):
+            continue
+        if (
+            analysis.ask == "procedure"
+            and cand.section_title != lead.section_title
+            and _CAPABILITY_CARD.match(cand.section_title)
+            and not (set(content_terms(cand.section_title)) & asked)
+        ):
+            continue
+        out.append(cand)
+    return out
+
+
 def _lead(pool: Sequence[Candidate]) -> Candidate:
     """The sentence to open with: names the subject if anything does.
 
@@ -944,6 +992,7 @@ def compose_answer(
     if not chosen:
         return ""
     chosen = _owe_subjects(analysis, candidates, chosen, limit=limit)
+    chosen = _prune_tails(analysis, chosen)
 
     body = " ".join(c.text for c in chosen)
     parts = [body]

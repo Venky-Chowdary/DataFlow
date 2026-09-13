@@ -87,3 +87,26 @@ def test_single_subject_answers_are_unchanged_by_the_subject_debt() -> None:
     assert "does **not** skip preflight" in lead, lead
     lead = _lead("do you use openai by default")
     assert "local engine" in lead, lead
+
+
+def test_a_settled_negative_is_not_followed_by_how_to_do_it() -> None:
+    """Browser QA: the Databricks refusal was followed by warehouse connect steps
+    and a dispatch list that named databricks as an engine."""
+    body = _answer("can i connect databricks")
+    assert "configured the same way" not in body, body
+    assert "pick the type under" not in body, body
+    assert "not transfer-ready and cannot be connected: databricks" in body, body
+
+
+def test_a_procedure_does_not_borrow_sibling_capability_cards() -> None:
+    """Browser QA: the PostgreSQL procedure ended with the Aurora/Cloud SQL card's
+    "Connect the instance as MySQL or PostgreSQL"."""
+    body = _answer("how do I connect a postgres database")
+    assert "connect the instance as mysql" not in body, body
+    assert "cloud sql" not in body, body
+
+
+def test_pause_wording_does_not_say_activate_turns_it_off() -> None:
+    body = _answer("how do i pause a pipeline")
+    assert "pause a saved pipeline from pipelines to turn it off" in body, body
+    assert "activate turns it back on" in body, body

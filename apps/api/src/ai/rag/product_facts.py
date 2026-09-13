@@ -1135,10 +1135,20 @@ def _connector_catalog_section() -> GeneratedSection | None:
         # "how many file formats can you read", the answer opened with the
         # format list and never said how many there were — the list is the
         # right sentence, it just made the operator count it themselves.
+        # The registry enumerates every driver type the code knows, including
+        # ones the catalog does not mark transfer-ready; listing them all as
+        # "dispatches on" contradicted the honesty card one sentence earlier.
+        live = [d for d in databases if d.lower() in ready] if ready else databases
+        not_live = [d for d in databases if d not in live]
         lines.append(
             f"Database and warehouse engines the transfer engine dispatches on, "
-            f"{len(databases)} of them: " + ", ".join(databases) + "."
+            f"{len(live)} of them: " + ", ".join(live) + "."
         )
+        if not_live:
+            lines.append(
+                "Registered driver types that are not transfer-ready and cannot "
+                "be connected: " + ", ".join(not_live) + "."
+            )
         # Name only transfer-ready warehouses. A catalog tile for Databricks
         # or Redshift is not a live writer — listing them here stole those
         # honesty cards and invented a destination.
@@ -2107,8 +2117,8 @@ def _pause_schedule_section() -> GeneratedSection:
         doc_title="Pipelines & schedules",
         section_title="Procedure: pause a schedule",
         text=(
-            "Pause or Activate a saved pipeline from Pipelines to turn it off, "
-            "including a nightly pipeline. "
+            "Pause a saved pipeline from Pipelines to turn it off, including a "
+            "nightly pipeline; Activate turns it back on. "
             "The detail drawer on a saved pipeline is where Pause and Activate "
             "live — not Job Theater, and not the create-pipeline form."
         ),
