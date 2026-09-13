@@ -141,16 +141,23 @@ def test_no_provider_uses_local_engine(store):
     assert "no ai provider key" in decision["reason"].lower()
 
 
-def test_saved_key_turns_auto_into_hybrid(store):
+def test_saved_key_stays_local_until_hybrid_opt_in(store):
+    """A pasted key must not exfiltrate workspace evidence on auto."""
     from src.ai.llm.provider import pilot_engine_decision, resolve_pilot_engine
 
     _save_key("openai", "sk-persisted-key")
 
     decision = pilot_engine_decision()
-    assert resolve_pilot_engine() == "hybrid"
-    assert decision["source"] == "configured_provider"
+    assert resolve_pilot_engine() == "local"
+    assert decision["engine"] == "local"
     assert decision["configured_providers"] == ["openai"]
+    assert "idle" in decision["reason"].lower() or "does not leave" in decision["reason"].lower()
     assert "sk-persisted-key" not in decision["reason"]
+
+    assert integrations_store.set_pilot_engine_preference("hybrid") == "hybrid"
+    opted = pilot_engine_decision()
+    assert opted["engine"] == "hybrid"
+    assert opted["source"] == "workspace_setting"
 
 
 def test_saved_workspace_preference_pins_local_despite_key(store):
@@ -351,7 +358,7 @@ def test_rejected_key_stops_the_engine_promising_that_provider(store):
 
     _save_key("openai", "sk-rejected-key")
     provider_mod.clear_auth_failures()
-    assert provider_mod.pilot_engine_decision()["engine"] == "hybrid"
+    assert provider_mod.pilot_engine_decision()["engine"] == "local"
 
     provider_mod._mark_provider_auth_failed("openai", "Error code: 401 - invalid_api_key")
     try:

@@ -1391,11 +1391,10 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "First-party attention+copy GRU (Luong attention, pointer-"
-                    "generator mix) trained on Datawrap cards and packed "
-                    "workspace facts. Generate over evidence, then fail-closed "
-                    "gates. Small in-domain model — not a foundation model. "
-                    "OpenAI / Anthropic / Ollama stay opt-in."
+                    "First-party attention+copy GRU on this host. Warehouse "
+                    "evidence stays on-box by default — OpenAI / Anthropic / "
+                    "Ollama are explicit Hybrid/Cloud opt-in only, never the "
+                    "default, because this is a data product."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1617,8 +1616,11 @@ class DataPilotTools:
                 (
                     "Datawrap Pilot's **own local engine** is the default brain — a "
                     "first-party copy-grounded generator (NL → tools → compose) "
-                    "with no OpenAI, Anthropic, or Ollama key. A third-party LLM is optional polish "
-                    "you turn on in Settings → AI; it never supplies transfer, aggregate, or Confirm facts."
+                    "with no OpenAI, Anthropic, or Ollama key. This is a data product: "
+                    "schemas and job evidence stay on-box. A third-party LLM is optional "
+                    "polish you turn on explicitly in Settings → AI (Hybrid or Cloud); "
+                    "saving a key does not send traffic. It never supplies transfer, "
+                    "aggregate, or Confirm facts."
                 ),
             ),
         ]

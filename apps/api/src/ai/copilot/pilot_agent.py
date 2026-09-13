@@ -2842,11 +2842,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Datawrap Pilot**. I speak with Datawrap's own small "
-                    "attention+copy GRU over retrieved evidence and live tools, "
-                    "then fail-closed gates. I am not ChatGPT and not a "
-                    "foundation model. OpenAI / Anthropic / Ollama stay optional "
-                    "under **Settings → AI**. I will not invent warehouse facts.",
+                    "I'm **Datawrap Pilot**. I speak on this host with Datawrap's "
+                    "own attention+copy GRU over retrieved evidence and live "
+                    "tools. I am not ChatGPT. Third-party LLMs stay off unless "
+                    "you explicitly pick Hybrid or Cloud in **Settings → AI** — "
+                    "this is a data product, so schemas and job evidence do not "
+                    "leave the box by default. I will not invent warehouse facts.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:

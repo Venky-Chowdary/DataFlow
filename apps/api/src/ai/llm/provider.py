@@ -597,9 +597,10 @@ def pilot_engine_decision() -> dict:
     """Which engine Pilot will use, and the reason — never a credential.
 
     Precedence: DATAFLOW_PILOT_ENGINE, then the saved workspace preference,
-    then ``auto``. Under ``auto`` a cloud provider the operator configured in
-    Settings turns Pilot hybrid; with nothing configured Pilot stays on the
-    local engine, which always works offline.
+    then ``auto``. ``auto`` stays on the local engine even when a key is
+    saved — a data product must not send schemas, samples, or job
+    evidence to a third-party LLM because someone pasted a key. Hybrid
+    and cloud are explicit opt-in only.
     """
     from services.integrations_store import get_pilot_engine_preference
 
@@ -646,12 +647,14 @@ def pilot_engine_decision() -> dict:
         }
 
     if configured:
+        idle = ", ".join(configured)
         return {
-            "engine": "hybrid",
-            "source": "configured_provider",
+            "engine": "local",
+            "source": "default",
             "reason": (
-                f"Provider key configured for {', '.join(configured)} — Pilot runs its "
-                "tools locally, then uses that provider for the answer."
+                f"Auto keeps Pilot on the local engine so workspace evidence "
+                f"does not leave the box. Saved key(s) for {idle} stay idle "
+                "until you pick Hybrid or Cloud in Settings → AI."
             ),
             "configured_providers": configured,
         }
@@ -804,7 +807,7 @@ def get_model_capabilities() -> dict:
         "providers": rows,
         "guarantees": [
             "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
-            "Save a provider key in Settings and Pilot uses it automatically; with no key saved Pilot stays local.",
+            "A saved provider key does not send traffic. Hybrid or Cloud must be chosen explicitly — this is a data product; schemas and job evidence stay on-box by default.",
             "DATAFLOW_PILOT_ENGINE, when set, overrides the workspace choice.",
             "Cloud providers are optional and only narrate: tools, gates and proofs always run locally, so a provider outage changes wording, never correctness.",
             "Grounded tool results are executed once; mutations always require operator Confirm.",

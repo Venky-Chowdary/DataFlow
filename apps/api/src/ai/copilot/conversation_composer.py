@@ -266,10 +266,10 @@ def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
         )
     return (
         f"{base}\n\n"
-        "Turn on OpenAI or Anthropic under **Settings → AI** if you want a "
-        "cloud model to chat about topics outside this product. Local Pilot "
-        "still answers anything I can prove from your connectors, jobs, "
-        f"pipelines, Validate runs, and docs.{live}"
+        "Local Pilot answers anything I can prove from your connectors, jobs, "
+        "pipelines, Validate runs, and docs. A cloud model is an explicit "
+        "Hybrid or Cloud choice in **Settings → AI** — it sends that chat "
+        f"off-box, so it stays off by default.{live}"
     )
 
 

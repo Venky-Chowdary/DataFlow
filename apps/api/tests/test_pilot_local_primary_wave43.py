@@ -16,8 +16,9 @@ import pytest
 def _no_configured_provider(tmp_path, monkeypatch):
     """Local-primary means: with no provider key saved, Pilot is local.
 
-    A saved key is a deliberate operator choice and is covered by
-    ``test_byo_provider_keys.py``; these cases pin the zero-key baseline.
+    A saved key is not enough to leave the box — Hybrid/Cloud must be
+    explicit (``test_byo_provider_keys.py``). These cases pin the
+    zero-key and auto baseline.
     """
     from services import integrations_store
 

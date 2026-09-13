@@ -30,7 +30,9 @@ this.
 
 Honesty bar (do not regress)
 ----------------------------
-* Third-party providers stay **opt-in polish** in Settings → AI.
+* Third-party providers stay **explicit Hybrid/Cloud opt-in**. A saved
+  key does not send traffic. Default is on-box because this is a data
+  product (schemas, samples, credentials, job evidence).
 * CDC default remains **at-least-once upsert on ``_df_lsn``**.
 * dbt and SSH are **not** product capabilities. The claim gate refuses
   them unless the evidence already names them (it should not).

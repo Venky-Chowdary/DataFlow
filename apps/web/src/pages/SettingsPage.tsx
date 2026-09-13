@@ -886,7 +886,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-head">
                     <div>
                       <h2>Active model route</h2>
-                      <p>Datawrap&apos;s own Pilot engine answers by default — a first-party copy-grounded generator, not a third-party foundation model. A third-party model is used only when you save a key and choose Hybrid.</p>
+                      <p>Datawrap is a data-movement product. Pilot stays on-box by default so schemas, samples, credentials, and job evidence are not sent to OpenAI or Anthropic. Saving a key stores it; nothing leaves this workspace until you explicitly pick Hybrid or Cloud.</p>
                     </div>
                   </div>
                   <div className="df2-settings-section-body">
@@ -909,10 +909,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           value={engineStatus?.preference ?? "auto"}
                           onChange={(e) => void saveEngineChoice(e.target.value as PilotEngineChoice)}
                         >
-                          <option value="auto">Auto — our engine unless you saved a provider key</option>
+                          <option value="auto">Auto — our engine only (keys stay idle)</option>
                           <option value="local">Our engine only</option>
-                          <option value="hybrid">Hybrid — our tools, third-party wording (opt-in)</option>
-                          <option value="cloud">Third-party provider (opt-in)</option>
+                          <option value="hybrid">Hybrid — our tools, third-party wording (sends evidence off-box)</option>
+                          <option value="cloud">Third-party provider (sends evidence off-box)</option>
                         </select>
                         <p className="df2-settings-hint">
                           {engineStatus
