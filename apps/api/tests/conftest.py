@@ -331,6 +331,8 @@ def spend_pilot_ack(ack_id: str, actor: str) -> dict:
     """
     import asyncio
 
+    from fastapi import BackgroundTasks
+
     from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
 
     class _State:
@@ -341,5 +343,7 @@ def spend_pilot_ack(ack_id: str, actor: str) -> dict:
         headers: dict[str, str] = {}
 
     return asyncio.run(
-        copilot_confirm(ConfirmActionRequest(ack_id=ack_id, actor=actor), _HttpRequest())
+        copilot_confirm(
+            ConfirmActionRequest(ack_id=ack_id, actor=actor), _HttpRequest(), BackgroundTasks()
+        )
     )

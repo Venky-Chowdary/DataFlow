@@ -22,7 +22,13 @@ from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
 from .job_narration import narrate_jobs
-from .tool_permissions import bind_current_context, is_permission_denial
+from .tool_permissions import (
+    MUTATE,
+    bind_current_context,
+    is_permission_denial,
+    tool_requirement,
+)
+from .lifecycle_tools import LIFECYCLE_TOOL_NAMES, short_job_id
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
@@ -40,6 +46,21 @@ logger = logging.getLogger(__name__)
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
+# Bounds on what a provider model may do inside one native tool loop.
+_NATIVE_MAX_TOOL_CALLS = 8
+_NATIVE_MAX_CALLS_PER_ROUND = 4
+_NATIVE_TOOL_OUTPUT_CHARS = 12_000
+
+_NATIVE_MUTATION_REFUSED = (
+    "Refused: “{name}” changes workspace state and is staged only by the deterministic "
+    "planner, never from a model-chosen call. Tell the operator to state the operation "
+    "plainly (for example “cancel job 1a2b” or “pause pipeline nightly-orders”) so the "
+    "planner can stage it with a Confirm step."
+)
+_NATIVE_BUDGET_REFUSED = (
+    "Refused: tool budget for this turn is spent ({limit} calls). Answer from the "
+    "results already returned, or say what is still unknown."
+)
 
 
 class _UnavailableAnthropic:
@@ -836,6 +857,7 @@ _PROPOSAL_TOOLS = frozenset(
         "run_schedule_now",
         "create_connector",
         "remediate_validation",
+        *(LIFECYCLE_TOOL_NAMES - {"test_connector"}),
     }
 )
 
@@ -850,6 +872,7 @@ _ACTION_TOOL_NAMES = frozenset(
         "plan_transfer_route",
         "start_transfer_studio",
         "remediate_validation",
+        *LIFECYCLE_TOOL_NAMES,
     }
 )
 
@@ -869,6 +892,53 @@ def _failure_reply(failed: list[Any]) -> str:
         else "I couldn't complete that lookup:"
     )
     return "\n".join([head, *(f"• {e}" for e in errors)])
+
+
+def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
+    """Preview text for a staged lifecycle ack, or the live probe result."""
+    p = o.get("preview") or {}
+    if name == "test_connector":
+        verdict = "reachable" if o.get("ok") else "**not reachable**"
+        msg = str(o.get("message") or "").strip()
+        line = f"**{o.get('name')}** ({o.get('type') or 'connector'}) is {verdict}."
+        return f"{line} {msg}".strip() if msg else line
+    label = o.get("label") or "Confirm this change"
+    if name in ("cancel_job", "retry_job", "resume_job", "replay_quarantine"):
+        route = " → ".join(x for x in (p.get("source"), p.get("destination")) if x)
+        bits = [f"Job **{short_job_id(str(p.get('job_id') or ''))}** is **{p.get('status') or '—'}**"]
+        if route:
+            bits.append(route + (f" · `{p.get('table')}`" if p.get("table") else ""))
+        if p.get("rows_written") is not None:
+            bits.append(f"{p.get('rows_written')} rows written")
+        if p.get("rejected_rows"):
+            bits.append(f"{p.get('rejected_rows')} quarantined")
+        effect = {
+            "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
+            "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
+            "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows through the destination writer with the original mapping.",
+        }[name]
+        return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
+    if name == "delete_connector":
+        bound = p.get("bound_schedules") or []
+        warn = (
+            f"\n⚠ {len(bound)} pipeline(s) reference it: {', '.join(f'**{b}**' for b in bound)} — they will fail on their next run."
+            if bound
+            else ""
+        )
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
+            f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "set_schedule_enabled":
+        after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
+        return f"Pipeline **{p.get('name')}** will {after}.\n\nConfirm to proceed: **{label}**."
+    if name == "delete_schedule":
+        return (
+            f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
+            f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
+        )
+    return f"Confirm to proceed: **{label}**."
 
 
 def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
@@ -912,7 +982,7 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
             "I can read that live — I need the table and which saved connector holds it.",
             f'For example: "sample users{on_conn}" or "show orders from {dst_ex}".',
         ))
-    if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
+    if re.search(r"\b(?:transfer|sync|move|migrate|copy|replicate)\b", lower):
         options.append((
             "I can run that transfer once I know which saved connector is on each "
             "side — those names are connectors, not tables.",
@@ -922,9 +992,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         ))
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
         options.append((
-            "Deletes are deliberately not something a prompt can trigger.",
-            "I run read-only actions and confirmed connector creates; destructive "
-            "changes have to be made in the UI.",
+            "I delete one named connector or pipeline at a time, and only after you Confirm.",
+            'Bulk deletes and table drops stay in the UI. Try: "delete the '
+            f'{src_ex} connector" or "delete pipeline <name>".',
         ))
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         options.append((
@@ -1244,6 +1314,19 @@ class DataPilotAgent:
                     ctx=ctx,
                     pending_labels=pending_labels or None,
                 )
+
+        # Transcript questions, injection, attributed claims, cross-tenant reads
+        # and gate bypasses are settled here, before Help retrieval or any LLM
+        # can narrate an answer to them. Routing + lexical cue must both agree.
+        from . import intent_policy
+
+        policy = intent_policy.decide(message)
+        if policy is not None:
+            ctx = self.context_builder.build(data_context, message)
+            return _with_llm_footnote(
+                intent_policy.answer(policy, history=history, ctx=ctx),
+                _resolve_pilot_engine(),
+            )
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
@@ -1593,6 +1676,7 @@ class DataPilotAgent:
                 or "connector not found" in err.lower()
                 or ("dataset" in err.lower() and "not found" in err.lower())
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
+                or tr.name in LIFECYCLE_TOOL_NAMES
             ):
                 turn.needs_clarification = err
             return
@@ -1715,6 +1799,50 @@ class DataPilotAgent:
                 "payload": out,
             })
 
+    def _native_tool_call(
+        self,
+        turn: "PilotTurn",
+        name: str,
+        arguments: dict | None,
+        data_context: dict | None,
+    ) -> tuple[ToolResult, str]:
+        """Run one model-chosen tool call and return ``(result, payload_for_model)``.
+
+        The native loop is reached only after the deterministic planner found no
+        grounded answer, so it is a *read* loop: a mutating tool chosen by the
+        model is refused rather than staged, the per-turn call budget is
+        enforced here rather than trusted to the model, and the payload handed
+        back is clipped so one wide sample cannot blow the context window.
+        Permission checks stay inside :meth:`tools.execute`.
+        """
+        if len(turn.tool_results) >= _NATIVE_MAX_TOOL_CALLS:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_BUDGET_REFUSED.format(limit=_NATIVE_MAX_TOOL_CALLS),
+            )
+        elif tool_requirement(name)[1] == MUTATE:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_MUTATION_REFUSED.format(name=name),
+            )
+        else:
+            args = self._with_result_context(name, arguments or {}, data_context)
+            tr = self.tools.execute(name, args)
+        turn.tool_results.append(tr)
+        self._append_tool_actions(turn, tr)
+        payload = json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default)
+        if len(payload) > _NATIVE_TOOL_OUTPUT_CHARS:
+            payload = json.dumps({
+                "truncated": True,
+                "chars": len(payload),
+                "preview": payload[:_NATIVE_TOOL_OUTPUT_CHARS],
+            })
+        return tr, payload
+
     def _anthropic_agent_loop(
         self,
         message: str,
@@ -1777,21 +1905,18 @@ class DataPilotAgent:
             if response.get("content"):
                 assistant_content.append({"type": "text", "text": response["content"]})
             tool_results_content = []
-            for tc in tool_calls:
+            for tc in tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]:
                 assistant_content.append({
                     "type": "tool_use",
                     "id": tc["id"],
                     "name": tc["name"],
                     "input": tc["input"],
                 })
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 tool_results_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
-                    "content": json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default),
+                    "content": payload,
                 })
 
             messages.append({"role": "assistant", "content": assistant_content})
@@ -2334,6 +2459,7 @@ Draft answer:
                     )
                 break
 
+            tool_calls = tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]
             assistant_msg: dict = {
                 "role": "assistant",
                 "content": response.get("content") or None,
@@ -2351,17 +2477,11 @@ Draft answer:
             }
             messages.append(assistant_msg)
             for tc in tool_calls:
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": json.dumps(
-                        tr.output if tr.success else {"error": tr.error},
-                        default=json_default,
-                    ),
+                    "content": payload,
                 })
 
         if used_native and turn.tool_results:
@@ -2885,6 +3005,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
+            elif tr.name in LIFECYCLE_TOOL_NAMES and tr.success:
+                parts.append(_render_lifecycle(tr.name, tr.output or {}))
             elif tr.name == "create_schedule" and tr.success:
                 parts.append(_render_schedule_stage(tr.output or {}))
             elif tr.name == "create_schedule" and isinstance(tr.output, dict) and tr.output.get(
@@ -3714,7 +3836,7 @@ You are Datawrap Pilot for Datawrap only — data knowledge, product capabilitie
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
-For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+You may only read. Mutations (start, create, cancel, retry, resume, replay, pause, delete) are staged by the planner from the operator's own words and go through Confirm — do not call them; tell the operator what to say, and never claim anything ran.
 Respect session focus and open clarifications above — do not invent a different connector or table.
 Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 

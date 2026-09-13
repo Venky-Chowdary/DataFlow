@@ -1135,10 +1135,20 @@ def _connector_catalog_section() -> GeneratedSection | None:
         # "how many file formats can you read", the answer opened with the
         # format list and never said how many there were — the list is the
         # right sentence, it just made the operator count it themselves.
+        # The registry enumerates every driver type the code knows, including
+        # ones the catalog does not mark transfer-ready; listing them all as
+        # "dispatches on" contradicted the honesty card one sentence earlier.
+        live = [d for d in databases if d.lower() in ready] if ready else databases
+        not_live = [d for d in databases if d not in live]
         lines.append(
             f"Database and warehouse engines the transfer engine dispatches on, "
-            f"{len(databases)} of them: " + ", ".join(databases) + "."
+            f"{len(live)} of them: " + ", ".join(live) + "."
         )
+        if not_live:
+            lines.append(
+                "Registered driver types that are not transfer-ready and cannot "
+                "be connected: " + ", ".join(not_live) + "."
+            )
         # Name only transfer-ready warehouses. A catalog tile for Databricks
         # or Redshift is not a live writer — listing them here stole those
         # honesty cards and invented a destination.
@@ -2107,8 +2117,8 @@ def _pause_schedule_section() -> GeneratedSection:
         doc_title="Pipelines & schedules",
         section_title="Procedure: pause a schedule",
         text=(
-            "Pause or Activate a saved pipeline from Pipelines to turn it off, "
-            "including a nightly pipeline. "
+            "Pause a saved pipeline from Pipelines to turn it off, including a "
+            "nightly pipeline; Activate turns it back on. "
             "The detail drawer on a saved pipeline is where Pause and Activate "
             "live — not Job Theater, and not the create-pipeline form."
         ),
@@ -2322,30 +2332,46 @@ def _competitor_wedge_section() -> GeneratedSection:
     )
 
 
-def _connect_postgres_section() -> GeneratedSection | None:
-    """New connection + the PostgreSQL driver the registry actually ships."""
+# Registry ids that the connector catalog spells differently.
+_CATALOG_ID_ALIASES = {"sqlserver": "sql_server"}
+
+
+def _connect_engine_sections() -> tuple[GeneratedSection, ...]:
+    """One "connect a <Engine>" procedure per transfer-ready registry engine.
+
+    "How do I connect to Snowflake" is the add-connector procedure with
+    Snowflake as the instance. With only the PostgreSQL card generated, every
+    other engine retrieved its capability cards ("can I connect Snowflake with
+    a private key"), which never mention New connection. The card is generated,
+    not written, so it exists exactly for the engines the registry ships and the
+    catalog marks transfer-ready — a planned engine gets no procedure.
+    """
     try:
         import registry
-
-        engines = [
-            str(getattr(d, "value", d)).lower()
-            for d in getattr(registry, "DATABASE_TYPES", ())
-        ]
-    except Exception:
-        return None
-    if "postgresql" not in engines:
-        return None
-    return GeneratedSection(
-        doc_title="Connections & engines",
-        section_title="Procedure: connect a PostgreSQL database",
-        text=(
-            "Click New connection and pick the PostgreSQL driver. "
-            "Then enter host, database and credentials, click Test, and Save "
-            "before using it in Transfer Studio or Pipelines."
-        ),
-        source_module="registry.py · Procedure: add a connector",
-        category="connectors",
-    )
+        from services.connector_catalog import get_connector_meta
+    except ImportError:
+        return ()
+    out: list[GeneratedSection] = []
+    for raw in getattr(registry, "DATABASE_TYPES", ()):
+        engine = str(getattr(raw, "value", raw)).lower()
+        meta = get_connector_meta(_CATALOG_ID_ALIASES.get(engine, engine))
+        if not meta or not meta.get("transfer_ready"):
+            continue
+        name = str(meta.get("name") or engine)
+        out.append(
+            GeneratedSection(
+                doc_title="Connections & engines",
+                section_title=f"Procedure: connect a {name} database",
+                text=(
+                    f"Click New connection and pick the {name} driver. "
+                    "Then enter its connection details and credentials, click Test, and Save "
+                    "before using it in Transfer Studio or Pipelines."
+                ),
+                source_module="registry.py · connector_catalog.json · Procedure: add a connector",
+                category="connectors",
+            )
+        )
+    return tuple(out)
 
 
 def _rest_api_section() -> GeneratedSection:
@@ -2522,6 +2548,27 @@ def _blocked_validate_section() -> GeneratedSection:
     )
 
 
+def _what_is_validate_section() -> GeneratedSection | None:
+    """The step itself, so "what is validate" is not answered by one gate card."""
+    cards = _core_gate_cards()
+    if len(cards) < 2:
+        return None
+    # No gate identifiers here: "what is Gate 9" must lead with the G9 card.
+    return GeneratedSection(
+        doc_title="Preflight gates explained",
+        section_title="What is Validate (preflight gates)",
+        text=(
+            "Validate is the Transfer Studio step that runs the preflight gate "
+            f"engine — all {len(cards)} core gates — against your source, destination "
+            "and saved mapping before any row is written. Execute stays locked "
+            "until every Validate gate returns approve; a soft or review-grade "
+            "pass does not unlock a write."
+        ),
+        source_module="preflight.gates · help-preflight#gates",
+        category="transfer",
+    )
+
+
 def _webhooks_section() -> GeneratedSection:
     """The word ``webhook`` has to be in the lead, not only the heading."""
     return GeneratedSection(
@@ -2611,12 +2658,13 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _pilot_engine_section,
         _capability_contract_sections,
         _competitor_wedge_section,
-        _connect_postgres_section,
+        _connect_engine_sections,
         _rest_api_section,
         _export_schedule_yaml_section,
         _export_proof_section,
         _test_passed_preflight_section,
         _preflight_gates_list_section,
+        _what_is_validate_section,
         _named_preflight_gate_sections,
         _blocked_validate_section,
         _webhooks_section,

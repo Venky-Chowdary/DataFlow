@@ -6,7 +6,7 @@ Customer-facing chat + separate training agent endpoints.
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from src.services import auth_service
@@ -217,8 +217,70 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     }
 
 
+async def _run_lifecycle_confirm(
+    kind: str,
+    payload: dict,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Perform a confirmed lifecycle ack through the REST handler that owns it.
+
+    Pilot never re-implements cancel/retry/resume/replay/delete: the confirming
+    request is handed to the same route function the screen calls, so workspace
+    checks, duplicate-safety on retry and CDC capture release on schedule delete
+    are applied once, by their owner.
+    """
+    import importlib
+
+    from services.effective_role import workspace_id_from_request_headers
+
+    pkg = __name__.rsplit(".", 1)[0]
+    connectors_router = importlib.import_module(f"{pkg}.connectors_router")
+    saved_connectors_router = importlib.import_module(f"{pkg}.saved_connectors_router")
+    schedules_router = importlib.import_module(f"{pkg}.schedules_router")
+
+    workspace_id = workspace_id_from_request_headers(http_request.headers) or ""
+    job_id = str(payload.get("job_id") or "").strip()
+    if kind == "cancel_job":
+        return dict(await connectors_router.cancel_transfer_job(job_id, http_request))
+    if kind == "retry_job":
+        return dict(
+            await connectors_router.retry_transfer_job(job_id, background_tasks, http_request)
+        )
+    if kind == "resume_job":
+        return dict(
+            await connectors_router.resume_transfer_job(job_id, background_tasks, http_request)
+        )
+    if kind == "replay_quarantine":
+        body = connectors_router.QuarantineReplayRequest()
+        return dict(await connectors_router.replay_job_quarantine(job_id, body, http_request))
+    if kind == "delete_connector":
+        cid = str(payload.get("connector_id") or "").strip()
+        out = saved_connectors_router.remove_saved_connector(cid, http_request, workspace_id)
+        return {**dict(out), "connector_id": cid, "name": payload.get("name") or ""}
+    if kind == "set_schedule_enabled":
+        sid = str(payload.get("schedule_id") or "").strip()
+        body = schedules_router.ScheduleUpdate(enabled=bool(payload.get("enabled")))
+        sched = await schedules_router.patch_pipeline_schedule(sid, body, http_request, workspace_id)
+        return {
+            "schedule_id": sid,
+            "name": getattr(sched, "name", "") or payload.get("name") or "",
+            "enabled": bool(getattr(sched, "enabled", payload.get("enabled"))),
+            "next_run_at": getattr(sched, "next_run_at", "") or "",
+        }
+    if kind == "delete_schedule":
+        sid = str(payload.get("schedule_id") or "").strip()
+        out = await schedules_router.remove_pipeline_schedule(sid, http_request, workspace_id)
+        return {**dict(out), "schedule_id": sid, "name": payload.get("name") or ""}
+    raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
+
+
 @router.post("/confirm")
-async def copilot_confirm(request: ConfirmActionRequest, http_request: Request):
+async def copilot_confirm(
+    request: ConfirmActionRequest,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
+):
     """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule /
     create_schedule).
 
@@ -388,6 +450,25 @@ async def copilot_confirm(request: ConfirmActionRequest, http_request: Request):
             "enabled": sched.enabled,
             "next_run_at": sched.next_run_at or "",
         }
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
+    from ..ai.copilot.lifecycle_tools import ACK_KIND_BY_TOOL
+
+    if kind in ACK_KIND_BY_TOOL.values():
+        try:
+            result = await _run_lifecycle_confirm(kind, payload, http_request, background_tasks)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to {kind.replace('_', ' ')}: {exc}") from exc
         ledger.finalize(
             ack_id,
             actor=actor,

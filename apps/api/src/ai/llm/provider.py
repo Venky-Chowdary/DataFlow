@@ -53,6 +53,11 @@ def _mark_provider_auth_failed(name: str, err: str) -> bool:
 # A key check is a person waiting on a button, so it is bounded: one attempt,
 # a short deadline, and a plain timeout message instead of SDK backoff.
 VERIFY_TIMEOUT_SECONDS = 12.0
+# A chat turn is also a person waiting: the SDK defaults (10 min, 2 retries)
+# outlive the Pilot's 20 s turn deadline and pin a worker thread long after the
+# local answer has been sent. One retry covers a dropped connection.
+REQUEST_TIMEOUT_SECONDS = 30.0
+REQUEST_MAX_RETRIES = 1
 
 
 def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
@@ -154,7 +159,11 @@ class DataTransferOpenAIProvider(DataTransferLLMProvider):
                 try:
                     from openai import OpenAI
 
-                    self._client = OpenAI(api_key=api_key)
+                    self._client = OpenAI(
+                        api_key=api_key,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                        max_retries=REQUEST_MAX_RETRIES,
+                    )
                 except ImportError:
                     pass
         except Exception:
@@ -302,7 +311,11 @@ class DataTransferAnthropicProvider(DataTransferLLMProvider):
                 try:
                     import anthropic
 
-                    self._client = anthropic.Anthropic(api_key=api_key)
+                    self._client = anthropic.Anthropic(
+                        api_key=api_key,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                        max_retries=REQUEST_MAX_RETRIES,
+                    )
                 except ImportError:
                     pass
         except Exception:

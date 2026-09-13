@@ -33,8 +33,16 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
-from .lexical_index import adjacent_shingles, content_terms
-from .query_analysis import QueryAnalysis
+from .evidence_policy import is_subject_term
+from .lexical_index import adjacent_shingles, content_terms, normalize
+from .query_analysis import QueryAnalysis, phrase_evidence
+
+# "what is a pipeline and how do I pause one": the clause that asks for a
+# definition, so its subject is owed a definitional sentence even when the
+# procedure clause outscores it.
+_DEFINITION_CLAUSE = re.compile(
+    r"\bwhat(?:'s|\s+is|\s+are)\s+(?:a|an|the)?\s*([A-Za-z][\w-]*)", re.I
+)
 
 # How much an expansion term counts relative to a word the operator typed.
 EXPANSION_WEIGHT = 0.45
@@ -772,6 +780,127 @@ def select_sentences(
     return [best, *rest]
 
 
+def _owe_subjects(
+    analysis: QueryAnalysis,
+    candidates: Sequence[Candidate],
+    chosen: list[Candidate],
+    *,
+    limit: int,
+) -> list[Candidate]:
+    """Every subject the question named speaks at least once.
+
+    Relevance selection is a sum over the question's words, so a question
+    about two things is answered by whichever has the most to say. "What is
+    quarantine and how does reconcile work" spent all six sentences on
+    quarantine, with the reconcile passage sitting unused in the evidence. A
+    subject with no sentence of its own takes the best one that names it — by
+    the typed word or by the spelling a phrase rule vouched for — appended in
+    place of the weakest supporting sentence when the answer is full.
+    """
+    spelled: dict[str, set[str]] = {}
+    for eaten, targets in phrase_evidence(analysis.text):
+        for term in eaten:
+            spelled.setdefault(term, set()).update(targets)
+    subjects = [t for t in analysis.terms if is_subject_term(t)]
+    if len(subjects) < 2:
+        return chosen
+    defined = {
+        normalize(m.group(1)) for m in _DEFINITION_CLAUSE.finditer(analysis.text)
+    } & set(subjects)
+    lead = chosen[0]
+    out = list(chosen)
+
+    def admit(owed: Candidate | None, *, first: bool = False) -> None:
+        if owed is None:
+            return
+        if len(out) >= limit:
+            weakest = min((c for c in out if c is not lead), key=lambda c: c.score)
+            out.remove(weakest)
+        if first:
+            out.insert(0, owed)
+        else:
+            out.append(owed)
+
+    def defines(cand: Candidate, names: set[str]) -> bool:
+        head = _DEFINITIONAL.match(cand.text)
+        if not head:
+            return False
+        # The subject has to be what the sentence is *about*: "A pipeline is a
+        # scheduled route" defines it; "the drawer on a saved pipeline is where
+        # Pause lives" only mentions it.
+        definiendum = content_terms(head.group(0))
+        return len(definiendum) <= 3 and bool(set(definiendum) & names)
+
+    for term in subjects:
+        names = {term, *spelled.get(term, ())}
+        if not any(c.terms & names for c in out):
+            admit(
+                max(
+                    (c for c in candidates if c.terms & names and c not in out),
+                    key=lambda c: c.score,
+                    default=None,
+                )
+            )
+        if term in defined and not any(defines(c, names) for c in out):
+            admit(
+                max(
+                    (c for c in candidates if c not in out and defines(c, names)),
+                    key=lambda c: c.score,
+                    default=None,
+                ),
+                first=True,
+            )
+    return out
+
+
+# A lead that says the asked-for thing is not there settles the question.
+_SETTLED_NEGATIVE = re.compile(
+    r"\b(?:is|are) not (?:a |an |its own )?(?:transfer-ready|shipped|a connect option|"
+    r"supported|separate)\b|\b(?:does|do) not (?:ship|include|support)\b|\bnot shipped\b",
+    re.I,
+)
+# A sentence that tells the operator how to do it.
+_INSTRUCTIONAL = re.compile(
+    r"^\s*(?:Click|Pick|Open|Connect|Then|Enter|Paste|Choose)\b"
+    r"|\bconfigured the same way\b|\bConnect the instance\b|\bclick Test\b",
+    re.I,
+)
+# Capability cards are written as a question about one named thing.
+_CAPABILITY_CARD = re.compile(r"^(?:do you|does \w+|can i|is \w+ supported)\b", re.I)
+
+
+def _prune_tails(analysis: QueryAnalysis, chosen: list[Candidate]) -> list[Candidate]:
+    """Drop supporting sentences the lead has already made wrong or off-topic.
+
+    Two tails measured in browser QA. "Can I connect Databricks" opened
+    correctly on "Databricks is not a transfer-ready driver" and then explained
+    how to configure a warehouse destination — instructions for a thing the
+    lead just said cannot be done. "How do I connect a postgres database"
+    opened on the procedure and then borrowed "Connect the instance as MySQL or
+    PostgreSQL" from the Aurora and Cloud SQL capability cards, whose subjects
+    the question never named. Neither is a ranking error the lead can fix; the
+    lead is right and the tail is judged relative to it.
+    """
+    if not chosen:
+        return chosen
+    lead = chosen[0]
+    settled = bool(_SETTLED_NEGATIVE.search(lead.text))
+    asked = {t for t in analysis.terms if is_subject_term(t)}
+    out = [lead]
+    for cand in chosen[1:]:
+        if settled and cand.section_title != lead.section_title and _INSTRUCTIONAL.search(cand.text):
+            continue
+        if (
+            analysis.ask == "procedure"
+            and cand.section_title != lead.section_title
+            and _CAPABILITY_CARD.match(cand.section_title)
+            and not (set(content_terms(cand.section_title)) & asked)
+        ):
+            continue
+        out.append(cand)
+    return out
+
+
 def _lead(pool: Sequence[Candidate]) -> Candidate:
     """The sentence to open with: names the subject if anything does.
 
@@ -862,6 +991,8 @@ def compose_answer(
     chosen = select_sentences(candidates, limit=limit)
     if not chosen:
         return ""
+    chosen = _owe_subjects(analysis, candidates, chosen, limit=limit)
+    chosen = _prune_tails(analysis, chosen)
 
     body = " ".join(c.text for c in chosen)
     parts = [body]

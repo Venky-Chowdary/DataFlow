@@ -628,12 +628,15 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             # Section heading leftover: **I can:**
             continue
         if re.match(r"^G\d+\b", line.lstrip("*")):
-            gate = line.rstrip(".")
-            if not gate.endswith((".", "!", "?")):
-                gate += "."
-            sentences.append(gate)
-            if len(sentences) >= max_sentences:
-                return sentences
+            for gate in _SENTENCE_SPLIT.split(line):
+                gate = gate.strip().rstrip(".")
+                if not gate:
+                    continue
+                if not gate.endswith((".", "!", "?")):
+                    gate += "."
+                sentences.append(gate)
+                if len(sentences) >= max_sentences:
+                    return sentences
             continue
         if not any(ch in line for ch in ".!?") and len(line.split()) <= 8:
             if _STEP_HEADING.match(line.lstrip("*")) or "—" not in line:

@@ -528,6 +528,10 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
      ("quarantine", "reject", "invalid", "dlq")),
     (re.compile(r"\b(?:row|record)s?\s+(?:ledger|accounting|balance)\b", re.I),
      ("reconciliation", "checksum", "conservation", "ledger")),
+    # The product spells the reconcile step "Checksum MATCH" in the section
+    # that describes it; the verb the operator uses never appears there.
+    (re.compile(r"\breconcil(?:e|es|ed|ing|iation)\b", re.I),
+     ("checksum",)),
     (re.compile(r"\bdata\s+loss|\blos(?:e|ing|t)\s+(?:row|record|data)s?\b", re.I),
      ("quarantine", "reconciliation", "checksum", "unaccounted")),
     (re.compile(
@@ -1753,7 +1757,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\blogical\s+decoding\b", re.I),
      ("wal_level", "pgoutput", "logical")),
     (re.compile(r"\bg([1-9])\b", re.I),
-     ("gate", "preflight", "validate", "schema")),
+     ("gate", "preflight", "validate")),
     (re.compile(r"\bhand[\s-]?off\b"
                 r"|\bsnapshot\s+to\s+(?:the\s+)?(?:cdc|stream|log)\b"
                 r"|\bbetween\s+snapshot\s+and\s+stream\b", re.I),

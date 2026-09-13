@@ -87,6 +87,17 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "create_connector": (Permission.CONNECTOR_WRITE, MUTATE),
     "run_schedule_now": (Permission.SCHEDULE_MANAGE, MUTATE),
     "create_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    # Lifecycle operations mirror /connectors/jobs/{id}/{cancel,retry,resume,
+    # quarantine/replay}, /saved-connectors/{id}/{test,DELETE} and
+    # /schedules/{id} PATCH|DELETE.
+    "test_connector": (Permission.CONNECTOR_READ, READ),
+    "cancel_job": (Permission.JOB_MANAGE, MUTATE),
+    "retry_job": (Permission.JOB_MANAGE, MUTATE),
+    "resume_job": (Permission.JOB_MANAGE, MUTATE),
+    "replay_quarantine": (Permission.JOB_MANAGE, MUTATE),
+    "delete_connector": (Permission.CONNECTOR_DELETE, MUTATE),
+    "set_schedule_enabled": (Permission.SCHEDULE_MANAGE, MUTATE),
+    "delete_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
 }
 
 
@@ -98,6 +109,13 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "create_connector": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
+    "cancel_job": Permission.JOB_MANAGE,
+    "retry_job": Permission.JOB_MANAGE,
+    "resume_job": Permission.JOB_MANAGE,
+    "replay_quarantine": Permission.JOB_MANAGE,
+    "delete_connector": Permission.CONNECTOR_DELETE,
+    "set_schedule_enabled": Permission.SCHEDULE_MANAGE,
+    "delete_schedule": Permission.SCHEDULE_MANAGE,
 }
 
 

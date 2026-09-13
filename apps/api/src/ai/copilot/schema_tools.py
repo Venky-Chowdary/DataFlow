@@ -7,13 +7,16 @@ Do not invent parallel SQL. Every probe goes through:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .example_phrases import (
     example_connector_name,
     example_dest_connector_name,
     example_table_name,
 )
+
+if TYPE_CHECKING:
+    from .tools import ToolResult
 
 
 class AmbiguousConnectorError(Exception):
@@ -25,7 +28,7 @@ class AmbiguousConnectorError(Exception):
         self.candidates = candidates or []
 
 
-def _tool_result(name: str, *, success: bool, output: Any = None, error: str = ""):
+def _tool_result(name: str, *, success: bool, output: Any = None, error: str = "") -> ToolResult:
     from .tools import ToolResult
 
     return ToolResult(name=name, success=success, output=output, error=error)

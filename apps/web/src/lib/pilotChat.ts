@@ -6,8 +6,12 @@
 import type { CopilotPendingAction } from "./api";
 import {
   confirmPilotPending,
+  isDestructiveLifecycle,
   isDestructiveTransfer,
+  isLifecycleOp,
+  lifecycleConfirmPrompt,
   transferOverwriteMessage,
+  type PilotConfirmOutcome,
 } from "./pilotConfirm";
 import { extractPilotResultId } from "./pilotChatStore";
 import type { ActiveDataContext, Screen } from "./types";
@@ -188,6 +192,7 @@ export async function runPilotConfirm(
       && action.type !== "start_transfer"
       && action.type !== "create_connector"
       && action.type !== "run_schedule"
+      && !isLifecycleOp(action.type)
     )
   ) {
     dispatchStudioAction({
@@ -250,6 +255,55 @@ export async function runPilotConfirm(
     return "cleared";
   }
 
+  if (isLifecycleOp(action.type)) {
+    if (isDestructiveLifecycle(action)) {
+      const prompt = lifecycleConfirmPrompt(action);
+      const ok = await confirm({ ...prompt, tone: "danger" });
+      if (!ok) return "cancelled";
+    }
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "lifecycle") throw new Error("Unexpected confirm result");
+    if (res.op === "delete_connector") {
+      window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
+    }
+    onNavigate?.(res.screen);
+    toast({ ...lifecycleToast(res), tone: "success" });
+    return "cleared";
+  }
+
   toast({ title: "Unknown action", message: action.type, tone: "error" });
   return "unknown";
+}
+
+function lifecycleToast(
+  res: Extract<PilotConfirmOutcome, { kind: "lifecycle" }>,
+): { title: string; message: string } {
+  const again = res.idempotent ? " (already applied)" : "";
+  switch (res.op) {
+    case "cancel_job":
+      return { title: `Cancellation requested${again}`, message: `Job ${res.job_id} stops after its current batch.` };
+    case "retry_job":
+      return {
+        title: `Retry started${again}`,
+        message: `New job ${res.job_id} re-runs ${String(res.result.retry_of || "the failed job")} from zero.`,
+      };
+    case "resume_job":
+      return { title: `Resume started${again}`, message: `Job ${res.job_id} continues from its last checkpoint.` };
+    case "replay_quarantine":
+      return {
+        title: `Quarantine replay started${again}`,
+        message: `Job ${res.job_id}: ${String(res.result.replayed ?? res.result.rows ?? "open")} rows re-sent.`,
+      };
+    case "delete_connector":
+      return { title: `Connector deleted${again}`, message: `“${res.subject}” was removed from Connectors.` };
+    case "set_schedule_enabled":
+      return {
+        title: res.result.enabled ? `Pipeline resumed${again}` : `Pipeline paused${again}`,
+        message: res.result.enabled
+          ? `“${res.subject}” next runs ${String(res.result.next_run_at || "on its cadence")}.`
+          : `“${res.subject}” will not fire until resumed.`,
+      };
+    case "delete_schedule":
+      return { title: `Pipeline deleted${again}`, message: `“${res.subject}” was removed; its jobs stay in Jobs.` };
+  }
 }

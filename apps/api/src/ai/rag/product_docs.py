@@ -34,13 +34,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
 from .char_ngram_index import CharNgramIndex
-from .evidence_policy import EvidenceVerdict, assess_evidence
+from .evidence_policy import EvidenceVerdict, assess_evidence, is_subject_term
 from .fusion import reciprocal_rank_fusion
 from .lexical_index import Bm25Index, content_terms
 from .query_analysis import (
@@ -50,6 +50,7 @@ from .query_analysis import (
     QueryAnalysis,
     analyze_query,
     distinctive_procedure_terms,
+    phrase_evidence,
 )
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
@@ -700,7 +701,13 @@ def _section_intent_bonus(
         re.search(r"\bgates\b", analysis.text, re.I)
         and not re.search(r"\bgate\s*[1-9]\b|\bg[1-9]\b", analysis.text, re.I)
     )
-    if named_gate and gate_set_ask:
+    # The card is on subject for "what is validate" only through its article
+    # title; it defines one gate, not the step, so it pays unless a gate is named.
+    if named_gate and not numbered_gate_ask:
+        bonus -= 3.2
+    # The step's own definition is not the set either: the members live under
+    # the listing and "Core gates" headings.
+    if gate_set_ask and definitional and not (listing or core_gates):
         bonus -= 3.2
     if listing and gate_set_ask and ask != "enumeration":
         bonus += 2.4
@@ -1955,6 +1962,7 @@ def _select_covering(
     ranked: Sequence[tuple[float, ProductDocHit]],
     limit: int,
     typed_terms: Sequence[str],
+    spelled_as: Mapping[str, set[str]] | None = None,
 ) -> list[ProductDocHit]:
     """Fill the evidence window to cover the question, not to repeat its best match.
 
@@ -1979,6 +1987,32 @@ def _select_covering(
     pool = list(ranked)
     chosen: list[ProductDocHit] = []
     covered: set[str] = set()
+
+    # A subject the question named is owed the passage *written about it*, not
+    # a passage that mentions it in passing. "What is quarantine and how does
+    # reconcile work" filled its window from the quarantine article plus the
+    # competitor comparison — which says ``reconcile`` once — and the reconcile
+    # article never entered. Body matches count as coverage only when no
+    # ranked passage carries the term in its heading. The section written
+    # about the subject beats the article that merely contains it: "Checksum
+    # MATCH" under "Job Theater & reconciliation" is the reconcile passage,
+    # "Open Job Theater" under the same article is not. The words a phrase
+    # rule says the subject is spelled with (``reconcile`` → ``checksum``)
+    # count as the subject's own only when the typed word itself heads
+    # nothing — otherwise "skip validation" would hand the Validate card every
+    # slot its words are owed. The debt is settled *after* the ranked fill, by
+    # swapping out the weakest supporting passage, so a question whose best
+    # passages already cover it is left exactly as ranked.
+    spelled = spelled_as or {}
+
+    def heads(hit: ProductDocHit, names: set[str]) -> int:
+        chunk = hit.chunk
+        if any(_covers(t, set(content_terms(chunk.section_title or ""))) for t in names):
+            return 2
+        if any(_covers(t, set(content_terms(chunk.doc_title or ""))) for t in names):
+            return 1
+        return 0
+
     while pool and len(chosen) < limit:
         def value(pair: tuple[float, ProductDocHit]) -> float:
             score, hit = pair
@@ -1996,6 +2030,24 @@ def _select_covering(
         pool.remove(pick)
         chosen.append(pick[1])
         covered |= set(pick[1].matched_terms) & wanted
+
+    rank_of = {id(hit): score for score, hit in ranked}
+    for term in (t for t in wanted if is_subject_term(t)):
+        names = {term}
+        if not any(heads(hit, names) for _, hit in ranked):
+            names |= spelled.get(term, set())
+        if any(heads(hit, names) or term in hit.matched_terms for hit in chosen):
+            continue
+        owed = max(
+            (p for p in pool if heads(p[1], names)),
+            key=lambda p: (heads(p[1], names), p[0]),
+            default=None,
+        )
+        if owed is None or len(chosen) < 2:
+            continue
+        weakest = min(chosen[1:], key=lambda hit: rank_of[id(hit)])
+        chosen[chosen.index(weakest)] = owed[1]
+        pool.remove(owed)
     return chosen
 
 
@@ -2092,8 +2144,47 @@ def _rank_hits(
                 ),
             )
         )
+    spelled: dict[str, set[str]] = {}
+    for eaten, targets in phrase_evidence(analysis.text):
+        for term in eaten:
+            spelled.setdefault(term, set()).update(targets)
+
+    # A two-subject question splits the typed query, and the section written
+    # about the second subject can fall below the fusion depth: "what is
+    # quarantine and how does reconcile work" ranked "Checksum MATCH" 25th on
+    # one matched word while twenty passages that mention both words in
+    # passing sat above it. Each subject gets its own shallow search, and a
+    # section *titled* for it joins the candidates on its own BM25 merit so
+    # the coverage step below has it to choose.
+    present = {pair[1].chunk.id for pair in ranked}
+    for term in typed_terms:
+        if not is_subject_term(term):
+            continue
+        names = [term, *sorted(spelled.get(term, ()))]
+        for own in index.search(" ".join(names), limit=3):
+            chunk = by_id.get(own.id)
+            if chunk is None or own.id in present:
+                continue
+            section = set(content_terms(chunk.section_title or ""))
+            if not any(_covers(t, section) for t in names):
+                continue
+            rank = FUSED_RANK_SCALE * (1.0 - RRF_WEIGHT) * (own.score / bm25_best)
+            rank += TITLE_WEIGHT * _title_coverage(chunk, anchor_terms)
+            rank += _section_intent_bonus(chunk, analysis)
+            present.add(own.id)
+            ranked.append(
+                (
+                    rank,
+                    ProductDocHit(
+                        chunk=chunk,
+                        score=own.score,
+                        grounding=grounding.get(own.id, 0.0),
+                        matched_terms=matched.get(own.id, ()),
+                    ),
+                )
+            )
     ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return _select_covering(ranked, limit, typed_terms)
+    return _select_covering(ranked, limit, typed_terms, spelled_as=spelled)
 
 
 def retrieve_product_answer(
@@ -2122,6 +2213,15 @@ def retrieve_product_answer(
         in_vocabulary=lambda term: _index()[0].idf(term) > 0,
     )
     if not verdict.answerable:
+        # Spelling repair is a fallback only: it may turn a refusal into an
+        # answer, never change the answer to a question already understood.
+        from .spell import correct_to_corpus
+
+        corrected = correct_to_corpus(query)
+        if corrected != query and verdict.uncovered_terms:
+            retry = retrieve_product_answer(corrected, limit=limit, grounding_floor=grounding_floor)
+            if retry.verdict.answerable:
+                return retry
         hits = []
     return ProductAnswer(
         query=query,
@@ -2165,9 +2265,15 @@ def names_product_subject(query: str) -> bool:
     documentation's vocabulary.
     """
     from .evidence_policy import is_subject_term
+    from .spell import correct_to_corpus
 
     analysis = analyze_query(query)
-    return any(is_subject_term(term) for term in analysis.search_terms)
+    if any(is_subject_term(term) for term in analysis.search_terms):
+        return True
+    corrected = correct_to_corpus(query)
+    if corrected == query:
+        return False
+    return any(is_subject_term(term) for term in analyze_query(corrected).search_terms)
 
 
 def nearest_articles(query: str, limit: int = 3) -> list[str]:
@@ -2247,6 +2353,19 @@ def compose_product_answer(answer: ProductAnswer) -> str:
     if legacy and answer.caveat:
         return f"{legacy}\n\n{answer.caveat}"
     return legacy
+
+
+def cited_sources(answer: ProductAnswer, spoken: str) -> list[dict[str, object]]:
+    """The retrieved sources the spoken answer actually cites.
+
+    Retrieval returns every passage the ranker considered; the composer then
+    selects from them and may set whole passages aside. Showing the set-aside
+    ones as source chips re-attached the Aurora and Cloud SQL cards to a
+    PostgreSQL procedure whose text no longer used them. When the spoken form
+    names no citation at all (a legacy or narrated answer) every hit stays.
+    """
+    cited = [hit.as_source() for hit in answer.hits if hit.chunk.citation in spoken]
+    return cited or answer.sources
 
 
 def product_doc_documents() -> tuple[list[str], list[dict], list[str]]:
