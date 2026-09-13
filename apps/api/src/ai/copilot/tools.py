@@ -26,7 +26,12 @@ from ..rag.query_analysis import (
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
-from .unsupported_question import is_answerable_subject, unsupported_question_output
+from .unsupported_question import (
+    asks_a_commercial_question,
+    commercial_question_output,
+    is_answerable_subject,
+    unsupported_question_output,
+)
 
 
 @dataclass
@@ -79,8 +84,21 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_connectors",
-        "description": "List saved database/warehouse connectors.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "List saved database/warehouse connectors. ``health`` filters by the "
+            "last connection test: passed | failed | untested | any."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "health": {
+                    "type": "string",
+                    "enum": ["any", "passed", "failed", "untested"],
+                    "default": "any",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "create_connector",
@@ -553,6 +571,46 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "rank_connector_tables",
+        "description": (
+            "Rank every table on one saved connector by exact row count. Use for "
+            "“which table has the most rows on Demo Orders”, “biggest/smallest "
+            "table”, “how big is this database” and connector-vs-connector size "
+            "comparisons. Counts are server-side, not sampled."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "order": {"type": "string", "enum": ["desc", "asc"], "default": "desc"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "compare_connectors",
+        "description": (
+            "Compare two saved connectors side by side on engine, endpoint, "
+            "connection health, transfer-readiness and live object count. Use for "
+            "“compare Demo Orders and Quarantine SQLite”, “what is the difference "
+            "between my two Postgres connectors”, “X vs Y”."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "left": {"type": "string", "description": "First saved connector name"},
+                "right": {"type": "string", "description": "Second saved connector name"},
+                "criterion": {
+                    "type": "string",
+                    "description": "The word the operator compared on, e.g. faster, better",
+                },
+            },
+            "required": ["left", "right"],
+        },
+    },
+    {
         "name": "sample_connector_object",
         "description": (
             "Sample live rows from a table/collection on a saved connector "
@@ -764,6 +822,8 @@ TOOL_FAMILIES: list[dict] = [
             "compare_datasets",
             "profile_quality_rules",
             "list_connector_objects",
+            "rank_connector_tables",
+            "compare_connectors",
             "introspect_connector_schema",
             "sample_connector_object",
             "aggregate_data",
@@ -884,6 +944,8 @@ class DataPilotTools:
             "open_schedule": self._open_schedule,
             "start_transfer_studio": self._start_transfer_studio,
             "list_connector_objects": self._list_connector_objects,
+            "rank_connector_tables": self._rank_connector_tables,
+            "compare_connectors": self._compare_connectors,
             "sample_connector_object": self._sample_connector_object,
             "run_query": self._run_query,
             "aggregate_data": self._aggregate_data,
@@ -959,14 +1021,24 @@ class DataPilotTools:
                             break
         return ToolResult(name="search_data", success=True, output={"query": query, "hits": hits[:25]})
 
-    def _list_connectors(self) -> ToolResult:
+    def _list_connectors(
+        self,
+        health: str = "any",
+        engine: str = "",
+        engine_excluded: bool = False,
+    ) -> ToolResult:
         summary = []
         errors: list[str] = []
         try:
             from services.connector_store import list_connectors as store_list
 
             for c in store_list():
-                d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
+                if hasattr(c, "to_dict"):
+                    d = c.to_dict()
+                elif isinstance(c, dict):
+                    d = dict(c)
+                else:
+                    d = dict(getattr(c, "__dict__", {}) or {})
                 summary.append({
                     "id": str(d.get("id") or d.get("_id") or ""),
                     "name": d.get("name"),
@@ -974,6 +1046,8 @@ class DataPilotTools:
                     "host": d.get("host"),
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
+                    "last_test_ok": d.get("last_test_ok"),
+                    "last_tested_at": d.get("last_tested_at"),
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
@@ -991,6 +1065,8 @@ class DataPilotTools:
                         "host": c.get("host"),
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
+                        "last_test_ok": c.get("last_test_ok"),
+                        "last_tested_at": c.get("last_tested_at"),
                     })
             except Exception as exc:
                 logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
@@ -1008,10 +1084,48 @@ class DataPilotTools:
                     + "). Check Settings → storage, then retry."
                 ),
             )
+        total_saved = len(summary)
+        saved_engines = sorted(
+            {canonical_engine(str(c.get("type") or "")) for c in summary if c.get("type")}
+        )
+        # "how many of those are postgres" listed every connector unchanged. On
+        # this workspace both are SQLite so the reply happened to be right; on a
+        # mixed workspace it is a silently wrong answer, which is why the engine
+        # is filtered here rather than left to the wording of the summary.
+        engine_want = canonical_engine(engine)
+        if engine_want:
+            matches = [
+                c for c in summary if canonical_engine(str(c.get("type") or "")) == engine_want
+            ]
+            summary = (
+                [c for c in summary if c not in matches] if engine_excluded else matches
+            )
+
+        # "get me the passed connectors" must not list every connector. Health is
+        # the last saved probe result, never a guess from the engine name.
+        want = (health or "any").strip().lower()
+        if want in {"passed", "failed", "untested"}:
+            buckets = {
+                "passed": lambda ok: ok is True,
+                "failed": lambda ok: ok is False,
+                "untested": lambda ok: ok not in (True, False),
+            }
+            keep = buckets[want]
+            summary = [c for c in summary if keep(c.get("last_test_ok"))]
+        else:
+            want = "any"
         return ToolResult(
             name="list_connectors",
             success=True,
-            output={"connectors": summary, "count": len(summary)},
+            output={
+                "connectors": summary,
+                "count": len(summary),
+                "health": want,
+                "engine": engine_want,
+                "engine_excluded": bool(engine_want and engine_excluded),
+                "saved_engines": saved_engines,
+                "total_saved": total_saved,
+            },
         )
 
     def _create_connector(  # nosec B107
@@ -1503,6 +1617,19 @@ class DataPilotTools:
 
         lower = (query or "").lower().strip()
 
+        # A price or an SLA is not an engineering fact, so retrieval over the
+        # engineering corpus has nothing to say about it. Left to the term filter
+        # this refusal held only when the sentence named nothing else: "how much
+        # does a transfer cost" anchored on ``transfer`` and answered with the
+        # Transfer Studio walkthrough, which is the invented answer this product
+        # exists to refuse.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output=commercial_question_output(query),
+            )
+
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [
             (
@@ -1728,6 +1855,12 @@ class DataPilotTools:
         # fragments ("how do I cook rice" → paste a job id, your dataset has 11
         # columns). If the question names no documented subject, refuse before
         # retrieval instead of narrating whatever the index happened to be closest to.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=commercial_question_output(query),
+            )
         if not is_answerable_subject(query):
             return ToolResult(
                 name="search_knowledge",
@@ -1832,10 +1965,13 @@ class DataPilotTools:
             if planned.success:
                 return planned
 
+        # ``preflight.gates`` has never existed, so this always fell to [] and
+        # the note claimed "this is the standard gate sequence" while listing
+        # none. ``PREFLIGHT_GATE_RULES`` is the table Validate actually enforces.
         try:
-            from preflight.gates import PREFLIGHT_GATES
+            from services.preflight_rules import PREFLIGHT_GATE_RULES
 
-            gate_ids = [gid.value if hasattr(gid, "value") else str(gid) for gid, _ in PREFLIGHT_GATES]
+            gate_ids = [str(gid) for gid in PREFLIGHT_GATE_RULES]
         except Exception:
             gate_ids = []
 
@@ -1848,9 +1984,9 @@ class DataPilotTools:
             "required_gates": gate_ids,
             **bind,
             "note": (
-                "This is the standard gate sequence, not a plan for your data. "
                 "Name two saved connectors and a table and I will introspect both "
-                "ends, map the columns and run the real gates."
+                "ends, map the columns and run the real gates. Until then this is "
+                "the standard gate sequence, not a plan for your data."
             ),
             "next": (
                 f'Try: "plan a transfer of orders from {example_connector_name()} '
@@ -2202,6 +2338,32 @@ class DataPilotTools:
         from .schema_tools import list_connector_objects
 
         return list_connector_objects(connector_id, connector_name, limit)
+
+    def _rank_connector_tables(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        order: str = "desc",
+        limit: int = 10,
+    ) -> ToolResult:
+        from .aggregate_tools import rank_connector_tables
+
+        return rank_connector_tables(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            order=order,
+            limit=limit,
+        )
+
+    def _compare_connectors(
+        self,
+        left: str = "",
+        right: str = "",
+        criterion: str = "",
+    ) -> ToolResult:
+        from .schema_tools import compare_connectors
+
+        return compare_connectors(left=left, right=right, criterion=criterion)
 
     def _sample_connector_object(
         self,
@@ -2602,11 +2764,35 @@ _META_PILOT_PHRASES = (
     "can you help me move",
     "able to help me move",
     "tell me what you can",
+    "your limits",
+    "your limitations",
+    "what are you bad at",
 )
+
+# The inverse of "what can you do" is the same question about the same card, and
+# it reached retrieval and was refused as undocumented — which reads as though the
+# product cannot even name its own limits. A regex rather than phrases because the
+# typo normalizer rewrites ``can't`` to ``cannot`` before routing sees it, so both
+# spellings have to be reachable.
+_META_LIMITS_RE = re.compile(
+    r"\bwhat\s+(?:can|could|will|would|do|does)(?:\s*not|'?t)\s+you\b"
+    r"|\bwhat\s+can\s+you\s+not\b"
+    r"|\bwhat\s+(?:are|is)\s+your\s+"
+    r"(?:limits?|limitations?|boundaries|constraints|weaknesses)\b"
+    r"|\bwhat\s+are\s+you\s+(?:bad|not\s+good)\s+at\b",
+    re.I,
+)
+
+
+def asks_about_pilot_limits(message: str) -> bool:
+    """Whether a meta question is about what Pilot *cannot* do."""
+    return bool(_META_LIMITS_RE.search((message or "").strip()))
 
 
 def _is_meta_pilot_question(lower: str) -> bool:
     if any(p in lower for p in _META_PILOT_PHRASES):
+        return True
+    if _META_LIMITS_RE.search(lower):
         return True
     if lower.strip() in {"capabilities", "help", "about", "about you"}:
         return True
@@ -2793,11 +2979,223 @@ def _wants_documentation_companion(message: str) -> bool:
         return False
     if _looks_like_live_data_fetch(lower):
         return False
+    # A named connection-test bucket is a live-state read: "which of my
+    # connectors are broken" is answered by the bucket itself, and the
+    # Connectors page tour in front of it buries the list that was asked for.
+    if connector_health_filter(lower) != "any":
+        return False
     if not _INTERROGATIVE.search(lower):
         return False
     if classify_ask(message) == "other" and not _looks_like_product_howto(lower):
         return False
     return names_product_subject(message)
+
+
+# Throughput, limits and "can you" capability questions are about Datawrap, not
+# counts over the operator's tables. "how many rows can you move per second"
+# parsed as COUNT(*) GROUP BY a column named `second`, so the answer was
+# "Column 'second' is not in orders. Available columns: id, region, amount".
+# Deliberately excludes per-hour/day/month, which are real temporal grains an
+# operator does group by ("orders per day").
+_PRODUCT_CAPACITY_ASK = re.compile(
+    r"\bthroughput\b"
+    r"|\bhow\s+fast\b"
+    r"|\brows?\s*(?:/|per\s+)(?:sec|second)\b"
+    r"|\bper\s+(?:sec|second)\b"
+    r"|\bhow\s+(?:many|much|big|large)\b[^.?!]*?\b(?:can|could)\s+"
+    r"(?:you|it|we|i|datawrap|dataflow|the\s+(?:engine|product|platform|tool))\b"
+    r"|\bwhat(?:'s| is)\s+(?:the\s+)?(?:max(?:imum)?|biggest|largest|upper\s+limit|ceiling)\b"
+    r"[^.?!]*?\b(?:you|it|datawrap|dataflow|supported?|allowed?)\b",
+    re.I,
+)
+
+
+def asks_about_product_capacity(message: str) -> bool:
+    """A rate or limit question about the product, not a count over live rows."""
+    return bool(_PRODUCT_CAPACITY_ASK.search(message or ""))
+
+
+# "did anything fail in the last 24 hours", "any failures today", "anything
+# break overnight", "what about last week". Every one of these is the jobs
+# ledger, but the pattern set only recognised the word *jobs*: asked in the way
+# an operator actually asks it, "did anything fail in the last 24 hours"
+# retrieved the paragraph about Daily cadence presets, and the natural follow-up
+# reached no tool at all and was refused as undocumented.
+_FAILURE_WORD = (
+    r"(?:fail(?:s|ed|ing|ure|ures)?|break|breaks|broke|broken|breakage|"
+    r"error(?:s|ed)?|crash(?:es|ed)?|die[ds]?|blow\s+up|blew\s+up|go\s+wrong|"
+    r"went\s+wrong)"
+)
+_RECENT_WINDOW = (
+    r"(?:today|tonight|yesterday|overnight|so\s+far|recently|lately|just\s+now|"
+    r"this\s+(?:morning|afternoon|evening|week|month)|"
+    r"last\s+(?:night|week|month|hour|run)|"
+    r"(?:in|over|during|within|for)\s+the\s+(?:last|past)\s+"
+    r"(?:\d+\s+)?(?:minute|hour|day|week|month)s?)"
+)
+_FAILED_RECENTLY = re.compile(
+    # A window makes the tense unambiguous: this is history, not a definition.
+    rf"\b{_FAILURE_WORD}\b[^.?!]{{0,30}}?\b{_RECENT_WINDOW}\b"
+    rf"|\b{_RECENT_WINDOW}\b[^.?!]{{0,30}}?\b{_FAILURE_WORD}\b"
+    # Without a window it still has to be asked as a state-of-the-world question
+    # about an indefinite subject: "did anything fail", "is anything broken".
+    rf"|\b(?:did|do|does|has|have|is|are|was|were)\s+"
+    rf"(?:anything|any\s+\w+|something|everything|it|we|they|my\s+\w+)\s+"
+    rf"(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b"
+    rf"|^\s*(?:any|anything|something)\s+(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b",
+    re.I,
+)
+
+#: A documentation question that happens to contain a failure word. "what
+#: happens if a transfer fails" is the runbook, not last night's ledger.
+_FAILURE_IS_A_DOC_ASK = re.compile(
+    r"\bwhat\s+happens\s+(?:if|when)\b|\bwhat\s+(?:do|should)\s+i\s+do\s+(?:if|when)\b"
+    r"|\bhow\s+(?:do|does|can|should)\b|\bwhy\s+(?:do|does|would)\s+"
+    r"(?:a|an|the|transfers?|jobs?)\b|\bwhat\s+is\b|\bwhat'?s\s+(?:a|an|the)\b",
+    re.I,
+)
+
+
+def asks_what_failed_recently(message: str) -> bool:
+    """Is this "show me what broke", as opposed to "what does failing mean"?"""
+    text = message or ""
+    if _FAILURE_IS_A_DOC_ASK.search(text):
+        return False
+    return bool(_FAILED_RECENTLY.search(text))
+
+
+# Ranking the tables on one connector by size. Without a tool behind these the
+# superlative itself was read as an identifier: "biggest table on Demo Orders"
+# planned COUNT/MAX over a table literally named ``biggest``, and "which table
+# has the most rows on Demo Orders" sampled one named ``most``. Both are invented
+# names sent at a live database.
+_TABLE_RANK_RE = re.compile(
+    r"\b(?:which|what)\s+(?:table|collection)\b[^.?!]{0,60}?"
+    r"\b(?:most|fewest|least|largest|biggest|smallest|highest|lowest)\b"
+    r"|\b(?:largest|biggest|smallest|widest)\s+(?:table|collection)s?\b"
+    r"|\b(?:table|collection)s?\s+(?:ranked|sorted|ordered)\s+by\s+(?:row|size)"
+    r"|\brank\s+(?:the\s+)?(?:table|collection)s?\b"
+    r"|\b(?:table|collection)\s+(?:row\s+)?counts?\b"
+    r"|\brow\s+counts?\s+(?:for|of|per|by)\s+(?:each|every|all)?\s*(?:table|collection)s?\b"
+    r"|\bhow\s+(?:big|large)\s+is\s+(?:my|the|this)\b"
+    r"|\bhow\s+many\s+rows?\s+(?:in\s+)?(?:total|altogether|overall)\b",
+    re.I,
+)
+_ASCENDING_RANK = re.compile(
+    r"\b(?:fewest|least|smallest|lowest|ascending|asc|bottom)\b", re.I
+)
+
+
+def asks_to_rank_connector_tables(message: str) -> bool:
+    """A size question about the tables on a connector, not about one table."""
+    return bool(_TABLE_RANK_RE.search(message or ""))
+
+
+def table_rank_order(message: str) -> str:
+    return "asc" if _ASCENDING_RANK.search(message or "") else "desc"
+
+
+#: The shapes a two-sided comparison arrives in. Each captures both sides so the
+#: names can be resolved against the saved connectors before anything commits to
+#: a tool: "append vs overwrite" and "Demo Orders vs Quarantine SQLite" are the
+#: same sentence and completely different questions.
+_COMPARE_FRAMES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bcompare\s+(?P<a>.+?)\s+(?:and|to|with|against|vs\.?|versus)\s+(?P<b>.+?)"
+        r"[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:what(?:'?s| is| are)?\s+the\s+)?(?:difference|differences|diff)\s+"
+        r"between\s+(?P<a>.+?)\s+(?:and|vs\.?|versus)\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?[a-z]+"
+        r"(?:er|est)?\s*[,:]?\s*(?P<a>.+?)\s+or\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\bhow\s+do(?:es)?\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s+"
+        r"(?:differ|compare)\b[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(r"^(?P<a>[^?!.]+?)\s+(?:vs\.?|versus)\s+(?P<b>[^?!.]+?)[\s.?!]*$", re.I),
+)
+
+#: Words the comparison itself contributes, which are not part of either name.
+_COMPARE_NOISE = re.compile(
+    r"^(?:my|our|the|a|an|both|two)\s+|\s+(?:connector|connectors|connection|"
+    r"connections|one|ones)$",
+    re.I,
+)
+
+#: The adjective a "which is …" comparison asked on, so the answer can say what
+#: this workspace does not measure instead of inventing a benchmark.
+_COMPARE_CRITERION = re.compile(
+    r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?(?P<word>[a-z]+)\b",
+    re.I,
+)
+
+
+def _compare_side(text: str) -> str:
+    """One side of a comparison with the comparison's own words stripped off."""
+    want = re.sub(r"\s+", " ", (text or "").strip().strip("\"'“”‘’"))
+    for _ in range(2):
+        stripped = _COMPARE_NOISE.sub("", want).strip()
+        if stripped == want:
+            break
+        want = stripped
+    return want
+
+
+def connector_comparison(message: str) -> dict[str, str] | None:
+    """The two saved connectors this message asks to compare, or None.
+
+    Resolution happens here rather than inside the tool because the same sentence
+    shape is a documentation question when the names are product concepts. Both
+    sides must resolve to a saved connector — anything less falls through to
+    retrieval, which is the right owner for "append vs overwrite".
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    from .schema_tools import saved_connector_name
+
+    for pattern in _COMPARE_FRAMES:
+        hit = pattern.search(text)
+        if not hit:
+            continue
+        left = saved_connector_name(_compare_side(hit.group("a")))
+        right = saved_connector_name(_compare_side(hit.group("b")))
+        if not left or not right or left == right:
+            continue
+        criterion = ""
+        word = _COMPARE_CRITERION.search(text)
+        if word:
+            criterion = word.group("word").lower()
+        return {"left": left, "right": right, "criterion": criterion}
+    return None
+
+
+# Creative writing is not a documentation subject. "write me a poem about data"
+# matched the product-subject model on the word *data* and was answered with the
+# Iceberg merge-on-read passage and a Help citation, which is worse than saying
+# no: it presents a real product fact as though it were the reply to that turn.
+_CREATIVE_REQUEST = re.compile(
+    r"\b(?:write|compose|make\s+up|give\s+me|tell\s+me|sing|draft|generate)\b"
+    r"[^.?!]{0,40}?"
+    r"\b(?:poem|poetry|haiku|limerick|sonnet|song|rap|joke|riddle|pun|story|"
+    # No bare "script": "generate a sql script" is a product request.
+    r"fairy\s*tale|essay|screenplay|lyrics)\b"
+    r"|\b(?:poem|haiku|limerick|joke|riddle)\s+about\b",
+    re.I,
+)
+
+
+def asks_for_creative_writing(message: str) -> bool:
+    """A creative-writing request, which the documentation cannot answer."""
+    return bool(_CREATIVE_REQUEST.search(message or ""))
 
 
 def _has_explicit_workspace_subject(lower: str) -> bool:
@@ -2816,6 +3214,10 @@ def _has_explicit_workspace_subject(lower: str) -> bool:
     if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
         return True
     if re.search(r"\bmapping assurance\b", lower):
+        return True
+    # "which of my connectors are broken" names a live connection-test bucket.
+    # That is workspace state, so the Connectors page tour must not lead it.
+    if connector_health_filter(lower) != "any":
         return True
     return False
 
@@ -2922,6 +3324,271 @@ def _capture_connector_name(raw: str) -> str:
         return _clean_connector_phrase(quoted.group(1))
     # Unquoted: take the whole remainder (supports "Local Postgres").
     return _clean_connector_phrase(re.sub(r"[.?!]+$", "", text).strip())
+
+
+# "get me the passed connectors" is a health filter, not a full inventory dump.
+_CONNECTOR_HEALTH = (
+    (
+        re.compile(
+            r"\b(?:passed|passing|pass|green|healthy|working|ok|connected|"
+            r"successful|success|good)\b",
+            re.I,
+        ),
+        "passed",
+    ),
+    (
+        re.compile(
+            r"\b(?:failed|failing|fail|red|broken|unhealthy|bad|error|"
+            r"errored|down|not\s+working)\b",
+            re.I,
+        ),
+        "failed",
+    ),
+    (
+        re.compile(r"\b(?:untested|not\s+tested|never\s+tested|unknown)\b", re.I),
+        "untested",
+    ),
+)
+
+
+# Datawrap's own inventory nouns, and the tool that reads each. Warehouse nouns
+# (tables, rows, columns) are deliberately absent: counting those is a live read
+# on a named connector, not a platform count.
+_WORKSPACE_INVENTORY_TOOLS: tuple[tuple[re.Pattern[str], tuple[str, dict]], ...] = (
+    (
+        re.compile(r"\b(?:schedules?|pipelines?|cadences?)\b", re.I),
+        ("list_schedules", {"limit": 20}),
+    ),
+    (
+        re.compile(r"\b(?:connectors?|connections?)\b", re.I),
+        ("list_connectors", {}),
+    ),
+    (
+        re.compile(r"\b(?:jobs?|transfers?|runs?)\b", re.I),
+        ("list_jobs", {"limit": 10}),
+    ),
+    (
+        re.compile(r"\b(?:datasets?|uploads?)\b", re.I),
+        ("list_datasets", {}),
+    ),
+)
+
+# Only possessive framings. "How many connectors do you support" and "how many
+# connectors are there" ask about the catalog and belong to the documentation;
+# "how many do I have" asks about this workspace.
+_WORKSPACE_COUNT_ASK = re.compile(
+    r"\bhow\s+many\s+[\w \-]{0,40}?\b(?:do|does|did)\s+(?:i|we|you)\s+have\b"
+    r"|\bhow\s+many\s+(?:of\s+)?(?:my|our)\b"
+    r"|\b(?:number|count|total)\s+of\s+(?:my|our)\b",
+    re.I,
+)
+
+
+# "tell me about my datasets" and "what are my pipelines" are the same read as
+# "how many datasets do i have" — the operator's own inventory. Asked without a
+# counting verb they reached the documentation instead.
+_WORKSPACE_POSSESSIVE_ASK = re.compile(
+    r"\b(?:tell\s+me\s+about|what\s+(?:are|is)|which\s+are|show\s+me|"
+    r"show|list|give\s+me|walk\s+me\s+through)\s+"
+    r"(?:all\s+(?:of\s+)?)?(?:my|our)\b",
+    re.I,
+)
+
+
+def _asks_to_count_workspace_objects(lower: str) -> bool:
+    """A read of the operator's own inventory, not of warehouse rows."""
+    if re.search(r"\bon\s+[a-z0-9]", lower):
+        return False
+    return bool(
+        _WORKSPACE_COUNT_ASK.search(lower) or _WORKSPACE_POSSESSIVE_ASK.search(lower)
+    )
+
+
+def _saved_connector_exists(name: str) -> bool:
+    """Whether ``name`` matches a saved connector — never a guess from wording."""
+    want = (name or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.connector_store import list_connectors as _saved
+
+        for row in _saved() or []:
+            data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            if str(data.get("name") or "").strip().lower() == want:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+# A health word inside a how-to or consequence frame is documentation vocabulary,
+# not a filter: "how do I fix a broken connector" and "what happens when a
+# connector test fails" are answered from Help, not from the failed bucket.
+_HEALTH_WORD_IS_DOCUMENTATION = re.compile(
+    r"\bhow\s+(?:do|can|to|should|would)\b"
+    r"|\bwhat\s+happens\b|\bwhat\s+if\b|\bwhat\s+does\b"
+    r"|\bwhy\s+(?:does|do|is|are)\s+(?:a|an|the)\b"
+    r"|\bmeans?\b|\bmeaning\b|\bshould\s+i\b"
+    r"|\benough\s+to\b|\bskip\b|\bdefinition\b",
+    re.I,
+)
+
+
+def connector_health_filter(message: str) -> str:
+    """Which connection-test bucket the operator asked for, or ``any``.
+
+    Health is the last saved probe (``last_test_ok``). Listing all twelve
+    connectors for "the passed connectors" reads like every one is green.
+    """
+    text = (message or "").strip()
+    # Plural on purpose: a bucket is a subset of the saved list. "my connector
+    # test passed but the transfer failed, why" is one connector and a
+    # diagnosis, and filtering the list is not what it asked for.
+    if not text or not re.search(r"\b(?:connectors|connections)\b", text, re.I):
+        return "any"
+    if _HEALTH_WORD_IS_DOCUMENTATION.search(text):
+        return "any"
+    for pattern, bucket in _CONNECTOR_HEALTH:
+        if pattern.search(text):
+            return bucket
+    return "any"
+
+
+# Engine names operators say out loud, mapped to the driver token the connector
+# store records. Exact driver names resolve from the catalog instead, so this only
+# needs the spoken forms.
+_ENGINE_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "postgre": "postgresql",
+    "pgsql": "postgresql",
+    "mongo": "mongodb",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "sql server": "sqlserver",
+    "bq": "bigquery",
+    "s3": "s3",
+    "lite": "sqlite",
+}
+
+# Engines the pilot can name in a filter. Deliberately the spoken vocabulary
+# rather than the whole 600-row catalog: a catalog slug is not what an operator
+# types, and matching one loosely turns a documentation ask into an inventory read.
+_ENGINE_WORDS: tuple[str, ...] = (
+    "postgresql", "postgres", "postgre", "pgsql",
+    "mysql", "mariadb", "sqlite",
+    "snowflake", "bigquery", "bq", "redshift", "databricks", "clickhouse",
+    "mongodb", "mongo", "sqlserver", "ms sql", "sql server", "mssql",
+    "oracle", "kafka", "s3", "gcs", "csv", "json", "parquet",
+)
+
+# The frames that make an engine word a *filter on my inventory* rather than a
+# question about the catalog. "do you support postgres" is the second kind.
+_ENGINE_FILTER_FRAME = re.compile(
+    r"\b(?:my|our|saved)\s+(?:connectors?|connections?)\b"
+    r"|\b(?:connectors?|connections?)\s+(?:do\s+)?(?:i|we)\s+have\b"
+    r"|\b(?:of|among)\s+(?:those|them|these)\b"
+    r"|^(?:list|show|which|what|count|how\s+many)\b[^?]*"
+    r"\b(?:connectors?|connections?)\b",
+    re.I,
+)
+
+# A capability question names an engine without asking about saved rows.
+_ENGINE_IS_CAPABILITY_ASK = re.compile(
+    r"\bdo\s+(?:you|we)\s+(?:support|have)\b"
+    r"|\bcan\s+you\s+(?:connect|read|write|load|move)\b"
+    r"|\bis\s+[\w ]+\s+supported\b"
+    r"|\bsupported?\b|\bsupports\b",
+    re.I,
+)
+
+_ENGINE_NEGATION = re.compile(
+    r"\b(?:not|aren'?t|isn'?t|other\s+than|except|excepting|excluding|exclude|"
+    r"besides|without|non)\b",
+    re.I,
+)
+
+
+def canonical_engine(engine: str) -> str:
+    """One spelling per engine, so ``postgres`` and ``postgresql`` are one bucket."""
+    want = re.sub(r"[^a-z0-9 ]+", "", (engine or "").strip().lower())
+    if not want:
+        return ""
+    want = _ENGINE_ALIASES.get(want, want)
+    return want.replace(" ", "")
+
+
+def connector_engine_filter(message: str) -> tuple[str, bool]:
+    """The engine bucket the operator asked their inventory for, and whether negated.
+
+    Returns ``("", False)`` for anything that is not a filter on saved rows —
+    "do you support postgres" is a catalog question and answering it from the
+    saved list would be a different claim entirely.
+    """
+    text = (message or "").strip()
+    if not text or _ENGINE_IS_CAPABILITY_ASK.search(text):
+        return "", False
+    if not _ENGINE_FILTER_FRAME.search(text):
+        return "", False
+    for word in sorted(_ENGINE_WORDS, key=len, reverse=True):
+        hit = re.search(rf"(?<![A-Za-z0-9]){re.escape(word)}(?![A-Za-z0-9])", text, re.I)
+        if not hit:
+            continue
+        # Negation belongs to the clause that carries the engine word: "connectors
+        # that are not postgres", "everything except sqlite".
+        before = text[max(0, hit.start() - 40) : hit.start()]
+        return canonical_engine(word), bool(_ENGINE_NEGATION.search(before))
+    return "", False
+
+
+# A pasted inventory row: ``Snowflake_venky (snowflake) → EMPLOYEE_DB``.
+# Operators paste our own bullet back with a question glued on the end.
+_PASTED_CONNECTOR_ROW = re.compile(
+    # Operators paste back exactly what Pilot printed, bullet and bold included:
+    # ``• **Demo Orders** (sqlite) → /data/demo.db list the tables``.
+    r"^\s*(?:[•·*\u2013\u2014-]\s+)?"
+    r"(?:\*\*|__|`)?\s*"
+    r"(?P<name>[A-Za-z][A-Za-z0-9_. -]{0,79}?)\s*"
+    r"(?:\*\*|__|`)?\s*"
+    r"\(\s*(?P<engine>[a-z0-9_]{2,24})\s*\)\s*"
+    r"(?:→|->|=>)?\s*"
+    r"(?P<db>[A-Za-z0-9_./-]*)\s*"
+    r"(?P<rest>.*)$",
+    re.I | re.S,
+)
+
+
+def _is_known_driver_type(engine: str) -> bool:
+    """Whether the parenthesised engine is a real driver — from the catalog."""
+    want = (engine or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.catalog_service import catalog_summary
+
+        types = catalog_summary().get("unique_driver_types") or ()
+        return want in {str(t).strip().lower() for t in types}
+    except Exception:
+        return False
+
+
+def split_pasted_connector_row(message: str) -> tuple[str, str]:
+    """Split a pasted connector row into (connector_name, remaining question).
+
+    ``Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there`` must
+    become a live table read on that connector — not a documentation refuse.
+    The parenthesised engine is what makes the shape unambiguous, so it is
+    checked against the catalog's own driver types rather than assumed.
+    """
+    match = _PASTED_CONNECTOR_ROW.match((message or "").strip())
+    if not match:
+        return "", ""
+    name = _clean_connector_phrase(match.group("name") or "")
+    rest = (match.group("rest") or "").strip()
+    if not name or not rest:
+        return "", ""
+    if not _is_known_driver_type(match.group("engine") or ""):
+        return "", ""
+    return name, rest
 
 
 def _is_raw_knowledge_shard(text: str) -> bool:
@@ -3303,6 +3970,8 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "analyze_result",
     "filter_result",
     "list_connector_objects",
+    "rank_connector_tables",
+    "compare_connectors",
 })
 
 # Tools that answer from the documentation rather than from workspace state.
@@ -3312,6 +3981,50 @@ _KNOWLEDGE_TOOLS = frozenset({
     "describe_pilot",
     "explain_mapping_assurance",
 })
+
+
+def _reads_workspace(planned: list[tuple[str, dict]]) -> bool:
+    """Whether the plan reads live state rather than only the documentation."""
+    return any(n not in _KNOWLEDGE_TOOLS for n, _ in planned)
+
+
+def _plans_lookup_on(planned: list[tuple[str, dict]], token: str) -> bool:
+    """Whether a misspelled word became the subject of a named-object lookup.
+
+    ``how many pipelins do i have`` planned COUNT(*) over a table called
+    `pipelins`, which no connector can hold — the tool was always going to fail,
+    so the spelling retry is strictly better than the plan it replaces.
+    """
+    for name, args in planned:
+        if name not in _NAMED_OBJECT_LOOKUP_TOOLS:
+            continue
+        for value in (args or {}).values():
+            if isinstance(value, str) and token in value.lower():
+                return True
+    return False
+
+
+def plan_tools_tolerant(message: str) -> list[tuple[str, dict]]:
+    """Plan tools, retrying once with workspace-noun typos corrected.
+
+    ``conenctors?`` and ``shcedules`` reached no tool at all and were refused as
+    undocumented. The retry is only ever allowed to *upgrade* a plan that either
+    read nothing live or was about to look up the misspelling itself, so a
+    correction can never change the meaning of a question the router already
+    understood — see ``spelling`` for why the vocabulary is deliberately small.
+    """
+    planned = infer_tools_from_message(message)
+    from .spelling import correct_workspace_typos, corrected_tokens
+
+    fixes = corrected_tokens(message)
+    if not fixes:
+        return planned
+    if _reads_workspace(planned) and not any(
+        _plans_lookup_on(planned, bad) for bad in fixes
+    ):
+        return planned
+    retry = infer_tools_from_message(correct_workspace_typos(message))
+    return retry if _reads_workspace(retry) else planned
 
 # Tools that need the operator to have named a specific object, and that report
 # "not found" when they were planned off a generic question instead.
@@ -3324,13 +4037,56 @@ _NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
     "get_preflight_run",
     "sample_connector_object",
     "list_connector_objects",
+    "rank_connector_tables",
+    "compare_connectors",
     "introspect_connector_schema",
     "aggregate_data",
     "analyze_dataset",
 })
 
+_DATASET_NOUN = (
+    r"(?:data\s?sets?|datasets?|uploads?|files?|csvs?|"
+    r"spreadsheets?|extracts?|feeds?)"
+)
 
-def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+# A dataset is the *subject* of "tell me about the employees dataset" and of
+# "analyze my HR upload". It is only vocabulary in "how does Datawrap mask
+# employee PII", which the fuzzy industry-word hint in
+# ``CopilotDataAnalyst.extract_dataset_hint`` cannot tell apart. Only a
+# syntactic subject may outrank the documentation.
+_DATASET_SUBJECT = re.compile(
+    r"\b(?:analy[sz]e|profile|preview|summari[sz]e)\s+"
+    r"(?:the\s+|my\s+|this\s+|our\s+)?"
+    r"(?P<verb_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{0,40}?)"
+    rf"(?:\s+{_DATASET_NOUN})?\s*[.?!]*$"
+    r"|"
+    r"\b(?:tell\s+me\s+(?:everything\s+)?about|what(?:'s|s| is)\s+in|"
+    r"describe|show\s+me)\s+(?:the\s+|my\s+|our\s+)?"
+    rf"(?P<about_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{{0,40}}?)\s+{_DATASET_NOUN}\b",
+    re.I,
+)
+
+_DATASET_SUBJECT_STOPWORDS = frozenset({
+    "this", "that", "it", "my", "our", "the", "a", "an", "them", "these",
+    "those", "data", "everything", "something", "anything", "result",
+    "results", "here", "again", "more",
+})
+
+
+def dataset_subject(message: str) -> str | None:
+    """Name of the dataset the message is *about*, or None if it names none."""
+    match = _DATASET_SUBJECT.search((message or "").strip())
+    if not match:
+        return None
+    name = (match.group("verb_name") or match.group("about_name") or "").strip(" \"'")
+    if not name or name.lower() in _DATASET_SUBJECT_STOPWORDS:
+        return None
+    return name
+
+
+def prune_planned_tools(
+    planned: list[tuple[str, dict]], message: str = ""
+) -> list[tuple[str, dict]]:
     """Keep a coherent primary intent — don't stack conflicting tool dumps."""
     if not planned:
         return planned
@@ -3375,15 +4131,58 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "list_jobs" in names or "list_connectors" in names:
         planned = [(n, a) for n, a in planned if n != "aggregate_data"]
         names = {n for n, _ in planned}
+    # "did anything fail in the last 24 hours" is answered by the ledger. Pairing
+    # it with a Help passage put the Daily-cadence-preset paragraph in front of
+    # the runs, which reads as though the question about last night was declined.
+    if "list_jobs" in names and asks_what_failed_recently(message):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n not in ("explain_product", "search_knowledge", "brief_workspace")
+        ]
+        names = {n for n, _ in planned}
+    # Throughput and limits are product capability, not a count over live rows.
+    # Guarded here as well as at the parse site because the telegraphic
+    # "how many rows <table> <connector>" pattern plans its own aggregate later,
+    # and read "how many rows can you move per second" as table `can` on a
+    # connector named "you move per second".
+    if (
+        "aggregate_data" in names
+        and asks_about_product_capacity(message)
+        and not _has_explicit_workspace_subject((message or "").lower())
+    ):
+        planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
     # A product FAQ already answers from Help. Companion quality/dataset dumps
     # (156 hashed uploads next to "what are the preflight gates") are noise.
+    #
+    # The reverse is true when the operator named a dataset as the subject:
+    # "tell me about the employees dataset" is a profile request, and answering
+    # it with the Lineage help card is the noise. The dataset tool then keeps
+    # the turn and reports honestly when nothing by that name is indexed.
     if "explain_product" in names:
-        planned = [
-            (n, a) for n, a in planned
-            if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
-        ]
+        # "tell me about my datasets" is an inventory read, and the possessive is
+        # what says so. Read as documentation it dropped ``list_datasets`` and
+        # answered with a Help card about datasets in general.
+        _own_inventory = "list_datasets" in names and _asks_to_count_workspace_objects(
+            (message or "").lower()
+        )
+        # "which of my connectors are sqlite" is a filter on saved rows. The
+        # engine name also heads a Help article, and leading with it answered
+        # with the whole transfer-ready driver list instead of their two rows.
+        if "list_connectors" in names and connector_engine_filter(message)[0]:
+            _own_inventory = True
+        if _own_inventory or (
+            dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}
+        ):
+            planned = [(n, a) for n, a in planned if n != "explain_product"]
+        else:
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+            ]
         names = {n for n, _ in planned}
     if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
@@ -3508,6 +4307,43 @@ _TRANSFER_TO_FROM_RE = re.compile(
     rf"{_TRANSFER_TRAIL}",
     re.IGNORECASE,
 )
+# "sync orders on Demo Orders to Warehouse" — the source connector qualified with
+# ``on``, which is how every read in this product is phrased ("count rows in orders
+# *on* Demo Orders"). Only the ``from`` form was parsed, so a request that named
+# the table, both endpoints and a cadence resolved to nothing and was answered with
+# the pause-a-schedule procedure.
+_TRANSFER_ON_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the|all|my|our|these|those))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:on|in)\s+(?P<src>.+?)"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+
+# ``schedule`` is not a transfer verb: it also names the *object* ("open schedule
+# Nightly Load"), so putting it in _TRANSFER_VERBS would change how every route
+# regex reads a sentence. When it is unmistakably the verb of a route — a table
+# and an endpoint follow it — swap in a verb the route parser already knows and
+# let the cadence parser keep the rest.
+_SCHEDULE_AS_TRANSFER_VERB = re.compile(
+    r"^(?P<lead>\s*(?:(?:hey|hi|ok|okay|so|please|pls)\s+|"
+    r"(?:can|could|would|will)\s+(?:you|u)\s+(?:please\s+)?|"
+    r"(?:i|we)\s+(?:want|need|would\s+like)\s+to\s+)*)"
+    r"schedule\b(?=\s+(?:a|an|the|all|my|our)?\s*[A-Za-z_][\w.$]*\s+"
+    r"(?:from|on|in|to|into)\b)",
+    re.IGNORECASE,
+)
+
+
+def _schedule_verb_as_transfer(text: str) -> str:
+    return _SCHEDULE_AS_TRANSFER_VERB.sub(lambda m: f"{m.group('lead')}sync", text or "")
+
+
 # "transfer orders to Warehouse" (source omitted — plan route / clarify later)
 _TRANSFER_TO_ONLY_RE = re.compile(
     rf"\b(?:{_TRANSFER_VERBS})\b"
@@ -3759,9 +4595,19 @@ _ROW_STATE_WORDS = frozenset(
     """.split()
 )
 
-_NOT_A_TABLE_NAME = frozenset(
-    {"data", "rows", "me", "some", "the", "my", "all"}
-) | _ROW_STATE_WORDS
+def _comparative_words() -> frozenset[str]:
+    from .aggregate_tools import COMPARATIVE_WORDS
+
+    return COMPARATIVE_WORDS
+
+
+# A comparison word is never the name of the thing being compared, so the
+# planners fail closed on the canonical set rather than each keeping a copy.
+_NOT_A_TABLE_NAME = (
+    frozenset({"data", "rows", "me", "some", "the", "my", "all"})
+    | _ROW_STATE_WORDS
+    | _comparative_words()
+)
 
 
 # A row preview always puts the quantity between the verb and the table:
@@ -3846,13 +4692,14 @@ def parse_transfer_intent(message: str) -> dict | None:
     cleaned, extras = parse_transfer_bind_and_rules(normalize_operator_typos(message))
     cleaned, rules = parse_transfer_data_rules(cleaned)
     extras.update(rules.as_intent_fields())
-    text = cleaned.strip()
+    text = _schedule_verb_as_transfer(cleaned.strip())
     if not text:
         return None
     match = (
         _TRANSFER_RE.search(text)
         or _TRANSFER_TO_FROM_RE.search(text)
         or _TRANSFER_ARROW_RE.search(text)
+        or _TRANSFER_ON_RE.search(text)
     )
     _matched_table = match.group("table").strip().lower() if match else ""
     if match and (
@@ -3971,21 +4818,54 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("describe_pilot", {}))
         return planned
 
+    # An operator pasting our own connector bullet back is naming that
+    # connector. Resolve it, then route the question they glued on.
+    # An operator pasting a row whose name is *not* saved still deserves the
+    # not-found recovery ("no connector matched X; saved connectors are …")
+    # rather than a documentation refuse that hides the real reason.
+    pasted_name, pasted_rest = split_pasted_connector_row(message)
+    if pasted_name:
+        inner = infer_tools_from_message(f"{pasted_rest} on {pasted_name}")
+        if inner and (
+            _saved_connector_exists(pasted_name)
+            or any(n in _NAMED_OBJECT_LOOKUP_TOOLS for n, _ in inner)
+        ):
+            return inner
+
     from .dialogue_acts import (
         classify_dialogue_act,
         is_calendar_question,
         is_create_connection_capability_ask,
         is_route_plan_capability_paste,
         is_schedule_health_question,
+        is_schedule_setup_capability_ask,
+        is_transfer_capability_ask,
     )
 
     # Clock asks must not retrieve DATE-type / transform docs.
     if is_calendar_question(message):
         return []
+    # Creative writing has no documentation to cite, and retrieving one anyway
+    # presented an Iceberg passage as the answer to "write me a poem about data".
+    if asks_for_creative_writing(message):
+        return []
+    # Price, licence and SLA are not engineering facts, so no tool here can
+    # answer them and every one that tried answered something else: "how many
+    # seats do we get" reached ``aggregate_data`` and replied "connector not
+    # found". ``explain_product`` owns the refusal that names what is missing.
+    if asks_a_commercial_question(message):
+        return [("explain_product", {"query": message})]
+    if is_schedule_setup_capability_ask(message):
+        return []
     if is_create_connection_capability_ask(message) or is_route_plan_capability_paste(message):
         return []
 
     _act = classify_dialogue_act(message)
+    # "any failures today" reads as a sitrep, but the operator asked for the run
+    # that broke, not a workspace summary — a briefing answers around the
+    # question. The jobs ledger is where the failure and its reason are recorded.
+    if _act == "briefing" and asks_what_failed_recently(message):
+        _act = ""
     # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
     # named objects (job_/pf_) keep their existing routers.
     if _act == "briefing" and not re.search(
@@ -4153,7 +5033,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             r"\benough\s+to\s+skip\b",
             lower,
         ):
-            planned.append(("list_connectors", {}))
+            _health = connector_health_filter(message)
+            _engine, _engine_not = connector_engine_filter(message)
+            _list_args: dict[str, Any] = {}
+            if _health != "any":
+                _list_args["health"] = _health
+            if _engine:
+                _list_args["engine"] = _engine
+                _list_args["engine_excluded"] = _engine_not
+            planned.append(("list_connectors", _list_args))
             planned = [
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
@@ -4403,9 +5291,25 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     _platform_job_inventory = bool(
         re.search(
             r"\b(?:how many\s+jobs|jobs?\s+(?:that\s+)?failed|failed\s+jobs|job\s+failures|"
-            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b",
+            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b"
+            # Rows *moved* is job telemetry, not a table to aggregate. Without
+            # this, "how many rows did we move yesterday" hunted for a saved
+            # connector named "we move yesterday".
+            r"|\bhow\s+many\s+rows?\s+(?:did|have|has)\s+(?:we|i|you|it)\s+"
+            r"(?:moved?|transferr?ed?|synced?|loaded?|copied|copy|written|wrote)\b"
+            # Quarantine and rejection counts are recorded on the job, not in a
+            # table. "how many rows got quarantined" hunted for a saved connector
+            # named "quarantined" and stacked a clarification, a Help passage and
+            # the connector list into one answer.
+            r"|\bhow\s+many\s+rows?\s+(?:got|were|was|are|have\s+been)\s+"
+            r"(?:quarantined|rejected|refused|dropped|skipped|lost)\b"
+            # "did anything run last night" is job history. The word "night"
+            # retrieved the nightly-cadence procedure instead.
+            r"|\b(?:did|has|have)\s+(?:anything|any\s+\w+|something|it|we|they)\s+"
+            r"(?:run|ran|execute[d]?|sync(?:ed)?|transferred?|move[d]?)\b",
             lower,
         )
+        or asks_what_failed_recently(lower)
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
     if (not _nav_only) and (
         _platform_job_inventory
@@ -4434,6 +5338,22 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             (n, a) for n, a in planned
             if not (n == "navigate" and (a or {}).get("screen") == "jobs")
         ]
+
+    # "How many X do I have" is a read of the operator's own workspace for
+    # every inventory noun, not only the two that had hand-written branches.
+    # "how many schedules do i have" fell through to the documentation and
+    # answered a count with the CDC-delete-drops-the-slot passage.
+    if _asks_to_count_workspace_objects(lower):
+        for pattern, tool in _WORKSPACE_INVENTORY_TOOLS:
+            if pattern.search(lower):
+                planned.append(tool)
+                planned = [
+                    (n, a) for n, a in planned
+                    if n != "explain_product"
+                    and not (n == "aggregate_data")
+                    and not (n == "navigate")
+                ]
+                break
 
     _platform_connector_inventory = bool(
         re.search(r"\b(?:how many\s+connectors|connector\s+count)\b", lower)
@@ -4587,7 +5507,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         else:
             planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
-    if not transfer_intent and any(
+    if not transfer_intent and is_transfer_capability_ask(message):
+        # No endpoints named yet, so the sketch is the answer: it states the next
+        # correct action and the gate sequence the route will run.
+        planned.append(("plan_transfer_route", {"source": "", "destination": ""}))
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("recommend_sync_mode", "explain_product")
+        ]
+    elif not transfer_intent and any(
         w in lower
         for w in (
             "plan transfer", "transfer plan", "route plan", "plan a route", "plan route",
@@ -4622,9 +5550,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         if route:
             src = _capture_connector_name(route.group(1))
             dst = _capture_connector_name(route.group(2))
+        # Only pass endpoints the route actually named. Falling back to a slice
+        # of the sentence made "how fast can you move data" render as a route
+        # whose source *and* destination were that whole question.
         planned.append(("plan_transfer_route", {
-            "source": src or cleaned[:80] or message[:80],
-            "destination": dst or cleaned[-80:] or message[-80:],
+            "source": src,
+            "destination": dst,
             "workload": "cdc" if "cdc" in lower else "unknown",
             **{k: v for k, v in extras.items() if v},
         }))
@@ -4778,8 +5709,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             lower,
         )
     )
-    if schema_of or columns_on or describe_table or table_look:
-        m = schema_of or columns_on or describe_table or table_look
+    # A schema *property* of a named table is a live read, never a Help topic.
+    # "what is the primary key of orders on Demo Orders" and "are there nulls in
+    # orders on Demo Orders" both answered from documentation, which cannot know
+    # either fact — the introspect tool already reports keys and nullability.
+    _SCHEMA_PROPERTY_WORD = (
+        r"(?:primary\s+keys?|pk|unique\s+keys?|foreign\s+keys?|"
+        r"indexe?s?|nullable|not\s+null|nulls?|"
+        r"data\s+types?|column\s+types?|dtypes?)"
+    )
+    schema_property = None if _policy_planned else (
+        re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\b"
+            r"[^.?!]*?\b(?:of|for|in|on|from)\s+"
+            rf"{_TABLE_REF}"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+        or re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\s+does\s+{_TABLE_REF}\s+have"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+    )
+    if schema_of or columns_on or describe_table or table_look or schema_property:
+        m = schema_of or columns_on or describe_table or table_look or schema_property
         table = (m.group(1) or "").strip()
         # Reject inventory / policy nouns mistaken as table names
         if table.lower() not in {
@@ -4840,7 +5794,67 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
-    if (
+    # Two of the operator's own connectors, named side by side. Both names had to
+    # resolve against the store to get here, so this is not a documentation
+    # question — which is what it used to become: the shipped examples use these
+    # very names, so "compare Demo Orders and Quarantine SQLite" retrieved the
+    # destination-type table and answered about six logical types instead.
+    comparison = connector_comparison(message)
+    if comparison:
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "explain_product",
+                "search_knowledge",
+                "list_connectors",
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "introspect_connector_schema",
+                "plan_transfer_route",
+                "get_transfer_capabilities",
+            )
+        ]
+        planned.append(("compare_connectors", dict(comparison)))
+        return planned
+    # A size question about the tables on a connector is a ranking, not a read of
+    # one table. Claimed before the inventory and sample parsers, because both
+    # used to take the superlative for the table name.
+    if asks_to_rank_connector_tables(message) and not _CAPABILITY_TABLE_LANDING.search(
+        lower
+    ):
+        # The connector name ends where the ranking clause begins: anchored only
+        # at end-of-string, "which table on Demo Orders has the most rows" bound
+        # a connector literally named "Demo Orders has the most rows".
+        rank_on = re.search(
+            r"\b(?:on|in|for|from|of)\s+(?:the\s+|my\s+)?"
+            r"(?P<connector>[A-Za-z0-9_][\w\-. ]{0,48}?)"
+            r"(?:\s+(?:connector|database|db|warehouse))?"
+            r"(?:\s*[?.!]*$|\s+(?:has|have|had|holds?|contains?|with|that|which|"
+            r"is|are|was|were|by|and|or|ranked|sorted|ordered)\b)",
+            message,
+            re.I,
+        )
+        cname = _capture_connector_name(rank_on.group("connector")) if rank_on else ""
+        args: dict[str, Any] = {"order": table_rank_order(message)}
+        if cname:
+            args["connector_name"] = cname
+        planned.append(("rank_connector_tables", args))
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "explain_product",
+                "search_knowledge",
+            )
+        ]
+    elif (
         tables_on
         and "introspect_connector_schema" not in [p[0] for p in planned]
         and not _CAPABILITY_TABLE_LANDING.search(lower)
@@ -4912,6 +5926,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         and not _has_explicit_workspace_subject(lower)
     ):
         agg = None
+    # Throughput and limits are product capability, not a row count.
+    if (
+        agg is not None
+        and asks_about_product_capacity(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
     if (
         agg is not None
         and not _explicit_sql_intent
@@ -4947,7 +5968,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
+        # "query orders on Demo Orders" and "run a query on orders on Demo
+        # Orders" are reads. Without the verb they matched nothing at all and the
+        # turn was refused as undocumented, which is the one thing an operator
+        # never accepts from a data tool.
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
+        r"run\s+(?:a\s+)?quer(?:y|ies)\s+(?:on|against|over)|quer(?:y|ies)|"
         r"analyze|profile|peek(?:\s+at)?|(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
         r"([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
@@ -5415,16 +6441,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(s in lower for s in data_signals) and not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
         if hint:
             planned.append(("analyze_dataset", {"dataset_name": hint}))
-        elif re.search(r"\banalyze\b", lower) and "analyze_dataset" not in [p[0] for p in planned]:
+        elif "analyze_dataset" not in [p[0] for p in planned]:
             # Named dataset that the index doesn't know yet — still invoke so
             # recovery can list indexed uploads instead of a dead-end reply.
-            m = re.search(
-                r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
-                lower,
-            )
-            name = (m.group(1) if m else "").strip(" \"'")
-            if name and name not in {"this", "that", "it", "my", "the"}:
-                planned.append(("analyze_dataset", {"dataset_name": name}))
+            subject = dataset_subject(message)
+            if subject:
+                planned.append(("analyze_dataset", {"dataset_name": subject}))
 
     if _looks_like_product_howto(lower) and not _has_explicit_workspace_subject(lower):
         # Curated local FAQ — don't wipe stronger product/ops tools already planned.
@@ -5442,6 +6464,9 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             # nothing else — the documentation that justifies it was dropped
             # because the tool was not on this list.
             "recommend_sync_mode",
+            # "tell me about the employees dataset" names an uploaded dataset.
+            # Dropping the profile turned it into a Lineage documentation dump.
+            "analyze_dataset", "list_datasets", "compare_datasets", "search_data",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -5639,7 +6664,33 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             continue
         seen.add(key)
         unique.append((name, args))
-    return prune_planned_tools(unique)
+    return prune_planned_tools(_collapse_underspecified(unique), message)
+
+
+def _collapse_underspecified(
+    planned: list[tuple[str, dict]],
+) -> list[tuple[str, dict]]:
+    """Drop a call whose arguments are a subset of another call of the same tool.
+
+    "how many connectors do i have the failed ones" planned ``list_connectors``
+    twice — once with ``health=failed`` from the correction and once bare from the
+    count — so the failed bucket was answered and then contradicted by the full
+    list underneath it. Two calls where one is strictly less specified are the
+    same question asked twice; a genuinely different subject is not a subset and
+    still runs.
+    """
+    keep: list[tuple[str, dict]] = []
+    for i, (name, args) in enumerate(planned):
+        redundant = any(
+            other_name == name
+            and j != i
+            and (args or {}).items() <= (other_args or {}).items()
+            and len(other_args or {}) > len(args or {})
+            for j, (other_name, other_args) in enumerate(planned)
+        )
+        if not redundant:
+            keep.append((name, args))
+    return keep
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:

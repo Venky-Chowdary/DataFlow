@@ -31,6 +31,8 @@ from .tools import (
     format_tool_results_for_llm,
     get_pilot_tools,
     infer_tools_from_message,
+    asks_about_product_capacity,
+    plan_tools_tolerant,
 )
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,15 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"run {o.get('name') or o.get('schedule_id')}"
     if tr.name == "list_connector_objects":
         return f"{o.get('count', 0)} objects on {o.get('connector_name')}"
+    if tr.name == "rank_connector_tables":
+        return (
+            f"{o.get('counted', 0)} tables counted on {o.get('connector_name')} "
+            f"({o.get('total_rows', 0)} rows)"
+        )
+    if tr.name == "compare_connectors":
+        left = (o.get("left") or {}).get("name") or "?"
+        right = (o.get("right") or {}).get("name") or "?"
+        return f"{left} vs {right} · {len(o.get('differs') or [])} field(s) differ"
     if tr.name == "sample_connector_object":
         rid = o.get("result_id") or ""
         base = f"{o.get('row_count', 0)} rows from {o.get('table')}"
@@ -444,6 +455,249 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_table_ranking(o: dict[str, Any]) -> str:
+    """Answer "which table is biggest" with the counts it was ranked on.
+
+    The winner leads because that is the question; the table of counts is the
+    evidence. Tables that refused a count are named rather than dropped — a
+    partial inventory presented as the whole one is the silent loss this product
+    exists to refuse.
+    """
+    ranked = [r for r in (o.get("ranked") or []) if isinstance(r, dict)]
+    cname = str(o.get("connector_name") or "connector")
+    ascending = str(o.get("order") or "desc").lower() == "asc"
+    counted = int(o.get("counted") or len(ranked))
+    if not ranked:
+        return f"No table on **{cname}** returned a row count."
+
+    top = ranked[0]
+    superlative = "smallest" if ascending else "largest"
+    lines = [
+        f"The {superlative} table on **{cname}** is `{top.get('table')}` with "
+        f"**{int(top.get('rows') or 0):,} rows**."
+    ]
+    lines.append("| table | rows |")
+    lines.append("| --- | ---: |")
+    for row in ranked:
+        lines.append(f"| `{row.get('table')}` | {int(row.get('rows') or 0):,} |")
+    total = int(o.get("total_rows") or 0)
+    objects = int(o.get("total_objects") or counted)
+    tail = (
+        f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
+        "Each count is an exact server-side `COUNT(*)`, not a sample."
+    )
+    if len(ranked) < counted:
+        tail = f"Showing {len(ranked)} of {counted} counted. " + tail
+    lines.append(tail)
+    skipped = [s for s in (o.get("skipped") or []) if isinstance(s, dict)]
+    if skipped:
+        lines.append(
+            f"• **{len(skipped)} object(s) could not be counted** and are not in "
+            "the ranking: "
+            + "; ".join(
+                f"`{s.get('table')}` ({str(s.get('error') or '').strip()[:80]})"
+                for s in skipped[:4]
+            )
+            + ("…" if len(skipped) > 4 else "")
+        )
+    if o.get("truncated"):
+        lines.append(
+            "• The schema has more objects than I ranked in one pass, so this is "
+            "the largest page, not proven to be the whole database."
+        )
+    return "\n".join(lines)
+
+
+def _connector_side(f: dict[str, Any]) -> dict[str, str]:
+    """One connector's column of the comparison table, already formatted."""
+    endpoint = str(f.get("database") or "") or str(f.get("host") or "") or "—"
+    objects = f.get("objects")
+    tested = str(f.get("last_tested_at") or "")
+    return {
+        "engine": str(f.get("engine") or "—"),
+        "endpoint": f"`{endpoint}`" if endpoint != "—" else "—",
+        "health": str(f.get("health") or "untested")
+        + (f" ({tested[:10]})" if tested else ""),
+        "capability": str(f.get("capability") or "—"),
+        "objects": f"{int(objects):,}" if isinstance(objects, int) else "not read",
+        "reachable": "yes" if f.get("connected") else "no",
+    }
+
+
+def _render_connector_comparison(o: dict[str, Any]) -> str:
+    """Two saved connectors side by side, on facts the workspace actually holds.
+
+    A comparison has to say what differs, or the operator has to diff the table
+    themselves. It must also say what it *cannot* compare: this workspace records
+    no throughput or price per connector, so "which is faster" has no answer here
+    and inventing one from the engine name would be a benchmark we never ran.
+    """
+    left = o.get("left") or {}
+    right = o.get("right") or {}
+    a_name = str(left.get("name") or "A")
+    b_name = str(right.get("name") or "B")
+    a = _connector_side(left)
+    b = _connector_side(right)
+    rows = (
+        ("Engine", "engine"),
+        ("Endpoint", "endpoint"),
+        ("Connection test", "health"),
+        ("Transfer readiness", "capability"),
+        ("Tables / collections", "objects"),
+        ("Reachable now", "reachable"),
+    )
+    lines = [f"**{a_name}** vs **{b_name}** — what your workspace records:"]
+    lines.append(f"| | {a_name} | {b_name} |")
+    lines.append("| --- | --- | --- |")
+    for label, key in rows:
+        lines.append(f"| {label} | {a[key]} | {b[key]} |")
+
+    differs = [str(d) for d in (o.get("differs") or [])]
+    if differs:
+        spoken = {
+            "engine": "engine",
+            "database": "endpoint",
+            "host": "endpoint",
+            "health": "connection test",
+            "capability": "transfer readiness",
+            "objects": "object count",
+        }
+        named = []
+        for d in differs:
+            word = spoken.get(d, d)
+            if word not in named:
+                named.append(word)
+        lines.append(f"They differ on {_including_clause_words(named)}.")
+    else:
+        lines.append("Every field the workspace records is identical.")
+    if o.get("same_engine"):
+        lines.append(
+            "Same engine on both sides, so a transfer between them needs no type "
+            "coercion beyond the mapping."
+        )
+
+    unmeasured = str(o.get("unmeasured") or "")
+    if unmeasured:
+        lines.append(
+            f"I cannot rank them on {unmeasured} — this workspace does not record "
+            "it per connector, and reading it off the engine name would be a "
+            "benchmark nobody ran."
+        )
+    for side in (left, right):
+        note = str(side.get("message") or "")
+        if note and not side.get("connected"):
+            lines.append(f"• **{side.get('name')}** did not answer: {note[:140]}")
+    return "\n".join(lines)
+
+
+def _including_clause_words(words: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — the list read out loud."""
+    kept = [w for w in words if w]
+    if not kept:
+        return "nothing"
+    if len(kept) == 1:
+        return kept[0]
+    return ", ".join(kept[:-1]) + " and " + kept[-1]
+
+
+def _local_and_utc(instant: str, timezone_name: str) -> str:
+    """A due instant in the zone the operator named, with the UTC one after it.
+
+    The scheduler stores UTC, so "02:00 Asia/Kolkata" published as
+    ``2026-09-13T20:30:00+00:00`` looks like the cadence was misread. Lead with
+    the wall clock they asked for and keep UTC as the audit value.
+    """
+    text = (instant or "").strip()
+    zone = (timezone_name or "").strip()
+    if not text or not zone or zone.upper() == "UTC":
+        return f"`{text}`" if text else "—"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        local = datetime.fromisoformat(text).astimezone(ZoneInfo(zone))
+    except Exception:
+        return f"`{text}`"
+    return f"`{local.strftime('%Y-%m-%d %H:%M')}` **{zone}** (`{text}`)"
+
+
+def _render_schedule_stage(o: dict[str, Any]) -> str:
+    """Show the standing instruction an operator is about to sign off on.
+
+    A staged schedule had no renderer at all, so a fully resolved route with a
+    Confirm row already attached fell through to the “outside the documentation”
+    refusal — the operator was told their request was unanswerable underneath a
+    button that would have created it.
+    """
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
+    name = str(preview.get("name") or "pipeline")
+    source = str(preview.get("source") or "?")
+    destination = str(preview.get("destination") or "?")
+    cadence = str(preview.get("cadence") or "").strip()
+    sync = str(preview.get("sync_mode") or "").strip()
+    lines = [
+        f"Staged pipeline **{name}** — `{source}` → `{destination}`"
+        + (f", {cadence}" if cadence else "")
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    cron = str(preview.get("cron") or "").strip()
+    zone = str(preview.get("timezone") or "").strip()
+    if cron and cron != "(preset interval)":
+        lines.append(f"• Cron `{cron}`" + (f" in **{zone}**" if zone else "") + ".")
+    elif zone:
+        lines.append(f"• Timezone **{zone}**.")
+    if preview.get("first_run_at"):
+        lines.append(f"• First run {_local_and_utc(str(preview['first_run_at']), zone)}.")
+    note = str(preview.get("timezone_note") or "").strip()
+    if note:
+        lines.append(f"• {note}")
+    mapped = preview.get("mapped_columns")
+    if mapped is not None:
+        unmapped = preview.get("unmapped_source_columns") or []
+        detail = f"• Mapping approved at stage time: **{mapped}** column(s)"
+        if unmapped:
+            detail += (
+                f", **{len(unmapped)} unmapped**: "
+                + ", ".join(f"`{c}`" for c in list(unmapped)[:6])
+                + ("…" if len(unmapped) > 6 else "")
+            )
+        lines.append(detail + ". Every run writes that mapping, not a re-derivation.")
+    if preview.get("cursor_column"):
+        lines.append(
+            f"• Advances on watermark `{preview['cursor_column']}` — "
+            "each run only reads rows past the last one."
+        )
+    if preview.get("upsert_key"):
+        lines.append(f"• Idempotent on key `{preview['upsert_key']}`.")
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — "
+            + (
+                "every run fails closed unless it is SIGNED."
+                if preview.get("require_signed_contract")
+                else "enforcement is advisory until you require SIGNED."
+            )
+        )
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+    run_id = str(preview.get("preflight_run_id") or "").strip()
+    if run_id:
+        lines.append(f"• Cleared preflight run `{run_id}` before staging.")
+    if o.get("destructive"):
+        lines.append(
+            "• **Every run overwrites the destination table** — that is the "
+            "standing instruction, not a one-off."
+        )
+    lines.append(
+        "Nothing is scheduled until you Confirm below; it starts enabled once you do."
+    )
+    return "\n".join(lines)
+
+
 def _render_schedule_run(o: dict[str, Any]) -> str:
     """Show the pipeline an operator has to sign off on: route, bind, breaker."""
     preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
@@ -550,6 +804,41 @@ _ASKS_FOR_INPUT = re.compile(
     re.I,
 )
 
+#: The same thing said as a question rather than an imperative — "What time
+#: should the nightly run start, and in which timezone?". Only the imperative
+#: openers were listed, so a cadence prompt was published under "I could not
+#: complete that", which reads as a failure the operator has to work around
+#: instead of one word they still owe.
+_ASKS_FOR_INPUT_QUESTION = re.compile(
+    r"^(?:what|when|where|who|how\s+often|how\s+many|how\s+should)\b",
+    re.I,
+)
+
+
+def _is_input_request(error: str) -> bool:
+    """Is this failure really Pilot asking for one missing input?"""
+    text = (error or "").strip()
+    if not text:
+        return False
+    if _ASKS_FOR_INPUT.match(text):
+        return True
+    # A question mark is what separates "What time should this run?" from
+    # "What went wrong: the host refused the connection."
+    return bool(_ASKS_FOR_INPUT_QUESTION.match(text) and "?" in text)
+
+#: Tools whose successful output is an offer the next turn can accept or drop.
+#: ``plan_transfer`` is the only rehearsal here — the rest already hold an ack.
+_PROPOSAL_TOOLS = frozenset(
+    {
+        "plan_transfer",
+        "start_transfer",
+        "create_schedule",
+        "run_schedule_now",
+        "create_connector",
+        "remediate_validation",
+    }
+)
+
 #: Tools that *do* something. "Lookup" is the wrong word for a failed create.
 _ACTION_TOOL_NAMES = frozenset(
     {
@@ -571,7 +860,7 @@ def _failure_reply(failed: list[Any]) -> str:
     errors = [e for e in errors if e]
     if not errors:
         return "I could not complete that."
-    if all(_ASKS_FOR_INPUT.match(e) for e in errors):
+    if all(_is_input_request(e) for e in errors):
         # Nothing went wrong — Pilot is missing one input and is asking for it.
         return errors[0] if len(errors) == 1 else "\n".join(f"• {e}" for e in errors)
     head = (
@@ -878,11 +1167,27 @@ class DataPilotAgent:
         history: list[dict] | None = None,
         data_context: dict | None = None,
     ) -> CopilotResponse:
+        """Answer one turn, honouring a length instruction the turn carried."""
+        response = self._chat(message, history, data_context)
+        from .dialogue_acts import wants_brief_answer
+
+        if response and response.answer and wants_brief_answer(message):
+            from .conversation_composer import condense_to_lead
+
+            response.answer = condense_to_lead(response.answer)
+        return response
+
+    def _chat(
+        self,
+        message: str,
+        history: list[dict] | None = None,
+        data_context: dict | None = None,
+    ) -> CopilotResponse:
         message = message.strip()
         lower_msg = message.lower()
         history = history or []
         data_context = self._ensure_data_context(data_context, history)
-        from .dialogue_acts import classify_dialogue_act
+        from .dialogue_acts import classify_dialogue_act, is_calendar_question
         from .conversation_composer import compose_greeting_response
 
         if not message or classify_dialogue_act(message) == "greeting":
@@ -895,11 +1200,25 @@ class DataPilotAgent:
             # so the footnote was dead (method==greeting never reached it).
             return _with_llm_footnote(greet, _resolve_pilot_engine())
 
+        # Clock time is a host fact. Hybrid OpenAI must not retrieve DATE-type
+        # Help or refuse with "I can't provide the current date."
+        if is_calendar_question(message):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history, ctx, data_context)
+
         # Recap / thanks / next-step over the last spoken answer — do this before
         # tool routing so "summarize that" after a job list does not re-hit Mongo.
         # A stored sample still wins: "summarize that" then profiles the result.
         _hist_act = classify_dialogue_act(message, history=history)
-        if _hist_act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+        if _hist_act in {
+            "summarize_last",
+            "explain_simpler",
+            "thanks",
+            "next_action",
+            "recall_ask",
+            "repair_unclear",
+            "trouble_vague",
+        }:
             sid = str((data_context or {}).get("pilot_session_id") or "").strip()
             focus = None
             if sid:
@@ -941,11 +1260,18 @@ class DataPilotAgent:
 
         ctx = self.context_builder.build(data_context, message)
 
-        # Local always works offline. Hybrid/cloud when keys exist (auto detects).
+        # Local always works offline. Hybrid/cloud only after an explicit opt-in.
         engine = _resolve_pilot_engine()
         local = self._local_agent(message, history or [], ctx, data_context)
         if engine == "local":
             return local
+        # Composed conversation turns (calendar, create-connection, refuse) are
+        # already the answer. Native OpenAI must not race Help retrieval over them.
+        if (local.method or "") == "pilot_conversation":
+            return _with_llm_footnote(
+                self._polish_with_llm(message, history or [], local, system=""),
+                engine,
+            )
 
         system = self._build_system_prompt(ctx, data_context)
 
@@ -1596,6 +1922,65 @@ Draft answer:
             tools_used=local.tools_used,
         )
 
+    def _settle_last_proposal(
+        self,
+        message: str,
+        data_context: dict | None,
+    ) -> CopilotResponse | None:
+        """Answer "go ahead" / "never mind" against what was actually offered.
+
+        Only the conversational outcomes land here. Consent that can be carried
+        out — a rehearsed plan promoted to a real run — is a tool plan, so it is
+        resolved in :meth:`_plan_with_memory` instead and this returns ``None``.
+        """
+        from .conversation_composer import (
+            compose_abandon_response,
+            compose_confirm_is_yours_response,
+            compose_nothing_to_settle_response,
+        )
+        from .followup import (
+            looks_like_abandonment,
+            looks_like_consent,
+            promote_proposal,
+        )
+        from .working_memory import get_working_memory
+
+        consent = looks_like_consent(message)
+        abandon = looks_like_abandonment(message)
+        if not consent and not abandon:
+            return None
+
+        session_id = self._session_id(data_context)
+        if not session_id:
+            return None
+        memory = get_working_memory()
+        proposal = memory.get_proposal(session_id)
+        pending = memory.get_pending(session_id)
+
+        if abandon:
+            # Dropping the proposal is the whole point: a stale ack that outlives
+            # "never mind" is how an operator ends up confirming something they
+            # already withdrew.
+            memory.clear_proposal(session_id)
+            memory.clear_pending(session_id)
+            if not proposal and not pending:
+                return compose_nothing_to_settle_response()
+            return compose_abandon_response(
+                label=getattr(proposal, "label", "") or getattr(pending, "question", ""),
+                staged=bool(getattr(proposal, "staged", False)),
+            )
+
+        # An open clarification owns a bare "do it": it means "yes, go on" about
+        # the question just asked, and answering the older proposal instead would
+        # silently abandon the half-described request.
+        if pending:
+            return None
+        if not proposal:
+            return None
+        if promote_proposal(proposal):
+            return None
+        return compose_confirm_is_yours_response(proposal.label)
+
     def _plan_with_memory(
         self,
         message: str,
@@ -1611,16 +1996,23 @@ Draft answer:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_consent,
             looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
             names_its_own_subject,
+            names_pending_candidate,
             opens_a_row_predicate,
             pending_from_assistant_clarification,
+            promote_proposal,
             resolve_followup,
+            resolve_job_window_followup,
+            resolve_rank_followup,
             resolve_knowledge_engine_followup,
+            resolve_ordinal_reference,
             resolve_pending_answer,
             resolve_platform_coreference,
+            resolve_repair,
             resolve_table_coreference_tools,
         )
         from .working_memory import get_working_memory
@@ -1629,16 +2021,36 @@ Draft answer:
         knowledge = resolve_knowledge_engine_followup(message, history)
         if knowledge:
             message = knowledge
+        # "no i meant the failed ones" is the previous question with one
+        # constraint replaced, not a new subject. Resolved before the pending and
+        # focus branches so the correction reaches normal routing intact.
+        repaired = resolve_repair(message, history)
+        if repaired:
+            message = repaired
+        # "the first one" is the name the previous list already printed. Resolved
+        # into the text so the rest of routing sees an ordinary named subject.
+        ordinal = resolve_ordinal_reference(message, history)
+        if ordinal:
+            message = ordinal
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:
                 return platform
-            return infer_tools_from_message(message)
+            return plan_tools_tolerant(message)
 
         memory = get_working_memory()
         focus = memory.get_focus(session_id)
 
         pending = memory.get_pending(session_id)
+        # "run it" one turn after a plan is the plan, run for real. Parsed from
+        # scratch it named no route and was refused, so the operator had to retype
+        # the whole thing to execute what they had just approved on screen.
+        if not pending and looks_like_consent(message):
+            proposal = memory.get_proposal(session_id)
+            promoted = promote_proposal(proposal) if proposal else None
+            if promoted:
+                memory.clear_proposal(session_id)
+                return [promoted]
         if not pending:
             soft = pending_from_assistant_clarification(history)
             if soft:
@@ -1646,8 +2058,14 @@ Draft answer:
                 if answered:
                     return [answered]
                 # Typo / non-answer against a transcript clarification — promote
-                # to hard pending and re-ask (same as memory-backed slots).
-                if not looks_like_fresh_intent(message) and not looks_like_elliptical_edit(message):
+                # to hard pending and re-ask (same as memory-backed slots). A turn
+                # that names one of the offered connectors is not a non-answer:
+                # it settled the question and asked its own.
+                if (
+                    not looks_like_fresh_intent(message)
+                    and not looks_like_elliptical_edit(message)
+                    and not names_pending_candidate(message, soft)
+                ):
                     memory.remember_pending(session_id, soft)
                     return []
         if pending:
@@ -1655,11 +2073,26 @@ Draft answer:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
-            # Fresh intents and elliptical edits clear the slot; typos keep it open.
-            if looks_like_fresh_intent(message) or looks_like_elliptical_edit(message):
+            # Fresh intents, elliptical edits and turns that name one of the
+            # offered candidates clear the slot; typos keep it open.
+            if (
+                looks_like_fresh_intent(message)
+                or looks_like_elliptical_edit(message)
+                or names_pending_candidate(message, pending)
+            ):
                 memory.clear_pending(session_id)
             else:
                 return []
+
+        # A bare superlative or time window edits the shape of the previous
+        # answer. Both used to reach no tool and be refused as undocumented one
+        # turn after the same question, spelled out, had been answered.
+        reranked = resolve_rank_followup(message, focus)
+        if reranked:
+            return reranked
+        rewindowed = resolve_job_window_followup(message, history)
+        if rewindowed:
+            return rewindowed
 
         platform = resolve_platform_coreference(message, history)
         if platform:
@@ -1669,10 +2102,20 @@ Draft answer:
         if table_coref:
             return table_coref
 
-        planned = infer_tools_from_message(message)
+        planned = plan_tools_tolerant(message)
+        # A remembered table must not be handed a question about the product. With
+        # `orders` in focus, "how many rows can you move per second" became
+        # COUNT(*) GROUP BY a column called `second` and answered "Column 'second'
+        # is not in orders" — the guard at the parse site cannot see the focus.
+        _capacity_ask = asks_about_product_capacity(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
-        if focus and looks_like_followup(message, focus) and not names_its_own_subject(planned):
+        if (
+            focus
+            and not _capacity_ask
+            and looks_like_followup(message, focus)
+            and not names_its_own_subject(planned)
+        ):
             low = message.lower().strip()
             # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
             for name, args in planned:
@@ -1694,7 +2137,7 @@ Draft answer:
             # Coreference with focus but no metric edit — still prefer table tools.
             if table_coref := resolve_table_coreference_tools(message, focus):
                 return table_coref
-        if not planned:
+        if not planned and not _capacity_ask:
             edit = resolve_followup(message, focus)
             if edit is not None:
                 # Known subject (even with missing measure) — let the tool ask
@@ -1727,6 +2170,17 @@ Draft answer:
         memory = get_working_memory()
         args_by_tool = {name: args for name, args in planned}
 
+        # A column the live schema rejected is not a subject to remember. "top 3
+        # customers by amount in orders" fails on `customer`, and remembering it
+        # made the *next* turn ("just tell me the number") fail on the same
+        # missing column instead of answering from the table still in focus.
+        rejected = {
+            m.group(1).strip().lower()
+            for tr in turn.tool_results
+            if tr.name == "aggregate_data" and not tr.success
+            for m in re.finditer(r"Column '([^']+)' is not in", tr.error or "")
+        }
+
         # Remember the asked subject even when the tool fails (missing connector)
         # so elliptical follow-ups like "only paid ones" still have a table/metric.
         for name, args in planned:
@@ -1736,6 +2190,10 @@ Draft answer:
                 k: args.get(k)
                 for k in ("table", "connector_name", "metric", "column", "group_by", "where")
                 if args.get(k)
+                and not (
+                    k in ("column", "group_by")
+                    and str(args.get(k)).strip().lower() in rejected
+                )
             }
             if update.get("table") or update.get("connector_name"):
                 memory.update_focus(session_id, **update)
@@ -1752,6 +2210,34 @@ Draft answer:
                     memory.remember_pending(session_id, slot)
                     if not turn.needs_clarification:
                         turn.needs_clarification = slot.question
+
+        self._remember_proposal(planned, turn, session_id, memory)
+
+    @staticmethod
+    def _remember_proposal(
+        planned: list[tuple[str, dict]],
+        turn: PilotTurn,
+        session_id: str,
+        memory: Any,
+    ) -> None:
+        """Keep the thing just offered, so consent and cancel have a referent."""
+        from .working_memory import PilotProposal
+
+        args_by_tool = {name: args for name, args in planned}
+        offered: PilotProposal | None = None
+        for tr in turn.tool_results:
+            if not tr.success or tr.name not in _PROPOSAL_TOOLS:
+                continue
+            out = tr.output if isinstance(tr.output, dict) else {}
+            offered = PilotProposal(
+                tool=tr.name,
+                args=dict(args_by_tool.get(tr.name) or {}),
+                label=str(out.get("label") or "").strip(),
+                ack_id=str(out.get("ack_id") or "").strip(),
+                staged=bool(out.get("requires_confirm") or out.get("ack_id")),
+            )
+        if offered:
+            memory.remember_proposal(session_id, offered)
 
     def _with_result_context(self, name: str, args: dict | None, data_context: dict | None) -> dict:
         """Inject session / last_result_id so follow-ups hit the real stored rows."""
@@ -2023,7 +2509,37 @@ Respond as Datawrap Pilot — grounded in tool results."""
             is_create_connection_capability_ask,
             is_route_plan_capability_paste,
             is_schedule_health_question,
+            is_schedule_setup_capability_ask,
         )
+
+        # Checked before anything that could read state: a secret request must not
+        # reach a tool, least of all the connector list that prints hosts.
+        from .dialogue_acts import asks_for_a_stored_secret
+
+        if asks_for_a_stored_secret(message):
+            from .conversation_composer import compose_secret_refusal_response
+
+            return compose_secret_refusal_response(ctx)
+
+        # Pressing on a boundary Pilot just stated must restate it, never fall
+        # through to a tool that looks like the first step of complying.
+        from .dialogue_acts import insists_after_refusal, refused_capability
+
+        if insists_after_refusal(message, history):
+            from .conversation_composer import compose_held_refusal_response
+
+            return compose_held_refusal_response(refused_capability(history))
+
+        # "run it" and "actually cancel that" are about the thing offered last
+        # turn, so they are settled against proposal memory before any parsing.
+        settled = self._settle_last_proposal(message, data_context)
+        if settled is not None:
+            return settled
+
+        if is_schedule_setup_capability_ask(message):
+            from .conversation_composer import compose_schedule_setup_response
+
+            return compose_schedule_setup_response(ctx)
 
         if is_calendar_question(message):
             from .conversation_composer import compose_calendar, compose_calendar_response
@@ -2075,13 +2591,23 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
                 pending = get_working_memory().get_pending(session_id)
                 if pending and pending.question:
+                    from .followup import looks_like_consent
+
                     turn.needs_clarification = pending.question
                     hint = ""
                     if pending.candidates:
                         shown = ", ".join(f"**{c}**" for c in pending.candidates[:6])
                         hint = f"\n\nAvailable: {shown}."
+                    # "do it" is consent, not a miss — and pointing at a list that
+                    # was never printed is worse than saying what is still owed.
+                    if looks_like_consent(message):
+                        tail = "I will, once you answer that — it is the one thing I still need."
+                    elif pending.candidates:
+                        tail = "I didn't match that reply — try a name from the list, or ask a new question."
+                    else:
+                        tail = "I didn't match that reply — answer that, or ask a new question."
                     return CopilotResponse(
-                        answer=f"{pending.question}{hint}\n\nI didn't match that reply — try a name from the list, or ask a new question.".strip(),
+                        answer=f"{pending.question}{hint}\n\n{tail}".strip(),
                         intent=intent,
                         confidence=0.78,
                         method="pilot_local_engine",
@@ -2173,6 +2699,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
         live_schema = any(
             tr.name in (
                 "list_connector_objects",
+                "rank_connector_tables",
+                "compare_connectors",
                 "introspect_connector_schema",
                 "sample_connector_object",
                 "aggregate_data",
@@ -2357,6 +2885,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
+            elif tr.name == "create_schedule" and tr.success:
+                parts.append(_render_schedule_stage(tr.output or {}))
+            elif tr.name == "create_schedule" and isinstance(tr.output, dict) and tr.output.get(
+                "action"
+            ) == "plan_transfer":
+                # Preflight refused the cadence but the plan is real evidence:
+                # show the gates that blocked it, not just the sentence.
+                parts.append(f"{tr.error}\n\n{_render_transfer('plan_transfer', tr.output)}")
             elif tr.name == "list_contracts" and tr.success:
                 rows = tr.output.get("contracts", [])
                 if rows:
@@ -2481,12 +3017,24 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     parts.append(_render_transfer("plan_transfer", o))
                 else:
                     posture = _render_requested_data_rules(o)
-                    parts.append(
-                        f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
-                        f"{o.get('note') or ''}"
-                        f"{posture}"
-                        f"\n{o.get('next') or ''}"
+                    gates = ", ".join(
+                        str(g) for g in (o.get("required_gates") or []) if g
                     )
+                    # The next correct action leads. A wall of gate ids in front
+                    # of "name two saved connectors and a table" buries the only
+                    # thing the operator can act on — and with no gates to list
+                    # it rendered as a bare heading with nothing after the colon.
+                    segments = [
+                        s
+                        for s in (
+                            str(o.get("note") or "").strip(),
+                            str(o.get("next") or "").strip(),
+                        )
+                        if s
+                    ]
+                    if gates:
+                        segments.append(f"**Standard gate sequence**: {gates}")
+                    parts.append("\n".join(segments) + posture)
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}
                 parts.append(
@@ -2546,6 +3094,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         f"({cols} columns):{extra}\n"
                         + "\n".join(f"• {r}" for r in rules)
                     )
+            elif tr.name == "rank_connector_tables" and tr.success:
+                parts.append(_render_table_ranking(tr.output or {}))
+            elif tr.name == "compare_connectors" and tr.success:
+                parts.append(_render_connector_comparison(tr.output or {}))
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
@@ -2775,17 +3327,48 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
+                health = str(tr.output.get("health") or "any")
+                total = int(tr.output.get("total_saved") or len(conns))
+                engine = str(tr.output.get("engine") or "")
+                engine_not = bool(tr.output.get("engine_excluded"))
+                engine_label = ""
+                if engine:
+                    engine_label = (
+                        f"are not {engine}" if engine_not else f"are {engine}"
+                    )
                 ask_tables = any(
                     w in (message or "").lower()
                     for w in ("table", "tables", "collections", "objects")
                 )
                 if conns:
-                    lines = [f"You have **{len(conns)} saved connector(s)**."]
+                    if health != "any":
+                        label = {
+                            "passed": "passed their last connection test",
+                            "failed": "failed their last connection test",
+                            "untested": "have never been tested",
+                        }[health]
+                        if engine_label:
+                            label = f"{engine_label} and {label}"
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{label}."
+                        ]
+                    elif engine_label:
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{engine_label}."
+                        ]
+                    else:
+                        lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
-                        lines.append(
-                            f"• **{c.get('name')}** ({c.get('type')}) → "
-                            f"{c.get('database', c.get('host', ''))}"
-                        )
+                        # An arrow with nothing after it reads like a truncated
+                        # answer. A connector with neither database nor host
+                        # recorded simply has no target to point at.
+                        target = str(
+                            c.get("database") or c.get("host") or ""
+                        ).strip()
+                        row = f"• **{c.get('name')}** ({c.get('type')})"
+                        lines.append(f"{row} → {target}" if target else row)
                     if ask_tables:
                         names = [str(c.get("name") or "") for c in conns if c.get("name")]
                         sample = names[0] if names else "your connector"
@@ -2794,6 +3377,28 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             f'"list tables on {sample}".'
                         )
                     parts.append("\n".join(lines))
+                elif health != "any":
+                    # An empty bucket is a real finding, not an empty workspace.
+                    verb = {
+                        "passed": "has passed its last connection test",
+                        "failed": "failed its last connection test",
+                        "untested": "is untested",
+                    }[health]
+                    if engine:
+                        verb = f"{engine_label.replace('are', 'is')} and {verb}"
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) {verb}. "
+                        "Open **Connectors** and press Test to record a result."
+                    )
+                elif engine:
+                    # An empty engine bucket is also a finding: the operator asked
+                    # which of their connectors run this engine, and none do.
+                    kinds = [str(k) for k in (tr.output.get("saved_engines") or []) if k]
+                    have = f" You run {', '.join(kinds)}." if kinds else ""
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) "
+                        f"{engine_label.replace('are', 'is')}.{have}"
+                    )
                 else:
                     parts.append(
                         "No connectors saved yet. Go to **Connectors** to add "
@@ -2840,7 +3445,29 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• **{c['name']}** ({badge}) — {c.get('description', '')[:60]}")
                 parts.append("\n".join(lines))
             elif tr.name == "describe_pilot" and tr.success:
+                from .tools import asks_about_pilot_limits
+
                 o = tr.output or {}
+                cannot = o.get("cannot_yet") or []
+                # "what can't you do" is the same card read from the other end.
+                # Leading with the capability list answered the opposite question.
+                if asks_about_pilot_limits(message) and cannot:
+                    lines = [
+                        "Straight answer — here is what I will **not** do from "
+                        "chat, so you never have to find out the hard way:"
+                    ]
+                    for item in cannot[:6]:
+                        lines.append(f"• {item}")
+                    lines.append(
+                        "I also never invent a warehouse fact, and I never run a "
+                        "changing action without your Confirm."
+                    )
+                    if o.get("can"):
+                        lines.append(
+                            "Ask *what can you do* for the other side of the list."
+                        )
+                    parts.append("\n".join(lines))
+                    continue
                 lines = [
                     "I'm **Datawrap Pilot**. I speak on this host with Datawrap's "
                     "own attention+copy GRU over retrieved evidence and live "
@@ -2852,7 +3479,6 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 ]
                 for item in (o.get("can") or [])[:8]:
                     lines.append(f"• {item}")
-                cannot = o.get("cannot_yet") or []
                 if cannot:
                     lines.append("**Not yet from chat:**")
                     for item in cannot[:3]:
@@ -2934,6 +3560,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     "analyze_result",
                     "filter_result",
                     "list_connector_objects",
+                    "rank_connector_tables",
+                    "compare_connectors",
                     "diff_schemas",
                     "map_connector_schemas",
                 )

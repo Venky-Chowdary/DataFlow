@@ -38,7 +38,8 @@ from .working_memory import PendingSlot, PilotFocus
 # Pronouns / definite descriptions that point at the previous subject.
 _COREFERENCE_RE = re.compile(
     r"\b(?:it|that|this|these|those|them|there|"
-    r"same|the same|that one|the table|that table|this table|"
+    r"same|the same|that one|the other one|the other ones|"
+    r"the table|that table|this table|"
     r"the collection|that collection|the result|that result)\b",
     re.IGNORECASE,
 )
@@ -72,6 +73,30 @@ _AFFIRMATIVE = frozenset({
 })
 
 
+# Words that open an instruction rather than name a value, so "just tell me the
+# number" and "only show the total" are read as asks, not as filters.
+#
+# Rank words belong here for the same reason: "only the top 2" is a limit, and
+# read as a filter it became ``status = 'top 2'`` — a predicate on a column the
+# operator never named, against a value that is not in any row.
+_NOT_A_FILTER_VALUE = re.compile(
+    r"^(?:tell|show|give|list|get|say|read|explain|describe|do|make|run|open|"
+    r"answer|repeat|me|us|it|that|this|one|number|count|total|sum|average|"
+    r"top|bottom|first|last|latest|newest|oldest|highest|lowest|biggest|"
+    r"smallest|best|worst|most|least|few|rest|others?|ones?)\b",
+    re.I,
+)
+
+# A turn that asks for the same query again, with nothing changed.
+_REPEAT_RE = re.compile(
+    r"^(?:again|same\s+again|one\s+more\s+time|once\s+more|"
+    r"(?:do|run)\s+(?:that|it|this)\s+again|re-?run(?:\s+(?:that|it|this))?|"
+    r"repeat(?:\s+(?:that|it|this))?|refresh(?:\s+(?:that|it|this))?|"
+    r"check\s+(?:that|it)\s+again)$",
+    re.I,
+)
+
+
 def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
     """Parse \"only paid\" / \"where status = paid\" into a filter clause."""
     text = _clean(message)
@@ -88,7 +113,13 @@ def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
     if not only_m:
         return ""
     val = only_m.group(1).strip().strip("\"'")
+    val = re.sub(r"^(?:the|a|an)\s+", "", val, flags=re.I).strip()
     if not val or val.lower() in _PLATFORM_NOUNS:
+        return ""
+    # A filter value is a literal, not a sentence. "just tell me the number"
+    # became ``status = 'tell me the number'`` and, because the clause was then
+    # remembered, failed every following turn on a column the table lacks.
+    if len(val.split()) > 2 or _NOT_A_FILTER_VALUE.match(val):
         return ""
     preferred = ("status", "state", "type", "region", "category", "tier", "channel")
     cols = [c.lower() for c in ((focus.columns if focus else None) or [])]
@@ -262,14 +293,151 @@ def resolve_knowledge_engine_followup(
     return None
 
 
+# A repair turn: the operator says the last answer read their question wrong and
+# supplies the correction. "no i meant the failed ones" was refused as
+# undocumented, and "wait, that's not what i meant" replayed the same connector
+# list it was objecting to — the two turns that most make an assistant look like
+# it is not listening.
+_REPAIR_OPENER = re.compile(
+    r"^\s*(?:(?:no+|nope|nah|wait|sorry|actually|hmm+|oops|ugh)\b[\s,.!-]*)*"
+    r"(?:that(?:'s| is|s)?\s+not\s+(?:what\s+i\s+(?:meant|asked)|it|right)"
+    r"|not\s+(?:that|those|them|what\s+i\s+(?:meant|asked))"
+    r"|i\s+(?:meant|mean)|i\s+said"
+    r"|i\s+was\s+asking\s+(?:about|for)"
+    r"|i\s+asked\s+(?:about|for))"
+    r"[\s,:;.-]*",
+    re.I,
+)
+
+# A bare objection with no correction attached. "that's not what i meant" full
+# stop cannot be re-planned — the honest move is to ask which part was wrong.
+_BARE_REPAIR = re.compile(r"^[\s,.!?-]*$")
+
+# Filler the operator puts in front of the correction itself.
+_CORRECTION_FILLER = re.compile(
+    r"^(?:the\s+|a\s+|an\s+|about\s+|for\s+|just\s+|only\s+|like\s+)+", re.I
+)
+
+
+def repair_correction(message: str) -> str | None:
+    """The correction in a repair turn: "" when bare, ``None`` when not a repair."""
+    text = _clean(message)
+    if not text:
+        return None
+    match = _REPAIR_OPENER.match(text)
+    if not match:
+        return None
+    rest = text[match.end():].strip()
+    if _BARE_REPAIR.match(rest):
+        return ""
+    return _CORRECTION_FILLER.sub("", rest).strip(" ,.!?;:-")
+
+
+def resolve_repair(message: str, history: list[dict] | None) -> str | None:
+    """Re-state the previous question with the operator's correction applied.
+
+    The correction replaces a constraint on a subject the operator already named,
+    so appending it to the question being corrected is what recovers the real
+    ask: "how many connectors do i have" + "failed ones" is the failed-connector
+    bucket, which the router already knows how to read.
+    """
+    correction = repair_correction(message)
+    if not correction:
+        return None
+    prior = _last_substantive_user_text(history)
+    if not prior:
+        return None
+    # A correction that names its own subject *replaces* the previous one:
+    # "i meant pipelines" after a connector count is the pipeline count, and
+    # appending it planned both lists and answered with two contradicting ones.
+    old, new = _repair_subject(prior), _repair_subject(correction)
+    if old and new and old.rstrip("s") != new.rstrip("s"):
+        return re.sub(rf"\b{re.escape(old)}\b", new, prior, flags=re.I)
+    return f"{prior} {correction}"
+
+
+# Subjects a repair can swap out. Longest first, so a plural is preferred over
+# the singular hiding inside it.
+_REPAIR_SUBJECTS: tuple[str, ...] = tuple(
+    sorted(
+        (
+            "collections", "collection", "columns", "column",
+            "connections", "connection", "connectors", "connector",
+            "contracts", "contract", "datasets", "dataset",
+            "jobs", "job", "pipelines", "pipeline",
+            "schedules", "schedule", "tables", "table",
+            "transfers", "transfer",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _repair_subject(text: str) -> str:
+    """The workspace noun this turn is about, or "" when it names none."""
+    low = (text or "").lower()
+    for noun in _REPAIR_SUBJECTS:
+        if re.search(rf"\b{noun}\b", low):
+            return noun
+    return ""
+
+
+def _last_substantive_user_text(history: list[dict] | None) -> str:
+    """The most recent user turn that asked something, skipping repairs.
+
+    A bare "that's not what i meant" is itself a user turn, so correcting it on
+    the next turn built "that's not what i meant pipelines" and answered with the
+    job list. The question being corrected is the last one that carried a subject.
+    """
+    from .dialogue_acts import turn_text
+
+    for item in reversed(history or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").lower() != "user":
+            continue
+        text = turn_text(item)
+        if text and repair_correction(text) is None:
+            return text
+    return ""
+
+
+#: "only the failing ones", "just the postgres ones", "the untested ones". The
+#: pointer is the bare "ones" — it restricts the list the previous turn printed.
+_NARROWED_ONES_RE = re.compile(
+    r"^(?:(?:and|but|ok(?:ay)?|so)\s+)?(?:(?:just|only)\s+)?"
+    r"(?:(?:show|list|give)\s+(?:me\s+)?)?(?:the\s+)?"
+    r"([a-z][a-z-]*)\s+ones?\b[\s.?!]*$",
+    re.I,
+)
+
+
 def resolve_platform_coreference(
     message: str,
     history: list[dict] | None,
 ) -> list[tuple[str, dict[str, Any]]] | None:
     """those jobs / which of those failed → list_jobs from prior turn context."""
     text = _clean(message)
-    if not text or not _COREFERENCE_RE.search(text):
+    # "only the failing ones" carries no pronoun at all — the pointer is the bare
+    # "ones". Gated on the coreference vocabulary alone, a one-word narrowing of
+    # the list already on screen reached no tool and was refused as undocumented.
+    if not text or not (
+        _COREFERENCE_RE.search(text) or _NARROWED_ONES_RE.match(text)
+    ):
         return None
+    from .tools import connector_engine_filter
+
+    # "how many of those are postgres" points squarely at the list the previous
+    # turn printed. The documentation names PostgreSQL too, so retrieval won the
+    # turn and answered about Azure and RDS drivers instead of the two saved rows
+    # the operator was looking at. Only fires when a list really was printed.
+    if re.search(r"\b(?:of|among)\s+(?:those|them|these)\b", text, re.I):
+        engine, excluded = connector_engine_filter(text)
+        if engine and offered_names(last_assistant_content(history)):
+            return [
+                ("list_connectors", {"engine": engine, "engine_excluded": excluded})
+            ]
     # "how do I get the list of rows that failed" contains ``that`` as a
     # relative pronoun, not as a pointer at a previous turn, and ``failed`` as
     # part of its own subject. Read as a coreference it became "list the failed
@@ -287,6 +455,11 @@ def resolve_platform_coreference(
         return None
     prior = last_assistant_content(history).lower()
     low = text.lower()
+    # ``that`` points at a previous turn in "which of those failed" and heads a
+    # relative clause in "connectors that are not postgres". The second restricts
+    # a noun this very turn named; read as a pointer it threw the restriction
+    # away and re-listed every connector as though nothing had been asked.
+    pointer_text = _RELATIVE_PRONOUN.sub(" ", low)
     # Noun *runs* / "the last run", never the verb in "if I run …".
     jobs_cue = bool(
         re.search(
@@ -299,14 +472,43 @@ def resolve_platform_coreference(
     dummy_it = bool(
         re.search(r"\bis\s+it\s+(?:safe|idempotent|lossy|dangerous|ok|okay|fine)\b", low)
     )
-    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", low)) or (
-        bool(re.search(r"\bit\b", low)) and not dummy_it
+    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", pointer_text)) or (
+        bool(re.search(r"\bit\b", pointer_text)) and not dummy_it
     )
     if jobs_cue and job_pointer:
         return [("list_jobs", {"limit": 10})]
     connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
-    if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
-        return [("list_connectors", {})]
+    # "and the other one?" points at the item of the previous list the operator
+    # has not asked about yet. It carries no pronoun, so it reached no tool and
+    # was refused as undocumented; re-listing is at least the right subject.
+    other_one = bool(re.search(r"\bthe\s+other\s+ones?\b", low))
+    narrowed_ones = bool(_NARROWED_ONES_RE.match(low))
+    if connectors_cue and (
+        other_one
+        or narrowed_ones
+        or re.search(r"\b(?:those|these|them|that|it)\b", pointer_text)
+    ):
+        # A restriction the turn carries is part of the answer, not noise to drop.
+        from .tools import connector_health_filter
+
+        # Both filters are gated on the noun *connectors*, which is exactly the
+        # word an elliptical narrowing leaves out. Reading "only the postgres
+        # ones" against the raw text found no filter and re-listed everything, so
+        # the restriction looked ignored; spell the noun back in for the read.
+        spoken = f"my connectors {text}" if narrowed_ones else text
+        engine, excluded = connector_engine_filter(spoken)
+        args: dict[str, Any] = {}
+        if engine:
+            args = {"engine": engine, "engine_excluded": excluded}
+        health = connector_health_filter(spoken)
+        if health != "any":
+            args["health"] = health
+        if narrowed_ones and not other_one and not args:
+            # The narrowing word is neither an engine nor a health bucket, so we
+            # cannot honour it. Re-listing everything would read as though the
+            # restriction had been applied and nothing was filtered out.
+            return None
+        return [("list_connectors", args)]
     return None
 
 
@@ -335,6 +537,104 @@ def resolve_table_coreference_tools(
     if re.search(r"\b(?:schema|columns|describe|structure|introspect)\b", low):
         return [("introspect_connector_schema", args)]
     return None
+
+
+#: Every list the pilot prints puts one item per bullet and names it in bold
+#: (connectors) or backticks (tables). Reading the *bullets* rather than every
+#: bold span is what keeps the heading — "You have **2 saved connector(s)**" —
+#: out of the candidate set.
+_BULLET_LINE = re.compile(r"^\s*[•\-\*]\s+(.+)$")
+_BULLET_NAME = re.compile(r"^(?:\*\*([^*]{1,60})\*\*|`([^`]{1,60})`)")
+
+#: Ordinal pointers into that list. ``job`` and ``run`` are deliberately absent:
+#: "my last job" is a query the job tools answer, not a pointer at a printed list.
+_ORDINALS: tuple[tuple[str, int], ...] = (
+    (r"first|1st", 0),
+    (r"second|2nd", 1),
+    (r"third|3rd", 2),
+    (r"fourth|4th", 3),
+    (r"fifth|5th", 4),
+    (r"last|final", -1),
+)
+_ORDINAL_NOUN = (
+    r"(?:one|item|entry|connector|connection|table|collection|dataset|"
+    r"schedule|pipeline)s?"
+)
+
+
+def offered_names(assistant_text: str) -> list[str]:
+    """The list items the pilot last printed, in the order it printed them."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (assistant_text or "").splitlines():
+        bullet = _BULLET_LINE.match(raw_line)
+        if not bullet:
+            continue
+        named = _BULLET_NAME.match(bullet.group(1).strip())
+        if not named:
+            continue
+        name = (named.group(1) or named.group(2) or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    return names[:12]
+
+
+def resolve_ordinal_reference(
+    message: str,
+    history: list[dict] | None,
+) -> str | None:
+    """Rewrite "the first one" as the name the previous list gave it.
+
+    "how many connectors do i have" then "how many tables on the first one" used
+    to reach the connector lookup with the literal words *the first one*, which
+    matched nothing and re-asked which connector was meant — while the list it
+    was pointing at was still on screen. Returning a rewritten *message* keeps
+    ordinary routing in charge of what the turn then means.
+    """
+    text = _clean(message)
+    if not text:
+        return None
+    for pattern, index in _ORDINALS:
+        hit = re.search(
+            rf"\b(?:the\s+)?(?:{pattern})\s+{_ORDINAL_NOUN}\b",
+            text,
+            re.I,
+        )
+        if not hit:
+            continue
+        names = offered_names(last_assistant_content(history))
+        if not names:
+            return None
+        if index >= len(names):
+            return None
+        return f"{text[: hit.start()]}{names[index]}{text[hit.end() :]}".strip()
+    return None
+
+
+def names_pending_candidate(message: str, pending: PendingSlot | None) -> str:
+    """The offered candidate this turn names outright inside a fuller sentence.
+
+    An open "which connector did you mean?" used to swallow the next turn whole,
+    so "what tables are on Demo Orders" — which answers the question and asks a
+    new one — was met with "I didn't match that reply" and the same list again.
+    A turn that names a candidate is self-sufficient: clear the slot and route it
+    normally rather than filling the old tool with a new question's subject.
+    """
+    if not pending:
+        return ""
+    text = _clean(message).lower()
+    if not text:
+        return ""
+    for cand in pending.candidates or []:
+        name = (cand or "").strip()
+        if not name or name.lower() == text:
+            # A bare reply *is* the slot answer; that path handles it.
+            continue
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(name.lower())}(?![A-Za-z0-9])", text):
+            return name
+    return ""
 
 
 def pending_from_assistant_clarification(
@@ -394,6 +694,7 @@ _ELLIPTICAL_EDIT_RE = re.compile(
     r"make\s+it|switch\s+to|filter\s+to|do\s+that\s+again|by|per|"
     r"group(?:ed)?\s+by|drop\s+(?:the\s+)?group(?:ing)?|no\s+grouping|"
     r"top\s+\d|bottom\s+\d|"
+    r"again|once\s+more|re-?run|repeat|sort|order\s+by|"
     r"where|filter|instead)\b",
     re.I,
 )
@@ -431,6 +732,16 @@ _QUESTION_FRAME = re.compile(
 # ``there`` that points at a remembered subject, so it must not count as a
 # coreference.
 _EXISTENTIAL_THERE = re.compile(r"\b(?:are|is|was|were)\s+there\b", re.I)
+
+# ``that``/``which`` immediately before a verb heads a relative clause that
+# restricts a noun in this same turn — "connectors that are not postgres" — so it
+# is not a pointer at anything the previous turn said.
+_RELATIVE_PRONOUN = re.compile(
+    r"\b(?:that|which|who)\s+(?:are|is|was|were|do|does|did|have|has|had|can|"
+    r"could|will|would|aren'?t|isn'?t|don'?t|doesn'?t|failed|fail|passed|pass|"
+    r"ran|run|use|uses|point|points|match|matches)\b",
+    re.I,
+)
 
 
 def has_own_question_frame(text: str) -> bool:
@@ -524,18 +835,37 @@ def opens_a_row_predicate(message: str, columns: Sequence[str] = ()) -> bool:
     return bool(named & set(_words(text)))
 
 
+# Acts that are self-contained turns by definition, so they can never be the
+# answer to "which connector did you mean?". Reusing the dialogue-act classifier
+# keeps this in step with what the router already recognises instead of growing a
+# second keyword list beside ``_FRESH_INTENT_RE``.
+_SELF_CONTAINED_ACTS = frozenset({"briefing", "greeting", "next_action", "thanks"})
+
+
 def looks_like_fresh_intent(message: str) -> bool:
     """True when the user clearly started a new request (not a slot fill / typo)."""
     reply = _clean(message)
     if not reply:
         return False
-    return bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply)
+    if bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply):
+        return True
+    # An open clarification used to swallow the next unrelated question: asked
+    # right after a failed connector match, "is anything waiting on me" replayed
+    # "No connector matched “quarantined”" and added "I didn't match that reply".
+    from .dialogue_acts import classify_dialogue_act
+
+    return classify_dialogue_act(reply) in _SELF_CONTAINED_ACTS
 
 
 def looks_like_elliptical_edit(message: str) -> bool:
     """True for follow-up edits like \"only paid ones\" / \"and by region?\"."""
     reply = _clean(message)
     if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
+        return False
+    # "do it" and "go ahead" are consent, not an edit of the last query. Read as
+    # an edit they cleared the open clarification, so a staged schedule waiting
+    # only on its cadence was thrown away and the next turn started from nothing.
+    if reply.lower() in _AFFIRMATIVE:
         return False
     if asks_its_own_question(reply):
         return False
@@ -574,6 +904,18 @@ def resolve_pending_answer(
 
     lower = reply.lower()
     candidates = [c for c in (pending.candidates or []) if c]
+
+    # A cadence is a phrase, not an identifier — "nightly at 02:00 Asia/Kolkata"
+    # is four words and none of them is a name. The scheduler's own parser is the
+    # judge, so a reply it cannot resolve keeps the question open.
+    if pending.missing == "cadence":
+        from .schedule_cadence import parse_cadence
+
+        if parse_cadence(reply).resolved:
+            args = dict(pending.args or {})
+            args["cadence"] = reply
+            return pending.tool, args
+        return None
 
     value = ""
     if candidates:
@@ -686,6 +1028,23 @@ _VALUE_TAIL = (
 )
 
 
+#: "and customers" after counting ``orders`` is the same question about another
+#: table — the shortest form of "same for customers". Only a plural noun is read
+#: this way: "and pending" is far more likely to be a filter value, and reading
+#: it as a table would answer a question the operator did not ask.
+#: "and customers", "and in order_items", "now for invoices". The preposition was
+#: not allowed, so "and in customers" one turn after a row count reached no tool
+#: and was refused as undocumented — the same question with the table spelled out
+#: had just been answered.
+_BARE_TABLE_SWAP = re.compile(
+    r"^(?:and|also|now|then|plus)\s+"
+    r"(?:(?:in|on|for|from|about|with)\s+)?(?:the\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_.]{2,48}s)"
+    r"(?:\s+(?:table|collection))?[\s.?!]*$",
+    re.I,
+)
+
+
 def _extract_edit_table(message: str) -> str:
     """"same for products", "now do orders", "what about the invoices table"."""
     m = re.search(
@@ -695,6 +1054,8 @@ def _extract_edit_table(message: str) -> str:
         message,
         re.I,
     )
+    if not m:
+        m = _BARE_TABLE_SWAP.match(_clean(message))
     if not m:
         return ""
     table = _clean(m.group(1))
@@ -740,22 +1101,35 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
         return False
     if asks_its_own_question(text):
         return False
+    # A turn that opens with a continuation word is elliptical by construction, so
+    # it is settled before the self-contained guards below. Those guards read any
+    # "in <word>" as a named scope, which made "and in customers" look like a
+    # complete question: it reached no tool and was refused as undocumented, one
+    # turn after the same count with the table spelled out had been answered.
+    _continues = bool(re.match(r"^(?:and|also|now|then|plus)\s+\S", text, re.I))
     # Self-contained asks name their own table/connector — not elliptical.
-    if re.search(
-        r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b",
-        text,
-        re.I,
-    ) and not _COREFERENCE_RE.search(text):
+    if (
+        re.search(r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b", text, re.I)
+        and not _COREFERENCE_RE.search(text)
+        and not _continues
+    ):
         return False
     if (
         re.search(r"\bon\s+[A-Za-z_][A-Za-z0-9_\- ]{1,40}\s*$", text, re.I)
         and len(words) >= 5
         and not _COREFERENCE_RE.search(text)
+        and not _continues
     ):
         return False
+    # "again" after a count is the same query re-run. It reached no tool at all
+    # and came back as "outside what the Datawrap documentation covers".
+    if _REPEAT_RE.match(text):
+        return True
     if _COREFERENCE_RE.search(text):
         return True
     if re.match(r"^(?:and|also|now|then|what\s+about|how\s+about|ok\s+)", text, re.I):
+        return True
+    if re.match(r"^(?:sort|order)\b", text, re.I):
         return True
     if _INSTEAD_RE.search(text):
         return True
@@ -803,6 +1177,10 @@ def resolve_followup(
         where=getattr(focus, "where", "") or "",
     )
 
+    # "again" changes nothing, which is exactly the edit: re-run what we ran.
+    if _REPEAT_RE.match(text):
+        return req
+
     edited = False
 
     where_clause = _extract_edit_where(text, focus)
@@ -843,6 +1221,10 @@ def resolve_followup(
         edited = True
     elif _DESC_RE.search(text) and not re.match(r"^(?:top|bottom)\s+\d", text, re.I):
         req.descending = True
+        # A direction on its own is a whole edit. Without this, "sort it
+        # descending" made no change the caller could see, so it fell through to
+        # retrieval and was refused as undocumented.
+        edited = True
 
     if not edited:
         return None
@@ -958,6 +1340,11 @@ def focus_from_tool_output(name: str, output: dict[str, Any]) -> dict[str, Any]:
         update = {k: v for k, v in update.items() if v not in ("", None, [])}
         update.update(authoritative)
         return update
+    if name == "rank_connector_tables":
+        # The direction is part of the subject here: "the other way round" has to
+        # know which way the last ranking went.
+        update["descending"] = str(output.get("order") or "desc").lower() != "asc"
+        return {k: v for k, v in update.items() if v not in ("", None, [])}
     if name in ("sample_connector_object", "introspect_connector_schema"):
         cols = output.get("columns") or []
         names: list[str] = []
@@ -1002,6 +1389,22 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             missing="table",
             question=text,
         )
+    # A staged schedule that is missing only its cadence asks for the time and the
+    # zone. Left off this list the question was unanswerable: the next turn
+    # ("nightly at 02:00 Asia/Kolkata") reached routing as a brand-new request and
+    # matched nothing, so the schedule the operator had already described was lost.
+    if re.search(
+        r"what\s+time\b|which\s+timezone\b|how\s+often\s+should\b|"
+        r"\bnot\s+a\s+5-field\s+cron\b|\bcannot\s+schedule\s+cron\b|"
+        r"don'?t\s+recognise\s+the\s+timezone\b",
+        lowered,
+    ):
+        return PendingSlot(
+            tool=name,
+            args=dict(args or {}),
+            missing="cadence",
+            question=text,
+        )
     if re.search(r"which column|which date column", lowered):
         candidates = re.findall(r"[:]\s*(.+)$", text.strip())
         listed: list[str] = []
@@ -1015,3 +1418,172 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             candidates=listed,
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Consent and abandonment of the last proposal
+# ---------------------------------------------------------------------------
+#
+# A plan is a rehearsal and a stage is an ack in the ledger. Both were forgotten
+# the instant the turn ended, so the two turns operators always type next —
+# "run it" and "actually cancel that" — were parsed from scratch, matched no
+# tool, and were answered with a documentation refusal or an unrelated job list.
+
+#: "run it", "go ahead and run it", "yes start it". Deliberately narrow: the verb
+#: has to be about executing, or the whole turn has to be bare consent, so
+#: "run a query on orders" is never swallowed as consent for a stale plan.
+_CONSENT_RE = re.compile(
+    r"^(?:(?:yes|yeah|yep|ok|okay|sure|please|pls)[,\s]+)*"
+    r"(?:(?:go\s+ahead|proceed)(?:\s+and)?\s*)?"
+    r"(?:(?:now|then)\s+)?"
+    r"(?:run|start|execute|do|kick\s+off|fire|ship|send|launch|apply)"
+    r"(?:\s+(?:it|this|that|them|the\s+(?:plan|transfer|route|job|sync)))?"
+    r"\s*[.!]*$",
+    re.I,
+)
+
+#: Bare consent with no verb at all — "go ahead", "yes please", "sounds good".
+_BARE_CONSENT = frozenset({
+    "go ahead", "go ahead please", "proceed", "yes", "yes please", "yep", "yeah",
+    "ok", "okay", "sure", "do it", "do it please", "sounds good", "lets do it",
+    "let's do it", "confirmed", "approve", "approved", "ship it",
+})
+
+#: "actually cancel that", "never mind", "forget it", "undo that", "stop".
+_ABANDON_RE = re.compile(
+    r"^(?:(?:actually|wait|hold\s+on|no|hmm|hm)[,\s]+)*"
+    r"(?:(?:i\s+)?(?:changed\s+my\s+mind|don'?t\s+(?:do|run|schedule)\s+(?:it|that|this))|"
+    r"cancel(?:\s+(?:it|that|this|the\s+\w+))?|"
+    r"never\s*mind|nevermind|forget\s+(?:it|that|about\s+it)|"
+    r"undo(?:\s+(?:it|that|this))?|discard(?:\s+(?:it|that|this))?|"
+    r"drop\s+(?:it|that|this)|scrap\s+(?:it|that|this)|"
+    r"abort(?:\s+(?:it|that|this))?|stop(?:\s+(?:it|that|this))?|"
+    r"remove\s+that|take\s+that\s+back|not\s+anymore|no\s+don'?t)"
+    r"\s*[.!]*$",
+    re.I,
+)
+
+
+def looks_like_consent(message: str) -> bool:
+    """Is this turn "go on" and nothing else?"""
+    text = _clean(message).strip().lower().rstrip(".!")
+    if not text:
+        return False
+    if text in _BARE_CONSENT:
+        return True
+    return bool(_CONSENT_RE.match(text))
+
+
+def looks_like_abandonment(message: str) -> bool:
+    """Is this turn "never mind" about whatever was just offered?"""
+    text = _clean(message).strip()
+    if not text or len(_words(text)) > 6:
+        return False
+    return bool(_ABANDON_RE.match(text))
+
+
+#: What consenting to a rehearsal promotes it to. A plan becomes the real run;
+#: everything else is already staged and can only be Confirmed by the operator.
+_CONSENT_PROMOTION = {"plan_transfer": "start_transfer"}
+
+
+def promote_proposal(proposal: Any) -> tuple[str, dict[str, Any]] | None:
+    """The tool call that carries out the proposal the operator just consented to.
+
+    Returns ``None`` for an already-staged mutation: an ack in the ledger is the
+    operator's to Confirm, and a pilot that could approve its own stage would
+    make the Confirm gate decorative.
+    """
+    tool = str(getattr(proposal, "tool", "") or "")
+    if not tool or getattr(proposal, "staged", False):
+        return None
+    promoted = _CONSENT_PROMOTION.get(tool)
+    if not promoted:
+        return None
+    args = dict(getattr(proposal, "args", None) or {})
+    if not args:
+        return None
+    return promoted, args
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups that edit the *shape* of the previous answer
+# ---------------------------------------------------------------------------
+
+#: "and the smallest one", "the other way round". A bare superlative after a
+#: ranking is an edit of that ranking, not a new subject — parsed fresh it became
+#: an aggregate against a table the sentence never named.
+_RANK_FLIP_RE = re.compile(
+    r"^(?:and\s+|but\s+|what\s+about\s+|how\s+about\s+|now\s+|ok(?:ay)?\s+|so\s+)*"
+    r"(?:show\s+me\s+|give\s+me\s+|list\s+)?"
+    r"(?:the\s+)?"
+    r"(?:other\s+way(?:\s+round)?|reverse(?:d)?|opposite|"
+    r"(?:smallest|largest|biggest|fewest|least|most|highest|lowest|widest)"
+    r"(?:\s+(?:one|ones|table|tables|first))?)"
+    r"\s*[?.!]*$",
+    re.I,
+)
+_RANK_ASC_WORDS = re.compile(r"\b(?:smallest|fewest|least|lowest)\b", re.I)
+_RANK_DESC_WORDS = re.compile(r"\b(?:largest|biggest|most|highest|widest)\b", re.I)
+
+
+def resolve_rank_followup(
+    message: str,
+    focus: Any,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """Re-rank the connector already in focus, flipped or re-pointed."""
+    if not focus or getattr(focus, "tool", "") != "rank_connector_tables":
+        return None
+    text = _clean(message)
+    if not text or not _RANK_FLIP_RE.match(text):
+        return None
+    if _RANK_ASC_WORDS.search(text):
+        order = "asc"
+    elif _RANK_DESC_WORDS.search(text):
+        order = "desc"
+    else:
+        # "the other way round" — invert what the last ranking used.
+        order = "asc" if getattr(focus, "descending", True) else "desc"
+    args: dict[str, Any] = {"order": order}
+    if getattr(focus, "connector_id", ""):
+        args["connector_id"] = focus.connector_id
+    elif getattr(focus, "connector_name", ""):
+        args["connector_name"] = focus.connector_name
+    return [("rank_connector_tables", args)]
+
+
+#: A bare time window after a jobs answer — "what about last week", "and
+#: yesterday?". These reached no tool at all and were refused as undocumented,
+#: one turn after the same question with the window spelled out was answered.
+_BARE_TIME_WINDOW = re.compile(
+    r"^(?:and\s+|but\s+|what\s+about\s+|how\s+about\s+|ok(?:ay)?\s+|so\s+)*"
+    r"(?:for\s+|in\s+|since\s+|during\s+)?(?:the\s+)?"
+    r"(?:today|tonight|yesterday|overnight|this\s+(?:morning|afternoon|evening|week|month)|"
+    r"last\s+(?:night|week|month|hour|run|\d+\s+\w+)|"
+    r"(?:last|past)\s+(?:\d+\s+)?(?:minute|hour|day|week|month)s?)"
+    r"\s*[?.!]*$",
+    re.I,
+)
+#: Only a jobs answer can be re-pointed at another window. Matched on the wording
+#: the job renderer owns, so a documentation answer that happened to mention a
+#: pipeline does not turn "what about last week" into a jobs listing.
+_PRIOR_WAS_JOBS = re.compile(
+    r"\bno\s+transfer\s+jobs\s+yet\b|\btransfer\s+job\b|\bjob_[a-z0-9]|"
+    r"\b\d+\s+(?:transfer\s+)?jobs?\b|\brecent\s+transfers\b",
+    re.I,
+)
+
+
+def resolve_job_window_followup(
+    message: str,
+    history: list[dict] | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """"what about last week" right after a jobs answer is the same read."""
+    text = _clean(message)
+    if not text or not _BARE_TIME_WINDOW.match(text):
+        return None
+    if not _PRIOR_WAS_JOBS.search(last_assistant_content(history)):
+        return None
+    # The window itself is not a filter the tool takes yet, so this widens the
+    # page rather than claiming to have filtered by a date it cannot apply.
+    return [("list_jobs", {"limit": 25})]

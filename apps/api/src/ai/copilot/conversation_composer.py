@@ -19,6 +19,7 @@ from .dialogue_acts import (
     DialogueAct,
     last_assistant_text,
     last_user_text,
+    turn_text,
 )
 
 
@@ -151,6 +152,94 @@ def compose_thanks() -> str:
     )
 
 
+def compose_recall_ask(history: list[dict]) -> str:
+    """Quote the operator's own previous turns back to them.
+
+    "what did i just ask you" was answered with the three closest Help headings
+    and a refusal, which is the one thing the transcript makes impossible to get
+    wrong.
+    """
+    asked = [
+        text
+        for item in (history or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "").lower() == "user"
+        and (text := turn_text(item))
+    ]
+    if not asked:
+        return (
+            "This is the first thing you've asked me in this conversation, so "
+            "there's nothing earlier to repeat."
+        )
+    lines = [f"You asked: “{_clip(asked[-1], 160)}”"]
+    if len(asked) > 1:
+        lines.append(f"Before that: “{_clip(asked[-2], 160)}”")
+    lines.append(
+        "Say *summarize that* for the short version of my answer, or ask it "
+        "again a different way and I'll re-read the workspace."
+    )
+    return "\n".join(lines)
+
+
+def compose_trouble_intake(
+    ctx: dict[str, Any] | None = None,
+    *,
+    discrepancy: bool = False,
+) -> str:
+    """Take a vague complaint and name the four handles that make it readable.
+
+    "this is broken" was answered "That is outside what the Datawrap
+    documentation covers", which is true and useless — the operator has a problem
+    and the reply says nothing about how to hand it over.
+
+    ``discrepancy`` is for the different complaint that rows or numbers are wrong:
+    the handles are the same, but row loss has one named owner in this product —
+    the quarantine ledger and the reconcile checksum — and saying so is the whole
+    difference between a triage prompt and an answer.
+    """
+    ctx = ctx or {}
+    lines: list[str] = []
+    if discrepancy:
+        lines.append(
+            "Rows that go missing are not silent here: bad rows land in "
+            "**quarantine** and the run's **reconcile** checksum compares source "
+            "and destination counts, so the gap has a record. Point me at the run "
+            "and I'll read both."
+        )
+    lines.append(
+        "Let's find it. I can read the evidence directly — give me any one of "
+        "these and I'll open the finding:"
+    )
+    lines += [
+        "• a **job ID** or preflight run ID (`job_…` / `pf_…`) and I'll read its "
+        "gates, quarantine and reconcile result",
+        "• a **connector name** and I'll re-test it and list its tables",
+        "• a **table and connector** and I'll introspect the schema and sample it",
+        "• the **error text** you saw, and I'll name the gate or rule that "
+        "produced it",
+    ]
+    names = [str(n) for n in (ctx.get("connector_names") or []) if n][:3]
+    if names:
+        shown = ", ".join(f"**{n}**" for n in names)
+        lines.append(f"Saved connectors: {shown}.")
+    lines.append("Or say *give me a workspace briefing* and I'll start from what needs you.")
+    return "\n".join(lines)
+
+
+def compose_repair_prompt(history: list[dict]) -> str:
+    """Ask what was misread instead of replaying the answer being objected to."""
+    asked = last_user_text(history)
+    lines = ["Understood — I read that wrong."]
+    if asked:
+        lines.append(f"I answered as though you asked “{_clip(asked, 140)}”.")
+    lines.append(
+        "Tell me the part I got wrong and I'll redo it — for example *I meant "
+        "the failed ones*, *I meant pipelines, not jobs*, or name the connector "
+        "and table you had in mind."
+    )
+    return "\n".join(lines)
+
+
 def compose_calendar(ctx: dict[str, Any] | None = None) -> str:
     """Answer a clock ask. Never retrieve DATE-type or transform docs."""
     spoken = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
@@ -223,6 +312,56 @@ def compose_create_connection_response(ctx: dict[str, Any] | None = None) -> Cop
     )
 
 
+def compose_schedule_setup_capability(ctx: dict[str, Any] | None = None) -> str:
+    """Honest scheduling capability: chat stages the cadence, Confirm creates it.
+
+    This used to answer "not from chat yet" and send the operator to the
+    Pipelines screen. That stopped being true once ``create_schedule`` staged a
+    real payload through the ack ledger, so the honest answer is what it needs
+    from them — a route and a cadence — instead of a redirect.
+    """
+    ctx = ctx or {}
+    n = ctx.get("pipeline_count")
+    if n is None:
+        try:
+            from services.schedule_store import list_schedules
+
+            n = len(list_schedules() or [])
+        except Exception:
+            n = 0
+    have = ""
+    if int(n or 0):
+        have = f" You already have **{int(n)}** pipeline(s) I can list, run, or explain."
+    from .example_phrases import example_connector_name, example_dest_connector_name
+
+    src = example_connector_name(ctx)
+    dst = example_dest_connector_name(ctx, source_hint=src)
+    return (
+        "Yes — name the **route** and the **cadence** and I will stage it for "
+        "Confirm. Nothing is scheduled until you accept, and I will not stage a "
+        "cadence over a route whose preflight is blocked, because an unattended "
+        f"run would fail the same way every night.{have}\n\n"
+        f'For example: *"schedule orders from {src} to {dst} nightly at 02:00 '
+        'Asia/Kolkata"*. I also list your pipelines, run one now (Confirm '
+        "required), and explain why one is parked."
+    )
+
+
+def compose_schedule_setup_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    return CopilotResponse(
+        answer=compose_schedule_setup_capability(ctx),
+        intent="schedule_help",
+        confidence=0.84,
+        method="pilot_conversation",
+        reasoning="Schedule-setup capability — stage a cadence for Confirm",
+        suggested_prompts=[
+            "Show my pipelines",
+            "Is schedules working?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
 def compose_route_plan_capability() -> str:
     return (
         "Name a saved **source** and **destination** and I will propose a "
@@ -241,6 +380,147 @@ def compose_route_plan_capability_response() -> CopilotResponse:
         suggested_prompts=[
             "Give me a workspace briefing",
             "Show my connectors",
+            "Show my pipelines",
+        ],
+    )
+
+
+def compose_held_refusal_response(refusal: str = "") -> CopilotResponse:
+    """Restate a boundary the operator is pressing on, and say why role is moot.
+
+    Answering "i am the admin, do it" with the connector list made the refusal
+    look negotiable and the list look like the first step of carrying it out. A
+    held boundary has to be restated, with the reason it does not move.
+    """
+    stated = (refusal or "").strip()
+    lead = stated if stated else "That is still not something I will do from chat."
+    return CopilotResponse(
+        answer=(
+            f"{lead}\n\n"
+            "Being the admin does not change it — the limit is on **this chat**, "
+            "not on you. Chat is a read-and-propose surface: what it can change, "
+            "it stages behind **Confirm** so there is a record of who approved "
+            "what, and what it cannot change it will not do at all.\n\n"
+            "Do it in the UI where the action is audited, and I will read the "
+            "result back and tell you what changed."
+        ),
+        intent="policy",
+        confidence=0.9,
+        method="pilot_conversation",
+        reasoning="Refusal restated under pressure — role does not widen chat's scope",
+        suggested_prompts=[
+            "Show my connectors",
+            "What can't you do?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
+def compose_secret_refusal_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    """Refuse to read back a stored secret, and say where it actually lives.
+
+    A flat "outside the documentation" hides a rule the product does have, and
+    falling through to the connector list is worse: that list prints hosts and
+    file paths, so part of what was asked for gets disclosed under an answer to a
+    different question.
+    """
+    return CopilotResponse(
+        answer=(
+            "I can't read that back — and I'm not able to. Connector secrets are "
+            "encrypted in the server-side vault and are never returned to a chat "
+            "response, an answer, or a log line; I only ever see the connector's "
+            "name, engine and host.\n\n"
+            "• To **change** one, open **Connectors → the connector → Edit** and "
+            "re-enter it. Nothing has to be read out to replace it.\n"
+            "• To check whether one still works, ask me to test the connector, or "
+            "press **Test** on that row — I report pass/fail, not the value.\n"
+            "• If you need the value itself, it has to come from wherever you "
+            "issued it (your cloud console, DBA, or secret manager), not from me."
+        ),
+        intent="security",
+        confidence=0.95,
+        method="pilot_conversation",
+        reasoning="Secret read-back refused — vault-only, never echoed to chat",
+        suggested_prompts=[
+            "Show my connectors",
+            "How are credentials stored?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
+def compose_abandon_response(label: str = "", staged: bool = False) -> CopilotResponse:
+    """Say plainly that the offer was withdrawn and nothing was created.
+
+    "actually cancel that" used to fall through to a job listing, which reads as
+    though the cancel worked — while the Confirm row was still live. Naming what
+    was dropped is the only version of this an operator can trust.
+    """
+    what = f" — **{label.strip()}**" if (label or "").strip() else ""
+    if staged:
+        body = (
+            f"Dropped{what}. Nothing was created: that was staged for Confirm and "
+            "I never pressed it, so there is nothing to undo on your side either."
+        )
+    elif what:
+        body = f"Dropped{what}. That was a plan, so nothing had run or been saved."
+    else:
+        body = "Dropped. Nothing had run or been saved."
+    return CopilotResponse(
+        answer=body + "\n\nWhat would you like instead?",
+        intent="cancel",
+        confidence=0.9,
+        method="pilot_conversation",
+        reasoning="Abandoned the last proposal — named what was dropped",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my pipelines",
+            "Show my connectors",
+        ],
+    )
+
+
+def compose_nothing_to_settle_response() -> CopilotResponse:
+    """"Never mind" with nothing outstanding — say so instead of inventing one."""
+    return CopilotResponse(
+        answer=(
+            "Nothing is staged or waiting, so there is nothing to cancel. I only "
+            "hold something open after I stage a transfer, a pipeline or a "
+            "connector for Confirm."
+        ),
+        intent="cancel",
+        confidence=0.85,
+        method="pilot_conversation",
+        reasoning="Cancel with no outstanding proposal",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my pipelines",
+            "Show my transfer jobs",
+        ],
+    )
+
+
+def compose_confirm_is_yours_response(label: str = "") -> CopilotResponse:
+    """Consent to something already staged: Confirm is the operator's action.
+
+    Approving its own stage would make the Confirm gate decorative, so the honest
+    answer points at the control rather than pretending to have pressed it.
+    """
+    what = f" **{label.strip()}**" if (label or "").strip() else " that"
+    return CopilotResponse(
+        answer=(
+            f"It is already staged and waiting on you:{what} is sitting behind "
+            "**Confirm** below. I do not approve my own changes — that gate is "
+            "what makes the rest of my answers safe to act on.\n\n"
+            "Press Confirm to apply it, or say *cancel that* and I will drop it."
+        ),
+        intent="confirm_help",
+        confidence=0.88,
+        method="pilot_conversation",
+        reasoning="Consent to an already-staged mutation — Confirm stays operator-owned",
+        suggested_prompts=[
+            "What happens if I confirm?",
+            "Cancel that",
             "Show my pipelines",
         ],
     )
@@ -291,10 +571,46 @@ _STEP_HEADING = re.compile(
 )
 
 
+def _unwrap_bold(piece: str) -> str:
+    """Drop bold markers that wrap the whole span; leave inline bold alone."""
+    text = (piece or "").strip()
+    if text.startswith("**") and text.endswith("**") and text.count("**") == 2:
+        return text[2:-2].strip()
+    return text
+
+
+def condense_to_lead(text: str, *, max_sentences: int = 1) -> str:
+    """The first sentence(s) of a composed answer, keeping its Source line.
+
+    "in one sentence, what is append mode" was answered with three paragraphs.
+    Trimming here rather than at each composer keeps every answer's evidence and
+    citation intact — a short answer is the same answer, not a different one.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    keep = max(1, int(max_sentences))
+    parts = _summary_sentences(raw, max_sentences=max(12, keep))
+    if not parts:
+        return raw
+    lead = " ".join(parts[:keep]).strip()
+    tail = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip().startswith("Source:")
+    ]
+    if not tail:
+        return lead
+    return f"{lead}\n\n{tail[0]}"
+
+
 def _strip_markdown_decor(text: str) -> str:
+    # Order matters: the attribution line comes first in a recap, so stripping the
+    # "Short version" prefix before it left the prefix in place and a second
+    # "shorter" produced "**Short version:** **Short version:** …".
     t = (text or "").strip()
-    t = re.sub(r"^\*\*Short version:\*\*\s*", "", t)
     t = re.sub(r"^_On your last ask[^\n]*\n+", "", t)
+    t = re.sub(r"^\*\*Short version:\*\*\s*", "", t)
     return t.strip()
 
 
@@ -328,7 +644,11 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             if after:
                 line = after
         for piece in _SENTENCE_SPLIT.split(line):
-            piece = piece.strip().strip("*")
+            # Only a *balanced* wrap is decoration. Stripping asterisks blindly
+            # turned "**Append** adds source rows" into "Append** adds source
+            # rows" — the closing marker of a bold word mid-sentence has no
+            # opener left to match it.
+            piece = _unwrap_bold(piece.strip())
             if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
                 continue
             if piece.endswith(":"):
@@ -456,6 +776,25 @@ def weave_tool_answer(message: str, parts: list[str], *, act: DialogueAct) -> st
     return body
 
 
+#: A recap of an answer is not itself an answer, so it is never the thing a
+#: second "shorter" is asking about.
+_IS_RECAP = re.compile(r"^\s*(?:_On your last ask|\*\*Short version:\*\*)", re.I)
+
+
+def _last_substantive_answer(history: list[dict] | None) -> str:
+    from .dialogue_acts import turn_text
+
+    for item in reversed(history or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").lower() != "assistant":
+            continue
+        text = turn_text(item)
+        if text and not _IS_RECAP.match(text):
+            return text
+    return ""
+
+
 def compose_history_turn(
     act: DialogueAct,
     *,
@@ -466,15 +805,31 @@ def compose_history_turn(
 ) -> CopilotResponse:
     last = last_assistant_text(history)
     if act == "summarize_last":
-        answer = summarize_text(last)
+        # "shorter" after "explain it simply" must shorten the *finding*, not the
+        # recap of it — summarizing a summary rewords a reworded answer and adds
+        # a second attribution line.
+        answer = summarize_text(_last_substantive_answer(history) or last)
         intent = "analytics_help"
     elif act == "explain_simpler":
-        answer = explain_simpler(last)
+        answer = explain_simpler(_last_substantive_answer(history) or last)
         intent = "product_help"
     elif act == "next_action":
         answer = compose_next_action(
             last_answer=last,
             pending_labels=pending_labels,
+        )
+        intent = "troubleshooting"
+    elif act == "recall_ask":
+        answer = compose_recall_ask(history)
+        intent = "greeting"
+    elif act == "repair_unclear":
+        answer = compose_repair_prompt(history)
+        intent = "troubleshooting"
+    elif act == "trouble_vague":
+        from .dialogue_acts import is_data_discrepancy_report
+
+        answer = compose_trouble_intake(
+            ctx, discrepancy=is_data_discrepancy_report(message)
         )
         intent = "troubleshooting"
     elif act == "thanks":
@@ -518,6 +873,12 @@ def _followups_for_act(act: DialogueAct) -> list[str]:
         return ["What should I do next?", "Summarize that", "Show my jobs"]
     if act == "next_action":
         return ["Give me a workspace briefing", "Show my pipelines", "Show my jobs"]
+    if act == "recall_ask":
+        return ["Summarize that", "What should I do next?", "Give me a workspace briefing"]
+    if act == "repair_unclear":
+        return ["I meant the failed ones", "Show my connectors", "Show my jobs"]
+    if act == "trouble_vague":
+        return ["Give me a workspace briefing", "Show my jobs", "Test my connectors"]
     return ["Give me a workspace briefing", "Show my jobs", "What can you do?"]
 
 

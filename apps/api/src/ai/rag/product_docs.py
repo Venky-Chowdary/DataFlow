@@ -1916,6 +1916,20 @@ class ProductAnswer:
     def sources(self) -> list[dict[str, object]]:
         return [hit.as_source() for hit in self.hits]
 
+    def _spoken_form(self, stem: str) -> str:
+        """The operator's own word for a stemmed subject.
+
+        ``uncovered_subjects`` holds stems, so quoting one straight back printed
+        “databas” to an operator who had typed “database”.
+        """
+        probe = (stem or "").lower()
+        if not probe:
+            return stem
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", self.query or ""):
+            if word.lower().startswith(probe):
+                return word
+        return stem
+
     @property
     def caveat(self) -> str:
         """The sentence that names what the documentation does not cover.
@@ -1929,7 +1943,7 @@ class ProductAnswer:
         missing = [t for t in self.verdict.uncovered_subjects if len(t) > 2][:4]
         if not missing:
             return ""
-        listed = ", ".join(f"“{t}”" for t in missing)
+        listed = ", ".join(f"“{self._spoken_form(t)}”" for t in missing)
         return (
             f"The documentation I can cite does not cover {listed}, so that part "
             f"is not answered here — ask me to read your live workspace if it is "

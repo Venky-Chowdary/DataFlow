@@ -248,6 +248,20 @@ _COUNT_MEASURE_WORDS = _ROW_WORDS | {"count", "counts", "volume", "frequency", "
 # Conversational filler that can trail a captured name ("connectors do I have").
 # Only trimmed from measure/table candidates — a connector may legitimately be
 # called "My Warehouse".
+# A comparison word occupies the slot where the identifier goes, but it is never
+# the name of the thing being compared. "biggest table on Demo Orders" parsed as
+# MAX over a column called `table` in a table called `biggest`, and "which table
+# has the most rows" sampled one called `most` — invented names sent at a live
+# database. Canonical here because the planner in ``tools`` fails closed on the
+# same set rather than keeping its own copy.
+COMPARATIVE_WORDS = frozenset(
+    """
+    most fewest least largest biggest smallest widest narrowest
+    highest lowest bigger smaller larger fewer more less
+    top bottom first last latest newest oldest best worst
+    """.split()
+)
+
 _STOP_TOKENS = frozenset({
     "do", "does", "did", "i", "we", "you", "your", "my", "our", "is", "are",
     "was", "were", "have", "has", "had", "there", "here", "please", "thanks",
@@ -577,6 +591,15 @@ def _finish_request(
     ):
         return None
 
+    # A superlative in the identifier slot means the sentence never named a
+    # subject — "biggest table on Demo Orders" measured a column called `table`
+    # in a table called `biggest`. Hand it back so the table-ranking route,
+    # which really does answer that question, can claim it.
+    if (req.table or "").strip().lower() in COMPARATIVE_WORDS:
+        return None
+    if (req.column or "").strip().lower() in COMPARATIVE_WORDS:
+        return None
+
     needs_column = _METRICS[req.metric][1]
     if needs_column and not req.column:
         req.missing.append("column")
@@ -617,6 +640,21 @@ def _singular(token: str) -> str:
     return token
 
 
+# Words an operator says *around* a column name rather than as one: schema
+# vocabulary ("the amount column"), metric vocabulary ("distinct region") and
+# bare articles. They are only ever dropped after the whole phrase has already
+# failed to resolve, so a table that really owns a column called `total` still
+# answers `total` exactly.
+_COLUMN_PHRASE_NOISE = frozenset(
+    {
+        "a", "all", "an", "any", "by", "col", "cols", "column", "columns",
+        "count", "distinct", "each", "entries", "entry", "field", "fields",
+        "for", "in", "many", "much", "number", "of", "on", "record", "records",
+        "row", "rows", "the", "total", "unique", "value", "values",
+    }
+)
+
+
 def resolve_name(needle: str, available: list[str]) -> str:
     """Match a spoken name to a real schema name, or "" when nothing fits."""
     want = (needle or "").strip()
@@ -653,6 +691,28 @@ def resolve_name(needle: str, available: list[str]) -> str:
         ]
         if len(partial) == 1:
             return partial[0]
+    # Spoken phrases carry words the schema does not: "the amount column",
+    # "order amount", "distinct region". Resolve the content words one at a
+    # time and accept the answer only when they agree on a single column, so an
+    # ambiguous phrase still fails closed instead of guessing a column.
+    words = [w for w in re.split(r"[^a-z0-9]+", want.lower()) if w]
+    if len(words) > 1:
+        # A noise word that is itself a real column keeps its vote, so "total
+        # amount" stays ambiguous on a table owning both `total` and `amount`.
+        content = [
+            w
+            for w in words
+            if w not in _COLUMN_PHRASE_NOISE or resolve_name(w, available)
+        ]
+        probes = content or words
+        if len(probes) < len(words) and len(content) > 1:
+            joined = resolve_name(" ".join(content), available)
+            if joined:
+                return joined
+        hits = {resolve_name(w, available) for w in probes}
+        hits.discard("")
+        if len(hits) == 1:
+            return hits.pop()
     return ""
 
 
@@ -805,6 +865,33 @@ def _introspect_columns(conn: dict[str, Any], table: str) -> list[dict[str, Any]
     from .schema_tools import introspect_connector_table
 
     return introspect_connector_table(conn, table, purpose="source")["columns"]
+
+
+def _sibling_table(conn: dict[str, Any], wanted: str, table: str) -> str:
+    """The connector's own table this unresolved column name actually matches.
+
+    "how many distinct customers in orders" asks for a column that does not
+    exist, and `customers` is a *table* on the same connector. Naming that is the
+    difference between a dead end and the operator's next correct question.
+    """
+    probe = _normalize_name(wanted)
+    if not probe or probe == _normalize_name(table):
+        return ""
+    try:
+        from .schema_tools import list_connector_objects
+
+        result = list_connector_objects(
+            connector_id=str(conn.get("id") or conn.get("_id") or ""),
+            connector_name=str(conn.get("name") or ""),
+        )
+        objects = list((getattr(result, "output", None) or {}).get("objects") or [])
+    except Exception:
+        return ""
+    for name in objects:
+        norm = _normalize_name(str(name))
+        if norm == probe or _singular(norm) == _singular(probe):
+            return str(name)
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -967,12 +1054,20 @@ def aggregate_connector_data(
             )
         measure_col = resolve_name(wanted, names)
         if not measure_col:
+            sibling = _sibling_table(conn, wanted, table)
+            hint = (
+                f" `{sibling}` is a table on {conn.get('name') or 'this connector'}, "
+                f"not a column in {table} — ask me to {metric_key.replace('_', ' ')} "
+                f"over `{sibling}` instead."
+                if sibling
+                else ""
+            )
             return _tool_result(
                 tool,
                 success=False,
                 error=(
                     f"Column '{wanted}' is not in {table}. "
-                    f"Available columns: {', '.join(names[:20])}."
+                    f"Available columns: {', '.join(names[:20])}." + hint
                 ),
             )
         if metric_key in {"sum", "avg"}:
@@ -1016,12 +1111,21 @@ def aggregate_connector_data(
                         ),
                     )
             if not dim_col:
+                sibling = _sibling_table(conn, wanted, table)
+                hint = (
+                    f" `{sibling}` is a table on "
+                    f"{conn.get('name') or 'this connector'}, not a column in "
+                    f"{table} — name a column of {table} to group by, or ask "
+                    f"about `{sibling}` instead."
+                    if sibling
+                    else ""
+                )
                 return _tool_result(
                     tool,
                     success=False,
                     error=(
                         f"Column '{wanted}' is not in {table}. "
-                        f"Available columns: {', '.join(names[:20])}."
+                        f"Available columns: {', '.join(names[:20])}." + hint
                     ),
                 )
 
@@ -1210,6 +1314,100 @@ def aggregate_connector_data(
             "group_count": len(rows) if dim_col else 0,
             "value": scalar,
             "rows": rows[: min(row_limit, 50)],
+            "exact": True,
+            "read_only": True,
+        },
+    )
+
+
+#: Counting every table on a connector is one round trip per table, so the fan-out
+#: is bounded. A wider schema is reported as truncated rather than counted
+#: partially and presented as the whole inventory.
+_MAX_RANKED_TABLES = 40
+
+
+def rank_connector_tables(
+    connector_id: str = "",
+    connector_name: str = "",
+    order: str = "desc",
+    limit: int = 10,
+):
+    """Exact row counts for the tables on one connector, ranked by size.
+
+    "which table has the most rows on Demo Orders" had no tool behind it, so the
+    planner read the superlative as an identifier and sampled a table literally
+    named ``biggest`` — an invented name against a live database. This is the
+    real answer: list the objects, count each one server-side through the same
+    aggregate path as any other count, and rank what came back.
+
+    Tables that cannot be counted are returned in ``skipped`` with their reason.
+    A view that refuses a count is ordinary; dropping it from the ranking without
+    saying so would present a partial inventory as the whole one.
+    """
+    tool = "rank_connector_tables"
+    conn, err = _safe_connector(connector_id, connector_name, tool)
+    if err:
+        return err
+
+    cid = str(conn.get("id") or conn.get("_id") or "")
+    cname = str(conn.get("name") or connector_name or "")
+    from .schema_tools import list_connector_objects
+
+    listed = list_connector_objects(connector_id=cid, connector_name=cname)
+    if not listed.success:
+        return _tool_result(tool, success=False, error=listed.error)
+    info = listed.output or {}
+    names = [str(n).strip() for n in (info.get("objects") or []) if str(n).strip()]
+    if not names:
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                f"**{cname}** reported no tables to rank"
+                + (f" — {info.get('message')}" if info.get("message") else ".")
+            ),
+        )
+
+    considered = names[:_MAX_RANKED_TABLES]
+    ranked: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for name in considered:
+        counted = aggregate_connector_data(
+            connector_id=cid,
+            connector_name=cname,
+            table=name,
+            metric="count",
+        )
+        value = (counted.output or {}).get("value") if counted.success else None
+        if not counted.success or value is None:
+            skipped.append({
+                "table": name,
+                "error": str(counted.error or "count returned no value"),
+            })
+            continue
+        try:
+            ranked.append({"table": name, "rows": int(value)})
+        except (TypeError, ValueError):
+            skipped.append({"table": name, "error": f"non-numeric count {value!r}"})
+
+    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
+    ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
+    shown = max(1, int(limit or 10))
+    return _tool_result(
+        tool,
+        success=True,
+        output={
+            "connector_id": cid,
+            "connector_name": cname,
+            "type": info.get("type") or "",
+            "order": "asc" if ascending else "desc",
+            "ranked": ranked[:shown],
+            "counted": len(ranked),
+            "total_objects": int(info.get("total") or len(names)),
+            "considered": len(considered),
+            "total_rows": sum(r["rows"] for r in ranked),
+            "skipped": skipped,
+            "truncated": len(names) > len(considered) or bool(info.get("truncated")),
             "exact": True,
             "read_only": True,
         },

@@ -95,6 +95,18 @@ class PilotFocus:
         """True when we know a table to talk about."""
         return bool(self.table)
 
+    def has_scope(self) -> bool:
+        """True when we know *where* to look, even if not yet what.
+
+        Listing a connector's tables settles the connector and nothing else. That
+        is worth remembering: without it, "how many rows in the first one" right
+        after "what tables are on Demo Orders" reached the aggregator with a real
+        table name and no connector, and answered "Connector not found". Only
+        ``has_target`` gates the elliptical-edit layer, so a connector-only focus
+        fills omitted slots without ever claiming a table the operator never named.
+        """
+        return bool(self.table or self.connector_id or self.connector_name)
+
     def describe(self) -> str:
         if not self.table:
             return ""
@@ -115,6 +127,31 @@ class PendingSlot:
     created_at: float = 0.0
 
 
+@dataclass
+class PilotProposal:
+    """The last thing Pilot offered to do, and everything needed to act on it.
+
+    Focus remembers what was *read*; nothing remembered what was *offered*. So
+    "run it" one turn after a transfer plan was parsed from scratch, matched no
+    tool and was refused as undocumented — the operator had to retype the whole
+    route to run the plan they were just shown. Worse, "actually cancel that"
+    after a staged schedule fell through to a job listing, which reads as though
+    the cancel worked while the Confirm row was still live.
+
+    ``staged`` separates the two states that matter. A plan is a rehearsal Pilot
+    can promote to a run on consent. A staged mutation already holds an ack in
+    the ledger, and chat must never self-approve it — Confirm stays the
+    operator's action, so consent can only point at the button.
+    """
+
+    tool: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    label: str = ""
+    ack_id: str = ""
+    staged: bool = False
+    created_at: float = 0.0
+
+
 class PilotWorkingMemory:
     """Thread-safe, TTL'd, session-scoped focus + pending-slot store."""
 
@@ -124,6 +161,7 @@ class PilotWorkingMemory:
         self._lock = threading.RLock()
         self._focus: dict[str, dict[str, Any]] = {}
         self._pending: dict[str, dict[str, Any]] = {}
+        self._proposals: dict[str, dict[str, Any]] = {}
         self._load()
 
     # ------------------------------------------------------------------ io
@@ -140,13 +178,20 @@ class PilotWorkingMemory:
             for sid, doc in (raw.get("pending") or {}).items():
                 if float(doc.get("created_at") or 0) + self.ttl_sec > now:
                     self._pending[str(sid)] = doc
+            for sid, doc in (raw.get("proposals") or {}).items():
+                if float(doc.get("created_at") or 0) + self.ttl_sec > now:
+                    self._proposals[str(sid)] = doc
         except (OSError, json.JSONDecodeError, TypeError, AttributeError) as exc:
             _log.warning("pilot working memory load failed: %s", exc)
 
     def _persist(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"focus": self._focus, "pending": self._pending}
+            payload = {
+                "focus": self._focus,
+                "pending": self._pending,
+                "proposals": self._proposals,
+            }
             tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
             tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
             tmp.replace(self.path)
@@ -155,7 +200,11 @@ class PilotWorkingMemory:
 
     def _gc_locked(self) -> None:
         now = _now()
-        for store, stamp in ((self._focus, "updated_at"), (self._pending, "created_at")):
+        for store, stamp in (
+            (self._focus, "updated_at"),
+            (self._pending, "created_at"),
+            (self._proposals, "created_at"),
+        ):
             for sid in [
                 k for k, v in store.items() if float(v.get(stamp) or 0) + self.ttl_sec <= now
             ]:
@@ -167,6 +216,7 @@ class PilotWorkingMemory:
             for sid, _ in ordered[: len(self._focus) - _MAX_SESSIONS]:
                 self._focus.pop(sid, None)
                 self._pending.pop(sid, None)
+                self._proposals.pop(sid, None)
 
     # --------------------------------------------------------------- focus
 
@@ -188,7 +238,7 @@ class PilotWorkingMemory:
 
     def remember_focus(self, session_id: str, focus: PilotFocus) -> None:
         sid = (session_id or "").strip()
-        if not sid or not focus.has_target():
+        if not sid or not focus.has_scope():
             return
         focus.updated_at = _now()
         focus.columns = [str(c) for c in (focus.columns or [])][:_MAX_COLUMNS]
@@ -216,7 +266,7 @@ class PilotWorkingMemory:
                     setattr(current, key, "" if isinstance(getattr(current, key), str) else 0)
                 continue
             setattr(current, key, value)
-        if not current.has_target():
+        if not current.has_scope():
             return None
         self.remember_focus(sid, current)
         return current
@@ -256,10 +306,46 @@ class PilotWorkingMemory:
             if self._pending.pop(sid, None) is not None:
                 self._persist()
 
+    # ------------------------------------------------------------ proposal
+
+    def get_proposal(self, session_id: str) -> PilotProposal | None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        with self._lock:
+            self._gc_locked()
+            doc = self._proposals.get(sid)
+            if not doc:
+                return None
+            try:
+                return PilotProposal(**doc)
+            except TypeError:
+                self._proposals.pop(sid, None)
+                return None
+
+    def remember_proposal(self, session_id: str, proposal: PilotProposal) -> None:
+        sid = (session_id or "").strip()
+        if not sid or not proposal.tool:
+            return
+        proposal.created_at = _now()
+        with self._lock:
+            self._gc_locked()
+            self._proposals[sid] = asdict(proposal)
+            self._persist()
+
+    def clear_proposal(self, session_id: str) -> None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        with self._lock:
+            if self._proposals.pop(sid, None) is not None:
+                self._persist()
+
     def clear_for_tests(self) -> None:
         with self._lock:
             self._focus.clear()
             self._pending.clear()
+            self._proposals.clear()
             self._persist()
 
 
