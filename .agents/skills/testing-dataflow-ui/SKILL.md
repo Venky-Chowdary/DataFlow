@@ -7,6 +7,12 @@ description: How to bring up the DataFlow stack locally, log into the workspace 
 
 ## Bring up the stack
 
+- If the browser tool cannot initialize after a restored snapshot, verify that
+  `$DISPLAY` has a live X server (`ls /tmp/.X11-unix`, inspect Xvfb/Xorg processes).
+  `DISPLAY=:0` alone does not mean the display exists. If :0 is unused, start
+  `Xvfb :0 -screen 0 1600x1200x24 -ac`, then retry browser restart; the saved
+  browser profile may retain a valid login. Do this before starting a recording.
+
 - Mongo: `docker start df-mongo` (Jobs / Schedules / Contracts do not persist without it).
 - API: run from the repo virtualenv, **not** system python (system python has no FastAPI):
   ```bash
