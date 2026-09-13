@@ -411,6 +411,18 @@ def resolve_platform_coreference(
     text = _clean(message)
     if not text or not _COREFERENCE_RE.search(text):
         return None
+    from .tools import connector_engine_filter
+
+    # "how many of those are postgres" points squarely at the list the previous
+    # turn printed. The documentation names PostgreSQL too, so retrieval won the
+    # turn and answered about Azure and RDS drivers instead of the two saved rows
+    # the operator was looking at. Only fires when a list really was printed.
+    if re.search(r"\b(?:of|among)\s+(?:those|them|these)\b", text, re.I):
+        engine, excluded = connector_engine_filter(text)
+        if engine and offered_names(last_assistant_content(history)):
+            return [
+                ("list_connectors", {"engine": engine, "engine_excluded": excluded})
+            ]
     # "how do I get the list of rows that failed" contains ``that`` as a
     # relative pronoun, not as a pointer at a previous turn, and ``failed`` as
     # part of its own subject. Read as a coreference it became "list the failed
@@ -428,6 +440,11 @@ def resolve_platform_coreference(
         return None
     prior = last_assistant_content(history).lower()
     low = text.lower()
+    # ``that`` points at a previous turn in "which of those failed" and heads a
+    # relative clause in "connectors that are not postgres". The second restricts
+    # a noun this very turn named; read as a pointer it threw the restriction
+    # away and re-listed every connector as though nothing had been asked.
+    pointer_text = _RELATIVE_PRONOUN.sub(" ", low)
     # Noun *runs* / "the last run", never the verb in "if I run …".
     jobs_cue = bool(
         re.search(
@@ -440,8 +457,8 @@ def resolve_platform_coreference(
     dummy_it = bool(
         re.search(r"\bis\s+it\s+(?:safe|idempotent|lossy|dangerous|ok|okay|fine)\b", low)
     )
-    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", low)) or (
-        bool(re.search(r"\bit\b", low)) and not dummy_it
+    job_pointer = bool(re.search(r"\b(?:those|these|them|that)\b", pointer_text)) or (
+        bool(re.search(r"\bit\b", pointer_text)) and not dummy_it
     )
     if jobs_cue and job_pointer:
         return [("list_jobs", {"limit": 10})]
@@ -450,8 +467,15 @@ def resolve_platform_coreference(
     # has not asked about yet. It carries no pronoun, so it reached no tool and
     # was refused as undocumented; re-listing is at least the right subject.
     other_one = bool(re.search(r"\bthe\s+other\s+ones?\b", low))
-    if connectors_cue and (other_one or re.search(r"\b(?:those|these|them|that|it)\b", low)):
-        return [("list_connectors", {})]
+    if connectors_cue and (
+        other_one or re.search(r"\b(?:those|these|them|that|it)\b", pointer_text)
+    ):
+        # A restriction the turn carries is part of the answer, not noise to drop.
+        engine, excluded = connector_engine_filter(text)
+        args: dict[str, Any] = {}
+        if engine:
+            args = {"engine": engine, "engine_excluded": excluded}
+        return [("list_connectors", args)]
     return None
 
 
@@ -675,6 +699,16 @@ _QUESTION_FRAME = re.compile(
 # ``there`` that points at a remembered subject, so it must not count as a
 # coreference.
 _EXISTENTIAL_THERE = re.compile(r"\b(?:are|is|was|were)\s+there\b", re.I)
+
+# ``that``/``which`` immediately before a verb heads a relative clause that
+# restricts a noun in this same turn — "connectors that are not postgres" — so it
+# is not a pointer at anything the previous turn said.
+_RELATIVE_PRONOUN = re.compile(
+    r"\b(?:that|which|who)\s+(?:are|is|was|were|do|does|did|have|has|had|can|"
+    r"could|will|would|aren'?t|isn'?t|don'?t|doesn'?t|failed|fail|passed|pass|"
+    r"ran|run|use|uses|point|points|match|matches)\b",
+    re.I,
+)
 
 
 def has_own_question_frame(text: str) -> bool:

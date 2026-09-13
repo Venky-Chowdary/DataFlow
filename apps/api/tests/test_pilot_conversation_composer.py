@@ -1593,3 +1593,71 @@ def test_a_connector_only_focus_is_remembered():
     # Scope without a table must not make the turn look elliptical.
     assert not focus.has_target()
     assert focus.has_scope()
+
+
+def test_an_engine_word_filters_my_own_connectors():
+    """"how many of those are postgres" answered with the Azure and RDS driver
+    articles. On this workspace both connectors are SQLite so the unfiltered reply
+    happened to be right; on a mixed workspace it is a silently wrong answer.
+    """
+    from src.ai.copilot.tools import canonical_engine, connector_engine_filter
+
+    assert connector_engine_filter("how many of those are postgres") == ("postgresql", False)
+    assert connector_engine_filter("list connectors that are not postgres") == (
+        "postgresql",
+        True,
+    )
+    assert connector_engine_filter("which of my connectors are sqlite") == ("sqlite", False)
+    # A capability question names an engine without asking about saved rows.
+    assert connector_engine_filter("do you support postgres") == ("", False)
+    assert connector_engine_filter("is snowflake supported") == ("", False)
+    assert connector_engine_filter("how many connectors do i have") == ("", False)
+
+    assert canonical_engine("Postgres") == "postgresql"
+    assert canonical_engine("SQL Server") == "sqlserver"
+
+
+def test_the_engine_bucket_is_read_from_the_saved_rows():
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    agent = get_pilot_agent()
+    ctx = {"pilot_session_id": "test-engine-bucket"}
+
+    positive = agent.chat("which of my connectors are sqlite", data_context=dict(ctx))
+    assert "are sqlite" in positive.answer
+    assert "transfer-ready driver" not in positive.answer
+
+    negated = agent.chat("list connectors that are not postgres", data_context=dict(ctx))
+    assert "are not postgresql" in negated.answer
+
+    listed = agent.chat("how many connectors do i have", data_context=dict(ctx))
+    followed = agent.chat(
+        "how many of those are postgres",
+        history=[
+            {"role": "user", "content": "how many connectors do i have"},
+            {"role": "assistant", "content": listed.answer},
+        ],
+        data_context=dict(ctx),
+    )
+    # An empty bucket is a finding, and naming what they do run is the useful part.
+    assert "None of your" in followed.answer
+    assert "postgresql" in followed.answer
+    assert "sqlite" in followed.answer
+
+
+def test_a_relative_that_is_not_a_pointer_at_the_previous_turn():
+    """"connectors that are not postgres" was read as "those connectors", which
+    dropped the restriction and re-listed everything.
+    """
+    from src.ai.copilot.followup import resolve_platform_coreference
+    from src.ai.copilot.tools import plan_tools_tolerant
+
+    # The coreference layer steps aside, so the planner's own filter survives.
+    assert resolve_platform_coreference("list connectors that are not postgres", None) is None
+    assert plan_tools_tolerant("list connectors that are not postgres") == [
+        ("list_connectors", {"engine": "postgresql", "engine_excluded": True})
+    ]
+    # A genuine pointer still resolves.
+    assert resolve_platform_coreference("which of those failed", None) == [
+        ("list_jobs", {"limit": 10})
+    ]

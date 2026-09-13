@@ -972,7 +972,12 @@ class DataPilotTools:
                             break
         return ToolResult(name="search_data", success=True, output={"query": query, "hits": hits[:25]})
 
-    def _list_connectors(self, health: str = "any") -> ToolResult:
+    def _list_connectors(
+        self,
+        health: str = "any",
+        engine: str = "",
+        engine_excluded: bool = False,
+    ) -> ToolResult:
         summary = []
         errors: list[str] = []
         try:
@@ -1030,30 +1035,47 @@ class DataPilotTools:
                     + "). Check Settings → storage, then retry."
                 ),
             )
+        total_saved = len(summary)
+        saved_engines = sorted(
+            {canonical_engine(str(c.get("type") or "")) for c in summary if c.get("type")}
+        )
+        # "how many of those are postgres" listed every connector unchanged. On
+        # this workspace both are SQLite so the reply happened to be right; on a
+        # mixed workspace it is a silently wrong answer, which is why the engine
+        # is filtered here rather than left to the wording of the summary.
+        engine_want = canonical_engine(engine)
+        if engine_want:
+            matches = [
+                c for c in summary if canonical_engine(str(c.get("type") or "")) == engine_want
+            ]
+            summary = (
+                [c for c in summary if c not in matches] if engine_excluded else matches
+            )
+
         # "get me the passed connectors" must not list every connector. Health is
         # the last saved probe result, never a guess from the engine name.
         want = (health or "any").strip().lower()
-        if want not in {"passed", "failed", "untested"}:
-            return ToolResult(
-                name="list_connectors",
-                success=True,
-                output={"connectors": summary, "count": len(summary), "health": "any"},
-            )
-        buckets = {
-            "passed": lambda ok: ok is True,
-            "failed": lambda ok: ok is False,
-            "untested": lambda ok: ok not in (True, False),
-        }
-        keep = buckets[want]
-        filtered = [c for c in summary if keep(c.get("last_test_ok"))]
+        if want in {"passed", "failed", "untested"}:
+            buckets = {
+                "passed": lambda ok: ok is True,
+                "failed": lambda ok: ok is False,
+                "untested": lambda ok: ok not in (True, False),
+            }
+            keep = buckets[want]
+            summary = [c for c in summary if keep(c.get("last_test_ok"))]
+        else:
+            want = "any"
         return ToolResult(
             name="list_connectors",
             success=True,
             output={
-                "connectors": filtered,
-                "count": len(filtered),
+                "connectors": summary,
+                "count": len(summary),
                 "health": want,
-                "total_saved": len(summary),
+                "engine": engine_want,
+                "engine_excluded": bool(engine_want and engine_excluded),
+                "saved_engines": saved_engines,
+                "total_saved": total_saved,
             },
         )
 
@@ -3151,6 +3173,92 @@ def connector_health_filter(message: str) -> str:
     return "any"
 
 
+# Engine names operators say out loud, mapped to the driver token the connector
+# store records. Exact driver names resolve from the catalog instead, so this only
+# needs the spoken forms.
+_ENGINE_ALIASES: dict[str, str] = {
+    "postgres": "postgresql",
+    "postgre": "postgresql",
+    "pgsql": "postgresql",
+    "mongo": "mongodb",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "sql server": "sqlserver",
+    "bq": "bigquery",
+    "s3": "s3",
+    "lite": "sqlite",
+}
+
+# Engines the pilot can name in a filter. Deliberately the spoken vocabulary
+# rather than the whole 600-row catalog: a catalog slug is not what an operator
+# types, and matching one loosely turns a documentation ask into an inventory read.
+_ENGINE_WORDS: tuple[str, ...] = (
+    "postgresql", "postgres", "postgre", "pgsql",
+    "mysql", "mariadb", "sqlite",
+    "snowflake", "bigquery", "bq", "redshift", "databricks", "clickhouse",
+    "mongodb", "mongo", "sqlserver", "ms sql", "sql server", "mssql",
+    "oracle", "kafka", "s3", "gcs", "csv", "json", "parquet",
+)
+
+# The frames that make an engine word a *filter on my inventory* rather than a
+# question about the catalog. "do you support postgres" is the second kind.
+_ENGINE_FILTER_FRAME = re.compile(
+    r"\b(?:my|our|saved)\s+(?:connectors?|connections?)\b"
+    r"|\b(?:connectors?|connections?)\s+(?:do\s+)?(?:i|we)\s+have\b"
+    r"|\b(?:of|among)\s+(?:those|them|these)\b"
+    r"|^(?:list|show|which|what|count|how\s+many)\b[^?]*"
+    r"\b(?:connectors?|connections?)\b",
+    re.I,
+)
+
+# A capability question names an engine without asking about saved rows.
+_ENGINE_IS_CAPABILITY_ASK = re.compile(
+    r"\bdo\s+(?:you|we)\s+(?:support|have)\b"
+    r"|\bcan\s+you\s+(?:connect|read|write|load|move)\b"
+    r"|\bis\s+[\w ]+\s+supported\b"
+    r"|\bsupported?\b|\bsupports\b",
+    re.I,
+)
+
+_ENGINE_NEGATION = re.compile(
+    r"\b(?:not|aren'?t|isn'?t|other\s+than|except|excepting|excluding|exclude|"
+    r"besides|without|non)\b",
+    re.I,
+)
+
+
+def canonical_engine(engine: str) -> str:
+    """One spelling per engine, so ``postgres`` and ``postgresql`` are one bucket."""
+    want = re.sub(r"[^a-z0-9 ]+", "", (engine or "").strip().lower())
+    if not want:
+        return ""
+    want = _ENGINE_ALIASES.get(want, want)
+    return want.replace(" ", "")
+
+
+def connector_engine_filter(message: str) -> tuple[str, bool]:
+    """The engine bucket the operator asked their inventory for, and whether negated.
+
+    Returns ``("", False)`` for anything that is not a filter on saved rows —
+    "do you support postgres" is a catalog question and answering it from the
+    saved list would be a different claim entirely.
+    """
+    text = (message or "").strip()
+    if not text or _ENGINE_IS_CAPABILITY_ASK.search(text):
+        return "", False
+    if not _ENGINE_FILTER_FRAME.search(text):
+        return "", False
+    for word in sorted(_ENGINE_WORDS, key=len, reverse=True):
+        hit = re.search(rf"(?<![A-Za-z0-9]){re.escape(word)}(?![A-Za-z0-9])", text, re.I)
+        if not hit:
+            continue
+        # Negation belongs to the clause that carries the engine word: "connectors
+        # that are not postgres", "everything except sqlite".
+        before = text[max(0, hit.start() - 40) : hit.start()]
+        return canonical_engine(word), bool(_ENGINE_NEGATION.search(before))
+    return "", False
+
+
 # A pasted inventory row: ``Snowflake_venky (snowflake) → EMPLOYEE_DB``.
 # Operators paste our own bullet back with a question glued on the end.
 _PASTED_CONNECTOR_ROW = re.compile(
@@ -3766,6 +3874,11 @@ def prune_planned_tools(
         _own_inventory = "list_datasets" in names and _asks_to_count_workspace_objects(
             (message or "").lower()
         )
+        # "which of my connectors are sqlite" is a filter on saved rows. The
+        # engine name also heads a Help article, and leading with it answered
+        # with the whole transfer-ready driver list instead of their two rows.
+        if "list_connectors" in names and connector_engine_filter(message)[0]:
+            _own_inventory = True
         if _own_inventory or (
             dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}
         ):
@@ -4567,9 +4680,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             lower,
         ):
             _health = connector_health_filter(message)
-            planned.append(
-                ("list_connectors", {"health": _health} if _health != "any" else {})
-            )
+            _engine, _engine_not = connector_engine_filter(message)
+            _list_args: dict[str, Any] = {}
+            if _health != "any":
+                _list_args["health"] = _health
+            if _engine:
+                _list_args["engine"] = _engine
+                _list_args["engine_excluded"] = _engine_not
+            planned.append(("list_connectors", _list_args))
             planned = [
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")

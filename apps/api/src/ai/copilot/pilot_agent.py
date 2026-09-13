@@ -2868,6 +2868,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 conns = tr.output.get("connectors", [])
                 health = str(tr.output.get("health") or "any")
                 total = int(tr.output.get("total_saved") or len(conns))
+                engine = str(tr.output.get("engine") or "")
+                engine_not = bool(tr.output.get("engine_excluded"))
+                engine_label = ""
+                if engine:
+                    engine_label = (
+                        f"are not {engine}" if engine_not else f"are {engine}"
+                    )
                 ask_tables = any(
                     w in (message or "").lower()
                     for w in ("table", "tables", "collections", "objects")
@@ -2879,9 +2886,16 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             "failed": "failed their last connection test",
                             "untested": "have never been tested",
                         }[health]
+                        if engine_label:
+                            label = f"{engine_label} and {label}"
                         lines = [
                             f"**{len(conns)}** of **{total}** saved connector(s) "
                             f"{label}."
+                        ]
+                    elif engine_label:
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{engine_label}."
                         ]
                     else:
                         lines = [f"You have **{len(conns)} saved connector(s)**."]
@@ -2909,9 +2923,20 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         "failed": "failed its last connection test",
                         "untested": "is untested",
                     }[health]
+                    if engine:
+                        verb = f"{engine_label.replace('are', 'is')} and {verb}"
                     parts.append(
                         f"None of your **{total}** saved connector(s) {verb}. "
                         "Open **Connectors** and press Test to record a result."
+                    )
+                elif engine:
+                    # An empty engine bucket is also a finding: the operator asked
+                    # which of their connectors run this engine, and none do.
+                    kinds = [str(k) for k in (tr.output.get("saved_engines") or []) if k]
+                    have = f" You run {', '.join(kinds)}." if kinds else ""
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) "
+                        f"{engine_label.replace('are', 'is')}.{have}"
                     )
                 else:
                     parts.append(
