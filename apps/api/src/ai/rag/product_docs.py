@@ -34,13 +34,13 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
 from .char_ngram_index import CharNgramIndex
-from .evidence_policy import EvidenceVerdict, assess_evidence
+from .evidence_policy import EvidenceVerdict, assess_evidence, is_subject_term
 from .fusion import reciprocal_rank_fusion
 from .lexical_index import Bm25Index, content_terms
 from .query_analysis import (
@@ -50,6 +50,7 @@ from .query_analysis import (
     QueryAnalysis,
     analyze_query,
     distinctive_procedure_terms,
+    phrase_evidence,
 )
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
@@ -1961,6 +1962,7 @@ def _select_covering(
     ranked: Sequence[tuple[float, ProductDocHit]],
     limit: int,
     typed_terms: Sequence[str],
+    spelled_as: Mapping[str, set[str]] | None = None,
 ) -> list[ProductDocHit]:
     """Fill the evidence window to cover the question, not to repeat its best match.
 
@@ -1985,6 +1987,32 @@ def _select_covering(
     pool = list(ranked)
     chosen: list[ProductDocHit] = []
     covered: set[str] = set()
+
+    # A subject the question named is owed the passage *written about it*, not
+    # a passage that mentions it in passing. "What is quarantine and how does
+    # reconcile work" filled its window from the quarantine article plus the
+    # competitor comparison — which says ``reconcile`` once — and the reconcile
+    # article never entered. Body matches count as coverage only when no
+    # ranked passage carries the term in its heading. The section written
+    # about the subject beats the article that merely contains it: "Checksum
+    # MATCH" under "Job Theater & reconciliation" is the reconcile passage,
+    # "Open Job Theater" under the same article is not. The words a phrase
+    # rule says the subject is spelled with (``reconcile`` → ``checksum``)
+    # count as the subject's own only when the typed word itself heads
+    # nothing — otherwise "skip validation" would hand the Validate card every
+    # slot its words are owed. The debt is settled *after* the ranked fill, by
+    # swapping out the weakest supporting passage, so a question whose best
+    # passages already cover it is left exactly as ranked.
+    spelled = spelled_as or {}
+
+    def heads(hit: ProductDocHit, names: set[str]) -> int:
+        chunk = hit.chunk
+        if any(_covers(t, set(content_terms(chunk.section_title or ""))) for t in names):
+            return 2
+        if any(_covers(t, set(content_terms(chunk.doc_title or ""))) for t in names):
+            return 1
+        return 0
+
     while pool and len(chosen) < limit:
         def value(pair: tuple[float, ProductDocHit]) -> float:
             score, hit = pair
@@ -2002,6 +2030,24 @@ def _select_covering(
         pool.remove(pick)
         chosen.append(pick[1])
         covered |= set(pick[1].matched_terms) & wanted
+
+    rank_of = {id(hit): score for score, hit in ranked}
+    for term in (t for t in wanted if is_subject_term(t)):
+        names = {term}
+        if not any(heads(hit, names) for _, hit in ranked):
+            names |= spelled.get(term, set())
+        if any(heads(hit, names) or term in hit.matched_terms for hit in chosen):
+            continue
+        owed = max(
+            (p for p in pool if heads(p[1], names)),
+            key=lambda p: (heads(p[1], names), p[0]),
+            default=None,
+        )
+        if owed is None or len(chosen) < 2:
+            continue
+        weakest = min(chosen[1:], key=lambda hit: rank_of[id(hit)])
+        chosen[chosen.index(weakest)] = owed[1]
+        pool.remove(owed)
     return chosen
 
 
@@ -2098,8 +2144,47 @@ def _rank_hits(
                 ),
             )
         )
+    spelled: dict[str, set[str]] = {}
+    for eaten, targets in phrase_evidence(analysis.text):
+        for term in eaten:
+            spelled.setdefault(term, set()).update(targets)
+
+    # A two-subject question splits the typed query, and the section written
+    # about the second subject can fall below the fusion depth: "what is
+    # quarantine and how does reconcile work" ranked "Checksum MATCH" 25th on
+    # one matched word while twenty passages that mention both words in
+    # passing sat above it. Each subject gets its own shallow search, and a
+    # section *titled* for it joins the candidates on its own BM25 merit so
+    # the coverage step below has it to choose.
+    present = {pair[1].chunk.id for pair in ranked}
+    for term in typed_terms:
+        if not is_subject_term(term):
+            continue
+        names = [term, *sorted(spelled.get(term, ()))]
+        for own in index.search(" ".join(names), limit=3):
+            chunk = by_id.get(own.id)
+            if chunk is None or own.id in present:
+                continue
+            section = set(content_terms(chunk.section_title or ""))
+            if not any(_covers(t, section) for t in names):
+                continue
+            rank = FUSED_RANK_SCALE * (1.0 - RRF_WEIGHT) * (own.score / bm25_best)
+            rank += TITLE_WEIGHT * _title_coverage(chunk, anchor_terms)
+            rank += _section_intent_bonus(chunk, analysis)
+            present.add(own.id)
+            ranked.append(
+                (
+                    rank,
+                    ProductDocHit(
+                        chunk=chunk,
+                        score=own.score,
+                        grounding=grounding.get(own.id, 0.0),
+                        matched_terms=matched.get(own.id, ()),
+                    ),
+                )
+            )
     ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return _select_covering(ranked, limit, typed_terms)
+    return _select_covering(ranked, limit, typed_terms, spelled_as=spelled)
 
 
 def retrieve_product_answer(

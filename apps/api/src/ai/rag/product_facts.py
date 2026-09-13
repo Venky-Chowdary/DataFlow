@@ -2322,30 +2322,46 @@ def _competitor_wedge_section() -> GeneratedSection:
     )
 
 
-def _connect_postgres_section() -> GeneratedSection | None:
-    """New connection + the PostgreSQL driver the registry actually ships."""
+# Registry ids that the connector catalog spells differently.
+_CATALOG_ID_ALIASES = {"sqlserver": "sql_server"}
+
+
+def _connect_engine_sections() -> tuple[GeneratedSection, ...]:
+    """One "connect a <Engine>" procedure per transfer-ready registry engine.
+
+    "How do I connect to Snowflake" is the add-connector procedure with
+    Snowflake as the instance. With only the PostgreSQL card generated, every
+    other engine retrieved its capability cards ("can I connect Snowflake with
+    a private key"), which never mention New connection. The card is generated,
+    not written, so it exists exactly for the engines the registry ships and the
+    catalog marks transfer-ready — a planned engine gets no procedure.
+    """
     try:
         import registry
-
-        engines = [
-            str(getattr(d, "value", d)).lower()
-            for d in getattr(registry, "DATABASE_TYPES", ())
-        ]
-    except Exception:
-        return None
-    if "postgresql" not in engines:
-        return None
-    return GeneratedSection(
-        doc_title="Connections & engines",
-        section_title="Procedure: connect a PostgreSQL database",
-        text=(
-            "Click New connection and pick the PostgreSQL driver. "
-            "Then enter host, database and credentials, click Test, and Save "
-            "before using it in Transfer Studio or Pipelines."
-        ),
-        source_module="registry.py · Procedure: add a connector",
-        category="connectors",
-    )
+        from services.connector_catalog import get_connector_meta
+    except ImportError:
+        return ()
+    out: list[GeneratedSection] = []
+    for raw in getattr(registry, "DATABASE_TYPES", ()):
+        engine = str(getattr(raw, "value", raw)).lower()
+        meta = get_connector_meta(_CATALOG_ID_ALIASES.get(engine, engine))
+        if not meta or not meta.get("transfer_ready"):
+            continue
+        name = str(meta.get("name") or engine)
+        out.append(
+            GeneratedSection(
+                doc_title="Connections & engines",
+                section_title=f"Procedure: connect a {name} database",
+                text=(
+                    f"Click New connection and pick the {name} driver. "
+                    "Then enter its connection details and credentials, click Test, and Save "
+                    "before using it in Transfer Studio or Pipelines."
+                ),
+                source_module="registry.py · connector_catalog.json · Procedure: add a connector",
+                category="connectors",
+            )
+        )
+    return tuple(out)
 
 
 def _rest_api_section() -> GeneratedSection:
@@ -2632,7 +2648,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _pilot_engine_section,
         _capability_contract_sections,
         _competitor_wedge_section,
-        _connect_postgres_section,
+        _connect_engine_sections,
         _rest_api_section,
         _export_schedule_yaml_section,
         _export_proof_section,
