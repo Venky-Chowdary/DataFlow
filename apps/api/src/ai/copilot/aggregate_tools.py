@@ -617,6 +617,21 @@ def _singular(token: str) -> str:
     return token
 
 
+# Words an operator says *around* a column name rather than as one: schema
+# vocabulary ("the amount column"), metric vocabulary ("distinct region") and
+# bare articles. They are only ever dropped after the whole phrase has already
+# failed to resolve, so a table that really owns a column called `total` still
+# answers `total` exactly.
+_COLUMN_PHRASE_NOISE = frozenset(
+    {
+        "a", "all", "an", "any", "by", "col", "cols", "column", "columns",
+        "count", "distinct", "each", "entries", "entry", "field", "fields",
+        "for", "in", "many", "much", "number", "of", "on", "record", "records",
+        "row", "rows", "the", "total", "unique", "value", "values",
+    }
+)
+
+
 def resolve_name(needle: str, available: list[str]) -> str:
     """Match a spoken name to a real schema name, or "" when nothing fits."""
     want = (needle or "").strip()
@@ -653,6 +668,28 @@ def resolve_name(needle: str, available: list[str]) -> str:
         ]
         if len(partial) == 1:
             return partial[0]
+    # Spoken phrases carry words the schema does not: "the amount column",
+    # "order amount", "distinct region". Resolve the content words one at a
+    # time and accept the answer only when they agree on a single column, so an
+    # ambiguous phrase still fails closed instead of guessing a column.
+    words = [w for w in re.split(r"[^a-z0-9]+", want.lower()) if w]
+    if len(words) > 1:
+        # A noise word that is itself a real column keeps its vote, so "total
+        # amount" stays ambiguous on a table owning both `total` and `amount`.
+        content = [
+            w
+            for w in words
+            if w not in _COLUMN_PHRASE_NOISE or resolve_name(w, available)
+        ]
+        probes = content or words
+        if len(probes) < len(words) and len(content) > 1:
+            joined = resolve_name(" ".join(content), available)
+            if joined:
+                return joined
+        hits = {resolve_name(w, available) for w in probes}
+        hits.discard("")
+        if len(hits) == 1:
+            return hits.pop()
     return ""
 
 

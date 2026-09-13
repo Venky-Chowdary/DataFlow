@@ -31,6 +31,7 @@ from .tools import (
     format_tool_results_for_llm,
     get_pilot_tools,
     infer_tools_from_message,
+    plan_tools_tolerant,
 )
 
 logger = logging.getLogger(__name__)
@@ -1646,7 +1647,7 @@ Draft answer:
             platform = resolve_platform_coreference(message, history)
             if platform:
                 return platform
-            return infer_tools_from_message(message)
+            return plan_tools_tolerant(message)
 
         memory = get_working_memory()
         focus = memory.get_focus(session_id)
@@ -1682,7 +1683,7 @@ Draft answer:
         if table_coref:
             return table_coref
 
-        planned = infer_tools_from_message(message)
+        planned = plan_tools_tolerant(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
         if focus and looks_like_followup(message, focus) and not names_its_own_subject(planned):
@@ -2826,10 +2827,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     else:
                         lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
-                        lines.append(
-                            f"• **{c.get('name')}** ({c.get('type')}) → "
-                            f"{c.get('database', c.get('host', ''))}"
-                        )
+                        # An arrow with nothing after it reads like a truncated
+                        # answer. A connector with neither database nor host
+                        # recorded simply has no target to point at.
+                        target = str(
+                            c.get("database") or c.get("host") or ""
+                        ).strip()
+                        row = f"• **{c.get('name')}** ({c.get('type')})"
+                        lines.append(f"{row} → {target}" if target else row)
                     if ask_tables:
                         names = [str(c.get("name") or "") for c in conns if c.get("name")]
                         sample = names[0] if names else "your connector"

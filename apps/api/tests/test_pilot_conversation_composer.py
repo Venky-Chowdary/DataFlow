@@ -933,3 +933,209 @@ def test_parked_and_pending_work_reaches_the_briefing():
     ):
         assert classify_dialogue_act(ask) == "briefing", ask
         assert [n for n, _ in infer_tools_from_message(ask)] == ["brief_workspace"], ask
+
+
+def test_a_spoken_column_phrase_resolves_to_the_real_column():
+    """"sum the amount column" answered "Column 'amount column' is not in orders".
+
+    The resolver only ever compared the whole spoken phrase, so every noun an
+    operator says *around* a column name broke the lookup. Content words are
+    tried individually and the answer is accepted only when they agree, so a
+    genuinely ambiguous phrase still fails closed instead of picking a column.
+    """
+    from src.ai.copilot.aggregate_tools import resolve_name
+
+    orders = ["id", "region", "amount", "placed_at"]
+    assert resolve_name("amount column", orders) == "amount"
+    assert resolve_name("the amount column", orders) == "amount"
+    assert resolve_name("order amount", orders) == "amount"
+    assert resolve_name("distinct region", orders) == "region"
+    assert resolve_name("the placed at column", orders) == "placed_at"
+
+    # Unknown columns stay unknown — the honest error is the right answer.
+    assert resolve_name("customers", orders) == ""
+    assert resolve_name("second", orders) == ""
+
+    # A noise word that is itself a column keeps its vote, so the phrase is
+    # ambiguous rather than silently resolved to one of the two.
+    assert resolve_name("total", ["total", "amount"]) == "total"
+    assert resolve_name("total column", ["total", "amount"]) == "total"
+    assert resolve_name("total amount", ["total", "amount"]) == ""
+    assert resolve_name("order amount", ["order_id", "amount"]) == ""
+
+
+def test_throughput_and_limit_questions_are_not_row_counts():
+    """"how many rows can you move per second" ran COUNT(*) on the last table.
+
+    It answered "Column 'second' is not in orders" — a product capability
+    question reported as a schema error against the operator's data. Real
+    temporal grains ("orders per day") must keep grouping.
+    """
+    from src.ai.copilot.tools import asks_about_product_capacity, infer_tools_from_message
+
+    for ask in (
+        "how many rows can you move per second",
+        "what is your throughput",
+        "how much data can you handle",
+    ):
+        assert asks_about_product_capacity(ask), ask
+        assert "aggregate_data" not in [n for n, _ in infer_tools_from_message(ask)], ask
+
+    assert not asks_about_product_capacity("count orders per day on Demo Orders")
+    grouped = dict(infer_tools_from_message("count orders per day on Demo Orders"))
+    assert grouped["aggregate_data"]["group_by"] == "day"
+    assert "aggregate_data" in dict(infer_tools_from_message("count rows in orders on Demo Orders"))
+
+
+def test_a_schema_property_of_a_named_table_is_read_live():
+    """A primary key and a nullability are facts only the source can answer.
+
+    Both used to retrieve Help: the primary-key ask returned the migration
+    certificate aspect list, and the nulls ask returned the coerced-null ledger
+    passage. Neither can know the operator's table.
+    """
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "what's the primary key of orders on Demo Orders",
+        "are there nulls in orders on Demo Orders",
+        "what are the indexes on orders on Demo Orders",
+        "what data types does orders have on Demo Orders",
+    ):
+        plan = dict(infer_tools_from_message(ask))
+        assert "introspect_connector_schema" in plan, ask
+        assert plan["introspect_connector_schema"]["table"] == "orders", ask
+
+    # The same words without a table are still documentation.
+    assert [n for n, _ in infer_tools_from_message("what is a primary key")] == ["explain_product"]
+
+
+def test_opening_a_transfer_without_endpoints_answers_with_the_next_step():
+    """"plan a transfer" retrieved Azure Test Plans; "i want to copy a table"
+    retrieved Iceberg merge-on-read; "can you migrate my database" answered
+    "Datawrap does not ship Azure Migrate". None of the three names an endpoint,
+    so the one useful reply is the sketch that asks for two connectors and a
+    table and lists the gates the route will run.
+    """
+    from src.ai.copilot.dialogue_acts import is_transfer_capability_ask
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "plan a transfer",
+        "i want to copy a table",
+        "can you migrate my database",
+        "help me move my data",
+    ):
+        assert is_transfer_capability_ask(ask), ask
+        plan = dict(infer_tools_from_message(ask))
+        assert plan.get("plan_transfer_route") == {"source": "", "destination": ""}, ask
+
+    # Naming endpoints is past the opening ask — the real planner runs.
+    assert not is_transfer_capability_ask("move data from mysql to postgres")
+    named = dict(infer_tools_from_message("move data from mysql to postgres"))
+    assert named["plan_transfer_route"]["source"] == "mysql"
+    assert named["plan_transfer_route"]["destination"] == "postgres"
+
+    # An unparsed route must not echo the whole question back as an endpoint.
+    sketch = dict(infer_tools_from_message("how fast can you move data"))
+    assert sketch["plan_transfer_route"]["source"] == ""
+
+
+def test_quarantine_counts_and_run_history_are_job_telemetry():
+    """Both were answered from the documentation, which holds neither number.
+
+    "how many rows got quarantined" also hunted for a saved connector named
+    "quarantined" and stacked a clarification, a Help passage and the connector
+    list into one reply.
+    """
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "how many rows got quarantined",
+        "how many rows were rejected",
+        "did anything run last night",
+        "did anything run",
+    ):
+        plan = [n for n, _ in infer_tools_from_message(ask)]
+        assert "list_jobs" in plan, ask
+        assert "aggregate_data" not in plan, ask
+
+    # The nightly *procedure* is still documentation.
+    assert [n for n, _ in infer_tools_from_message("how do i schedule a nightly run")] == [
+        "explain_product"
+    ]
+
+
+def test_a_misspelled_workspace_noun_still_reaches_the_workspace():
+    """"conenctors?" and "shcedules" were refused as undocumented.
+
+    The retry may only upgrade a plan that read nothing live, or one that was
+    about to look up the misspelling itself, so a real table name one edit from
+    a workspace noun is never rewritten.
+    """
+    from src.ai.copilot.spelling import correct_workspace_typos
+    from src.ai.copilot.tools import plan_tools_tolerant
+
+    assert correct_workspace_typos("conenctors?") == "connectors?"
+    assert correct_workspace_typos("shcedules") == "schedules"
+    assert correct_workspace_typos("list tabels on Demo Orders") == "list tables on Demo Orders"
+    assert correct_workspace_typos("my pipelins") == "my pipelines"
+
+    assert [n for n, _ in plan_tools_tolerant("conenctors?")] == ["list_connectors"]
+    assert [n for n, _ in plan_tools_tolerant("how many conenctors do i have")] == [
+        "list_connectors"
+    ]
+    assert [n for n, _ in plan_tools_tolerant("my pipelins")] == ["list_schedules"]
+    assert [n for n, _ in plan_tools_tolerant("list tabels on Demo Orders")] == [
+        "list_connector_objects"
+    ]
+    # A misspelling that became the lookup subject is corrected too — COUNT(*)
+    # over a table called `pipelins` was never going to resolve.
+    assert [n for n, _ in plan_tools_tolerant("how many pipelins do i have")] == ["list_schedules"]
+
+    # `contacts` is one edit from `contracts` and is a real table everywhere.
+    assert correct_workspace_typos("count rows in contacts on Demo Orders") == (
+        "count rows in contacts on Demo Orders"
+    )
+    live = dict(plan_tools_tolerant("count rows in contacts on Demo Orders"))
+    assert live["aggregate_data"]["table"] == "contacts"
+
+
+def test_an_open_clarification_does_not_swallow_the_next_question():
+    """A failed connector match left a slot open, and the next unrelated
+    question replayed "No connector matched “quarantined”" with "I didn't match
+    that reply" appended. A self-contained act is never a slot fill.
+    """
+    from src.ai.copilot.followup import looks_like_fresh_intent
+
+    for ask in (
+        "is anything waiting on me",
+        "is anything parked",
+        "what needs my attention",
+        "hi",
+        "thanks",
+    ):
+        assert looks_like_fresh_intent(ask), ask
+
+    # A bare name is still the answer to "which connector did you mean?".
+    assert not looks_like_fresh_intent("Demo Orders")
+
+
+def test_an_uncovered_subject_is_quoted_in_the_operators_own_words():
+    """The caveat quoted the *stem*, so "can you migrate my database" was told
+    the documentation does not cover “databas”.
+    """
+    from src.ai.rag.product_docs import retrieve_product_answer
+
+    answer = retrieve_product_answer("can you migrate my database", limit=4)
+    assert answer.verdict.uncovered_subjects == ("databas",), "stem is still the index term"
+    assert "“database”" in answer.caveat
+    assert "“databas”" not in answer.caveat
+
+
+def test_a_connector_without_a_target_renders_no_dangling_arrow():
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    resp = get_pilot_agent().chat("list my connectors")
+    for line in resp.answer.splitlines():
+        assert not line.rstrip().endswith("→"), line

@@ -204,6 +204,45 @@ def is_route_plan_capability_paste(message: str) -> bool:
     return bool(_ROUTE_PLAN_CAPABILITY.match((message or "").strip()))
 
 
+# An operator opening a transfer without naming endpoints yet. "plan a
+# transfer", "i want to copy a table" and "can you migrate my database"
+# retrieved Azure Test Plans, Iceberg merge-on-read and an Azure Migrate denial
+# respectively — three unrelated capability rows instead of the one thing that
+# moves the task forward, which is naming two saved connectors and a table.
+# Deliberately excludes "how do i move data", which the documentation answers
+# well with the real Transfer Studio steps.
+_TRANSFER_CAPABILITY = re.compile(
+    r"^\s*(?:hey\s+|hi\s+|ok\s+|so\s+|please\s+|pls\s+)*"
+    r"(?:"
+    r"(?:can|could|will|would)\s+(?:you|u)\s+(?:please\s+)?"
+    r"(?:help\s+me\s+)?(?:copy|move|migrate|transfer|sync|replicate|load)\b"
+    r"|(?:i|we)\s+(?:want|need|would\s+like|wanna|gotta|have)\s+to\s+"
+    r"(?:copy|move|migrate|transfer|sync|replicate|load)\b"
+    r"|help\s+me\s+(?:copy|move|migrate|transfer|sync|replicate|load)\b"
+    r"|(?:plan|start|stage|set\s*up|setup|create|do|run|begin)\s+"
+    r"(?:a\s+|an\s+|the\s+|my\s+|new\s+)?"
+    r"(?:transfer|migration|data\s+move|data\s+transfer|copy|load|sync)\b"
+    r"|(?:how\s+fast|throughput)\b[^.?!]*\b(?:copy|move|migrate|transfer|sync)\b"
+    r")",
+    re.I,
+)
+
+# Naming an endpoint means the operator is past the opening ask, so the real
+# route planner should run instead of the sketch.
+_NAMES_ROUTE_ENDPOINTS = re.compile(
+    r"\bfrom\s+\S+\s+(?:to|into)\s+\S|\b(?:to|into)\s+\S+\s+from\s+\S|→|->",
+    re.I,
+)
+
+
+def is_transfer_capability_ask(message: str) -> bool:
+    """Opening a transfer with no endpoints named yet — answer with the next step."""
+    text = (message or "").strip()
+    if not text or _NAMES_ROUTE_ENDPOINTS.search(text):
+        return False
+    return bool(_TRANSFER_CAPABILITY.match(text))
+
+
 _WORKSPACE_MARKERS = re.compile(
     r"\b(?:"
     r"connectors?|pipelines?|schedules?|jobs?|transfers?|validate|preflight|quarantine|"

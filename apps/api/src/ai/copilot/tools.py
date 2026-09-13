@@ -2851,6 +2851,30 @@ def _wants_documentation_companion(message: str) -> bool:
     return names_product_subject(message)
 
 
+# Throughput, limits and "can you" capability questions are about Datawrap, not
+# counts over the operator's tables. "how many rows can you move per second"
+# parsed as COUNT(*) GROUP BY a column named `second`, so the answer was
+# "Column 'second' is not in orders. Available columns: id, region, amount".
+# Deliberately excludes per-hour/day/month, which are real temporal grains an
+# operator does group by ("orders per day").
+_PRODUCT_CAPACITY_ASK = re.compile(
+    r"\bthroughput\b"
+    r"|\bhow\s+fast\b"
+    r"|\brows?\s*(?:/|per\s+)(?:sec|second)\b"
+    r"|\bper\s+(?:sec|second)\b"
+    r"|\bhow\s+(?:many|much|big|large)\b[^.?!]*?\b(?:can|could)\s+"
+    r"(?:you|it|we|i|datawrap|dataflow|the\s+(?:engine|product|platform|tool))\b"
+    r"|\bwhat(?:'s| is)\s+(?:the\s+)?(?:max(?:imum)?|biggest|largest|upper\s+limit|ceiling)\b"
+    r"[^.?!]*?\b(?:you|it|datawrap|dataflow|supported?|allowed?)\b",
+    re.I,
+)
+
+
+def asks_about_product_capacity(message: str) -> bool:
+    """A rate or limit question about the product, not a count over live rows."""
+    return bool(_PRODUCT_CAPACITY_ASK.search(message or ""))
+
+
 def _has_explicit_workspace_subject(lower: str) -> bool:
     """True when the ask names a live connector/table/job — keep ops tools."""
     if re.search(r"\bfrom\s+.+\s+to\s+\w", lower):
@@ -3534,6 +3558,50 @@ _KNOWLEDGE_TOOLS = frozenset({
     "explain_mapping_assurance",
 })
 
+
+def _reads_workspace(planned: list[tuple[str, dict]]) -> bool:
+    """Whether the plan reads live state rather than only the documentation."""
+    return any(n not in _KNOWLEDGE_TOOLS for n, _ in planned)
+
+
+def _plans_lookup_on(planned: list[tuple[str, dict]], token: str) -> bool:
+    """Whether a misspelled word became the subject of a named-object lookup.
+
+    ``how many pipelins do i have`` planned COUNT(*) over a table called
+    `pipelins`, which no connector can hold — the tool was always going to fail,
+    so the spelling retry is strictly better than the plan it replaces.
+    """
+    for name, args in planned:
+        if name not in _NAMED_OBJECT_LOOKUP_TOOLS:
+            continue
+        for value in (args or {}).values():
+            if isinstance(value, str) and token in value.lower():
+                return True
+    return False
+
+
+def plan_tools_tolerant(message: str) -> list[tuple[str, dict]]:
+    """Plan tools, retrying once with workspace-noun typos corrected.
+
+    ``conenctors?`` and ``shcedules`` reached no tool at all and were refused as
+    undocumented. The retry is only ever allowed to *upgrade* a plan that either
+    read nothing live or was about to look up the misspelling itself, so a
+    correction can never change the meaning of a question the router already
+    understood — see ``spelling`` for why the vocabulary is deliberately small.
+    """
+    planned = infer_tools_from_message(message)
+    from .spelling import correct_workspace_typos, corrected_tokens
+
+    fixes = corrected_tokens(message)
+    if not fixes:
+        return planned
+    if _reads_workspace(planned) and not any(
+        _plans_lookup_on(planned, bad) for bad in fixes
+    ):
+        return planned
+    retry = infer_tools_from_message(correct_workspace_typos(message))
+    return retry if _reads_workspace(retry) else planned
+
 # Tools that need the operator to have named a specific object, and that report
 # "not found" when they were planned off a generic question instead.
 _NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
@@ -3635,6 +3703,18 @@ def prune_planned_tools(
     # Platform inventory: "how many jobs failed" / "connector count" must not
     # become COUNT(*) — drop aggregate entirely beside inventory lists.
     if "list_jobs" in names or "list_connectors" in names:
+        planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
+    # Throughput and limits are product capability, not a count over live rows.
+    # Guarded here as well as at the parse site because the telegraphic
+    # "how many rows <table> <connector>" pattern plans its own aggregate later,
+    # and read "how many rows can you move per second" as table `can` on a
+    # connector named "you move per second".
+    if (
+        "aggregate_data" in names
+        and asks_about_product_capacity(message)
+        and not _has_explicit_workspace_subject((message or "").lower())
+    ):
         planned = [(n, a) for n, a in planned if n != "aggregate_data"]
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
@@ -4262,6 +4342,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         is_route_plan_capability_paste,
         is_schedule_health_question,
         is_schedule_setup_capability_ask,
+        is_transfer_capability_ask,
     )
 
     # Clock asks must not retrieve DATE-type / transform docs.
@@ -4698,7 +4779,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             # this, "how many rows did we move yesterday" hunted for a saved
             # connector named "we move yesterday".
             r"|\bhow\s+many\s+rows?\s+(?:did|have|has)\s+(?:we|i|you|it)\s+"
-            r"(?:moved?|transferr?ed?|synced?|loaded?|copied|copy|written|wrote)\b",
+            r"(?:moved?|transferr?ed?|synced?|loaded?|copied|copy|written|wrote)\b"
+            # Quarantine and rejection counts are recorded on the job, not in a
+            # table. "how many rows got quarantined" hunted for a saved connector
+            # named "quarantined" and stacked a clarification, a Help passage and
+            # the connector list into one answer.
+            r"|\bhow\s+many\s+rows?\s+(?:got|were|was|are|have\s+been)\s+"
+            r"(?:quarantined|rejected|refused|dropped|skipped|lost)\b"
+            # "did anything run last night" is job history. The word "night"
+            # retrieved the nightly-cadence procedure instead.
+            r"|\b(?:did|has|have)\s+(?:anything|any\s+\w+|something|it|we|they)\s+"
+            r"(?:run|ran|execute[d]?|sync(?:ed)?|transferred?|move[d]?)\b",
             lower,
         )
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
@@ -4898,7 +4989,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         else:
             planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
-    if not transfer_intent and any(
+    if not transfer_intent and is_transfer_capability_ask(message):
+        # No endpoints named yet, so the sketch is the answer: it states the next
+        # correct action and the gate sequence the route will run.
+        planned.append(("plan_transfer_route", {"source": "", "destination": ""}))
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("recommend_sync_mode", "explain_product")
+        ]
+    elif not transfer_intent and any(
         w in lower
         for w in (
             "plan transfer", "transfer plan", "route plan", "plan a route", "plan route",
@@ -4933,9 +5032,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         if route:
             src = _capture_connector_name(route.group(1))
             dst = _capture_connector_name(route.group(2))
+        # Only pass endpoints the route actually named. Falling back to a slice
+        # of the sentence made "how fast can you move data" render as a route
+        # whose source *and* destination were that whole question.
         planned.append(("plan_transfer_route", {
-            "source": src or cleaned[:80] or message[:80],
-            "destination": dst or cleaned[-80:] or message[-80:],
+            "source": src,
+            "destination": dst,
             "workload": "cdc" if "cdc" in lower else "unknown",
             **{k: v for k, v in extras.items() if v},
         }))
@@ -5089,8 +5191,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             lower,
         )
     )
-    if schema_of or columns_on or describe_table or table_look:
-        m = schema_of or columns_on or describe_table or table_look
+    # A schema *property* of a named table is a live read, never a Help topic.
+    # "what is the primary key of orders on Demo Orders" and "are there nulls in
+    # orders on Demo Orders" both answered from documentation, which cannot know
+    # either fact — the introspect tool already reports keys and nullability.
+    _SCHEMA_PROPERTY_WORD = (
+        r"(?:primary\s+keys?|pk|unique\s+keys?|foreign\s+keys?|"
+        r"indexe?s?|nullable|not\s+null|nulls?|"
+        r"data\s+types?|column\s+types?|dtypes?)"
+    )
+    schema_property = None if _policy_planned else (
+        re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\b"
+            r"[^.?!]*?\b(?:of|for|in|on|from)\s+"
+            rf"{_TABLE_REF}"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+        or re.search(
+            rf"\b{_SCHEMA_PROPERTY_WORD}\s+does\s+{_TABLE_REF}\s+have"
+            r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
+            lower,
+        )
+    )
+    if schema_of or columns_on or describe_table or table_look or schema_property:
+        m = schema_of or columns_on or describe_table or table_look or schema_property
         table = (m.group(1) or "").strip()
         # Reject inventory / policy nouns mistaken as table names
         if table.lower() not in {
@@ -5220,6 +5345,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         agg is not None
         and not (agg.connector_name or "").strip()
         and _looks_like_product_howto(lower)
+        and not _has_explicit_workspace_subject(lower)
+    ):
+        agg = None
+    # Throughput and limits are product capability, not a row count.
+    if (
+        agg is not None
+        and asks_about_product_capacity(lower)
         and not _has_explicit_workspace_subject(lower)
     ):
         agg = None

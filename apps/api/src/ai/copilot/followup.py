@@ -524,12 +524,26 @@ def opens_a_row_predicate(message: str, columns: Sequence[str] = ()) -> bool:
     return bool(named & set(_words(text)))
 
 
+# Acts that are self-contained turns by definition, so they can never be the
+# answer to "which connector did you mean?". Reusing the dialogue-act classifier
+# keeps this in step with what the router already recognises instead of growing a
+# second keyword list beside ``_FRESH_INTENT_RE``.
+_SELF_CONTAINED_ACTS = frozenset({"briefing", "greeting", "next_action", "thanks"})
+
+
 def looks_like_fresh_intent(message: str) -> bool:
     """True when the user clearly started a new request (not a slot fill / typo)."""
     reply = _clean(message)
     if not reply:
         return False
-    return bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply)
+    if bool(_FRESH_INTENT_RE.search(reply)) or asks_its_own_question(reply):
+        return True
+    # An open clarification used to swallow the next unrelated question: asked
+    # right after a failed connector match, "is anything waiting on me" replayed
+    # "No connector matched “quarantined”" and added "I didn't match that reply".
+    from .dialogue_acts import classify_dialogue_act
+
+    return classify_dialogue_act(reply) in _SELF_CONTAINED_ACTS
 
 
 def looks_like_elliptical_edit(message: str) -> bool:
