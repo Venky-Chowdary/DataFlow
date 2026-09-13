@@ -88,17 +88,27 @@ _NEXT_ACTION = re.compile(
     re.I,
 )
 
-# Product / workspace nouns — if present, this is not "general internet chat".
-_CALENDAR = re.compile(
-    r"^\s*(?:"
-    r"(?:what(?:'s| is)\s+)?(?:the\s+)?(?:today'?s|todays)\s+date"
+# Clock vs DATE-type: warehouse nouns mean a column/cast question.
+_DATE_TYPE_ASK = re.compile(
+    r"\b(?:"
+    r"column|columns|type|types|cast|coerce|coercion|transform|transforms|"
+    r"format|formats|field|schema|mapping|logical\s+type|"
+    r"postgres|postgresql|mysql|sqlite|snowflake|bigquery|mongodb|"
+    r"destination|source\s+type"
+    r")\b",
+    re.I,
+)
+
+# Open clock English — word order varies ("the date today" vs "todays date").
+_CLOCK_ASK = re.compile(
+    r"\b(?:"
+    r"(?:what(?:'s|s| is)|tell\s+me|give\s+me|whats)\s+(?:the\s+)?(?:current\s+)?"
+    r"(?:date|day)(?:\s+(?:is\s+it|is\s+today|today|now))?"
+    r"|(?:today'?s|todays|current)\s+date"
+    r"|date\s+today"
     r"|what\s+(?:day|date)\s+is\s+(?:it|today)"
-    r"|(?:what\s+is\s+)?date\s+today"
-    r"|today'?s\s+date"
     r"|what\s+is\s+today"
-    r"|tell\s+me\s+(?:the\s+)?(?:today'?s\s+)?(?:date|day)"
-    r"|what\s+day\s+is\s+it"
-    r")\s*[.!?]*\s*$",
+    r")\b",
     re.I,
 )
 
@@ -140,8 +150,11 @@ _HOW_TO_OR_DELETE_SCHEDULE = re.compile(
 
 
 def is_calendar_question(message: str) -> bool:
-    """Clock/calendar — not a DATE-column or transform question."""
-    return bool(_CALENDAR.match((message or "").strip()))
+    """Host clock — not a DATE-column, cast, or transform question."""
+    text = (message or "").strip()
+    if not text or _DATE_TYPE_ASK.search(text):
+        return False
+    return bool(_CLOCK_ASK.search(text))
 
 
 def is_schedule_health_question(message: str) -> bool:

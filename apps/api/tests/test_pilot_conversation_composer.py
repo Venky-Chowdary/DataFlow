@@ -85,7 +85,13 @@ def test_calendar_and_schedule_health_are_not_help_articles():
     assert is_calendar_question("date today")
     assert is_calendar_question("what is todays date")
     assert is_calendar_question("what's today's date")
+    assert is_calendar_question("what is the date today ?")
+    assert is_calendar_question("what is the date today")
+    assert is_calendar_question("what's the date")
+    assert is_calendar_question("current date")
     assert not is_calendar_question("what is a date column")
+    assert not is_calendar_question("date format in postgres")
+    assert not is_calendar_question("Snowflake DATE type")
     assert is_schedule_health_question("is schedules working")
     assert is_schedule_health_question("why schedules are not working")
     assert is_schedule_health_question("are my pipelines working?")
@@ -548,6 +554,43 @@ def test_greeting_and_history_through_agent():
     assert "will not answer it from guesswork" in rice.answer
     assert "Settings → AI" in rice.answer
     assert "boil water" not in rice.answer.lower()
+
+
+def test_hybrid_openai_cannot_replace_clock_with_date_types(monkeypatch):
+    """The live Hybrid failure: OpenAI said it cannot give the date, then dumped DATE types."""
+    from src.ai.copilot.agent import CopilotResponse
+    from src.ai.copilot import pilot_agent as pa
+
+    monkeypatch.setattr(pa, "_resolve_pilot_engine", lambda: "hybrid")
+    raced = []
+
+    def _openai_lie(message, history, system, data_context):
+        raced.append(message)
+        return CopilotResponse(
+            answer=(
+                "I can’t provide the current date, but I can help with data-related "
+                "questions. In Datawrap, a date column can be created in PostgreSQL: DATE."
+            ),
+            intent="product_help",
+            confidence=0.95,
+            method="openai_agent",
+            tools_used=[{"name": "explain_product", "success": True, "summary": "DATE types"}],
+            sources=[{"title": "Type fidelity & coercion"}],
+        )
+
+    agent = pa.DataPilotAgent()
+    monkeypatch.setattr(agent, "_first_available_native_agent", lambda: _openai_lie)
+    resp = agent.chat(
+        "what is the date today ?",
+        history=[],
+        data_context={"pilot_session_id": "clock-hybrid"},
+    )
+    assert raced == []
+    assert "UTC" in resp.answer
+    assert "PostgreSQL" not in resp.answer
+    assert "can't provide" not in resp.answer.lower()
+    assert "cannot provide" not in resp.answer.lower()
+    assert "DATE" not in resp.answer
 
 
 def test_briefing_through_agent_uses_tool_not_faq(monkeypatch):

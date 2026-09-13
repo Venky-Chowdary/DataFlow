@@ -882,7 +882,7 @@ class DataPilotAgent:
         lower_msg = message.lower()
         history = history or []
         data_context = self._ensure_data_context(data_context, history)
-        from .dialogue_acts import classify_dialogue_act
+        from .dialogue_acts import classify_dialogue_act, is_calendar_question
         from .conversation_composer import compose_greeting_response
 
         if not message or classify_dialogue_act(message) == "greeting":
@@ -894,6 +894,12 @@ class DataPilotAgent:
             # workspace answer. The greeting return used to skip this wrapper,
             # so the footnote was dead (method==greeting never reached it).
             return _with_llm_footnote(greet, _resolve_pilot_engine())
+
+        # Clock time is a host fact. Hybrid OpenAI must not retrieve DATE-type
+        # Help or refuse with "I can't provide the current date."
+        if is_calendar_question(message):
+            ctx = self.context_builder.build(data_context, message)
+            return self._local_agent(message, history, ctx, data_context)
 
         # Recap / thanks / next-step over the last spoken answer — do this before
         # tool routing so "summarize that" after a job list does not re-hit Mongo.
@@ -941,11 +947,18 @@ class DataPilotAgent:
 
         ctx = self.context_builder.build(data_context, message)
 
-        # Local always works offline. Hybrid/cloud when keys exist (auto detects).
+        # Local always works offline. Hybrid/cloud only after an explicit opt-in.
         engine = _resolve_pilot_engine()
         local = self._local_agent(message, history or [], ctx, data_context)
         if engine == "local":
             return local
+        # Composed conversation turns (calendar, create-connection, refuse) are
+        # already the answer. Native OpenAI must not race Help retrieval over them.
+        if (local.method or "") == "pilot_conversation":
+            return _with_llm_footnote(
+                self._polish_with_llm(message, history or [], local, system=""),
+                engine,
+            )
 
         system = self._build_system_prompt(ctx, data_context)
 
