@@ -22,6 +22,7 @@ import {
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
+  showsFollowUpPrompts,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
@@ -500,7 +501,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                       </button>
                     ) : null;
                   })}
-                  {i === messages.length - 1 && msg.suggested_prompts && msg.suggested_prompts.length > 0 && (
+                  {showsFollowUpPrompts(i, session.messages.length, msg.suggested_prompts) && (
                     <div className="df2-pilot-followups">
                       {msg.suggested_prompts.map((p) => (
                         <button key={p} type="button" className="df2-pilot-followup" onClick={() => send(p)} disabled={loading}>

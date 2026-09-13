@@ -78,6 +78,25 @@ export function applyPilotSafeActions(
   }
 }
 
+/**
+ * Whether a message may offer follow-up prompts.
+ *
+ * Only the newest turn: chips on every assistant message stack a column of
+ * stale suggestions down the thread, and tapping one from three turns ago
+ * re-asks a question the conversation has already moved past.
+ *
+ * Typed as a predicate on `suggested` so the caller can render the chips
+ * without repeating the emptiness check the guard already made.
+ */
+export function showsFollowUpPrompts(
+  index: number,
+  total: number,
+  suggested: string[] | undefined,
+): suggested is string[] {
+  if (!suggested || suggested.length === 0) return false;
+  return index === total - 1;
+}
+
 /** Chip label for a suggested navigate/action. */
 export function pilotActionChipLabel(action: {
   label?: string;
