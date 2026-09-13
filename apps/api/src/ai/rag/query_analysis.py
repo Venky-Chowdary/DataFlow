@@ -73,6 +73,18 @@ GENERIC_QUESTION_WORDS = frozenset(
     """.split()
 )
 
+#: The product's own name is the one thing every section of its own documentation
+#: is about — 290 of 495 sections say it, and its IDF is a fifth of ``connector``.
+#: Naming it narrows a question by nothing, exactly like ``support``, which sits
+#: in the generic set above for the same reason. Left in as a subject it scored as
+#: hard as the real one: "how many connectors does datawrap support" retrieved the
+#: Airbyte-pack comparison and never reached the section that counts them, while
+#: the same question phrased "do you support" was answered with the number.
+#:
+#: It is dropped only when the question names another subject: "what is datawrap"
+#: is a real question about the brand, and the corpus has a section for it.
+_BRAND_WORDS = frozenset(normalize(w) for w in ("datawrap",))
+
 # A generic word can still be a useful *expansion trigger* even though it is a
 # useless anchor: "bad" tells us nothing on its own but does point at the
 # quarantine vocabulary, and "allowed" points at the role model. So expansion
@@ -3398,6 +3410,14 @@ def analyze_query(question: str) -> QueryAnalysis:
     frame = frame_words(text)
     kept = tuple(t for t in raw if t not in generic and t not in frame)
     dropped = tuple(t for t in raw if t in generic or t in frame)
+    # The brand is a subject only when it is the *whole* subject. Beside a real
+    # one it competes with it, and the bigram it forms ("connector_datawrap")
+    # outranks the section that answers the question.
+    if any(t in _BRAND_WORDS for t in kept) and any(t not in _BRAND_WORDS for t in kept):
+        faded = frozenset(t for t in kept if t in _BRAND_WORDS)
+        kept = tuple(t for t in kept if t not in faded)
+        dropped = dropped + tuple(sorted(faded))
+        frame = frame | faded
     # Expansion reads every term, generic ones included, so "bad" and "allowed"
     # can still point at the quarantine and role vocabulary; the dedupe below
     # keeps the generic words themselves out of the expansion set.
