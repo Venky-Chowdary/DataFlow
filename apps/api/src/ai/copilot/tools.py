@@ -79,8 +79,21 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_connectors",
-        "description": "List saved database/warehouse connectors.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "List saved database/warehouse connectors. ``health`` filters by the "
+            "last connection test: passed | failed | untested | any."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "health": {
+                    "type": "string",
+                    "enum": ["any", "passed", "failed", "untested"],
+                    "default": "any",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "create_connector",
@@ -959,14 +972,19 @@ class DataPilotTools:
                             break
         return ToolResult(name="search_data", success=True, output={"query": query, "hits": hits[:25]})
 
-    def _list_connectors(self) -> ToolResult:
+    def _list_connectors(self, health: str = "any") -> ToolResult:
         summary = []
         errors: list[str] = []
         try:
             from services.connector_store import list_connectors as store_list
 
             for c in store_list():
-                d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
+                if hasattr(c, "to_dict"):
+                    d = c.to_dict()
+                elif isinstance(c, dict):
+                    d = dict(c)
+                else:
+                    d = dict(getattr(c, "__dict__", {}) or {})
                 summary.append({
                     "id": str(d.get("id") or d.get("_id") or ""),
                     "name": d.get("name"),
@@ -974,6 +992,8 @@ class DataPilotTools:
                     "host": d.get("host"),
                     "database": d.get("database"),
                     "status": d.get("status", "saved"),
+                    "last_test_ok": d.get("last_test_ok"),
+                    "last_tested_at": d.get("last_tested_at"),
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
@@ -991,6 +1011,8 @@ class DataPilotTools:
                         "host": c.get("host"),
                         "database": c.get("database"),
                         "status": c.get("status", "unknown"),
+                        "last_test_ok": c.get("last_test_ok"),
+                        "last_tested_at": c.get("last_tested_at"),
                     })
             except Exception as exc:
                 logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
@@ -1008,10 +1030,31 @@ class DataPilotTools:
                     + "). Check Settings → storage, then retry."
                 ),
             )
+        # "get me the passed connectors" must not list every connector. Health is
+        # the last saved probe result, never a guess from the engine name.
+        want = (health or "any").strip().lower()
+        if want not in {"passed", "failed", "untested"}:
+            return ToolResult(
+                name="list_connectors",
+                success=True,
+                output={"connectors": summary, "count": len(summary), "health": "any"},
+            )
+        buckets = {
+            "passed": lambda ok: ok is True,
+            "failed": lambda ok: ok is False,
+            "untested": lambda ok: ok not in (True, False),
+        }
+        keep = buckets[want]
+        filtered = [c for c in summary if keep(c.get("last_test_ok"))]
         return ToolResult(
             name="list_connectors",
             success=True,
-            output={"connectors": summary, "count": len(summary)},
+            output={
+                "connectors": filtered,
+                "count": len(filtered),
+                "health": want,
+                "total_saved": len(summary),
+            },
         )
 
     def _create_connector(  # nosec B107
@@ -2924,6 +2967,92 @@ def _capture_connector_name(raw: str) -> str:
     return _clean_connector_phrase(re.sub(r"[.?!]+$", "", text).strip())
 
 
+# "get me the passed connectors" is a health filter, not a full inventory dump.
+_CONNECTOR_HEALTH = (
+    (
+        re.compile(
+            r"\b(?:passed|passing|pass|green|healthy|working|ok|connected|"
+            r"successful|success|good)\b",
+            re.I,
+        ),
+        "passed",
+    ),
+    (
+        re.compile(
+            r"\b(?:failed|failing|fail|red|broken|unhealthy|bad|error|"
+            r"errored|down|not\s+working)\b",
+            re.I,
+        ),
+        "failed",
+    ),
+    (
+        re.compile(r"\b(?:untested|not\s+tested|never\s+tested|unknown)\b", re.I),
+        "untested",
+    ),
+)
+
+
+def _saved_connector_exists(name: str) -> bool:
+    """Whether ``name`` matches a saved connector — never a guess from wording."""
+    want = (name or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.connector_store import list_connectors as _saved
+
+        for row in _saved() or []:
+            data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            if str(data.get("name") or "").strip().lower() == want:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def connector_health_filter(message: str) -> str:
+    """Which connection-test bucket the operator asked for, or ``any``.
+
+    Health is the last saved probe (``last_test_ok``). Listing all twelve
+    connectors for "the passed connectors" reads like every one is green.
+    """
+    text = (message or "").strip()
+    if not text or not re.search(r"\bconnector|\bconnection", text, re.I):
+        return "any"
+    for pattern, bucket in _CONNECTOR_HEALTH:
+        if pattern.search(text):
+            return bucket
+    return "any"
+
+
+# A pasted inventory row: ``Snowflake_venky (snowflake) → EMPLOYEE_DB``.
+# Operators paste our own bullet back with a question glued on the end.
+_PASTED_CONNECTOR_ROW = re.compile(
+    r"^\s*(?:[•*-]\s*)?"
+    r"(?P<name>[A-Za-z][A-Za-z0-9_. -]{0,79}?)\s*"
+    r"\(\s*(?P<engine>[a-z0-9_]{2,24})\s*\)\s*"
+    r"(?:→|->|=>)?\s*"
+    r"(?P<db>[A-Za-z0-9_./-]*)\s*"
+    r"(?P<rest>.*)$",
+    re.I | re.S,
+)
+
+
+def split_pasted_connector_row(message: str) -> tuple[str, str]:
+    """Split a pasted connector row into (connector_name, remaining question).
+
+    ``Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there`` must
+    become a live table read on that connector — not a documentation refuse.
+    """
+    match = _PASTED_CONNECTOR_ROW.match((message or "").strip())
+    if not match:
+        return "", ""
+    name = _clean_connector_phrase(match.group("name") or "")
+    rest = (match.group("rest") or "").strip()
+    if not name or not rest:
+        return "", ""
+    return name, rest
+
+
 def _is_raw_knowledge_shard(text: str) -> bool:
     t = text.strip()
     if t.startswith("Semantic type:"):
@@ -3971,16 +4100,27 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("describe_pilot", {}))
         return planned
 
+    # An operator pasting our own connector bullet back is naming that
+    # connector. Resolve it, then route the question they glued on.
+    pasted_name, pasted_rest = split_pasted_connector_row(message)
+    if pasted_name and _saved_connector_exists(pasted_name):
+        inner = infer_tools_from_message(f"{pasted_rest} on {pasted_name}")
+        if inner:
+            return inner
+
     from .dialogue_acts import (
         classify_dialogue_act,
         is_calendar_question,
         is_create_connection_capability_ask,
         is_route_plan_capability_paste,
         is_schedule_health_question,
+        is_schedule_setup_capability_ask,
     )
 
     # Clock asks must not retrieve DATE-type / transform docs.
     if is_calendar_question(message):
+        return []
+    if is_schedule_setup_capability_ask(message):
         return []
     if is_create_connection_capability_ask(message) or is_route_plan_capability_paste(message):
         return []
@@ -4153,7 +4293,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             r"\benough\s+to\s+skip\b",
             lower,
         ):
-            planned.append(("list_connectors", {}))
+            _health = connector_health_filter(message)
+            planned.append(
+                ("list_connectors", {"health": _health} if _health != "any" else {})
+            )
             planned = [
                 (n, a) for n, a in planned
                 if not (n == "navigate" and (a or {}).get("screen") == "connectors")
@@ -5415,11 +5558,17 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(s in lower for s in data_signals) and not any(p[0] in _LIVE_SCHEMA_TOOLS for p in planned):
         if hint:
             planned.append(("analyze_dataset", {"dataset_name": hint}))
-        elif re.search(r"\banalyze\b", lower) and "analyze_dataset" not in [p[0] for p in planned]:
+        elif "analyze_dataset" not in [p[0] for p in planned]:
             # Named dataset that the index doesn't know yet — still invoke so
             # recovery can list indexed uploads instead of a dead-end reply.
+            # "tell me about the employees dataset" names a dataset as plainly
+            # as "analyze employees"; it must not become a Lineage doc dump.
             m = re.search(
                 r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
+                lower,
+            ) or re.search(
+                r"(?:tell\s+me\s+(?:everything\s+)?about|what(?:'s| is)\s+in)\s+"
+                r"(?:the\s+|my\s+)?(.+?)\s+data(?:set|file)?\s*[.?!]*\s*$",
                 lower,
             )
             name = (m.group(1) if m else "").strip(" \"'")
@@ -5442,6 +5591,9 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             # nothing else — the documentation that justifies it was dropped
             # because the tool was not on this list.
             "recommend_sync_mode",
+            # "tell me about the employees dataset" names an uploaded dataset.
+            # Dropping the profile turned it into a Lineage documentation dump.
+            "analyze_dataset", "list_datasets", "compare_datasets", "search_data",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):

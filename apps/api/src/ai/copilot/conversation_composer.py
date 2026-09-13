@@ -223,6 +223,46 @@ def compose_create_connection_response(ctx: dict[str, Any] | None = None) -> Cop
     )
 
 
+def compose_schedule_setup_capability(ctx: dict[str, Any] | None = None) -> str:
+    """Honest scheduling capability: I run existing ones, Pipelines defines new."""
+    ctx = ctx or {}
+    n = ctx.get("pipeline_count")
+    if n is None:
+        try:
+            from services.schedule_store import list_schedules
+
+            n = len(list_schedules() or [])
+        except Exception:
+            n = 0
+    have = ""
+    if int(n or 0):
+        have = f" You already have **{int(n)}** pipeline(s) I can list, run, or explain."
+    return (
+        "Not from chat yet — defining a **new** schedule is a **Pipelines** "
+        "screen action, because a cadence binds a saved route, a contract, and "
+        "an approval owner. I can list your pipelines, run one now (Confirm "
+        "required), explain why one is parked, and stage the transfer it "
+        f"wraps.{have}\n\n"
+        "Open **Pipelines → New pipeline** to define the cadence, then ask me "
+        "*is schedules working* and I will watch it."
+    )
+
+
+def compose_schedule_setup_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    return CopilotResponse(
+        answer=compose_schedule_setup_capability(ctx),
+        intent="schedule_help",
+        confidence=0.84,
+        method="pilot_conversation",
+        reasoning="Schedule-setup capability — honest no-from-chat, not GitOps export",
+        suggested_prompts=[
+            "Show my pipelines",
+            "Is schedules working?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
 def compose_route_plan_capability() -> str:
     return (
         "Name a saved **source** and **destination** and I will propose a "

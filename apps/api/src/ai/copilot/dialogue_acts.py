@@ -136,6 +136,15 @@ _CREATE_CONNECTION_CAPABILITY = re.compile(
     re.I,
 )
 
+# "can you setup schedule" is a capability ask, not the YAML-export procedure.
+_SCHEDULE_CAPABILITY = re.compile(
+    r"^\s*(?:can|could|will|are\s+you\s+able\s+to)\s+you?\s*"
+    r"(?:set\s*up|setup|create|make|add|configure|schedule)\s+"
+    r"(?:a\s+|an\s+|the\s+|new\s+|my\s+)?"
+    r"(?:schedule|pipeline|cadence|cron|nightly\s+run)s?\s*[.!?]*\s*$",
+    re.I,
+)
+
 _ROUTE_PLAN_CAPABILITY = re.compile(
     r"^\s*plan\s+source\s*[→\->]{1,3}\s*destination\s+routes?"
     r"(?:\s+and\s+sync\s+modes?)?\s*[.!?]*\s*$",
@@ -168,6 +177,11 @@ def is_schedule_health_question(message: str) -> bool:
 def is_create_connection_capability_ask(message: str) -> bool:
     """Bare 'can you create a connection' — no host, so do not demand credentials."""
     return bool(_CREATE_CONNECTION_CAPABILITY.match((message or "").strip()))
+
+
+def is_schedule_setup_capability_ask(message: str) -> bool:
+    """Bare 'can you setup schedule' — answer the capability, not GitOps export."""
+    return bool(_SCHEDULE_CAPABILITY.match((message or "").strip()))
 
 
 def is_route_plan_capability_paste(message: str) -> bool:

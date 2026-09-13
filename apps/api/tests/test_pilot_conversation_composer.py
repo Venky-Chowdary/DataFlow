@@ -115,6 +115,56 @@ def test_compose_calendar_speaks_utc_date_not_column_types():
     assert "1" in text or "connector" in text.lower()
 
 
+def test_schedule_setup_is_a_capability_not_a_yaml_export():
+    from src.ai.copilot.dialogue_acts import is_schedule_setup_capability_ask
+    from src.ai.copilot.conversation_composer import compose_schedule_setup_capability
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    assert is_schedule_setup_capability_ask("can you setup schedule")
+    assert is_schedule_setup_capability_ask("can you set up a pipeline")
+    assert is_schedule_setup_capability_ask("could you create a schedule")
+    assert not is_schedule_setup_capability_ask("how do I export a schedule as YAML")
+    assert not is_schedule_setup_capability_ask("show my pipelines")
+
+    text = compose_schedule_setup_capability({"pipeline_count": 2})
+    assert "Pipelines" in text
+    assert "YAML" not in text
+    assert "Export YAML" not in text
+    assert "2" in text
+    # No RAG plan, so GitOps export cannot be retrieved for this turn.
+    assert infer_tools_from_message("can you setup schedule") == []
+
+
+def test_connector_health_filter_reads_the_last_test():
+    from src.ai.copilot.tools import connector_health_filter
+
+    assert connector_health_filter("get me the passed connectors") == "passed"
+    assert connector_health_filter("which connectors are failing") == "failed"
+    assert connector_health_filter("untested connectors") == "untested"
+    assert connector_health_filter("show my connectors") == "any"
+    # Not a connector ask at all.
+    assert connector_health_filter("did the job pass") == "any"
+
+
+def test_pasted_connector_row_is_a_named_connector():
+    from src.ai.copilot.tools import split_pasted_connector_row
+
+    name, rest = split_pasted_connector_row(
+        "Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there"
+    )
+    assert name == "Snowflake_venky"
+    assert rest == "how many tables there"
+
+    bullet, ask = split_pasted_connector_row(
+        "• MySQL (mysql) → railway list tables"
+    )
+    assert bullet == "MySQL"
+    assert ask == "list tables"
+
+    # A plain sentence is not an inventory row.
+    assert split_pasted_connector_row("how many tables in orders") == ("", "")
+
+
 def test_compose_create_connection_is_confirm_gated():
     text = compose_create_connection_capability({
         "connectors": [{"name": "SnowFlake"}, {"name": "MySQL"}],

@@ -2036,7 +2036,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
             is_create_connection_capability_ask,
             is_route_plan_capability_paste,
             is_schedule_health_question,
+            is_schedule_setup_capability_ask,
         )
+
+        if is_schedule_setup_capability_ask(message):
+            from .conversation_composer import compose_schedule_setup_response
+
+            return compose_schedule_setup_response(ctx)
 
         if is_calendar_question(message):
             from .conversation_composer import compose_calendar, compose_calendar_response
@@ -2788,12 +2794,25 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])
+                health = str(tr.output.get("health") or "any")
+                total = int(tr.output.get("total_saved") or len(conns))
                 ask_tables = any(
                     w in (message or "").lower()
                     for w in ("table", "tables", "collections", "objects")
                 )
                 if conns:
-                    lines = [f"You have **{len(conns)} saved connector(s)**."]
+                    if health != "any":
+                        label = {
+                            "passed": "passed their last connection test",
+                            "failed": "failed their last connection test",
+                            "untested": "have never been tested",
+                        }[health]
+                        lines = [
+                            f"**{len(conns)}** of **{total}** saved connector(s) "
+                            f"{label}."
+                        ]
+                    else:
+                        lines = [f"You have **{len(conns)} saved connector(s)**."]
                     for c in conns:
                         lines.append(
                             f"• **{c.get('name')}** ({c.get('type')}) → "
@@ -2807,6 +2826,17 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             f'"list tables on {sample}".'
                         )
                     parts.append("\n".join(lines))
+                elif health != "any":
+                    # An empty bucket is a real finding, not an empty workspace.
+                    verb = {
+                        "passed": "has passed its last connection test",
+                        "failed": "failed its last connection test",
+                        "untested": "is untested",
+                    }[health]
+                    parts.append(
+                        f"None of your **{total}** saved connector(s) {verb}. "
+                        "Open **Connectors** and press Test to record a result."
+                    )
                 else:
                     parts.append(
                         "No connectors saved yet. Go to **Connectors** to add "
