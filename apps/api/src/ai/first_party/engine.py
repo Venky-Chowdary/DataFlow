@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .claims import invented_claims
 from .checkpoint import FirstPartyCheckpoint, default_artifact_path, load_checkpoint
+from .lm_checkpoint import default_lm_path, load_lm
 from .dual_encoder import nearest_gold
 from .pointer_gen import tokens_grounded_in_evidence
 from .tokens import word_tokens
@@ -440,6 +441,10 @@ def narrate_enabled() -> bool:
     return _env_on("DATAFLOW_FP_NARRATE", default=True)
 
 
+def lm_enabled() -> bool:
+    return _env_on("DATAFLOW_FP_LM", default=True)
+
+
 @lru_cache(maxsize=1)
 def load_model(path: str | None = None) -> FirstPartyCheckpoint | None:
     """Load the shipped checkpoint, or ``None`` if serve must stay extractive."""
@@ -456,11 +461,63 @@ def load_model(path: str | None = None) -> FirstPartyCheckpoint | None:
         return None
 
 
+@lru_cache(maxsize=1)
+def load_lm_model(path: str | None = None) -> object | None:
+    """Load the first-party Transformer LM, or ``None`` if it is not shipped."""
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return None
+    artifact = Path(path) if path else default_lm_path()
+    if not artifact.is_file():
+        return None
+    try:
+        return load_lm(artifact)
+    except Exception:
+        return None
+
+
 def reset_model_cache() -> None:
     """Test helper — drop the process-wide checkpoint."""
     clear = getattr(load_model, "cache_clear", None)
     if callable(clear):
         clear()
+    lm_clear = getattr(load_lm_model, "cache_clear", None)
+    if callable(lm_clear):
+        lm_clear()
+
+
+def speak_with_lm(question: str, evidence: str, draft: str = "") -> str | None:
+    """Generate over packed evidence, then fail-close.
+
+    This is the first-party chatbot path: a causal Transformer decoder,
+    constrained to evidence tokens, discarded if it invents dbt / SSH /
+    exactly-once. Missing weights or a failed gate keep the extractive draft.
+    """
+    if not narrate_enabled() or not lm_enabled():
+        return None
+    model = load_lm_model()
+    if model is None:
+        return None
+    generated = (model.generate_grounded(question, evidence) or "").strip()
+    if not generated:
+        return None
+    words = generated.split()
+    if len(words) >= 4 and words[:2] == words[2:4]:
+        return None
+    if len(set(words)) <= 2 and len(words) > 3:
+        return None
+    gate = f"{evidence} {draft}"
+    if invented_claims(generated, gate):
+        return None
+    if not tokens_grounded_in_evidence(generated, gate):
+        return None
+    if draft:
+        from src.ai.rag.evidence import keeps_draft_facts
+
+        if not keeps_draft_facts(draft, generated):
+            return None
+    return generated
 
 
 def _subject_terms(text: str) -> set[str]:

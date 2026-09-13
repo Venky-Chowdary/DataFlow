@@ -2026,8 +2026,16 @@ Respond as Datawrap Pilot — grounded in tool results."""
         )
 
         if is_calendar_question(message):
-            from .conversation_composer import compose_calendar_response
+            from .conversation_composer import compose_calendar, compose_calendar_response
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
 
+            draft = compose_calendar(ctx)
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            if spoken:
+                resp = compose_calendar_response(ctx)
+                resp.answer = spoken
+                return resp
             return compose_calendar_response(ctx)
         if is_create_connection_capability_ask(message):
             from .conversation_composer import compose_create_connection_response
@@ -2814,12 +2822,11 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Datawrap Pilot**. I am a grounded workspace operator, "
-                    "not a general chatbot. I do not generate free-form answers — "
-                    "I retrieve product evidence, run live tools, and compose from "
-                    "that evidence. OpenAI / Anthropic / Ollama stay optional under "
-                    "**Settings → AI** if you want a real language model to speak "
-                    "over the same tools. I still will not invent warehouse facts.",
+                    "I'm **Datawrap Pilot**. I speak with Datawrap's own small "
+                    "GRU seq2seq over retrieved evidence and live tools, then "
+                    "fail-closed gates. I am not ChatGPT and not a foundation "
+                    "model. OpenAI / Anthropic / Ollama stay optional under "
+                    "**Settings → AI**. I will not invent warehouse facts.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:

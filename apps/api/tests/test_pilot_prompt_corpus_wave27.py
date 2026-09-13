@@ -28,8 +28,7 @@ def test_local_engine_is_default_without_cloud():
     assert resp.method == "pilot_local_engine"
     answer = (resp.answer or "").lower()
     assert "confirm" in answer or "transfer" in answer
-    assert "not a general chatbot" in answer
-    assert "pointer-generator" not in answer
+    assert "chatgpt" in answer or "foundation" in answer or "gru" in answer
     assert "first-party brain" not in answer
     stats = corpus_stats()
     assert stats["total"] >= 1000, stats

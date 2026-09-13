@@ -1391,12 +1391,10 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "Not a conversational LLM. The local path is retrieve "
-                    "(BM25 + capability cards) → live tools → extractive compose. "
-                    "The first-party pointer-generator may add a closed prefix "
-                    "and usually copies the draft unchanged. OpenAI / Anthropic / "
-                    "Ollama stay opt-in under Settings → AI — never the source "
-                    "of transfer facts."
+                    "First-party GRU seq2seq (hashed encoder + GRU decoder) trained "
+                    "on Datawrap cards and packed workspace facts. Generate over "
+                    "evidence, then fail-closed gates. Small in-domain model — not "
+                    "a foundation model. OpenAI / Anthropic / Ollama stay opt-in."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "

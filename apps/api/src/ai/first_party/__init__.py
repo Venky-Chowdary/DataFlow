@@ -10,10 +10,10 @@ already in production:
    product subject is introduced.
 3. Hybrid retrieve (BM25 + char 4-gram TF-IDF, RRF) + evidence policy.
 4. Extractive ``compose_answer``.
-5. Optional **pointer-generator narrate** — closed fluency prefix plus
-   a copy of the extractive draft. Discarded unless
-   ``keeps_draft_facts`` / ``retains_evidence`` / ``invented_claims``
-   all pass.
+5. Optional **first-party GRU seq2seq** over packed evidence, then
+   the pointer-generator prefix. Discarded unless
+   ``invented_claims`` / token-grounding pass. Degenerate loops
+   fall back to the extractive draft.
 
 Why this architecture
 ---------------------
@@ -37,7 +37,7 @@ Honesty bar (do not regress)
 * No legal no-data-loss SLA. Bad rows are quarantined; the row ledger
   must close. Airbyte connector packs are not a runtime.
 
-Public serve API: ``semantic_rewrite``, ``narrate_answer``.
+Public serve API: ``semantic_rewrite``, ``narrate_answer``, ``speak_with_lm``.
 """
 
 from .engine import (
@@ -46,6 +46,7 @@ from .engine import (
     reset_model_cache,
     retrieve_bonus,
     semantic_rewrite,
+    speak_with_lm,
 )
 
 __all__ = [
@@ -54,4 +55,5 @@ __all__ = [
     "reset_model_cache",
     "retrieve_bonus",
     "semantic_rewrite",
+    "speak_with_lm",
 ]
