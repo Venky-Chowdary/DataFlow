@@ -1753,7 +1753,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\blogical\s+decoding\b", re.I),
      ("wal_level", "pgoutput", "logical")),
     (re.compile(r"\bg([1-9])\b", re.I),
-     ("gate", "preflight", "validate", "schema")),
+     ("gate", "preflight", "validate")),
     (re.compile(r"\bhand[\s-]?off\b"
                 r"|\bsnapshot\s+to\s+(?:the\s+)?(?:cdc|stream|log)\b"
                 r"|\bbetween\s+snapshot\s+and\s+stream\b", re.I),

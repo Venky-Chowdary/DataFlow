@@ -23,6 +23,8 @@ from src.ai.first_party.intent_router import (
     load_router,
     train,
 )
+from src.ai.rag.product_docs import retrieve_product_answer
+from src.ai.rag.query_analysis import analyze_query
 from src.ai.rag.spell import correct_to_corpus, damerau_levenshtein
 
 os.environ.setdefault("DATAFLOW_PILOT_ENGINE", "local")
@@ -194,6 +196,31 @@ def test_one_sentence_ask_trims_multi_gate_line(pilot):
     resp = pilot.chat("in one sentence, what is validate", history=[], data_context=None)
     body = (resp.answer or "").split("\n\nSource:")[0]
     assert len([s for s in body.split(". ") if s.strip()]) == 1
+    assert body.startswith("Validate is the Transfer Studio step")
+
+
+# ── retrieval relevance (browser-QA regressions) ────────────────────────────
+
+
+def test_what_is_validate_leads_with_the_step_not_one_gate_card(pilot):
+    resp = pilot.chat("what is validate", history=[], data_context=None)
+    body = (resp.answer or "").split("\n\nSource:")[0]
+    assert body.startswith("Validate is the Transfer Studio step")
+    assert resp.sources[0]["section"].startswith("What is Validate")
+
+
+def test_numbered_gate_question_is_not_expanded_to_schema_drift():
+    analysis = analyze_query("what does the g7 gate check")
+    assert "schema" not in analysis.expansions
+    hits = retrieve_product_answer("what does the g7 gate check", limit=5).hits
+    titles = [h.chunk.section_title for h in hits]
+    assert "What is G7" in titles
+    assert not any("CDC" in t or "Schema change" in t for t in titles)
+
+
+def test_named_gate_still_wins_its_own_question():
+    hits = retrieve_product_answer("what is g3", limit=3).hits
+    assert hits[0].chunk.section_title == "What is G3"
 
 
 # ── spelling repair ─────────────────────────────────────────────────────────

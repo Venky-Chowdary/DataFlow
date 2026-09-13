@@ -700,7 +700,13 @@ def _section_intent_bonus(
         re.search(r"\bgates\b", analysis.text, re.I)
         and not re.search(r"\bgate\s*[1-9]\b|\bg[1-9]\b", analysis.text, re.I)
     )
-    if named_gate and gate_set_ask:
+    # The card is on subject for "what is validate" only through its article
+    # title; it defines one gate, not the step, so it pays unless a gate is named.
+    if named_gate and not numbered_gate_ask:
+        bonus -= 3.2
+    # The step's own definition is not the set either: the members live under
+    # the listing and "Core gates" headings.
+    if gate_set_ask and definitional and not (listing or core_gates):
         bonus -= 3.2
     if listing and gate_set_ask and ask != "enumeration":
         bonus += 2.4

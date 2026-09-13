@@ -2522,6 +2522,27 @@ def _blocked_validate_section() -> GeneratedSection:
     )
 
 
+def _what_is_validate_section() -> GeneratedSection | None:
+    """The step itself, so "what is validate" is not answered by one gate card."""
+    cards = _core_gate_cards()
+    if len(cards) < 2:
+        return None
+    # No gate identifiers here: "what is Gate 9" must lead with the G9 card.
+    return GeneratedSection(
+        doc_title="Preflight gates explained",
+        section_title="What is Validate (preflight gates)",
+        text=(
+            "Validate is the Transfer Studio step that runs the preflight gate "
+            f"engine — all {len(cards)} core gates — against your source, destination "
+            "and saved mapping before any row is written. Execute stays locked "
+            "until every Validate gate returns approve; a soft or review-grade "
+            "pass does not unlock a write."
+        ),
+        source_module="preflight.gates · help-preflight#gates",
+        category="transfer",
+    )
+
+
 def _webhooks_section() -> GeneratedSection:
     """The word ``webhook`` has to be in the lead, not only the heading."""
     return GeneratedSection(
@@ -2617,6 +2638,7 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _export_proof_section,
         _test_passed_preflight_section,
         _preflight_gates_list_section,
+        _what_is_validate_section,
         _named_preflight_gate_sections,
         _blocked_validate_section,
         _webhooks_section,
