@@ -2500,12 +2500,24 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     parts.append(_render_transfer("plan_transfer", o))
                 else:
                     posture = _render_requested_data_rules(o)
-                    parts.append(
-                        f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
-                        f"{o.get('note') or ''}"
-                        f"{posture}"
-                        f"\n{o.get('next') or ''}"
+                    gates = ", ".join(
+                        str(g) for g in (o.get("required_gates") or []) if g
                     )
+                    # The next correct action leads. A wall of gate ids in front
+                    # of "name two saved connectors and a table" buries the only
+                    # thing the operator can act on — and with no gates to list
+                    # it rendered as a bare heading with nothing after the colon.
+                    segments = [
+                        s
+                        for s in (
+                            str(o.get("note") or "").strip(),
+                            str(o.get("next") or "").strip(),
+                        )
+                        if s
+                    ]
+                    if gates:
+                        segments.append(f"**Standard gate sequence**: {gates}")
+                    parts.append("\n".join(segments) + posture)
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}
                 parts.append(

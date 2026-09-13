@@ -822,3 +822,74 @@ def test_a_pasted_connector_row_routes_against_the_named_connector():
     ]
     assert "list_connector_objects" in planned
     assert "explain_product" not in planned
+
+
+def test_hybrid_never_replaces_a_grounded_workspace_answer(monkeypatch):
+    """A saved key rewords; it does not get to answer.
+
+    The whole point of Hybrid is third-party wording over first-party evidence.
+    A native tool loop that scores well on fluency must never win the turn away
+    from a local tool that actually read the workspace, or the operator reads
+    "you may have around 5 connectors" about a workspace holding two.
+    """
+    import src.ai.copilot.pilot_agent as pa
+    from src.ai.copilot.agent import CopilotResponse
+
+    monkeypatch.setattr(pa, "_resolve_pilot_engine", lambda: "hybrid")
+    raced: list[str] = []
+
+    def _confident_stranger(message, history, system, data_context):
+        raced.append(message)
+        return CopilotResponse(
+            answer=(
+                "I don't have access to your workspace. In general a pipeline is "
+                "scheduled with cron. You may have around 5 connectors."
+            ),
+            intent="product_help",
+            confidence=0.99,
+            method="openai_agent",
+            tools_used=[{"name": "explain_product", "success": True, "summary": "generic"}],
+            sources=[{"title": "General knowledge"}],
+        )
+
+    agent = pa.DataPilotAgent()
+    monkeypatch.setattr(
+        agent, "_first_available_native_agent", lambda: _confident_stranger
+    )
+
+    for i, ask in enumerate([
+        "what is the date today ?",
+        "how many schedules do i have",
+        "how many connectors do i have",
+        "which of my connectors are broken",
+        "how many rows did we move yesterday",
+        "can you setup schedule",
+    ]):
+        resp = agent.chat(
+            ask, history=[], data_context={"pilot_session_id": f"hybrid-guard-{i}"}
+        )
+        answer = resp.answer or ""
+        assert "around 5 connectors" not in answer, ask
+        assert "don't have access to your workspace" not in answer, ask
+
+    assert raced == []
+
+
+def test_a_generic_route_sketch_leads_with_the_next_action_and_real_gates():
+    """"Move data from mysql to postgres" names engine families, not connectors.
+
+    ``preflight.gates`` has never existed in this repo, so the gate list was
+    always empty and the sketch rendered as a bare "**Standard gate sequence**:"
+    heading in front of the only sentence the operator could act on.
+    """
+    from services.preflight_rules import PREFLIGHT_GATE_RULES
+    from src.ai.copilot.tools import get_pilot_tools
+
+    result = get_pilot_tools().execute(
+        "plan_transfer_route", {"source": "mysql", "destination": "postgres"}
+    )
+    assert result.success
+    gates = result.output.get("required_gates") or []
+    assert gates, "the sketch must name the gates Validate actually enforces"
+    assert set(gates) == set(PREFLIGHT_GATE_RULES)
+    assert result.output["note"].startswith("Name two saved connectors")

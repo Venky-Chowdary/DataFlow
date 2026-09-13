@@ -1875,10 +1875,13 @@ class DataPilotTools:
             if planned.success:
                 return planned
 
+        # ``preflight.gates`` has never existed, so this always fell to [] and
+        # the note claimed "this is the standard gate sequence" while listing
+        # none. ``PREFLIGHT_GATE_RULES`` is the table Validate actually enforces.
         try:
-            from preflight.gates import PREFLIGHT_GATES
+            from services.preflight_rules import PREFLIGHT_GATE_RULES
 
-            gate_ids = [gid.value if hasattr(gid, "value") else str(gid) for gid, _ in PREFLIGHT_GATES]
+            gate_ids = [str(gid) for gid in PREFLIGHT_GATE_RULES]
         except Exception:
             gate_ids = []
 
@@ -1891,9 +1894,9 @@ class DataPilotTools:
             "required_gates": gate_ids,
             **bind,
             "note": (
-                "This is the standard gate sequence, not a plan for your data. "
                 "Name two saved connectors and a table and I will introspect both "
-                "ends, map the columns and run the real gates."
+                "ends, map the columns and run the real gates. Until then this is "
+                "the standard gate sequence, not a plan for your data."
             ),
             "next": (
                 f'Try: "plan a transfer of orders from {example_connector_name()} '
