@@ -73,6 +73,15 @@ _AFFIRMATIVE = frozenset({
 })
 
 
+# Words that open an instruction rather than name a value, so "just tell me the
+# number" and "only show the total" are read as asks, not as filters.
+_NOT_A_FILTER_VALUE = re.compile(
+    r"^(?:tell|show|give|list|get|say|read|explain|describe|do|make|run|open|"
+    r"answer|repeat|me|us|it|that|this|one|number|count|total|sum|average)\b",
+    re.I,
+)
+
+
 def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
     """Parse \"only paid\" / \"where status = paid\" into a filter clause."""
     text = _clean(message)
@@ -89,7 +98,13 @@ def _extract_edit_where(message: str, focus: PilotFocus | None) -> str:
     if not only_m:
         return ""
     val = only_m.group(1).strip().strip("\"'")
+    val = re.sub(r"^(?:the|a|an)\s+", "", val, flags=re.I).strip()
     if not val or val.lower() in _PLATFORM_NOUNS:
+        return ""
+    # A filter value is a literal, not a sentence. "just tell me the number"
+    # became ``status = 'tell me the number'`` and, because the clause was then
+    # remembered, failed every following turn on a column the table lacks.
+    if len(val.split()) > 2 or _NOT_A_FILTER_VALUE.match(val):
         return ""
     preferred = ("status", "state", "type", "region", "category", "tier", "channel")
     cols = [c.lower() for c in ((focus.columns if focus else None) or [])]

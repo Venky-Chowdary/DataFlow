@@ -1343,3 +1343,97 @@ def test_a_vague_complaint_asks_for_the_evidence_it_can_read():
     assert "job_" in intake and "connector name" in intake
     assert "Demo Orders" in intake
     assert "outside what the Datawrap documentation covers" not in intake
+
+
+def test_a_remembered_table_does_not_answer_a_product_question():
+    """With `orders` in focus, "how many rows can you move per second" became
+    COUNT(*) GROUP BY a column called `second`. The guard at the parse site
+    cannot see the session focus, so the elliptical path needs it too.
+    """
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    agent = get_pilot_agent()
+    ctx = {"pilot_session_id": "test-capacity-focus"}
+    agent.chat("count rows in orders on Demo Orders", data_context=dict(ctx))
+    resp = agent.chat(
+        "how many rows can you move per second",
+        history=[{"role": "user", "content": "count rows in orders on Demo Orders"}],
+        data_context=dict(ctx),
+    )
+    assert "is not in orders" not in resp.answer
+    assert "aggregate_data" not in [t.get("name") for t in (resp.tools_used or [])]
+
+
+def test_an_unresolved_column_that_is_a_sibling_table_says_so():
+    """"how many distinct customers in orders" asks for a column that does not
+    exist, and `customers` is a table on the same connector. Naming that is the
+    difference between a dead end and the next correct question.
+    """
+    from src.ai.copilot.tools import get_pilot_tools
+
+    tools = get_pilot_tools()
+    measure = tools.execute(
+        "aggregate_data",
+        {
+            "connector_name": "Demo Orders",
+            "table": "orders",
+            "metric": "count_distinct",
+            "column": "customers",
+        },
+    )
+    assert not measure.success
+    assert "`customers` is a table on Demo Orders" in measure.error
+
+    grouped = tools.execute(
+        "aggregate_data",
+        {
+            "connector_name": "Demo Orders",
+            "table": "orders",
+            "metric": "sum",
+            "column": "amount",
+            "group_by": "customer",
+        },
+    )
+    assert not grouped.success
+    assert "`customers` is a table on Demo Orders" in grouped.error
+
+
+def test_a_filter_value_is_a_literal_not_a_sentence():
+    """"just tell me the number" became ``status = 'tell me the number'``, and
+    because the clause was remembered it failed every following turn on a column
+    the table does not have.
+    """
+    from src.ai.copilot.followup import _extract_edit_where
+    from src.ai.copilot.working_memory import PilotFocus
+
+    focus = PilotFocus(table="orders", connector_name="Demo Orders")
+    assert _extract_edit_where("only paid", focus) == "status = 'paid'"
+    assert _extract_edit_where("only the paid ones", focus) == "status = 'paid'"
+    assert _extract_edit_where("where amount > 100", focus) == "amount > 100"
+
+    for filler in ("just tell me the number", "only show the total", "just give me the answer"):
+        assert _extract_edit_where(filler, focus) == "", filler
+
+
+def test_a_rejected_column_is_not_remembered_as_the_subject():
+    """A poisoned focus made every later turn fail on the same missing column."""
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+    from src.ai.copilot.working_memory import get_working_memory
+
+    agent = get_pilot_agent()
+    sid = "test-rejected-column"
+    ctx = {"pilot_session_id": sid}
+    agent.chat("count rows in orders on Demo Orders", data_context=dict(ctx))
+    agent.chat("top 3 customers by amount in orders on Demo Orders", data_context=dict(ctx))
+
+    focus = get_working_memory().get_focus(sid)
+    assert focus is not None
+    assert focus.table == "orders"
+    assert focus.group_by != "customer", "a column the schema rejected is not a subject"
+
+    recovered = agent.chat(
+        "just tell me the number",
+        history=[{"role": "user", "content": "count rows in orders on Demo Orders"}],
+        data_context=dict(ctx),
+    )
+    assert "12 rows" in recovered.answer

@@ -844,6 +844,33 @@ def _introspect_columns(conn: dict[str, Any], table: str) -> list[dict[str, Any]
     return introspect_connector_table(conn, table, purpose="source")["columns"]
 
 
+def _sibling_table(conn: dict[str, Any], wanted: str, table: str) -> str:
+    """The connector's own table this unresolved column name actually matches.
+
+    "how many distinct customers in orders" asks for a column that does not
+    exist, and `customers` is a *table* on the same connector. Naming that is the
+    difference between a dead end and the operator's next correct question.
+    """
+    probe = _normalize_name(wanted)
+    if not probe or probe == _normalize_name(table):
+        return ""
+    try:
+        from .schema_tools import list_connector_objects
+
+        result = list_connector_objects(
+            connector_id=str(conn.get("id") or conn.get("_id") or ""),
+            connector_name=str(conn.get("name") or ""),
+        )
+        objects = list((getattr(result, "output", None) or {}).get("objects") or [])
+    except Exception:
+        return ""
+    for name in objects:
+        norm = _normalize_name(str(name))
+        if norm == probe or _singular(norm) == _singular(probe):
+            return str(name)
+    return ""
+
+
 # --------------------------------------------------------------------------
 # The tool
 # --------------------------------------------------------------------------
@@ -1004,12 +1031,20 @@ def aggregate_connector_data(
             )
         measure_col = resolve_name(wanted, names)
         if not measure_col:
+            sibling = _sibling_table(conn, wanted, table)
+            hint = (
+                f" `{sibling}` is a table on {conn.get('name') or 'this connector'}, "
+                f"not a column in {table} — ask me to {metric_key.replace('_', ' ')} "
+                f"over `{sibling}` instead."
+                if sibling
+                else ""
+            )
             return _tool_result(
                 tool,
                 success=False,
                 error=(
                     f"Column '{wanted}' is not in {table}. "
-                    f"Available columns: {', '.join(names[:20])}."
+                    f"Available columns: {', '.join(names[:20])}." + hint
                 ),
             )
         if metric_key in {"sum", "avg"}:
@@ -1053,12 +1088,21 @@ def aggregate_connector_data(
                         ),
                     )
             if not dim_col:
+                sibling = _sibling_table(conn, wanted, table)
+                hint = (
+                    f" `{sibling}` is a table on "
+                    f"{conn.get('name') or 'this connector'}, not a column in "
+                    f"{table} — name a column of {table} to group by, or ask "
+                    f"about `{sibling}` instead."
+                    if sibling
+                    else ""
+                )
                 return _tool_result(
                     tool,
                     success=False,
                     error=(
                         f"Column '{wanted}' is not in {table}. "
-                        f"Available columns: {', '.join(names[:20])}."
+                        f"Available columns: {', '.join(names[:20])}." + hint
                     ),
                 )
 

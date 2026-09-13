@@ -31,6 +31,7 @@ from .tools import (
     format_tool_results_for_llm,
     get_pilot_tools,
     infer_tools_from_message,
+    asks_about_product_capacity,
     plan_tools_tolerant,
 )
 
@@ -1699,9 +1700,19 @@ Draft answer:
             return table_coref
 
         planned = plan_tools_tolerant(message)
+        # A remembered table must not be handed a question about the product. With
+        # `orders` in focus, "how many rows can you move per second" became
+        # COUNT(*) GROUP BY a column called `second` and answered "Column 'second'
+        # is not in orders" — the guard at the parse site cannot see the focus.
+        _capacity_ask = asks_about_product_capacity(message)
         # Elliptical edits beat a fresh under-specified parse ("what about average
         # amount" would otherwise lose the remembered WHERE / table).
-        if focus and looks_like_followup(message, focus) and not names_its_own_subject(planned):
+        if (
+            focus
+            and not _capacity_ask
+            and looks_like_followup(message, focus)
+            and not names_its_own_subject(planned)
+        ):
             low = message.lower().strip()
             # Fully grounded fresh aggregate (explicit table ≠ focus) wins.
             for name, args in planned:
@@ -1723,7 +1734,7 @@ Draft answer:
             # Coreference with focus but no metric edit — still prefer table tools.
             if table_coref := resolve_table_coreference_tools(message, focus):
                 return table_coref
-        if not planned:
+        if not planned and not _capacity_ask:
             edit = resolve_followup(message, focus)
             if edit is not None:
                 # Known subject (even with missing measure) — let the tool ask
@@ -1756,6 +1767,17 @@ Draft answer:
         memory = get_working_memory()
         args_by_tool = {name: args for name, args in planned}
 
+        # A column the live schema rejected is not a subject to remember. "top 3
+        # customers by amount in orders" fails on `customer`, and remembering it
+        # made the *next* turn ("just tell me the number") fail on the same
+        # missing column instead of answering from the table still in focus.
+        rejected = {
+            m.group(1).strip().lower()
+            for tr in turn.tool_results
+            if tr.name == "aggregate_data" and not tr.success
+            for m in re.finditer(r"Column '([^']+)' is not in", tr.error or "")
+        }
+
         # Remember the asked subject even when the tool fails (missing connector)
         # so elliptical follow-ups like "only paid ones" still have a table/metric.
         for name, args in planned:
@@ -1765,6 +1787,10 @@ Draft answer:
                 k: args.get(k)
                 for k in ("table", "connector_name", "metric", "column", "group_by", "where")
                 if args.get(k)
+                and not (
+                    k in ("column", "group_by")
+                    and str(args.get(k)).strip().lower() in rejected
+                )
             }
             if update.get("table") or update.get("connector_name"):
                 memory.update_focus(session_id, **update)
