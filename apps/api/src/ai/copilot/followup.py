@@ -403,13 +403,28 @@ def _last_substantive_user_text(history: list[dict] | None) -> str:
     return ""
 
 
+#: "only the failing ones", "just the postgres ones", "the untested ones". The
+#: pointer is the bare "ones" — it restricts the list the previous turn printed.
+_NARROWED_ONES_RE = re.compile(
+    r"^(?:(?:and|but|ok(?:ay)?|so)\s+)?(?:(?:just|only)\s+)?"
+    r"(?:(?:show|list|give)\s+(?:me\s+)?)?(?:the\s+)?"
+    r"([a-z][a-z-]*)\s+ones?\b[\s.?!]*$",
+    re.I,
+)
+
+
 def resolve_platform_coreference(
     message: str,
     history: list[dict] | None,
 ) -> list[tuple[str, dict[str, Any]]] | None:
     """those jobs / which of those failed → list_jobs from prior turn context."""
     text = _clean(message)
-    if not text or not _COREFERENCE_RE.search(text):
+    # "only the failing ones" carries no pronoun at all — the pointer is the bare
+    # "ones". Gated on the coreference vocabulary alone, a one-word narrowing of
+    # the list already on screen reached no tool and was refused as undocumented.
+    if not text or not (
+        _COREFERENCE_RE.search(text) or _NARROWED_ONES_RE.match(text)
+    ):
         return None
     from .tools import connector_engine_filter
 
@@ -467,14 +482,32 @@ def resolve_platform_coreference(
     # has not asked about yet. It carries no pronoun, so it reached no tool and
     # was refused as undocumented; re-listing is at least the right subject.
     other_one = bool(re.search(r"\bthe\s+other\s+ones?\b", low))
+    narrowed_ones = bool(_NARROWED_ONES_RE.match(low))
     if connectors_cue and (
-        other_one or re.search(r"\b(?:those|these|them|that|it)\b", pointer_text)
+        other_one
+        or narrowed_ones
+        or re.search(r"\b(?:those|these|them|that|it)\b", pointer_text)
     ):
         # A restriction the turn carries is part of the answer, not noise to drop.
-        engine, excluded = connector_engine_filter(text)
+        from .tools import connector_health_filter
+
+        # Both filters are gated on the noun *connectors*, which is exactly the
+        # word an elliptical narrowing leaves out. Reading "only the postgres
+        # ones" against the raw text found no filter and re-listed everything, so
+        # the restriction looked ignored; spell the noun back in for the read.
+        spoken = f"my connectors {text}" if narrowed_ones else text
+        engine, excluded = connector_engine_filter(spoken)
         args: dict[str, Any] = {}
         if engine:
             args = {"engine": engine, "engine_excluded": excluded}
+        health = connector_health_filter(spoken)
+        if health != "any":
+            args["health"] = health
+        if narrowed_ones and not other_one and not args:
+            # The narrowing word is neither an engine nor a health bucket, so we
+            # cannot honour it. Re-listing everything would read as though the
+            # restriction had been applied and nothing was filtered out.
+            return None
         return [("list_connectors", args)]
     return None
 
@@ -999,8 +1032,13 @@ _VALUE_TAIL = (
 #: table — the shortest form of "same for customers". Only a plural noun is read
 #: this way: "and pending" is far more likely to be a filter value, and reading
 #: it as a table would answer a question the operator did not ask.
+#: "and customers", "and in order_items", "now for invoices". The preposition was
+#: not allowed, so "and in customers" one turn after a row count reached no tool
+#: and was refused as undocumented — the same question with the table spelled out
+#: had just been answered.
 _BARE_TABLE_SWAP = re.compile(
-    r"^(?:and|also|now|then|plus)\s+(?:the\s+)?"
+    r"^(?:and|also|now|then|plus)\s+"
+    r"(?:(?:in|on|for|from|about|with)\s+)?(?:the\s+)?"
     r"([A-Za-z_][A-Za-z0-9_.]{2,48}s)"
     r"(?:\s+(?:table|collection))?[\s.?!]*$",
     re.I,
@@ -1063,17 +1101,24 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
         return False
     if asks_its_own_question(text):
         return False
+    # A turn that opens with a continuation word is elliptical by construction, so
+    # it is settled before the self-contained guards below. Those guards read any
+    # "in <word>" as a named scope, which made "and in customers" look like a
+    # complete question: it reached no tool and was refused as undocumented, one
+    # turn after the same count with the table spelled out had been answered.
+    _continues = bool(re.match(r"^(?:and|also|now|then|plus)\s+\S", text, re.I))
     # Self-contained asks name their own table/connector — not elliptical.
-    if re.search(
-        r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b",
-        text,
-        re.I,
-    ) and not _COREFERENCE_RE.search(text):
+    if (
+        re.search(r"\b(?:from|in)\s+[A-Za-z_][A-Za-z0-9_]*\b", text, re.I)
+        and not _COREFERENCE_RE.search(text)
+        and not _continues
+    ):
         return False
     if (
         re.search(r"\bon\s+[A-Za-z_][A-Za-z0-9_\- ]{1,40}\s*$", text, re.I)
         and len(words) >= 5
         and not _COREFERENCE_RE.search(text)
+        and not _continues
     ):
         return False
     # "again" after a count is the same query re-run. It reached no tool at all

@@ -2136,3 +2136,84 @@ def test_a_query_verb_reads_the_table():
         name, args = planned[0]
         assert name == "sample_connector_object", (ask, planned)
         assert args.get("table") == "orders", (ask, planned)
+
+
+def test_a_narrowing_of_the_printed_list_reaches_the_filter():
+    """"only the failing ones" one turn after the connector list carries no
+    pronoun, so it reached no tool and was refused as undocumented — the
+    operator was looking at the very rows they asked to narrow.
+
+    Both connector filters are gated on the noun *connectors*, which is exactly
+    the word the ellipsis leaves out, so the narrowing has to be read with the
+    noun spelled back in.
+    """
+    from src.ai.copilot.followup import resolve_platform_coreference
+
+    listed = [
+        {"role": "user", "content": "list my connectors"},
+        {
+            "role": "assistant",
+            "content": (
+                "You have **2** saved connector(s).\n\n"
+                "• Demo Orders (postgresql)\n"
+                "• Quarantine SQLite (sqlite)"
+            ),
+        },
+    ]
+    for ask, want in (
+        ("only the failing ones", {"health": "failed"}),
+        ("only the broken ones", {"health": "failed"}),
+        ("show me the passing ones", {"health": "passed"}),
+        ("only the untested ones", {"health": "untested"}),
+        ("just the postgres ones", {"engine": "postgresql", "engine_excluded": False}),
+        ("the non-postgres ones", {"engine": "postgresql", "engine_excluded": True}),
+    ):
+        planned = resolve_platform_coreference(ask, listed)
+        assert planned == [("list_connectors", want)], (ask, planned)
+
+    # "the other ones" names no restriction at all; re-listing is the answer.
+    assert resolve_platform_coreference("the other ones", listed) == [
+        ("list_connectors", {})
+    ]
+    # A word that is neither an engine nor a health bucket must not silently
+    # re-list everything as though the restriction had been honoured.
+    assert resolve_platform_coreference("the blue ones", listed) is None
+    # And with no list on screen there is nothing to narrow.
+    assert (
+        resolve_platform_coreference(
+            "only the failing ones",
+            [{"role": "assistant", "content": "Change data capture streams commits."}],
+        )
+        is None
+    )
+
+
+def test_a_continuation_swaps_the_table_even_with_a_preposition():
+    """"and in customers" one turn after a row count reached no tool and was
+    refused, because "in <word>" was read as a self-contained named scope. The
+    same question with the table spelled out had just been answered.
+    """
+    from src.ai.copilot.followup import looks_like_followup, resolve_followup
+    from src.ai.copilot.working_memory import PilotFocus
+
+    focus = PilotFocus(
+        connector_name="Demo Orders",
+        table="orders",
+        metric="count",
+        tool="aggregate_data",
+    )
+    for ask, table in (
+        ("and in customers", "customers"),
+        ("and customers", "customers"),
+        ("and in order_items", "order_items"),
+        ("now for invoices", "invoices"),
+    ):
+        assert looks_like_followup(ask, focus), ask
+        req = resolve_followup(ask, focus)
+        assert req is not None, ask
+        assert req.table == table, (ask, req)
+        # The connector the operator never repeated is inherited, not dropped.
+        assert req.connector_name == "Demo Orders", (ask, req)
+
+    # A question that names its own scope is still self-contained.
+    assert not looks_like_followup("how many rows in customers", focus)
