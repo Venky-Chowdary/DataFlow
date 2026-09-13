@@ -220,11 +220,15 @@ _ASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             # makes the two forms retrieve the same terms, so leaving this out
             # only changed the ask type — and the passive form then opened on
             # "what a pipeline is" instead of the create-pipeline procedure.
-            r"|\bhow\s+(?:is|are|was|were)\s+"
-            r"(?:a\s+|an\s+|the\s+|my\s+|our\s+)?(?:[a-z_][\w-]*\s+){1,3}"
-            # Stative participles describe what a thing *is*, not steps taken:
-            # "how are arrays supported" wants the type-fidelity passage, not a
-            # wizard step.
+            #
+            # Restricted to the objects an operator acts on. A data-level
+            # mechanism ("how are bad rows quarantined", "how is a schema
+            # mapped", "how is CDC resumed") is an explanation, and treating it
+            # as a procedure made the composer lead on whichever passage had the
+            # strongest imperative — the type_locked card, in both cases.
+            r"|\bhow\s+(?:is|are|was|were)\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?"
+            r"(?:pipelines?|schedules?|transfers?|connectors?|connections?|"
+            r"contracts?|jobs?|cadences?)\s+"
             r"(?!related\b|named\b|called\b|defined\b|supported\b|used\b"
             r"|intended\b|supposed\b)\w+ed\b"
             r"|\b(?:steps?|walk\s+me\s+through|set\s+up|setup|configure|"

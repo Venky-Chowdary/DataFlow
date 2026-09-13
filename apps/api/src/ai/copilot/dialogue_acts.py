@@ -48,7 +48,14 @@ _BRIEFING = re.compile(
     r"how\s+(?:are|is)\s+(?:we|my\s+(?:workspace|data|platform)|everything)\s+doing|"
     r"morning\s+briefing|stand-?up\s+(?:update|summary)|"
     r"catch\s+me\s+up|bring\s+me\s+up\s+to\s+speed|"
-    r"what\s+needs\s+(?:my\s+)?(?:attention|review)"
+    r"what\s+needs\s+(?:my\s+)?(?:attention|review)|"
+    # Parked pipelines and unsigned contracts are the two things the briefing
+    # already reports as waiting on the operator. Asked without a named object,
+    # "is anything parked" was refused as undocumented.
+    r"(?:is|are)\s+(?:there\s+)?(?:anything|any(?:thing)?\s+\w+|something)\s+"
+    r"(?:parked|blocked|waiting|pending|stuck|due)|"
+    r"what(?:'s| is)?\s+(?:parked|blocked|pending|waiting\s+on\s+(?:me|approval))|"
+    r"anything\s+(?:waiting|pending)\s+on\s+(?:me|approval)"
     r")\b|"
     r"^\s*tell\s+me\s+everything(?:\s+about\s+(?:my\s+)?(?:workspace|platform))?\s*[.!?]*$|"
     r"^\s*any\s+(?:failures?|problems?|issues?)\s*(?:today|right\s+now)?\s*[.!?]*$",

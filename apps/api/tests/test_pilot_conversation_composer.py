@@ -893,3 +893,43 @@ def test_a_generic_route_sketch_leads_with_the_next_action_and_real_gates():
     assert gates, "the sketch must name the gates Validate actually enforces"
     assert set(gates) == set(PREFLIGHT_GATE_RULES)
     assert result.output["note"].startswith("Name two saved connectors")
+
+
+def test_a_passive_mechanism_question_is_not_a_procedure():
+    """The passive procedure frame is scoped to objects an operator acts on.
+
+    Read wider, it made "how are bad rows quarantined" and "how is a schema
+    mapped" lead on whichever passage had the strongest imperative — the
+    type_locked card in both cases — instead of on quarantine and on semantic
+    mapping.
+    """
+    from src.ai.rag.product_docs import compose_product_answer, retrieve_product_answer
+    from src.ai.rag.query_analysis import classify_ask
+
+    def lead(question: str) -> str:
+        body = compose_product_answer(retrieve_product_answer(question, limit=4)) or ""
+        return " ".join(body.split()).lower()
+
+    assert classify_ask("how are pipelines scheduled") == "procedure"
+    assert classify_ask("how are bad rows quarantined") != "procedure"
+    assert classify_ask("how is a schema mapped") != "procedure"
+    assert classify_ask("how is cdc resumed after a restart") != "procedure"
+
+    assert "quarantine" in lead("how are bad rows quarantined")
+    assert "semantic column mapping" in lead("how is a schema mapped")
+    assert "type_locked" not in lead("how are bad rows quarantined").split(".")[0]
+
+
+def test_parked_and_pending_work_reaches_the_briefing():
+    """The briefing already reports parked pipelines and unsigned contracts."""
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "is anything parked",
+        "what is parked",
+        "is anything waiting on approval",
+        "is anything blocked",
+    ):
+        assert classify_dialogue_act(ask) == "briefing", ask
+        assert [n for n, _ in infer_tools_from_message(ask)] == ["brief_workspace"], ask
