@@ -2038,13 +2038,33 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 return resp
             return compose_calendar_response(ctx)
         if is_create_connection_capability_ask(message):
-            from .conversation_composer import compose_create_connection_response
+            from .conversation_composer import (
+                compose_create_connection_capability,
+                compose_create_connection_response,
+            )
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
 
-            return compose_create_connection_response(ctx)
+            draft = compose_create_connection_capability(ctx)
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            resp = compose_create_connection_response(ctx)
+            if spoken:
+                resp.answer = spoken
+            return resp
         if is_route_plan_capability_paste(message):
-            from .conversation_composer import compose_route_plan_capability_response
+            from .conversation_composer import (
+                compose_route_plan_capability,
+                compose_route_plan_capability_response,
+            )
+            from src.ai.first_party.context_pack import pack_from_workspace
+            from src.ai.first_party.engine import speak_with_lm
 
-            return compose_route_plan_capability_response()
+            draft = compose_route_plan_capability()
+            spoken = speak_with_lm(message, pack_from_workspace(ctx, evidence=draft), draft)
+            resp = compose_route_plan_capability_response()
+            if spoken:
+                resp.answer = spoken
+            return resp
 
         planned = self._plan_with_memory(message, data_context, history)
         if not planned:
@@ -2823,10 +2843,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 lines = [
                     "I'm **Datawrap Pilot**. I speak with Datawrap's own small "
-                    "GRU seq2seq over retrieved evidence and live tools, then "
-                    "fail-closed gates. I am not ChatGPT and not a foundation "
-                    "model. OpenAI / Anthropic / Ollama stay optional under "
-                    "**Settings → AI**. I will not invent warehouse facts.",
+                    "attention+copy GRU over retrieved evidence and live tools, "
+                    "then fail-closed gates. I am not ChatGPT and not a "
+                    "foundation model. OpenAI / Anthropic / Ollama stay optional "
+                    "under **Settings → AI**. I will not invent warehouse facts.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:

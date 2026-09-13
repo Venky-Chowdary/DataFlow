@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train Datawrap's own causal Transformer decoder and write ``pilot_lm_v1.npz``.
+"""Train Datawrap's own attention+copy GRU and write ``pilot_lm_v1.npz``.
 
 Run from ``apps/api``::
 
@@ -26,7 +26,7 @@ for path in (_SRC, _API_ROOT):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--epochs", type=int, default=18)
+    parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
@@ -38,7 +38,7 @@ def main() -> int:
     print(f"wrote {dest} vocab={bundle.vocab.size}")
 
     holdout = [
-        ("date today", pack_context(today_utc="Sunday, 13 September 2026"), "today"),
+        ("date today", pack_context(today_utc="Sunday, 13 September 2026"), "2026"),
         (
             "is schedules working",
             pack_context(

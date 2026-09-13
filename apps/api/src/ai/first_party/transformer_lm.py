@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .tokens import GLUE_WORDS, word_tokens
+from .tokens import DIALOGUE_GLUE, GLUE_WORDS, word_tokens
 
 PAD, BOS, EOS, Q, E, A, UNK = 0, 1, 2, 3, 4, 5, 6
 SPECIAL = ("<pad>", "<bos>", "<eos>", "<q>", "<e>", "<a>", "<unk>")
@@ -74,7 +74,7 @@ class Vocab:
             if extra not in keys:
                 seen.append(extra)
                 keys.add(extra)
-        for word in GLUE_WORDS:
+        for word in (*GLUE_WORDS, *DIALOGUE_GLUE):
             if word not in keys:
                 seen.append(word)
                 keys.add(word)

@@ -1,9 +1,9 @@
 """Grounded (question, context, answer) sequences for the first-party LM.
 
-Answers are spoken from the packed context. We never teacher-force a
-warehouse fact that is not on the context line. Dialogue templates use
-filled numbers and names so the decoder learns to read TODAY_UTC /
-PIPELINES / EVIDENCE — the same keys serve writes.
+Same operator question, different packed facts, different answer. That is
+how the decoder learns to *read* TODAY_UTC / PIPELINES / CONFIRM instead
+of memorizing one hardcoded line. Answers never name a warehouse fact
+that is not on the context line.
 """
 
 from __future__ import annotations
@@ -21,36 +21,57 @@ class LmExample:
     answer: str
 
 
-_DATE_ROWS: tuple[tuple[str, str], ...] = (
-    ("Sunday, 13 September 2026", "date today"),
-    ("Monday, 01 January 2026", "what is todays date"),
-    ("Friday, 04 July 2026", "what's today's date"),
-    ("Wednesday, 11 November 2026", "what day is it"),
-    ("Tuesday, 24 March 2026", "tell me the date"),
+_DATE_BANK: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Sunday, 13 September 2026",
+        ("date today", "what is todays date", "tell me the date"),
+    ),
+    (
+        "Monday, 01 January 2026",
+        ("what is todays date", "what's today's date"),
+    ),
+    (
+        "Friday, 04 July 2026",
+        ("what's today's date", "what day is it"),
+    ),
+    (
+        "Wednesday, 11 November 2026",
+        ("what day is it", "date today"),
+    ),
+    (
+        "Tuesday, 24 March 2026",
+        ("tell me the date", "whats the date"),
+    ),
+    (
+        "Thursday, 16 April 2026",
+        ("date today", "whats the date"),
+    ),
 )
 
-_PIPELINE_ROWS: tuple[tuple[int, int, int, tuple[str, ...], str], ...] = (
-    (2, 2, 0, ("Nightly", "TestJob"), "is schedules working"),
-    (2, 2, 0, ("Nightly", "TestJob"), "why schedules are not working"),
-    (3, 1, 2, ("Crown",), "are my pipelines working"),
-    (0, 0, 0, (), "is schedules working"),
-    (1, 0, 1, (), "are pipelines running"),
+_PIPELINE_BANK: tuple[tuple[int, int, int, tuple[str, ...], tuple[str, ...]], ...] = (
+    (2, 2, 0, ("Nightly", "TestJob"), ("is schedules working", "why schedules are not working")),
+    (3, 1, 2, ("Crown",), ("are my pipelines working", "is schedules working")),
+    (0, 0, 0, (), ("is schedules working", "are pipelines running")),
+    (1, 0, 1, (), ("are pipelines running", "are my pipelines working")),
+    (5, 3, 2, ("Nightly", "Retail", "QA"), ("why schedules are not working",)),
+    (4, 0, 4, (), ("is schedules working",)),
 )
 
-_GREET_ROWS: tuple[tuple[int, int, int, str], ...] = (
-    (12, 8, 2, "hi"),
-    (0, 0, 0, "hello"),
-    (4, 3, 1, "hey"),
-    (12, 8, 2, "what can you do"),
+_GREET_BANK: tuple[tuple[int, int, int, tuple[str, ...]], ...] = (
+    (12, 8, 2, ("hi", "what can you do")),
+    (0, 0, 0, ("hello", "hi")),
+    (4, 3, 1, ("hey", "what can you do")),
+    (7, 2, 0, ("hello",)),
 )
 
-_CREATE_ROWS: tuple[tuple[int, str], ...] = (
-    (12, "can you create connection"),
-    (0, "can you create a connector"),
-    (5, "can you add a connection"),
+_CREATE_BANK: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (12, ("can you create connection", "can you add a connection")),
+    (0, ("can you create a connector", "can you create connection")),
+    (5, ("can you add a connection",)),
+    (1, ("can you create a connector",)),
 )
 
-_ROUTE_ROWS: tuple[str, ...] = (
+_ROUTE_ASKS: tuple[str, ...] = (
     "plan source destination routes and sync modes",
     "plan a transfer",
 )
@@ -58,15 +79,12 @@ _ROUTE_ROWS: tuple[str, ...] = (
 
 def _dialogue_examples() -> list[LmExample]:
     out: list[LmExample] = []
-    for spoken, question in _DATE_ROWS:
+    for spoken, questions in _DATE_BANK:
         ctx = pack_context(today_utc=spoken)
-        answer = (
-            f"Today is {spoken} (UTC). I keep your Datawrap workspace, "
-            "not a personal calendar."
-        )
-        out.append(LmExample(question, ctx, answer))
-        out.append(LmExample(f"hey {question}", ctx, answer))
-    for n, parked, enabled, names, question in _PIPELINE_ROWS:
+        answer = f"Today is {spoken} (UTC)."
+        for question in questions:
+            out.append(LmExample(question, ctx, answer))
+    for n, parked, enabled, names, questions in _PIPELINE_BANK:
         ctx = pack_context(
             pipeline_count=n,
             parked_count=parked,
@@ -75,31 +93,30 @@ def _dialogue_examples() -> list[LmExample]:
         )
         if n == 0:
             answer = (
-                "No pipelines are scheduled yet, so nothing is running on a "
-                "cadence. Create one on Pipelines after a transfer."
+                "No pipelines are scheduled yet, so nothing is running on a cadence."
             )
         elif parked:
             who = ", ".join(names) if names else "those routes"
             answer = (
                 f"You have {n} pipelines. {parked} are parked on approval "
-                f"({who}) — they will not tick until someone approves."
+                f"({who})."
             )
         elif enabled:
             answer = f"You have {n} pipelines. {enabled} enabled and due to run."
         else:
             answer = f"You have {n} pipelines. None are enabled, so they will not fire."
-        out.append(LmExample(question, ctx, answer))
-    for n_conn, n_jobs, failed, question in _GREET_ROWS:
+        for question in questions:
+            out.append(LmExample(question, ctx, answer))
+    for n_conn, n_jobs, failed, questions in _GREET_BANK:
         ctx = pack_context(
             connector_count=n_conn,
             job_count=n_jobs,
             failed_jobs=failed,
-            create_connection="confirm_gated",
         )
         if n_conn == 0 and n_jobs == 0:
             answer = (
-                "I'm Datawrap Pilot. I am not a general chatbot. I read your "
-                "live workspace and compose from that evidence."
+                "I am Datawrap Pilot. I read your live workspace and compose "
+                "from that evidence."
             )
         else:
             fail = (
@@ -108,37 +125,38 @@ def _dialogue_examples() -> list[LmExample]:
                 else ""
             )
             answer = (
-                f"I'm Datawrap Pilot. I can see {n_conn} saved connectors "
+                f"I am Datawrap Pilot. I can see {n_conn} saved connectors "
                 f"and {n_jobs} recent jobs.{fail}"
             )
-        out.append(LmExample(question, ctx, answer))
-    for n_conn, question in _CREATE_ROWS:
+        for question in questions:
+            out.append(LmExample(question, ctx, answer))
+    for n_conn, questions in _CREATE_BANK:
         ctx = pack_context(
             connector_count=n_conn,
             create_connection="confirm_gated",
         )
         if n_conn:
             answer = (
-                f"Yes. Paste a host or connection URL and I will stage Confirm. "
-                f"You already have {n_conn} saved connectors."
+                f"Yes. I will stage Confirm. You have {n_conn} saved connectors."
             )
         else:
             answer = (
-                "Yes. Paste a host or connection URL and I will stage Confirm. "
-                "Name the engine if you want me to walk the fields."
+                "Yes. I will stage Confirm. Name the engine if you want me "
+                "to walk the fields."
             )
-        out.append(LmExample(question, ctx, answer))
+        for question in questions:
+            out.append(LmExample(question, ctx, answer))
     route_ctx = pack_context(create_connection="confirm_gated")
     route_ans = (
         "Name a saved source and destination and I will propose a sync mode, "
-        "then stage Confirm. Nothing writes until you accept."
+        "then stage Confirm."
     )
-    for question in _ROUTE_ROWS:
+    for question in _ROUTE_ASKS:
         out.append(LmExample(question, route_ctx, route_ans))
     return out
 
 
-def _product_examples(*, limit: int = 180) -> list[LmExample]:
+def _product_examples(*, limit: int = 80) -> list[LmExample]:
     out: list[LmExample] = []
     for ex in copy_examples()[:limit]:
         ctx = pack_context(evidence=ex.evidence)
@@ -149,9 +167,7 @@ def _product_examples(*, limit: int = 180) -> list[LmExample]:
 def lm_examples() -> tuple[LmExample, ...]:
     rows = _dialogue_examples() + _product_examples()
     extra: list[LmExample] = []
-    for row in rows[:80]:
-        for prefix in _CHAT_PREFIXES[:4]:
-            extra.append(
-                LmExample(prefix + row.question, row.context, row.answer)
-            )
+    for row in rows[:60]:
+        for prefix in _CHAT_PREFIXES[:3]:
+            extra.append(LmExample(prefix + row.question, row.context, row.answer))
     return tuple(rows + extra)

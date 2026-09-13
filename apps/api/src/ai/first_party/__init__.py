@@ -10,10 +10,11 @@ already in production:
    product subject is introduced.
 3. Hybrid retrieve (BM25 + char 4-gram TF-IDF, RRF) + evidence policy.
 4. Extractive ``compose_answer``.
-5. Optional **first-party GRU seq2seq** over packed evidence, then
-   the pointer-generator prefix. Discarded unless
-   ``invented_claims`` / token-grounding pass. Degenerate loops
-   fall back to the extractive draft.
+5. Optional **first-party attention+copy GRU** over packed evidence
+   (Luong attention, pointer-generator mix). Discarded unless
+   ``invented_claims`` / dialogue grounding pass. Degenerate loops
+   fall back to the extractive draft. The pointer-generator prefix
+   still narrates product RAG.
 
 Why this architecture
 ---------------------

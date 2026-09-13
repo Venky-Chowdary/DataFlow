@@ -51,7 +51,9 @@ def pack_context(
     if enabled_count is not None:
         lines.append(f"ENABLED: {int(enabled_count)}")
     if create_connection:
-        lines.append(f"CREATE_CONNECTION: {create_connection}")
+        # Speakable copy span — "confirm" must be a source token, not only
+        # the snake value confirm_gated (word_tokens keeps that as one id).
+        lines.append(f"CREATE_CONNECTION: stage Confirm ({create_connection})")
     body = (evidence or "").strip()
     if body:
         lines.append("EVIDENCE:")
@@ -79,11 +81,21 @@ def pack_from_workspace(
             if isinstance(j, dict)
             and str(j.get("status") or "").lower() in {"failed", "error"}
         )
+    pipeline_count = ctx.get("pipeline_count")
+    parked_count = ctx.get("parked_count")
+    if parked_count is None:
+        parked_count = ctx.get("schedules_parked")
+    enabled_count = ctx.get("enabled_count")
+    parked_names = ctx.get("parked_names") or []
     return pack_context(
         today_utc=utc_today_spoken(now),
         connector_count=n_conn or None,
         job_count=n_jobs or None,
         failed_jobs=failed or None,
+        pipeline_count=int(pipeline_count) if pipeline_count is not None else None,
+        parked_count=int(parked_count) if parked_count is not None else None,
+        parked_names=list(parked_names) if isinstance(parked_names, list) else None,
+        enabled_count=int(enabled_count) if enabled_count is not None else None,
         create_connection="confirm_gated",
         evidence=evidence,
     )

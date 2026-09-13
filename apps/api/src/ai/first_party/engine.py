@@ -19,7 +19,7 @@ from .checkpoint import FirstPartyCheckpoint, default_artifact_path, load_checkp
 from .lm_checkpoint import default_lm_path, load_lm
 from .dual_encoder import nearest_gold
 from .pointer_gen import tokens_grounded_in_evidence
-from .tokens import word_tokens
+from .tokens import DIALOGUE_GLUE, word_tokens
 
 # High enough that a gold must be a paraphrase, not a neighbor heading.
 # Measured so ``rice`` / off-subject slang stay unrewritten.
@@ -463,7 +463,7 @@ def load_model(path: str | None = None) -> FirstPartyCheckpoint | None:
 
 @lru_cache(maxsize=1)
 def load_lm_model(path: str | None = None) -> object | None:
-    """Load the first-party Transformer LM, or ``None`` if it is not shipped."""
+    """Load the first-party attention+copy LM, or ``None`` if it is not shipped."""
     try:
         import numpy  # noqa: F401
     except ImportError:
@@ -487,12 +487,25 @@ def reset_model_cache() -> None:
         lm_clear()
 
 
+def tokens_grounded_in_dialogue(output: str, evidence: str) -> bool:
+    """Every content token is dialogue glue or appears in the packed evidence.
+
+    Pointer-gen ``GLUE_WORDS`` is prefix-only. The seq2seq may also emit
+    closed conversational words (yes / today / confirm / pipelines). It
+    still cannot mint dbt, SSH, or a warehouse the pack never named.
+    """
+    allowed = set(word_tokens(evidence))
+    allowed.update(DIALOGUE_GLUE)
+    allowed.update({"source", "help"})
+    return all(token in allowed for token in word_tokens(output))
+
+
 def speak_with_lm(question: str, evidence: str, draft: str = "") -> str | None:
     """Generate over packed evidence, then fail-close.
 
-    This is the first-party chatbot path: a causal Transformer decoder,
-    constrained to evidence tokens, discarded if it invents dbt / SSH /
-    exactly-once. Missing weights or a failed gate keep the extractive draft.
+    First-party chatbot path: attention + copy GRU, constrained to
+    dialogue glue and pack tokens, discarded if it invents dbt / SSH /
+    exactly-once or drops draft facts. Missing weights keep the draft.
     """
     if not narrate_enabled() or not lm_enabled():
         return None
@@ -507,10 +520,12 @@ def speak_with_lm(question: str, evidence: str, draft: str = "") -> str | None:
         return None
     if len(set(words)) <= 2 and len(words) > 3:
         return None
+    if any(words.count(w) >= 3 for w in set(words) if len(w) > 2):
+        return None
     gate = f"{evidence} {draft}"
     if invented_claims(generated, gate):
         return None
-    if not tokens_grounded_in_evidence(generated, gate):
+    if not tokens_grounded_in_dialogue(generated, gate):
         return None
     if draft:
         from src.ai.rag.evidence import keeps_draft_facts
