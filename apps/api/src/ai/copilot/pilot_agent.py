@@ -22,7 +22,12 @@ from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
 from .job_narration import narrate_jobs
-from .tool_permissions import bind_current_context, is_permission_denial
+from .tool_permissions import (
+    MUTATE,
+    bind_current_context,
+    is_permission_denial,
+    tool_requirement,
+)
 from .lifecycle_tools import LIFECYCLE_TOOL_NAMES, short_job_id
 from .tools import (
     TOOL_DEFINITIONS,
@@ -41,6 +46,21 @@ logger = logging.getLogger(__name__)
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
+# Bounds on what a provider model may do inside one native tool loop.
+_NATIVE_MAX_TOOL_CALLS = 8
+_NATIVE_MAX_CALLS_PER_ROUND = 4
+_NATIVE_TOOL_OUTPUT_CHARS = 12_000
+
+_NATIVE_MUTATION_REFUSED = (
+    "Refused: “{name}” changes workspace state and is staged only by the deterministic "
+    "planner, never from a model-chosen call. Tell the operator to state the operation "
+    "plainly (for example “cancel job 1a2b” or “pause pipeline nightly-orders”) so the "
+    "planner can stage it with a Confirm step."
+)
+_NATIVE_BUDGET_REFUSED = (
+    "Refused: tool budget for this turn is spent ({limit} calls). Answer from the "
+    "results already returned, or say what is still unknown."
+)
 
 
 class _UnavailableAnthropic:
@@ -1779,6 +1799,50 @@ class DataPilotAgent:
                 "payload": out,
             })
 
+    def _native_tool_call(
+        self,
+        turn: "PilotTurn",
+        name: str,
+        arguments: dict | None,
+        data_context: dict | None,
+    ) -> tuple[ToolResult, str]:
+        """Run one model-chosen tool call and return ``(result, payload_for_model)``.
+
+        The native loop is reached only after the deterministic planner found no
+        grounded answer, so it is a *read* loop: a mutating tool chosen by the
+        model is refused rather than staged, the per-turn call budget is
+        enforced here rather than trusted to the model, and the payload handed
+        back is clipped so one wide sample cannot blow the context window.
+        Permission checks stay inside :meth:`tools.execute`.
+        """
+        if len(turn.tool_results) >= _NATIVE_MAX_TOOL_CALLS:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_BUDGET_REFUSED.format(limit=_NATIVE_MAX_TOOL_CALLS),
+            )
+        elif tool_requirement(name)[1] == MUTATE:
+            tr = ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_NATIVE_MUTATION_REFUSED.format(name=name),
+            )
+        else:
+            args = self._with_result_context(name, arguments or {}, data_context)
+            tr = self.tools.execute(name, args)
+        turn.tool_results.append(tr)
+        self._append_tool_actions(turn, tr)
+        payload = json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default)
+        if len(payload) > _NATIVE_TOOL_OUTPUT_CHARS:
+            payload = json.dumps({
+                "truncated": True,
+                "chars": len(payload),
+                "preview": payload[:_NATIVE_TOOL_OUTPUT_CHARS],
+            })
+        return tr, payload
+
     def _anthropic_agent_loop(
         self,
         message: str,
@@ -1841,21 +1905,18 @@ class DataPilotAgent:
             if response.get("content"):
                 assistant_content.append({"type": "text", "text": response["content"]})
             tool_results_content = []
-            for tc in tool_calls:
+            for tc in tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]:
                 assistant_content.append({
                     "type": "tool_use",
                     "id": tc["id"],
                     "name": tc["name"],
                     "input": tc["input"],
                 })
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 tool_results_content.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
-                    "content": json.dumps(tr.output if tr.success else {"error": tr.error}, default=json_default),
+                    "content": payload,
                 })
 
             messages.append({"role": "assistant", "content": assistant_content})
@@ -2398,6 +2459,7 @@ Draft answer:
                     )
                 break
 
+            tool_calls = tool_calls[:_NATIVE_MAX_CALLS_PER_ROUND]
             assistant_msg: dict = {
                 "role": "assistant",
                 "content": response.get("content") or None,
@@ -2415,17 +2477,11 @@ Draft answer:
             }
             messages.append(assistant_msg)
             for tc in tool_calls:
-                args = self._with_result_context(tc["name"], tc.get("input") or {}, data_context)
-                tr = self.tools.execute(tc["name"], args)
-                turn.tool_results.append(tr)
-                self._append_tool_actions(turn, tr)
+                _tr, payload = self._native_tool_call(turn, tc["name"], tc.get("input"), data_context)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": json.dumps(
-                        tr.output if tr.success else {"error": tr.error},
-                        default=json_default,
-                    ),
+                    "content": payload,
                 })
 
         if used_native and turn.tool_results:
@@ -3780,7 +3836,7 @@ You are Datawrap Pilot for Datawrap only — data knowledge, product capabilitie
 Available tools (internal — never name these in user-facing answers): {tool_names}.
 Use tools for any factual claim about jobs, connectors, datasets, schedules, or capabilities.
 Never invent IDs or warehouse state. Never mention tool names, APIs, or internal method labels in replies — write in plain product language.
-For mutating actions (remediate, run schedule), propose and wait for UI confirm — do not claim they already ran.
+You may only read. Mutations (start, create, cancel, retry, resume, replay, pause, delete) are staged by the planner from the operator's own words and go through Confirm — do not call them; tell the operator what to say, and never claim anything ran.
 Respect session focus and open clarifications above — do not invent a different connector or table.
 Navigate to any screen when asked (including schedules/pipelines, contracts, query, docs, proofs)."""
 
