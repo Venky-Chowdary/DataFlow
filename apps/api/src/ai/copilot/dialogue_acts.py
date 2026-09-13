@@ -19,6 +19,8 @@ DialogueAct = Literal[
     "summarize_last",
     "explain_simpler",
     "next_action",
+    "recall_ask",
+    "repair_unclear",
     "thanks",
     "general",
     "workspace",
@@ -152,6 +154,14 @@ _SCHEDULE_CAPABILITY = re.compile(
     re.I,
 )
 
+_RECALL_ASK = re.compile(
+    r"\bwhat\s+did\s+i\s+(?:just\s+)?(?:ask|say|type|write)\b"
+    r"|\bwhat\s+was\s+my\s+(?:last|previous|first)\s+(?:question|ask|message)\b"
+    r"|\brepeat\s+my\s+(?:question|last\s+question|ask)\b"
+    r"|\bwhat\s+(?:question\s+)?did\s+i\s+ask\s+you\b",
+    re.I,
+)
+
 _ROUTE_PLAN_CAPABILITY = re.compile(
     r"^\s*plan\s+source\s*[→\->]{1,3}\s*destination\s+routes?"
     r"(?:\s+and\s+sync\s+modes?)?\s*[.!?]*\s*$",
@@ -275,6 +285,18 @@ def classify_dialogue_act(message: str, *, history: list[dict] | None = None) ->
         return "greeting"
     if _THANKS.match(text):
         return "thanks"
+    # "what did i just ask you" is a question about the transcript, and the only
+    # place the answer exists is the transcript. Retrieval answered it with the
+    # three closest Help headings and a refusal.
+    if history and _RECALL_ASK.search(text):
+        return "recall_ask"
+    # A bare "that's not what i meant" carries no correction to re-plan, and
+    # replaying the answer it objects to is the one reply guaranteed to be wrong.
+    if history:
+        from .followup import repair_correction
+
+        if repair_correction(text) == "":
+            return "repair_unclear"
     if _SUMMARIZE_LAST.match(text) and history:
         return "summarize_last"
     if _EXPLAIN_SIMPLER.search(text) and history:

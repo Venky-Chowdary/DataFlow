@@ -38,7 +38,8 @@ from .working_memory import PendingSlot, PilotFocus
 # Pronouns / definite descriptions that point at the previous subject.
 _COREFERENCE_RE = re.compile(
     r"\b(?:it|that|this|these|those|them|there|"
-    r"same|the same|that one|the table|that table|this table|"
+    r"same|the same|that one|the other one|the other ones|"
+    r"the table|that table|this table|"
     r"the collection|that collection|the result|that result)\b",
     re.IGNORECASE,
 )
@@ -262,6 +263,116 @@ def resolve_knowledge_engine_followup(
     return None
 
 
+# A repair turn: the operator says the last answer read their question wrong and
+# supplies the correction. "no i meant the failed ones" was refused as
+# undocumented, and "wait, that's not what i meant" replayed the same connector
+# list it was objecting to — the two turns that most make an assistant look like
+# it is not listening.
+_REPAIR_OPENER = re.compile(
+    r"^\s*(?:(?:no+|nope|nah|wait|sorry|actually|hmm+|oops|ugh)\b[\s,.!-]*)*"
+    r"(?:that(?:'s| is|s)?\s+not\s+(?:what\s+i\s+(?:meant|asked)|it|right)"
+    r"|not\s+(?:that|those|them|what\s+i\s+(?:meant|asked))"
+    r"|i\s+(?:meant|mean)|i\s+said"
+    r"|i\s+was\s+asking\s+(?:about|for)"
+    r"|i\s+asked\s+(?:about|for))"
+    r"[\s,:;.-]*",
+    re.I,
+)
+
+# A bare objection with no correction attached. "that's not what i meant" full
+# stop cannot be re-planned — the honest move is to ask which part was wrong.
+_BARE_REPAIR = re.compile(r"^[\s,.!?-]*$")
+
+# Filler the operator puts in front of the correction itself.
+_CORRECTION_FILLER = re.compile(
+    r"^(?:the\s+|a\s+|an\s+|about\s+|for\s+|just\s+|only\s+|like\s+)+", re.I
+)
+
+
+def repair_correction(message: str) -> str | None:
+    """The correction in a repair turn: "" when bare, ``None`` when not a repair."""
+    text = _clean(message)
+    if not text:
+        return None
+    match = _REPAIR_OPENER.match(text)
+    if not match:
+        return None
+    rest = text[match.end():].strip()
+    if _BARE_REPAIR.match(rest):
+        return ""
+    return _CORRECTION_FILLER.sub("", rest).strip(" ,.!?;:-")
+
+
+def resolve_repair(message: str, history: list[dict] | None) -> str | None:
+    """Re-state the previous question with the operator's correction applied.
+
+    The correction replaces a constraint on a subject the operator already named,
+    so appending it to the question being corrected is what recovers the real
+    ask: "how many connectors do i have" + "failed ones" is the failed-connector
+    bucket, which the router already knows how to read.
+    """
+    correction = repair_correction(message)
+    if not correction:
+        return None
+    prior = _last_substantive_user_text(history)
+    if not prior:
+        return None
+    # A correction that names its own subject *replaces* the previous one:
+    # "i meant pipelines" after a connector count is the pipeline count, and
+    # appending it planned both lists and answered with two contradicting ones.
+    old, new = _repair_subject(prior), _repair_subject(correction)
+    if old and new and old.rstrip("s") != new.rstrip("s"):
+        return re.sub(rf"\b{re.escape(old)}\b", new, prior, flags=re.I)
+    return f"{prior} {correction}"
+
+
+# Subjects a repair can swap out. Longest first, so a plural is preferred over
+# the singular hiding inside it.
+_REPAIR_SUBJECTS: tuple[str, ...] = tuple(
+    sorted(
+        (
+            "collections", "collection", "columns", "column",
+            "connections", "connection", "connectors", "connector",
+            "contracts", "contract", "datasets", "dataset",
+            "jobs", "job", "pipelines", "pipeline",
+            "schedules", "schedule", "tables", "table",
+            "transfers", "transfer",
+        ),
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _repair_subject(text: str) -> str:
+    """The workspace noun this turn is about, or "" when it names none."""
+    low = (text or "").lower()
+    for noun in _REPAIR_SUBJECTS:
+        if re.search(rf"\b{noun}\b", low):
+            return noun
+    return ""
+
+
+def _last_substantive_user_text(history: list[dict] | None) -> str:
+    """The most recent user turn that asked something, skipping repairs.
+
+    A bare "that's not what i meant" is itself a user turn, so correcting it on
+    the next turn built "that's not what i meant pipelines" and answered with the
+    job list. The question being corrected is the last one that carried a subject.
+    """
+    from .dialogue_acts import turn_text
+
+    for item in reversed(history or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").lower() != "user":
+            continue
+        text = turn_text(item)
+        if text and repair_correction(text) is None:
+            return text
+    return ""
+
+
 def resolve_platform_coreference(
     message: str,
     history: list[dict] | None,
@@ -305,7 +416,11 @@ def resolve_platform_coreference(
     if jobs_cue and job_pointer:
         return [("list_jobs", {"limit": 10})]
     connectors_cue = bool(re.search(r"\bconnectors?\b", low)) or "connector" in prior
-    if connectors_cue and re.search(r"\b(?:those|these|them|that|it)\b", low):
+    # "and the other one?" points at the item of the previous list the operator
+    # has not asked about yet. It carries no pronoun, so it reached no tool and
+    # was refused as undocumented; re-listing is at least the right subject.
+    other_one = bool(re.search(r"\bthe\s+other\s+ones?\b", low))
+    if connectors_cue and (other_one or re.search(r"\b(?:those|these|them|that|it)\b", low)):
         return [("list_connectors", {})]
     return None
 

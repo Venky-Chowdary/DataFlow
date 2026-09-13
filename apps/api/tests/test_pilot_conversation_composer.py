@@ -1139,3 +1139,110 @@ def test_a_connector_without_a_target_renders_no_dangling_arrow():
     resp = get_pilot_agent().chat("list my connectors")
     for line in resp.answer.splitlines():
         assert not line.rstrip().endswith("→"), line
+
+
+def test_a_repair_turn_redoes_the_previous_question_with_the_correction():
+    """"no i meant the failed ones" was refused as undocumented.
+
+    A repair keeps the subject the operator already named and replaces one
+    constraint on it, so re-planning the corrected question is what recovers the
+    real ask. A correction that names its own subject replaces the old one
+    instead of stacking on it — appending "pipelines" to a connector count
+    planned both lists and answered with two that contradicted each other.
+    """
+    from src.ai.copilot.followup import repair_correction, resolve_repair
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    assert repair_correction("no i meant the failed ones") == "failed ones"
+    assert repair_correction("i meant pipelines") == "pipelines"
+    assert repair_correction("wait, that's not what i meant") == ""
+    assert repair_correction("how many connectors do i have") is None
+
+    hist = [
+        {"role": "user", "content": "how many connectors do i have"},
+        {"role": "assistant", "content": "You have **2 saved connector(s)**."},
+    ]
+    constrained = resolve_repair("no i meant the failed ones", hist)
+    assert constrained == "how many connectors do i have failed ones"
+    assert dict(infer_tools_from_message(constrained))["list_connectors"] == {"health": "failed"}
+
+    swapped = resolve_repair("i meant pipelines", hist)
+    assert swapped == "how many pipelines do i have"
+    assert [n for n, _ in infer_tools_from_message(swapped)] == ["list_schedules"]
+
+    # A bare objection carries nothing to re-plan.
+    assert resolve_repair("that's not what i meant", hist) is None
+
+
+def test_a_repair_skips_over_an_earlier_bare_objection():
+    """"that's not what i meant" is itself a user turn.
+
+    Correcting it on the next turn built "that's not what i meant pipelines" and
+    answered with the job list. The question being corrected is the last one that
+    carried a subject.
+    """
+    from src.ai.copilot.followup import resolve_repair
+
+    hist = [
+        {"role": "user", "content": "how many connectors do i have"},
+        {"role": "assistant", "content": "You have **2 saved connector(s)**."},
+        {"role": "user", "content": "wait, that's not what i meant"},
+        {"role": "assistant", "content": "Understood — I read that wrong."},
+    ]
+    assert resolve_repair("i meant pipelines", hist) == "how many pipelines do i have"
+
+
+def test_a_bare_objection_asks_what_was_misread():
+    """It used to replay the very answer it was objecting to."""
+    from src.ai.copilot.conversation_composer import compose_repair_prompt
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act
+
+    hist = [
+        {"role": "user", "content": "how many connectors do i have"},
+        {"role": "assistant", "content": "You have **2 saved connector(s)**."},
+    ]
+    for ask in ("wait, that's not what i meant", "no, not what i asked", "that's not it"):
+        assert classify_dialogue_act(ask, history=hist) == "repair_unclear", ask
+
+    prompt = compose_repair_prompt(hist)
+    assert "I read that wrong" in prompt
+    assert "how many connectors do i have" in prompt
+    assert "2 saved connector" not in prompt, "must not replay the rejected answer"
+
+
+def test_what_did_i_just_ask_is_answered_from_the_transcript():
+    """It was answered with the three closest Help headings and a refusal."""
+    from src.ai.copilot.conversation_composer import compose_recall_ask
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act
+
+    hist = [
+        {"role": "user", "content": "how many connectors do i have"},
+        {"role": "assistant", "content": "You have **2 saved connector(s)**."},
+        {"role": "user", "content": "which ones failed"},
+        {"role": "assistant", "content": "None failed."},
+    ]
+    for ask in ("what did i just ask you", "what was my last question", "repeat my question"):
+        assert classify_dialogue_act(ask, history=hist) == "recall_ask", ask
+
+    recalled = compose_recall_ask(hist)
+    assert "which ones failed" in recalled
+    assert "how many connectors do i have" in recalled
+    assert "does not cover" not in recalled
+
+    assert "first thing you've asked" in compose_recall_ask([])
+
+
+def test_the_other_one_points_at_the_previous_list():
+    """It carries no pronoun, so it reached no tool and was refused."""
+    from src.ai.copilot.followup import resolve_platform_coreference
+
+    hist = [{"role": "assistant", "content": "You have **2 saved connector(s)**."}]
+    assert resolve_platform_coreference("ok and the other one?", hist) == [("list_connectors", {})]
+
+
+def test_an_underspecified_duplicate_call_is_collapsed():
+    """The failed bucket was answered and then contradicted by the full list."""
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    plan = infer_tools_from_message("how many connectors do i have failed ones")
+    assert plan == [("list_connectors", {"health": "failed"})]

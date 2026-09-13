@@ -19,6 +19,7 @@ from .dialogue_acts import (
     DialogueAct,
     last_assistant_text,
     last_user_text,
+    turn_text,
 )
 
 
@@ -149,6 +150,49 @@ def compose_thanks() -> str:
         "You're welcome. If you want the short version of the last answer, "
         "say *summarize that*. If you want the next move, ask *what should I do next?*"
     )
+
+
+def compose_recall_ask(history: list[dict]) -> str:
+    """Quote the operator's own previous turns back to them.
+
+    "what did i just ask you" was answered with the three closest Help headings
+    and a refusal, which is the one thing the transcript makes impossible to get
+    wrong.
+    """
+    asked = [
+        text
+        for item in (history or [])
+        if isinstance(item, dict)
+        and str(item.get("role") or "").lower() == "user"
+        and (text := turn_text(item))
+    ]
+    if not asked:
+        return (
+            "This is the first thing you've asked me in this conversation, so "
+            "there's nothing earlier to repeat."
+        )
+    lines = [f"You asked: “{_clip(asked[-1], 160)}”"]
+    if len(asked) > 1:
+        lines.append(f"Before that: “{_clip(asked[-2], 160)}”")
+    lines.append(
+        "Say *summarize that* for the short version of my answer, or ask it "
+        "again a different way and I'll re-read the workspace."
+    )
+    return "\n".join(lines)
+
+
+def compose_repair_prompt(history: list[dict]) -> str:
+    """Ask what was misread instead of replaying the answer being objected to."""
+    asked = last_user_text(history)
+    lines = ["Understood — I read that wrong."]
+    if asked:
+        lines.append(f"I answered as though you asked “{_clip(asked, 140)}”.")
+    lines.append(
+        "Tell me the part I got wrong and I'll redo it — for example *I meant "
+        "the failed ones*, *I meant pipelines, not jobs*, or name the connector "
+        "and table you had in mind."
+    )
+    return "\n".join(lines)
 
 
 def compose_calendar(ctx: dict[str, Any] | None = None) -> str:
@@ -517,6 +561,12 @@ def compose_history_turn(
             pending_labels=pending_labels,
         )
         intent = "troubleshooting"
+    elif act == "recall_ask":
+        answer = compose_recall_ask(history)
+        intent = "greeting"
+    elif act == "repair_unclear":
+        answer = compose_repair_prompt(history)
+        intent = "troubleshooting"
     elif act == "thanks":
         answer = compose_thanks()
         intent = "greeting"
@@ -558,6 +608,10 @@ def _followups_for_act(act: DialogueAct) -> list[str]:
         return ["What should I do next?", "Summarize that", "Show my jobs"]
     if act == "next_action":
         return ["Give me a workspace briefing", "Show my pipelines", "Show my jobs"]
+    if act == "recall_ask":
+        return ["Summarize that", "What should I do next?", "Give me a workspace briefing"]
+    if act == "repair_unclear":
+        return ["I meant the failed ones", "Show my connectors", "Show my jobs"]
     return ["Give me a workspace briefing", "Show my jobs", "What can you do?"]
 
 

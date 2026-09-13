@@ -906,7 +906,14 @@ class DataPilotAgent:
         # tool routing so "summarize that" after a job list does not re-hit Mongo.
         # A stored sample still wins: "summarize that" then profiles the result.
         _hist_act = classify_dialogue_act(message, history=history)
-        if _hist_act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+        if _hist_act in {
+            "summarize_last",
+            "explain_simpler",
+            "thanks",
+            "next_action",
+            "recall_ask",
+            "repair_unclear",
+        }:
             sid = str((data_context or {}).get("pilot_session_id") or "").strip()
             focus = None
             if sid:
@@ -1635,6 +1642,7 @@ Draft answer:
             resolve_knowledge_engine_followup,
             resolve_pending_answer,
             resolve_platform_coreference,
+            resolve_repair,
             resolve_table_coreference_tools,
         )
         from .working_memory import get_working_memory
@@ -1643,6 +1651,12 @@ Draft answer:
         knowledge = resolve_knowledge_engine_followup(message, history)
         if knowledge:
             message = knowledge
+        # "no i meant the failed ones" is the previous question with one
+        # constraint replaced, not a new subject. Resolved before the pending and
+        # focus branches so the correction reaches normal routing intact.
+        repaired = resolve_repair(message, history)
+        if repaired:
+            message = repaired
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:

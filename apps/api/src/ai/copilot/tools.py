@@ -6081,7 +6081,33 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             continue
         seen.add(key)
         unique.append((name, args))
-    return prune_planned_tools(unique, message)
+    return prune_planned_tools(_collapse_underspecified(unique), message)
+
+
+def _collapse_underspecified(
+    planned: list[tuple[str, dict]],
+) -> list[tuple[str, dict]]:
+    """Drop a call whose arguments are a subset of another call of the same tool.
+
+    "how many connectors do i have the failed ones" planned ``list_connectors``
+    twice — once with ``health=failed`` from the correction and once bare from the
+    count — so the failed bucket was answered and then contradicted by the full
+    list underneath it. Two calls where one is strictly less specified are the
+    same question asked twice; a genuinely different subject is not a subset and
+    still runs.
+    """
+    keep: list[tuple[str, dict]] = []
+    for i, (name, args) in enumerate(planned):
+        redundant = any(
+            other_name == name
+            and j != i
+            and (args or {}).items() <= (other_args or {}).items()
+            and len(other_args or {}) > len(args or {})
+            for j, (other_name, other_args) in enumerate(planned)
+        )
+        if not redundant:
+            keep.append((name, args))
+    return keep
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:
