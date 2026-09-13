@@ -181,6 +181,32 @@ def compose_recall_ask(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def compose_trouble_intake(ctx: dict[str, Any] | None = None) -> str:
+    """Take a vague complaint and name the four handles that make it readable.
+
+    "this is broken" was answered "That is outside what the Datawrap
+    documentation covers", which is true and useless — the operator has a problem
+    and the reply says nothing about how to hand it over.
+    """
+    ctx = ctx or {}
+    lines = [
+        "Let's find it. I can read the evidence directly — give me any one of "
+        "these and I'll open the finding:",
+        "• a **job ID** or preflight run ID (`job_…` / `pf_…`) and I'll read its "
+        "gates, quarantine and reconcile result",
+        "• a **connector name** and I'll re-test it and list its tables",
+        "• a **table and connector** and I'll introspect the schema and sample it",
+        "• the **error text** you saw, and I'll name the gate or rule that "
+        "produced it",
+    ]
+    names = [str(n) for n in (ctx.get("connector_names") or []) if n][:3]
+    if names:
+        shown = ", ".join(f"**{n}**" for n in names)
+        lines.append(f"Saved connectors: {shown}.")
+    lines.append("Or say *give me a workspace briefing* and I'll start from what needs you.")
+    return "\n".join(lines)
+
+
 def compose_repair_prompt(history: list[dict]) -> str:
     """Ask what was misread instead of replaying the answer being objected to."""
     asked = last_user_text(history)
@@ -567,6 +593,9 @@ def compose_history_turn(
     elif act == "repair_unclear":
         answer = compose_repair_prompt(history)
         intent = "troubleshooting"
+    elif act == "trouble_vague":
+        answer = compose_trouble_intake(ctx)
+        intent = "troubleshooting"
     elif act == "thanks":
         answer = compose_thanks()
         intent = "greeting"
@@ -612,6 +641,8 @@ def _followups_for_act(act: DialogueAct) -> list[str]:
         return ["Summarize that", "What should I do next?", "Give me a workspace briefing"]
     if act == "repair_unclear":
         return ["I meant the failed ones", "Show my connectors", "Show my jobs"]
+    if act == "trouble_vague":
+        return ["Give me a workspace briefing", "Show my jobs", "Test my connectors"]
     return ["Give me a workspace briefing", "Show my jobs", "What can you do?"]
 
 

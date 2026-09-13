@@ -2875,6 +2875,26 @@ def asks_about_product_capacity(message: str) -> bool:
     return bool(_PRODUCT_CAPACITY_ASK.search(message or ""))
 
 
+# Creative writing is not a documentation subject. "write me a poem about data"
+# matched the product-subject model on the word *data* and was answered with the
+# Iceberg merge-on-read passage and a Help citation, which is worse than saying
+# no: it presents a real product fact as though it were the reply to that turn.
+_CREATIVE_REQUEST = re.compile(
+    r"\b(?:write|compose|make\s+up|give\s+me|tell\s+me|sing|draft|generate)\b"
+    r"[^.?!]{0,40}?"
+    r"\b(?:poem|poetry|haiku|limerick|sonnet|song|rap|joke|riddle|pun|story|"
+    # No bare "script": "generate a sql script" is a product request.
+    r"fairy\s*tale|essay|screenplay|lyrics)\b"
+    r"|\b(?:poem|haiku|limerick|joke|riddle)\s+about\b",
+    re.I,
+)
+
+
+def asks_for_creative_writing(message: str) -> bool:
+    """A creative-writing request, which the documentation cannot answer."""
+    return bool(_CREATIVE_REQUEST.search(message or ""))
+
+
 def _has_explicit_workspace_subject(lower: str) -> bool:
     """True when the ask names a live connector/table/job — keep ops tools."""
     if re.search(r"\bfrom\s+.+\s+to\s+\w", lower):
@@ -3061,11 +3081,24 @@ _WORKSPACE_COUNT_ASK = re.compile(
 )
 
 
+# "tell me about my datasets" and "what are my pipelines" are the same read as
+# "how many datasets do i have" — the operator's own inventory. Asked without a
+# counting verb they reached the documentation instead.
+_WORKSPACE_POSSESSIVE_ASK = re.compile(
+    r"\b(?:tell\s+me\s+about|what\s+(?:are|is)|which\s+are|show\s+me|"
+    r"show|list|give\s+me|walk\s+me\s+through)\s+"
+    r"(?:all\s+(?:of\s+)?)?(?:my|our)\b",
+    re.I,
+)
+
+
 def _asks_to_count_workspace_objects(lower: str) -> bool:
-    """A count of the operator's own inventory, not of warehouse rows."""
+    """A read of the operator's own inventory, not of warehouse rows."""
     if re.search(r"\bon\s+[a-z0-9]", lower):
         return False
-    return bool(_WORKSPACE_COUNT_ASK.search(lower))
+    return bool(
+        _WORKSPACE_COUNT_ASK.search(lower) or _WORKSPACE_POSSESSIVE_ASK.search(lower)
+    )
 
 
 def _saved_connector_exists(name: str) -> bool:
@@ -3727,7 +3760,15 @@ def prune_planned_tools(
     # it with the Lineage help card is the noise. The dataset tool then keeps
     # the turn and reports honestly when nothing by that name is indexed.
     if "explain_product" in names:
-        if dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}:
+        # "tell me about my datasets" is an inventory read, and the possessive is
+        # what says so. Read as documentation it dropped ``list_datasets`` and
+        # answered with a Help card about datasets in general.
+        _own_inventory = "list_datasets" in names and _asks_to_count_workspace_objects(
+            (message or "").lower()
+        )
+        if _own_inventory or (
+            dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}
+        ):
             planned = [(n, a) for n, a in planned if n != "explain_product"]
         else:
             planned = [
@@ -4347,6 +4388,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     # Clock asks must not retrieve DATE-type / transform docs.
     if is_calendar_question(message):
+        return []
+    # Creative writing has no documentation to cite, and retrieving one anyway
+    # presented an Iceberg passage as the answer to "write me a poem about data".
+    if asks_for_creative_writing(message):
         return []
     if is_schedule_setup_capability_ask(message):
         return []

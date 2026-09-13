@@ -913,6 +913,7 @@ class DataPilotAgent:
             "next_action",
             "recall_ask",
             "repair_unclear",
+            "trouble_vague",
         }:
             sid = str((data_context or {}).get("pilot_session_id") or "").strip()
             focus = None

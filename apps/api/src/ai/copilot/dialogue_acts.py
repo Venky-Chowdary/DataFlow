@@ -22,6 +22,7 @@ DialogueAct = Literal[
     "recall_ask",
     "repair_unclear",
     "thanks",
+    "trouble_vague",
     "general",
     "workspace",
 ]
@@ -57,8 +58,17 @@ _BRIEFING = re.compile(
     r"(?:is|are)\s+(?:there\s+)?(?:anything|any(?:thing)?\s+\w+|something)\s+"
     r"(?:parked|blocked|waiting|pending|stuck|due)|"
     r"what(?:'s| is)?\s+(?:parked|blocked|pending|waiting\s+on\s+(?:me|approval))|"
-    r"anything\s+(?:waiting|pending)\s+on\s+(?:me|approval)"
+    r"anything\s+(?:waiting|pending)\s+on\s+(?:me|approval)|"
+    # The operator's *own* workspace, not the hosted-tenant article. "what's my
+    # workspace look like" and "how is my workspace" both answered with "Datawrap
+    # is delivered as a hosted enterprise workspace at your tenant URL", which is
+    # true of every tenant and says nothing about theirs.
+    r"(?:what(?:'s| is)|how(?:'s| is)|how\s+are)\s+"
+    r"(?:my|our|the)\s+workspace\b|"
+    r"what(?:'s| is)\s+(?:my|our)\s+(?:status|state|health)"
     r")\b|"
+    # Bare "status" is the one-word form of the same ask.
+    r"^\s*(?:status|sitrep|overview)\s*[.!?]*$|"
     r"^\s*tell\s+me\s+everything(?:\s+about\s+(?:my\s+)?(?:workspace|platform))?\s*[.!?]*$|"
     r"^\s*any\s+(?:failures?|problems?|issues?)\s*(?:today|right\s+now)?\s*[.!?]*$",
     re.I,
@@ -153,6 +163,56 @@ _SCHEDULE_CAPABILITY = re.compile(
     r"(?:schedule|pipeline|cadence|cron|nightly\s+run)s?\s*[.!?]*\s*$",
     re.I,
 )
+
+# A vague trouble report with nothing named. "this is broken" was answered "That
+# is outside what the Datawrap documentation covers", which is technically true
+# and useless: the operator has a problem and the reply tells them nothing about
+# how to hand it over. Anything that names an object routes normally instead.
+_TROUBLE_SUBJECT = (
+    r"(?:it|this|that|everything|nothing|the\s+whole\s+thing|your\s+\w+|"
+    r"you|the\s+app|the\s+ui|the\s+page)"
+)
+_TROUBLE_PREFIX = (
+    r"^\s*(?:why\s+(?:is|are|does|do|did)\s+)?"
+    rf"(?:{_TROUBLE_SUBJECT}(?:'s|'re|s)?\s+)?"
+)
+_VAGUE_TROUBLE_PATTERNS = (
+    # A negative state says something is wrong on its own: "this is broken",
+    # "it keeps failing", "why are you so useless".
+    re.compile(
+        _TROUBLE_PREFIX
+        + r"(?:(?:is|are|was|were|has|have|keeps?|so|just|all)\s+)*"
+        r"(?:broken|broke|failing|failed|stuck|hanging|hung|frozen|useless|"
+        r"garbage|rubbish|terrible|awful|a\s+mess|crashing|crashed|erroring|"
+        r"down)\b[\s.!?]*$",
+        re.I,
+    ),
+    # "working" only reports trouble when it is negated.
+    re.compile(
+        _TROUBLE_PREFIX
+        + r"(?:(?:is|are|was|were)\s+)?"
+        r"(?:isn'?t|aren'?t|does\s*n[o']?t|do\s*n[o']?t|did\s*n[o']?t|won'?t|"
+        r"wont|never|not|no\s+longer)\s+work(?:s|ing|ed)?\b[\s.!?]*$",
+        re.I,
+    ),
+    # A negative subject carries the negation itself: "nothing works".
+    re.compile(r"^\s*nothing\s+(?:is\s+)?work(?:s|ing|ed)?\b[\s.!?]*$", re.I),
+    # Inverted: "why doesn't it work".
+    re.compile(
+        r"^\s*why\s+(?:does\s*n[o']?t|do\s*n[o']?t|isn'?t|won'?t|wont)\s+"
+        rf"{_TROUBLE_SUBJECT}\s+work(?:s|ing|ed)?\b[\s.!?]*$",
+        re.I,
+    ),
+)
+
+
+def is_vague_trouble_report(message: str) -> bool:
+    """A complaint with no job, connector, table or error named."""
+    text = (message or "").strip()
+    if not text or _WORKSPACE_MARKERS.search(text):
+        return False
+    return any(p.match(text) for p in _VAGUE_TROUBLE_PATTERNS)
+
 
 _RECALL_ASK = re.compile(
     r"\bwhat\s+did\s+i\s+(?:just\s+)?(?:ask|say|type|write)\b"
@@ -297,6 +357,8 @@ def classify_dialogue_act(message: str, *, history: list[dict] | None = None) ->
 
         if repair_correction(text) == "":
             return "repair_unclear"
+    if is_vague_trouble_report(text):
+        return "trouble_vague"
     if _SUMMARIZE_LAST.match(text) and history:
         return "summarize_last"
     if _EXPLAIN_SIMPLER.search(text) and history:

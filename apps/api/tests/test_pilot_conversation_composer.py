@@ -1246,3 +1246,100 @@ def test_an_underspecified_duplicate_call_is_collapsed():
 
     plan = infer_tools_from_message("how many connectors do i have failed ones")
     assert plan == [("list_connectors", {"health": "failed"})]
+
+
+def test_the_operators_own_workspace_is_a_briefing_not_the_tenant_article():
+    """"what's my workspace look like" answered "Datawrap is delivered as a
+    hosted enterprise workspace at your tenant URL" — true of every tenant and
+    silent about theirs. Bare "status" reached no tool at all.
+    """
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "what's my workspace look like",
+        "how is my workspace",
+        "what is my status",
+        "status",
+        "overview",
+    ):
+        assert classify_dialogue_act(ask) == "briefing", ask
+        assert [n for n, _ in infer_tools_from_message(ask)] == ["brief_workspace"], ask
+
+    # Without the possessive it is still the documented concept.
+    assert [n for n, _ in infer_tools_from_message("what is a workspace")] == ["explain_product"]
+
+
+def test_creative_writing_is_refused_not_answered_from_the_docs():
+    """"write me a poem about data" matched the product-subject model on *data*
+    and was answered with the Iceberg merge-on-read passage plus a Help citation,
+    which presents a real product fact as the reply to that turn.
+    """
+    from src.ai.copilot.tools import asks_for_creative_writing, infer_tools_from_message
+
+    for ask in (
+        "write me a poem about data",
+        "tell me a joke",
+        "write a haiku about schemas",
+        "sing me a song",
+    ):
+        assert asks_for_creative_writing(ask), ask
+        assert infer_tools_from_message(ask) == [], ask
+
+    # A SQL script is a product request, not creative writing.
+    assert not asks_for_creative_writing("generate a sql script")
+    assert not asks_for_creative_writing("write a query for me")
+
+
+def test_my_datasets_is_an_inventory_read():
+    """"tell me about my datasets" dropped list_datasets and answered with a
+    Help card about datasets in general. The possessive is what says whose.
+    """
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for ask in (
+        "tell me about my datasets",
+        "show me my datasets",
+        "what are my pipelines",
+        "list my schedules",
+    ):
+        plan = [n for n, _ in infer_tools_from_message(ask)]
+        assert "explain_product" not in plan, ask
+        assert plan, ask
+
+    assert [n for n, _ in infer_tools_from_message("what is a dataset")] == ["explain_product"]
+
+
+def test_a_vague_complaint_asks_for_the_evidence_it_can_read():
+    """"this is broken" was answered "That is outside what the Datawrap
+    documentation covers" — true and useless. Anything that names an object
+    routes normally.
+    """
+    from src.ai.copilot.conversation_composer import compose_trouble_intake
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act, is_vague_trouble_report
+
+    for ask in (
+        "this is broken",
+        "it's not working",
+        "it doesn't work",
+        "nothing works",
+        "everything is broken",
+        "why are you so useless",
+        "it keeps failing",
+    ):
+        assert is_vague_trouble_report(ask), ask
+        assert classify_dialogue_act(ask) == "trouble_vague", ask
+
+    for ask in (
+        "my connector is broken",
+        "why did my last job fail",
+        "which connectors failed their test",
+        "how do i fix a broken connector",
+        "it is working",
+    ):
+        assert not is_vague_trouble_report(ask), ask
+
+    intake = compose_trouble_intake({"connector_names": ["Demo Orders"]})
+    assert "job_" in intake and "connector name" in intake
+    assert "Demo Orders" in intake
+    assert "outside what the Datawrap documentation covers" not in intake
