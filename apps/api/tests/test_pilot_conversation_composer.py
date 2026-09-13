@@ -683,3 +683,142 @@ def test_an_inventory_read_is_not_prefixed_with_filler():
     woven = weave_tool_answer("list my connectors", [body], act="workspace")
     assert woven.startswith("You have **2 saved connector(s)**")
     assert "Here's what I found" not in woven
+
+
+def test_a_count_of_my_own_inventory_reads_the_inventory_tool():
+    """"How many X do I have" is a workspace read for every inventory noun.
+
+    Only jobs and connectors had hand-written branches, so "how many schedules
+    do i have" fell through to the documentation and answered a count with the
+    CDC-delete-drops-the-replication-slot passage.
+    """
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    expected = {
+        "how many schedules do i have": "list_schedules",
+        "how many pipelines do i have": "list_schedules",
+        "how many connectors do i have": "list_connectors",
+        "how many jobs do i have": "list_jobs",
+        "how many datasets do i have": "list_datasets",
+        "count of my connectors": "list_connectors",
+    }
+    for message, tool in expected.items():
+        planned = [n for n, _ in infer_tools_from_message(message)]
+        assert planned == [tool], f"{message!r} planned {planned}"
+
+
+def test_a_catalog_count_stays_with_the_documentation():
+    """"How many connectors do you support" is about the catalog, not my workspace."""
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    for message in (
+        "how many connectors do you support",
+        "how many connectors are live",
+        "how many engines are transfer ready",
+    ):
+        planned = [n for n, _ in infer_tools_from_message(message)]
+        assert "explain_product" in planned, f"{message!r} planned {planned}"
+
+
+def test_rows_moved_is_job_telemetry_not_a_table_to_aggregate():
+    """The rows a transfer wrote live on the job, not in a table called yesterday."""
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    planned = [n for n, _ in infer_tools_from_message("how many rows did we move yesterday")]
+    assert planned == ["list_jobs"]
+
+
+def test_passive_schedule_wording_asks_for_the_procedure():
+    """"How are pipelines scheduled" wants the steps, not the live cadence list."""
+    from src.ai.copilot.dialogue_acts import is_schedule_health_question
+    from src.ai.copilot.tools import infer_tools_from_message
+    from src.ai.rag.query_analysis import classify_ask
+
+    assert classify_ask("how are pipelines scheduled") == "procedure"
+    assert not is_schedule_health_question("how are pipelines scheduled")
+    assert [n for n, _ in infer_tools_from_message("how are pipelines scheduled")] == [
+        "explain_product"
+    ]
+    # Health wording still reaches the live list.
+    assert is_schedule_health_question("are my pipelines running")
+    assert "list_schedules" in [
+        n for n, _ in infer_tools_from_message("are my pipelines running")
+    ]
+
+
+def test_a_stative_participle_is_not_a_procedure():
+    """"How are arrays supported" wants type fidelity, not a wizard step."""
+    from src.ai.rag.query_analysis import classify_ask
+
+    assert classify_ask("how are arrays supported on mysql") != "procedure"
+    assert classify_ask("how are jobs different from pipelines") != "procedure"
+
+
+def test_a_health_word_in_a_how_to_is_not_a_bucket_filter():
+    """A bucket is a subset of the saved list, not documentation vocabulary."""
+    from src.ai.copilot.tools import connector_health_filter, infer_tools_from_message
+
+    assert connector_health_filter("which of my connectors are broken") == "failed"
+    assert connector_health_filter("list failed connectors") == "failed"
+    assert connector_health_filter("which connectors are healthy") == "passed"
+    # Singular, and a diagnosis: the documented preflight answer must survive.
+    assert connector_health_filter(
+        "my connector test passed but the transfer failed, why"
+    ) == "any"
+    assert connector_health_filter("how do I fix a broken connector") == "any"
+    assert connector_health_filter("what happens when a connector test fails") == "any"
+    assert connector_health_filter(
+        "is a green test on connectors enough to skip validation"
+    ) == "any"
+    # The bucket read answers on its own — no Connectors page tour in front.
+    assert [
+        n for n, _ in infer_tools_from_message("which of my connectors are broken")
+    ] == ["list_connectors"]
+
+
+def test_a_named_dataset_outranks_the_documentation():
+    """"Tell me about the employees dataset" is a profile, not the Lineage card."""
+    from src.ai.copilot.tools import dataset_subject, infer_tools_from_message
+
+    assert dataset_subject("tell me about the employees dataset") == "employees"
+    assert dataset_subject("what is in the orders csv") == "orders"
+    assert dataset_subject("analyze my HR upload") == "HR"
+    # Vocabulary overlap is not a subject.
+    assert dataset_subject("how does Datawrap mask employee PII") is None
+    assert dataset_subject("analyze that") is None
+    assert dataset_subject("what are the preflight gates") is None
+
+    planned = [n for n, _ in infer_tools_from_message("tell me about the employees dataset")]
+    assert planned == ["analyze_dataset"]
+
+
+def test_a_pasted_connector_row_routes_against_the_named_connector():
+    """Operators paste our own bullet back, bold and arrow included.
+
+    ``Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there`` was
+    answered with "that is outside what the Datawrap documentation covers",
+    which hid the real reason: no connector by that name is saved.
+    """
+    from src.ai.copilot.tools import infer_tools_from_message, split_pasted_connector_row
+
+    assert split_pasted_connector_row(
+        "Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there"
+    ) == ("Snowflake_venky", "how many tables there")
+    assert split_pasted_connector_row(
+        "• **Demo Orders** (sqlite) → /data/demo.db list the tables"
+    ) == ("Demo Orders", "list the tables")
+    # A row with no trailing question is just a row.
+    assert split_pasted_connector_row("Snowflake_venky (snowflake) → EMPLOYEE_DB") == ("", "")
+    # The parenthetical has to be a real driver, or the shape is a coincidence.
+    assert split_pasted_connector_row(
+        "Ghost Thing (notadriver) → X what is upsert"
+    ) == ("", "")
+
+    planned = [
+        n
+        for n, _ in infer_tools_from_message(
+            "• **Snowflake_venky** (snowflake) → EMPLOYEE_DB how many tables there"
+        )
+    ]
+    assert "list_connector_objects" in planned
+    assert "explain_product" not in planned

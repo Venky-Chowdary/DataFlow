@@ -2836,6 +2836,11 @@ def _wants_documentation_companion(message: str) -> bool:
         return False
     if _looks_like_live_data_fetch(lower):
         return False
+    # A named connection-test bucket is a live-state read: "which of my
+    # connectors are broken" is answered by the bucket itself, and the
+    # Connectors page tour in front of it buries the list that was asked for.
+    if connector_health_filter(lower) != "any":
+        return False
     if not _INTERROGATIVE.search(lower):
         return False
     if classify_ask(message) == "other" and not _looks_like_product_howto(lower):
@@ -2859,6 +2864,10 @@ def _has_explicit_workspace_subject(lower: str) -> bool:
     if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
         return True
     if re.search(r"\bmapping assurance\b", lower):
+        return True
+    # "which of my connectors are broken" names a live connection-test bucket.
+    # That is workspace state, so the Connectors page tour must not lead it.
+    if connector_health_filter(lower) != "any":
         return True
     return False
 
@@ -2992,6 +3001,46 @@ _CONNECTOR_HEALTH = (
 )
 
 
+# Datawrap's own inventory nouns, and the tool that reads each. Warehouse nouns
+# (tables, rows, columns) are deliberately absent: counting those is a live read
+# on a named connector, not a platform count.
+_WORKSPACE_INVENTORY_TOOLS: tuple[tuple[re.Pattern[str], tuple[str, dict]], ...] = (
+    (
+        re.compile(r"\b(?:schedules?|pipelines?|cadences?)\b", re.I),
+        ("list_schedules", {"limit": 20}),
+    ),
+    (
+        re.compile(r"\b(?:connectors?|connections?)\b", re.I),
+        ("list_connectors", {}),
+    ),
+    (
+        re.compile(r"\b(?:jobs?|transfers?|runs?)\b", re.I),
+        ("list_jobs", {"limit": 10}),
+    ),
+    (
+        re.compile(r"\b(?:datasets?|uploads?)\b", re.I),
+        ("list_datasets", {}),
+    ),
+)
+
+# Only possessive framings. "How many connectors do you support" and "how many
+# connectors are there" ask about the catalog and belong to the documentation;
+# "how many do I have" asks about this workspace.
+_WORKSPACE_COUNT_ASK = re.compile(
+    r"\bhow\s+many\s+[\w \-]{0,40}?\b(?:do|does|did)\s+(?:i|we|you)\s+have\b"
+    r"|\bhow\s+many\s+(?:of\s+)?(?:my|our)\b"
+    r"|\b(?:number|count|total)\s+of\s+(?:my|our)\b",
+    re.I,
+)
+
+
+def _asks_to_count_workspace_objects(lower: str) -> bool:
+    """A count of the operator's own inventory, not of warehouse rows."""
+    if re.search(r"\bon\s+[a-z0-9]", lower):
+        return False
+    return bool(_WORKSPACE_COUNT_ASK.search(lower))
+
+
 def _saved_connector_exists(name: str) -> bool:
     """Whether ``name`` matches a saved connector — never a guess from wording."""
     want = (name or "").strip().lower()
@@ -3009,6 +3058,19 @@ def _saved_connector_exists(name: str) -> bool:
     return False
 
 
+# A health word inside a how-to or consequence frame is documentation vocabulary,
+# not a filter: "how do I fix a broken connector" and "what happens when a
+# connector test fails" are answered from Help, not from the failed bucket.
+_HEALTH_WORD_IS_DOCUMENTATION = re.compile(
+    r"\bhow\s+(?:do|can|to|should|would)\b"
+    r"|\bwhat\s+happens\b|\bwhat\s+if\b|\bwhat\s+does\b"
+    r"|\bwhy\s+(?:does|do|is|are)\s+(?:a|an|the)\b"
+    r"|\bmeans?\b|\bmeaning\b|\bshould\s+i\b"
+    r"|\benough\s+to\b|\bskip\b|\bdefinition\b",
+    re.I,
+)
+
+
 def connector_health_filter(message: str) -> str:
     """Which connection-test bucket the operator asked for, or ``any``.
 
@@ -3016,7 +3078,12 @@ def connector_health_filter(message: str) -> str:
     connectors for "the passed connectors" reads like every one is green.
     """
     text = (message or "").strip()
-    if not text or not re.search(r"\bconnector|\bconnection", text, re.I):
+    # Plural on purpose: a bucket is a subset of the saved list. "my connector
+    # test passed but the transfer failed, why" is one connector and a
+    # diagnosis, and filtering the list is not what it asked for.
+    if not text or not re.search(r"\b(?:connectors|connections)\b", text, re.I):
+        return "any"
+    if _HEALTH_WORD_IS_DOCUMENTATION.search(text):
         return "any"
     for pattern, bucket in _CONNECTOR_HEALTH:
         if pattern.search(text):
@@ -3027,8 +3094,12 @@ def connector_health_filter(message: str) -> str:
 # A pasted inventory row: ``Snowflake_venky (snowflake) → EMPLOYEE_DB``.
 # Operators paste our own bullet back with a question glued on the end.
 _PASTED_CONNECTOR_ROW = re.compile(
-    r"^\s*(?:[•*-]\s*)?"
+    # Operators paste back exactly what Pilot printed, bullet and bold included:
+    # ``• **Demo Orders** (sqlite) → /data/demo.db list the tables``.
+    r"^\s*(?:[•·*\u2013\u2014-]\s+)?"
+    r"(?:\*\*|__|`)?\s*"
     r"(?P<name>[A-Za-z][A-Za-z0-9_. -]{0,79}?)\s*"
+    r"(?:\*\*|__|`)?\s*"
     r"\(\s*(?P<engine>[a-z0-9_]{2,24})\s*\)\s*"
     r"(?:→|->|=>)?\s*"
     r"(?P<db>[A-Za-z0-9_./-]*)\s*"
@@ -3037,11 +3108,27 @@ _PASTED_CONNECTOR_ROW = re.compile(
 )
 
 
+def _is_known_driver_type(engine: str) -> bool:
+    """Whether the parenthesised engine is a real driver — from the catalog."""
+    want = (engine or "").strip().lower()
+    if not want:
+        return False
+    try:
+        from services.catalog_service import catalog_summary
+
+        types = catalog_summary().get("unique_driver_types") or ()
+        return want in {str(t).strip().lower() for t in types}
+    except Exception:
+        return False
+
+
 def split_pasted_connector_row(message: str) -> tuple[str, str]:
     """Split a pasted connector row into (connector_name, remaining question).
 
     ``Snowflake_venky (snowflake) → EMPLOYEE_DB how many tables there`` must
     become a live table read on that connector — not a documentation refuse.
+    The parenthesised engine is what makes the shape unambiguous, so it is
+    checked against the catalog's own driver types rather than assumed.
     """
     match = _PASTED_CONNECTOR_ROW.match((message or "").strip())
     if not match:
@@ -3049,6 +3136,8 @@ def split_pasted_connector_row(message: str) -> tuple[str, str]:
     name = _clean_connector_phrase(match.group("name") or "")
     rest = (match.group("rest") or "").strip()
     if not name or not rest:
+        return "", ""
+    if not _is_known_driver_type(match.group("engine") or ""):
         return "", ""
     return name, rest
 
@@ -4151,10 +4240,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     # An operator pasting our own connector bullet back is naming that
     # connector. Resolve it, then route the question they glued on.
+    # An operator pasting a row whose name is *not* saved still deserves the
+    # not-found recovery ("no connector matched X; saved connectors are …")
+    # rather than a documentation refuse that hides the real reason.
     pasted_name, pasted_rest = split_pasted_connector_row(message)
-    if pasted_name and _saved_connector_exists(pasted_name):
+    if pasted_name:
         inner = infer_tools_from_message(f"{pasted_rest} on {pasted_name}")
-        if inner:
+        if inner and (
+            _saved_connector_exists(pasted_name)
+            or any(n in _NAMED_OBJECT_LOOKUP_TOOLS for n, _ in inner)
+        ):
             return inner
 
     from .dialogue_acts import (
@@ -4595,7 +4690,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     _platform_job_inventory = bool(
         re.search(
             r"\b(?:how many\s+jobs|jobs?\s+(?:that\s+)?failed|failed\s+jobs|job\s+failures|"
-            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b",
+            r"failed\s+transfers|how many\s+transfers\s+failed|jobs?\s+that\s+failed)\b"
+            # Rows *moved* is job telemetry, not a table to aggregate. Without
+            # this, "how many rows did we move yesterday" hunted for a saved
+            # connector named "we move yesterday".
+            r"|\bhow\s+many\s+rows?\s+(?:did|have|has)\s+(?:we|i|you|it)\s+"
+            r"(?:moved?|transferr?ed?|synced?|loaded?|copied|copy|written|wrote)\b",
             lower,
         )
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
@@ -4626,6 +4726,22 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             (n, a) for n, a in planned
             if not (n == "navigate" and (a or {}).get("screen") == "jobs")
         ]
+
+    # "How many X do I have" is a read of the operator's own workspace for
+    # every inventory noun, not only the two that had hand-written branches.
+    # "how many schedules do i have" fell through to the documentation and
+    # answered a count with the CDC-delete-drops-the-slot passage.
+    if _asks_to_count_workspace_objects(lower):
+        for pattern, tool in _WORKSPACE_INVENTORY_TOOLS:
+            if pattern.search(lower):
+                planned.append(tool)
+                planned = [
+                    (n, a) for n, a in planned
+                    if n != "explain_product"
+                    and not (n == "aggregate_data")
+                    and not (n == "navigate")
+                ]
+                break
 
     _platform_connector_inventory = bool(
         re.search(r"\b(?:how many\s+connectors|connector\s+count)\b", lower)

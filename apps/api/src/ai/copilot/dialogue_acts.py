@@ -153,7 +153,15 @@ _ROUTE_PLAN_CAPABILITY = re.compile(
 
 _HOW_TO_OR_DELETE_SCHEDULE = re.compile(
     r"\b(?:how\s+(?:do|can|to)|what\s+happens|delete|drop|export|yaml|gitops|"
-    r"cdc\s+schedule)\b",
+    r"cdc\s+schedule"
+    # Passive voice asks for the procedure: "how are pipelines scheduled" wants
+    # the create-a-pipeline steps, while "how are my pipelines running" is still
+    # health. The participle is what separates them.
+    r"|how\s+(?:is|are|was|were)\s+(?:a\s+|an\s+|the\s+|my\s+|our\s+)?"
+    r"(?:schedules?|pipelines?)\s+"
+    r"(?:scheduled|created|defined|configured|set\s*up|setup|exported|"
+    r"triggered|built|written|versioned)"
+    r")\b",
     re.I,
 )
 
