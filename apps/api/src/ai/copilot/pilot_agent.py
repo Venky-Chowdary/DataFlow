@@ -880,6 +880,22 @@ class DataPilotAgent:
         history: list[dict] | None = None,
         data_context: dict | None = None,
     ) -> CopilotResponse:
+        """Answer one turn, honouring a length instruction the turn carried."""
+        response = self._chat(message, history, data_context)
+        from .dialogue_acts import wants_brief_answer
+
+        if response and response.answer and wants_brief_answer(message):
+            from .conversation_composer import condense_to_lead
+
+            response.answer = condense_to_lead(response.answer)
+        return response
+
+    def _chat(
+        self,
+        message: str,
+        history: list[dict] | None = None,
+        data_context: dict | None = None,
+    ) -> CopilotResponse:
         message = message.strip()
         lower_msg = message.lower()
         history = history or []
@@ -2984,7 +3000,29 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• **{c['name']}** ({badge}) — {c.get('description', '')[:60]}")
                 parts.append("\n".join(lines))
             elif tr.name == "describe_pilot" and tr.success:
+                from .tools import asks_about_pilot_limits
+
                 o = tr.output or {}
+                cannot = o.get("cannot_yet") or []
+                # "what can't you do" is the same card read from the other end.
+                # Leading with the capability list answered the opposite question.
+                if asks_about_pilot_limits(message) and cannot:
+                    lines = [
+                        "Straight answer — here is what I will **not** do from "
+                        "chat, so you never have to find out the hard way:"
+                    ]
+                    for item in cannot[:6]:
+                        lines.append(f"• {item}")
+                    lines.append(
+                        "I also never invent a warehouse fact, and I never run a "
+                        "changing action without your Confirm."
+                    )
+                    if o.get("can"):
+                        lines.append(
+                            "Ask *what can you do* for the other side of the list."
+                        )
+                    parts.append("\n".join(lines))
+                    continue
                 lines = [
                     "I'm **Datawrap Pilot**. I speak on this host with Datawrap's "
                     "own attention+copy GRU over retrieved evidence and live "
@@ -2996,7 +3034,6 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 ]
                 for item in (o.get("can") or [])[:8]:
                     lines.append(f"• {item}")
-                cannot = o.get("cannot_yet") or []
                 if cannot:
                     lines.append("**Not yet from chat:**")
                     for item in cannot[:3]:

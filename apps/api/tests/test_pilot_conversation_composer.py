@@ -1661,3 +1661,139 @@ def test_a_relative_that_is_not_a_pointer_at_the_previous_turn():
     assert resolve_platform_coreference("which of those failed", None) == [
         ("list_jobs", {"limit": 10})
     ]
+
+
+def test_a_length_instruction_is_obeyed():
+    """"in one sentence, what is append mode" was answered with three paragraphs,
+    which reads as though the instruction was not heard.
+    """
+    from src.ai.copilot.conversation_composer import condense_to_lead
+    from src.ai.copilot.dialogue_acts import wants_brief_answer
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    assert wants_brief_answer("in one sentence, what is append mode")
+    assert wants_brief_answer("briefly, how many connectors do i have")
+    assert not wants_brief_answer("what is append mode")
+
+    long_answer = (
+        "**Append** adds source rows onto the destination. Use it for insert-only "
+        "feeds. Prefer upsert when you have a primary key.\n\nSource: Sync modes (Help)"
+    )
+    short = condense_to_lead(long_answer)
+    assert short.startswith("**Append** adds source rows onto the destination.")
+    assert "insert-only" not in short
+    # The citation survives — a short answer is the same answer, not a new one.
+    assert "Source: Sync modes (Help)" in short
+
+    agent = get_pilot_agent()
+    answered = agent.chat(
+        "in one sentence, what is append mode",
+        data_context={"pilot_session_id": "test-brevity"},
+    )
+    body = answered.answer.split("Source:")[0].strip()
+    assert body.count(".") <= 2, body
+
+
+def test_a_bold_word_mid_sentence_is_not_left_half_open():
+    """summarize_text stripped asterisks blindly, so "**Append** adds source rows"
+    came back as "Append** adds source rows".
+    """
+    import re
+
+    from src.ai.copilot.conversation_composer import summarize_text
+
+    out = summarize_text("**Append** adds source rows onto the destination.")
+    assert "**Append** adds" in out
+    # No closing marker left without its opener.
+    assert re.search(r"(?<!\*)\bAppend\*\*", out) is None
+
+
+def test_shorter_shortens_the_finding_not_the_recap():
+    """A second "shorter" summarized the summary, which produced two attribution
+    lines and two "Short version" prefixes.
+    """
+    from src.ai.copilot.conversation_composer import compose_history_turn
+    from src.ai.copilot.dialogue_acts import classify_dialogue_act
+
+    hist = [{"role": "user", "content": "what is append mode"}]
+    assert classify_dialogue_act("shorter", history=hist) == "summarize_last"
+    assert classify_dialogue_act("too long", history=hist) == "summarize_last"
+
+    history = [
+        {"role": "user", "content": "what is append mode"},
+        {
+            "role": "assistant",
+            "content": "**Append** adds source rows onto the destination. Use it "
+            "for insert-only feeds.",
+        },
+        {"role": "user", "content": "explain it like i'm new here"},
+        {
+            "role": "assistant",
+            "content": "_On your last ask — “what is append mode” —_\n\n"
+            "**Short version:** **Append** adds source rows onto the destination.",
+        },
+    ]
+    again = compose_history_turn(
+        "summarize_last", history=history, message="shorter", ctx={}
+    )
+    assert again.answer.count("Short version") == 1
+
+
+def test_a_missing_rows_complaint_gets_the_ledger_that_records_it():
+    """A long narrative about numbers looking off and rows going missing was
+    answered with a bare connector list.
+    """
+    from src.ai.copilot.dialogue_acts import (
+        classify_dialogue_act,
+        is_data_discrepancy_report,
+    )
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    complaint = (
+        "so i've got this thing where i set up a connector last week for the "
+        "finance team and now they say the numbers look off, i think maybe some "
+        "rows are missing, can you check what happened"
+    )
+    assert is_data_discrepancy_report(complaint)
+    assert is_data_discrepancy_report("the totals dont match between source and destination")
+    assert is_data_discrepancy_report("we are losing rows somewhere")
+    # Questions the documentation and the job tools already answer stay theirs.
+    for question in (
+        "how many rows got quarantined",
+        "where do rejected rows go",
+        "what happens if rows are missing",
+        "how do i find missing rows",
+    ):
+        assert not is_data_discrepancy_report(question), question
+    # A pasted run id is the handle the intake would ask for.
+    assert not is_data_discrepancy_report("job_abc123 lost rows")
+
+    assert classify_dialogue_act(complaint, history=[]) == "trouble_vague"
+    answered = get_pilot_agent().chat(
+        complaint, data_context={"pilot_session_id": "test-discrepancy"}
+    )
+    assert "quarantine" in answered.answer.lower()
+    assert "reconcile" in answered.answer.lower()
+    assert "job ID" in answered.answer
+
+
+def test_what_cant_you_do_answers_with_the_limits():
+    """The inverse of "what can you do" was refused as undocumented, which reads as
+    though the product cannot name its own limits.
+    """
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+    from src.ai.copilot.tools import _is_meta_pilot_question, asks_about_pilot_limits
+
+    for ask in ("what can't you do", "what cant you do", "what can you not do",
+                "what are your limits", "what cannot you do"):
+        assert _is_meta_pilot_question(ask), ask
+        assert asks_about_pilot_limits(ask), ask
+    assert not asks_about_pilot_limits("what can you do")
+
+    agent = get_pilot_agent()
+    limits = agent.chat("what can't you do", data_context={"pilot_session_id": "test-limits"})
+    assert "will **not** do" in limits.answer
+    assert "Delete connectors, jobs, or data" in limits.answer
+
+    can = agent.chat("what can you do", data_context={"pilot_session_id": "test-can"})
+    assert "**I can:**" in can.answer

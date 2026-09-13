@@ -2670,11 +2670,35 @@ _META_PILOT_PHRASES = (
     "can you help me move",
     "able to help me move",
     "tell me what you can",
+    "your limits",
+    "your limitations",
+    "what are you bad at",
 )
+
+# The inverse of "what can you do" is the same question about the same card, and
+# it reached retrieval and was refused as undocumented — which reads as though the
+# product cannot even name its own limits. A regex rather than phrases because the
+# typo normalizer rewrites ``can't`` to ``cannot`` before routing sees it, so both
+# spellings have to be reachable.
+_META_LIMITS_RE = re.compile(
+    r"\bwhat\s+(?:can|could|will|would|do|does)(?:\s*not|'?t)\s+you\b"
+    r"|\bwhat\s+can\s+you\s+not\b"
+    r"|\bwhat\s+(?:are|is)\s+your\s+"
+    r"(?:limits?|limitations?|boundaries|constraints|weaknesses)\b"
+    r"|\bwhat\s+are\s+you\s+(?:bad|not\s+good)\s+at\b",
+    re.I,
+)
+
+
+def asks_about_pilot_limits(message: str) -> bool:
+    """Whether a meta question is about what Pilot *cannot* do."""
+    return bool(_META_LIMITS_RE.search((message or "").strip()))
 
 
 def _is_meta_pilot_question(lower: str) -> bool:
     if any(p in lower for p in _META_PILOT_PHRASES):
+        return True
+    if _META_LIMITS_RE.search(lower):
         return True
     if lower.strip() in {"capabilities", "help", "about", "about you"}:
         return True

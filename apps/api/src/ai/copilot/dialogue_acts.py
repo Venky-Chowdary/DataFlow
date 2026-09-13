@@ -78,12 +78,35 @@ _SUMMARIZE_LAST = re.compile(
     r"^\s*(?:"
     r"summarize\s+(?:that|this|it|what\s+you\s+(?:just\s+)?said)|"
     r"(?:tl;?dr|tldr)|"
-    r"in\s+(?:a\s+)?(?:sentence|nutshell|few\s+words)|"
+    r"in\s+(?:a\s+|one\s+|1\s+)?(?:sentence|nutshell|few\s+words)|"
     r"short\s+version|"
+    # A bare "shorter" is the whole turn: it asks for the same answer, smaller.
+    # It reached no act at all and was refused as undocumented.
+    r"(?:much\s+)?shorter|too\s+long|less\s+detail|"
+    r"(?:keep\s+it|make\s+it|be)\s+(?:brief|short|shorter|concise)|"
+    r"condense(?:\s+(?:that|it))?|"
     r"recap(?:\s+that)?"
     r")\s*[.!?]*\s*$",
     re.I,
 )
+
+# A length instruction wrapped around a real question: "in one sentence, what is
+# append mode" was answered with three paragraphs, which reads as though the
+# instruction was not heard. The question still routes normally; only the
+# composed answer is trimmed.
+_BREVITY_MODIFIER = re.compile(
+    r"\bin\s+(?:just\s+)?(?:one|1|a\s+single)\s+(?:sentence|line)\b"
+    r"|\bone[- ]sentence\b|\bone\s+line\b"
+    r"|\b(?:keep\s+it|make\s+it|be)\s+(?:brief|short|concise)\b"
+    r"|\bbriefly\b|\bshort\s+answer\b|\bin\s+short\b"
+    r"|\bjust\s+the\s+(?:gist|headline|summary)\b",
+    re.I,
+)
+
+
+def wants_brief_answer(message: str) -> bool:
+    """Whether the turn asked for its answer short, on top of asking something."""
+    return bool(_BREVITY_MODIFIER.search((message or "").strip()))
 
 _EXPLAIN_SIMPLER = re.compile(
     r"\b(?:"
@@ -212,6 +235,57 @@ def is_vague_trouble_report(message: str) -> bool:
     if not text or _WORKSPACE_MARKERS.search(text):
         return False
     return any(p.match(text) for p in _VAGUE_TROUBLE_PATTERNS)
+
+
+# The other complaint an operator brings: the numbers are wrong, or rows are
+# missing. It mentions workspace nouns without naming an object, so the vague
+# check above rules it out, and retrieval then answered a long narrative with a
+# connector list. What it needs is the quarantine and reconcile evidence.
+_DISCREPANCY = re.compile(
+    r"\b(?:numbers?|counts?|totals?|figures?|amounts?|values?|data|rows?|records?)\b"
+    r"[^.?!]{0,40}?"
+    r"\b(?:look|looks|looked|seem|seems|seemed|are|is|were|was|feel|feels)\b"
+    r"\s*(?:a\s+bit\s+|kind\s+of\s+|really\s+|very\s+|all\s+)?"
+    r"\b(?:off|wrong|weird|odd|bad|different|incorrect|missing|short)\b"
+    r"|\b(?:rows?|records?|data)\s+(?:are\s+|is\s+|went\s+|got\s+|have\s+)?"
+    r"(?:missing|lost|dropped|disappeared|gone|vanished)\b"
+    r"|\b(?:missing|lost|dropped|losing)\s+"
+    r"(?:some\s+|a\s+few\s+|a\s+couple\s+of\s+)?(?:rows?|records?|data)\b"
+    r"|\bdoesn'?t\s+match\b|\bdo\s*n[o']?t\s+match\b|\bout\s+of\s+sync\b"
+    r"|\bnot\s+adding\s+up\b|\bdon'?t\s+add\s+up\b",
+    re.I,
+)
+
+# The same words inside a how-to, a consequence or a count frame are a question
+# the documentation and the job tools already answer well.
+_DISCREPANCY_IS_A_QUESTION = re.compile(
+    r"\bhow\s+(?:do|does|can|to|should|would|many|much)\b"
+    r"|\bwhat\s+happens\b|\bwhat\s+if\b|\bwhat\s+does\b"
+    r"|\bwhy\s+(?:does|do|is|are)\s+(?:a|an|the)\b"
+    r"|\bwhere\s+do\b|\bmeans?\b|\bdefinition\b",
+    re.I,
+)
+
+
+def is_data_discrepancy_report(message: str) -> bool:
+    """A complaint that rows or numbers are wrong, with no run or table named."""
+    text = (message or "").strip()
+    if not text or _DISCREPANCY_IS_A_QUESTION.search(text):
+        return False
+    if not _DISCREPANCY.search(text):
+        return False
+    # A pasted run id is the handle the intake would ask for, so the job tools
+    # own that turn instead.
+    if re.search(r"\b(?:job|pf|run|pipeline)_[A-Za-z0-9]{2,}\b", text, re.I):
+        return False
+    try:
+        from ..rag.evidence import names_identifier
+
+        if names_identifier(text):
+            return False
+    except Exception:
+        pass
+    return True
 
 
 _RECALL_ASK = re.compile(
@@ -357,7 +431,7 @@ def classify_dialogue_act(message: str, *, history: list[dict] | None = None) ->
 
         if repair_correction(text) == "":
             return "repair_unclear"
-    if is_vague_trouble_report(text):
+    if is_vague_trouble_report(text) or is_data_discrepancy_report(text):
         return "trouble_vague"
     if _SUMMARIZE_LAST.match(text) and history:
         return "summarize_last"

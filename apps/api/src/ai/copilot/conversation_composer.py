@@ -181,17 +181,36 @@ def compose_recall_ask(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def compose_trouble_intake(ctx: dict[str, Any] | None = None) -> str:
+def compose_trouble_intake(
+    ctx: dict[str, Any] | None = None,
+    *,
+    discrepancy: bool = False,
+) -> str:
     """Take a vague complaint and name the four handles that make it readable.
 
     "this is broken" was answered "That is outside what the Datawrap
     documentation covers", which is true and useless — the operator has a problem
     and the reply says nothing about how to hand it over.
+
+    ``discrepancy`` is for the different complaint that rows or numbers are wrong:
+    the handles are the same, but row loss has one named owner in this product —
+    the quarantine ledger and the reconcile checksum — and saying so is the whole
+    difference between a triage prompt and an answer.
     """
     ctx = ctx or {}
-    lines = [
+    lines: list[str] = []
+    if discrepancy:
+        lines.append(
+            "Rows that go missing are not silent here: bad rows land in "
+            "**quarantine** and the run's **reconcile** checksum compares source "
+            "and destination counts, so the gap has a record. Point me at the run "
+            "and I'll read both."
+        )
+    lines.append(
         "Let's find it. I can read the evidence directly — give me any one of "
-        "these and I'll open the finding:",
+        "these and I'll open the finding:"
+    )
+    lines += [
         "• a **job ID** or preflight run ID (`job_…` / `pf_…`) and I'll read its "
         "gates, quarantine and reconcile result",
         "• a **connector name** and I'll re-test it and list its tables",
@@ -401,10 +420,46 @@ _STEP_HEADING = re.compile(
 )
 
 
+def _unwrap_bold(piece: str) -> str:
+    """Drop bold markers that wrap the whole span; leave inline bold alone."""
+    text = (piece or "").strip()
+    if text.startswith("**") and text.endswith("**") and text.count("**") == 2:
+        return text[2:-2].strip()
+    return text
+
+
+def condense_to_lead(text: str, *, max_sentences: int = 1) -> str:
+    """The first sentence(s) of a composed answer, keeping its Source line.
+
+    "in one sentence, what is append mode" was answered with three paragraphs.
+    Trimming here rather than at each composer keeps every answer's evidence and
+    citation intact — a short answer is the same answer, not a different one.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return raw
+    keep = max(1, int(max_sentences))
+    parts = _summary_sentences(raw, max_sentences=max(12, keep))
+    if not parts:
+        return raw
+    lead = " ".join(parts[:keep]).strip()
+    tail = [
+        line.strip()
+        for line in raw.splitlines()
+        if line.strip().startswith("Source:")
+    ]
+    if not tail:
+        return lead
+    return f"{lead}\n\n{tail[0]}"
+
+
 def _strip_markdown_decor(text: str) -> str:
+    # Order matters: the attribution line comes first in a recap, so stripping the
+    # "Short version" prefix before it left the prefix in place and a second
+    # "shorter" produced "**Short version:** **Short version:** …".
     t = (text or "").strip()
-    t = re.sub(r"^\*\*Short version:\*\*\s*", "", t)
     t = re.sub(r"^_On your last ask[^\n]*\n+", "", t)
+    t = re.sub(r"^\*\*Short version:\*\*\s*", "", t)
     return t.strip()
 
 
@@ -438,7 +493,11 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             if after:
                 line = after
         for piece in _SENTENCE_SPLIT.split(line):
-            piece = piece.strip().strip("*")
+            # Only a *balanced* wrap is decoration. Stripping asterisks blindly
+            # turned "**Append** adds source rows" into "Append** adds source
+            # rows" — the closing marker of a bold word mid-sentence has no
+            # opener left to match it.
+            piece = _unwrap_bold(piece.strip())
             if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
                 continue
             if piece.endswith(":"):
@@ -566,6 +625,25 @@ def weave_tool_answer(message: str, parts: list[str], *, act: DialogueAct) -> st
     return body
 
 
+#: A recap of an answer is not itself an answer, so it is never the thing a
+#: second "shorter" is asking about.
+_IS_RECAP = re.compile(r"^\s*(?:_On your last ask|\*\*Short version:\*\*)", re.I)
+
+
+def _last_substantive_answer(history: list[dict] | None) -> str:
+    from .dialogue_acts import turn_text
+
+    for item in reversed(history or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").lower() != "assistant":
+            continue
+        text = turn_text(item)
+        if text and not _IS_RECAP.match(text):
+            return text
+    return ""
+
+
 def compose_history_turn(
     act: DialogueAct,
     *,
@@ -576,10 +654,13 @@ def compose_history_turn(
 ) -> CopilotResponse:
     last = last_assistant_text(history)
     if act == "summarize_last":
-        answer = summarize_text(last)
+        # "shorter" after "explain it simply" must shorten the *finding*, not the
+        # recap of it — summarizing a summary rewords a reworded answer and adds
+        # a second attribution line.
+        answer = summarize_text(_last_substantive_answer(history) or last)
         intent = "analytics_help"
     elif act == "explain_simpler":
-        answer = explain_simpler(last)
+        answer = explain_simpler(_last_substantive_answer(history) or last)
         intent = "product_help"
     elif act == "next_action":
         answer = compose_next_action(
@@ -594,7 +675,11 @@ def compose_history_turn(
         answer = compose_repair_prompt(history)
         intent = "troubleshooting"
     elif act == "trouble_vague":
-        answer = compose_trouble_intake(ctx)
+        from .dialogue_acts import is_data_discrepancy_report
+
+        answer = compose_trouble_intake(
+            ctx, discrepancy=is_data_discrepancy_report(message)
+        )
         intent = "troubleshooting"
     elif act == "thanks":
         answer = compose_thanks()
