@@ -554,11 +554,12 @@ MODEL_CAPABILITY_MATRIX = [
             "mapping_assignment",
         ],
         "best_for": (
-            "Primary Datawrap Pilot chatbot — first-party copy-grounded generator "
-            "(dual encoder + pointer-generator) then NL→tools→compose for "
-            "aggregates, schema, transfers-with-Confirm, jobs, product how-tos. "
-            "Not a foundation model. OpenAI/Anthropic/Ollama are optional polish "
-            "add-ons (engine=hybrid only)."
+            "Primary Datawrap Pilot chatbot — first-party attention+copy generator "
+            "(GRU decoder, Luong attention, pointer-generator mix) in front of a "
+            "deterministic local tool loop: NL→tools→compose for aggregates, "
+            "schema, transfers-with-Confirm, jobs, and product how-tos. Not a "
+            "foundation model. OpenAI/Anthropic/Ollama only reword the answer "
+            "and only when an operator picks Hybrid or Cloud."
         ),
     },
 ]

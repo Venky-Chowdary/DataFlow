@@ -3458,8 +3458,49 @@ _NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
     "analyze_dataset",
 })
 
+_DATASET_NOUN = (
+    r"(?:data\s?sets?|datasets?|uploads?|files?|csvs?|"
+    r"spreadsheets?|extracts?|feeds?)"
+)
 
-def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
+# A dataset is the *subject* of "tell me about the employees dataset" and of
+# "analyze my HR upload". It is only vocabulary in "how does Datawrap mask
+# employee PII", which the fuzzy industry-word hint in
+# ``CopilotDataAnalyst.extract_dataset_hint`` cannot tell apart. Only a
+# syntactic subject may outrank the documentation.
+_DATASET_SUBJECT = re.compile(
+    r"\b(?:analy[sz]e|profile|preview|summari[sz]e)\s+"
+    r"(?:the\s+|my\s+|this\s+|our\s+)?"
+    r"(?P<verb_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{0,40}?)"
+    rf"(?:\s+{_DATASET_NOUN})?\s*[.?!]*$"
+    r"|"
+    r"\b(?:tell\s+me\s+(?:everything\s+)?about|what(?:'s|s| is)\s+in|"
+    r"describe|show\s+me)\s+(?:the\s+|my\s+|our\s+)?"
+    rf"(?P<about_name>[A-Za-z0-9_][A-Za-z0-9_\- ]{{0,40}}?)\s+{_DATASET_NOUN}\b",
+    re.I,
+)
+
+_DATASET_SUBJECT_STOPWORDS = frozenset({
+    "this", "that", "it", "my", "our", "the", "a", "an", "them", "these",
+    "those", "data", "everything", "something", "anything", "result",
+    "results", "here", "again", "more",
+})
+
+
+def dataset_subject(message: str) -> str | None:
+    """Name of the dataset the message is *about*, or None if it names none."""
+    match = _DATASET_SUBJECT.search((message or "").strip())
+    if not match:
+        return None
+    name = (match.group("verb_name") or match.group("about_name") or "").strip(" \"'")
+    if not name or name.lower() in _DATASET_SUBJECT_STOPWORDS:
+        return None
+    return name
+
+
+def prune_planned_tools(
+    planned: list[tuple[str, dict]], message: str = ""
+) -> list[tuple[str, dict]]:
     """Keep a coherent primary intent — don't stack conflicting tool dumps."""
     if not planned:
         return planned
@@ -3508,11 +3549,19 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     # generic advice tools beside it are redundant noise.
     # A product FAQ already answers from Help. Companion quality/dataset dumps
     # (156 hashed uploads next to "what are the preflight gates") are noise.
+    #
+    # The reverse is true when the operator named a dataset as the subject:
+    # "tell me about the employees dataset" is a profile request, and answering
+    # it with the Lineage help card is the noise. The dataset tool then keeps
+    # the turn and reports honestly when nothing by that name is indexed.
     if "explain_product" in names:
-        planned = [
-            (n, a) for n, a in planned
-            if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
-        ]
+        if dataset_subject(message) and names & {"analyze_dataset", "list_datasets"}:
+            planned = [(n, a) for n, a in planned if n != "explain_product"]
+        else:
+            planned = [
+                (n, a) for n, a in planned
+                if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+            ]
         names = {n for n, _ in planned}
     if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
@@ -5561,19 +5610,9 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         elif "analyze_dataset" not in [p[0] for p in planned]:
             # Named dataset that the index doesn't know yet — still invoke so
             # recovery can list indexed uploads instead of a dead-end reply.
-            # "tell me about the employees dataset" names a dataset as plainly
-            # as "analyze employees"; it must not become a Lineage doc dump.
-            m = re.search(
-                r"analyze\s+(?:the\s+)?(.+?)(?:\s+data(?:set)?)?\s*$",
-                lower,
-            ) or re.search(
-                r"(?:tell\s+me\s+(?:everything\s+)?about|what(?:'s| is)\s+in)\s+"
-                r"(?:the\s+|my\s+)?(.+?)\s+data(?:set|file)?\s*[.?!]*\s*$",
-                lower,
-            )
-            name = (m.group(1) if m else "").strip(" \"'")
-            if name and name not in {"this", "that", "it", "my", "the"}:
-                planned.append(("analyze_dataset", {"dataset_name": name}))
+            subject = dataset_subject(message)
+            if subject:
+                planned.append(("analyze_dataset", {"dataset_name": subject}))
 
     if _looks_like_product_howto(lower) and not _has_explicit_workspace_subject(lower):
         # Curated local FAQ — don't wipe stronger product/ops tools already planned.
@@ -5791,7 +5830,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             continue
         seen.add(key)
         unique.append((name, args))
-    return prune_planned_tools(unique)
+    return prune_planned_tools(unique, message)
 
 
 def format_tool_results_for_llm(results: list[ToolResult]) -> str:

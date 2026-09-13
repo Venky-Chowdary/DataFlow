@@ -1233,9 +1233,14 @@ def _catalog_count_section() -> GeneratedSection | None:
         # an operator uses — "how many connectors are live" otherwise found the
         # **Live** readiness label and the Connectors page tour, both of which
         # use the word about one connector rather than about the count.
+        # "Engines" is the other word operators use for the same number — "how
+        # many engines are transfer ready" otherwise opened on the section that
+        # counts sync modes, roles, engines and formats, and answered a
+        # transfer-readiness question with 9 engines instead of 46 drivers.
         f"{len(drivers)} connectors are live and transfer-ready: those are the "
-        f"unique drivers a transfer can actually run on today. The catalog shows "
-        f"{tiles} connector tiles in total, of which {planned} are planned.",
+        f"unique drivers and engines a transfer can actually run on today. The "
+        f"catalog shows {tiles} connector tiles in total, of which {planned} "
+        f"are planned.",
         "The two numbers are not interchangeable and the larger one is not a "
         "capability claim: tiles include hosted aliases of one driver and "
         "roadmap entries, so quoting the tile count as the number of connectors "
@@ -2282,12 +2287,12 @@ def _pilot_engine_section() -> GeneratedSection | None:
         doc_title="What Datawrap is",
         section_title="Does Pilot use ChatGPT or a third-party LLM",
         text=(
-            "Datawrap Pilot answers with its own local engine by default — "
-            "a first-party copy-grounded generator (dual encoder plus "
-            "pointer-generator) that restates documented evidence, not "
-            "ChatGPT or a third-party foundation model, and a third-party "
-            "LLM (OpenAI, Anthropic, or Ollama) never supplies transfer, "
-            "aggregate, or Confirm facts. "
+            "Datawrap Pilot answers with its own local engine by default — a "
+            "small first-party generative model we trained ourselves (GRU "
+            "decoder, attention, pointer-generator copy mix) that restates "
+            "documented evidence, not ChatGPT or a third-party foundation "
+            "model, and a third-party generative LLM (OpenAI, Anthropic, or "
+            "Ollama) never supplies transfer, aggregate, or Confirm facts. "
             "This is a data product: schemas, samples, credentials, and job "
             "evidence stay on-box unless an operator explicitly picks Hybrid "
             "or Cloud in Settings → AI, and saving a provider key does not "
