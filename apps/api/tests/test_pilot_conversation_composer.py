@@ -8,14 +8,23 @@ from __future__ import annotations
 
 from src.ai.copilot.conversation_composer import (
     compose_briefing,
+    compose_calendar,
+    compose_create_connection_capability,
     compose_general,
     compose_greeting,
     compose_history_turn,
     compose_next_action,
+    compose_route_plan_capability,
     explain_simpler,
     summarize_text,
 )
-from src.ai.copilot.dialogue_acts import classify_dialogue_act
+from src.ai.copilot.dialogue_acts import (
+    classify_dialogue_act,
+    is_calendar_question,
+    is_create_connection_capability_ask,
+    is_route_plan_capability_paste,
+    is_schedule_health_question,
+)
 from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 from src.ai.copilot.tools import TOOL_DEFINITIONS, infer_tools_from_message
 from src.ai.copilot.workspace_briefing import collect_workspace_briefing
@@ -72,9 +81,53 @@ def test_summarize_that_needs_history():
     assert classify_dialogue_act("what should I do next") == "next_action"
 
 
+def test_calendar_and_schedule_health_are_not_help_articles():
+    assert is_calendar_question("date today")
+    assert is_calendar_question("what is todays date")
+    assert is_calendar_question("what's today's date")
+    assert not is_calendar_question("what is a date column")
+    assert is_schedule_health_question("is schedules working")
+    assert is_schedule_health_question("why schedules are not working")
+    assert is_schedule_health_question("are my pipelines working?")
+    assert not is_schedule_health_question("what happens if I delete a CDC schedule")
+    assert not is_schedule_health_question("how do I schedule a transfer")
+    assert is_create_connection_capability_ask("can you create connection")
+    assert is_create_connection_capability_ask("can you create a connector")
+    assert not is_create_connection_capability_ask(
+        "create a postgres connector at db.acme.com"
+    )
+    assert is_route_plan_capability_paste(
+        "Plan source→destination routes and sync modes"
+    )
+
+
+def test_compose_calendar_speaks_utc_date_not_column_types():
+    text = compose_calendar({"connectors": [{"name": "A"}], "recent_jobs": []})
+    assert "UTC" in text
+    assert "DATE" not in text
+    assert "transform" not in text.lower()
+    assert "1" in text or "connector" in text.lower()
+
+
+def test_compose_create_connection_is_confirm_gated():
+    text = compose_create_connection_capability({
+        "connectors": [{"name": "SnowFlake"}, {"name": "MySQL"}],
+    })
+    assert "Confirm" in text
+    assert "SnowFlake" in text
+    assert "Click New connection" not in text
+
+
+def test_compose_route_plan_asks_for_named_connectors():
+    text = compose_route_plan_capability()
+    assert "source" in text.lower()
+    assert "Confirm" in text
+
+
 def test_compose_greeting_empty_workspace_does_not_invent_counts():
     text = compose_greeting({"connectors": [], "recent_jobs": []})
     assert "Datawrap Pilot" in text
+    assert "not a general chatbot" in text.lower()
     assert "0" not in text or "still empty" in text.lower() or "Start anywhere" in text
     # No fake inventory.
     assert "650" not in text
@@ -238,6 +291,29 @@ def test_infer_tools_briefing_and_general():
 
     names = [n for n, _ in infer_tools_from_message("what is the capital of France")]
     assert "search_knowledge" not in names
+
+    names = [n for n, _ in infer_tools_from_message("date today")]
+    assert "explain_product" not in names
+    assert names == []
+
+    names = [n for n, _ in infer_tools_from_message("what is todays date")]
+    assert "explain_product" not in names
+
+    names = [n for n, _ in infer_tools_from_message("is schedules working")]
+    assert "list_schedules" in names
+    assert "explain_product" not in names
+
+    names = [n for n, _ in infer_tools_from_message("why schedules are not working")]
+    assert "list_schedules" in names
+    assert "explain_product" not in names
+
+    names = [n for n, _ in infer_tools_from_message("can you create connection")]
+    assert "explain_product" not in names
+    assert "create_connector" not in names
+
+    names = [n for n, _ in infer_tools_from_message("what happens if I delete a CDC schedule")]
+    assert "explain_product" in names
+    assert "list_schedules" not in names
 
     # Definitional FAQ — Help, not hashed-upload inventory.
     names = [n for n, _ in infer_tools_from_message("what does quarantine mean")]

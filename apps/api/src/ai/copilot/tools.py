@@ -1391,10 +1391,10 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "First-party brain is Datawrap's own local Pilot engine "
-                    "(dual encoder + copy-grounded pointer-generator, then "
-                    "NL → tools → compose). OpenAI / Anthropic / Ollama stay "
-                    "opt-in polish — never required, never the source of transfer facts."
+                    "First-party attention+copy GRU on this host. Warehouse "
+                    "evidence stays on-box by default — OpenAI / Anthropic / "
+                    "Ollama are explicit Hybrid/Cloud opt-in only, never the "
+                    "default, because this is a data product."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "
@@ -1616,8 +1616,11 @@ class DataPilotTools:
                 (
                     "Datawrap Pilot's **own local engine** is the default brain — a "
                     "first-party copy-grounded generator (NL → tools → compose) "
-                    "with no OpenAI, Anthropic, or Ollama key. A third-party LLM is optional polish "
-                    "you turn on in Settings → AI; it never supplies transfer, aggregate, or Confirm facts."
+                    "with no OpenAI, Anthropic, or Ollama key. This is a data product: "
+                    "schemas and job evidence stay on-box. A third-party LLM is optional "
+                    "polish you turn on explicitly in Settings → AI (Hybrid or Cloud); "
+                    "saving a key does not send traffic. It never supplies transfer, "
+                    "aggregate, or Confirm facts."
                 ),
             ),
         ]
@@ -2567,6 +2570,7 @@ class DataPilotTools:
 _META_PILOT_PHRASES = (
     "what knowledge",
     "what do you know",
+    "what do you knows",
     "your knowledge",
     "what can you",
     "what do you do",
@@ -3967,7 +3971,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("describe_pilot", {}))
         return planned
 
-    from .dialogue_acts import classify_dialogue_act
+    from .dialogue_acts import (
+        classify_dialogue_act,
+        is_calendar_question,
+        is_create_connection_capability_ask,
+        is_route_plan_capability_paste,
+        is_schedule_health_question,
+    )
+
+    # Clock asks must not retrieve DATE-type / transform docs.
+    if is_calendar_question(message):
+        return []
+    if is_create_connection_capability_ask(message) or is_route_plan_capability_paste(message):
+        return []
 
     _act = classify_dialogue_act(message)
     # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
@@ -4170,7 +4186,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("create_connector", {"message": message}))
 
     # Pipelines / schedules
-    if any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")) or _asks_whether_any_exist(lower, "schedules?", "pipelines?"):
+    if is_schedule_health_question(message):
+        planned.append(("list_schedules", {"limit": 20}))
+        planned = [
+            (n, a) for n, a in planned
+            if n != "explain_product"
+            and not (n == "navigate" and (a or {}).get("screen") == "schedules")
+        ]
+    elif any(w in lower for w in ("list schedules", "list pipelines", "my pipelines", "my schedules", "show pipelines", "show schedules", "show my pipelines", "show my schedules")) or _asks_whether_any_exist(lower, "schedules?", "pipelines?"):
         planned.append(("list_schedules", {"limit": 20}))
         planned = [
             (n, a) for n, a in planned
@@ -5469,8 +5492,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         and not _looks_like_live_data_fetch(lower)
         and any(n in _KNOWLEDGE_TOOLS for n, _ in planned)
     ):
+        drop = set(_NAMED_OBJECT_LOOKUP_TOOLS)
+        if not is_schedule_health_question(message):
+            drop.add("list_schedules")
         planned = [
-            (n, a) for n, a in planned if n not in _NAMED_OBJECT_LOOKUP_TOOLS
+            (n, a) for n, a in planned if n not in drop
         ]
 
     # A stated transfer is the request; inventory/advice tools that merely share
@@ -5587,6 +5613,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         ]
         if not any(n == "explain_product" for n, _ in planned):
             planned.append(("explain_product", {"query": message[:240]}))
+
+    # Live schedule health is an inventory read. CDC-delete / GitOps docs
+    # must not steal "is schedules working".
+    if is_schedule_health_question(message):
+        planned = [(n, a) for n, a in planned if n != "explain_product"]
+        if not any(n == "list_schedules" for n, _ in planned):
+            planned.append(("list_schedules", {"limit": 20}))
 
     # A question about something this product documents must never leave here
     # with nothing planned. "What string type is created on postgres" named an

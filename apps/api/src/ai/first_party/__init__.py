@@ -10,10 +10,11 @@ already in production:
    product subject is introduced.
 3. Hybrid retrieve (BM25 + char 4-gram TF-IDF, RRF) + evidence policy.
 4. Extractive ``compose_answer``.
-5. Optional **pointer-generator narrate** — closed fluency prefix plus
-   a copy of the extractive draft. Discarded unless
-   ``keeps_draft_facts`` / ``retains_evidence`` / ``invented_claims``
-   all pass.
+5. Optional **first-party attention+copy GRU** over packed evidence
+   (Luong attention, pointer-generator mix). Discarded unless
+   ``invented_claims`` / dialogue grounding pass. Degenerate loops
+   fall back to the extractive draft. The pointer-generator prefix
+   still narrates product RAG.
 
 Why this architecture
 ---------------------
@@ -29,7 +30,9 @@ this.
 
 Honesty bar (do not regress)
 ----------------------------
-* Third-party providers stay **opt-in polish** in Settings → AI.
+* Third-party providers stay **explicit Hybrid/Cloud opt-in**. A saved
+  key does not send traffic. Default is on-box because this is a data
+  product (schemas, samples, credentials, job evidence).
 * CDC default remains **at-least-once upsert on ``_df_lsn``**.
 * dbt and SSH are **not** product capabilities. The claim gate refuses
   them unless the evidence already names them (it should not).
@@ -37,7 +40,7 @@ Honesty bar (do not regress)
 * No legal no-data-loss SLA. Bad rows are quarantined; the row ledger
   must close. Airbyte connector packs are not a runtime.
 
-Public serve API: ``semantic_rewrite``, ``narrate_answer``.
+Public serve API: ``semantic_rewrite``, ``narrate_answer``, ``speak_with_lm``.
 """
 
 from .engine import (
@@ -46,6 +49,7 @@ from .engine import (
     reset_model_cache,
     retrieve_bonus,
     semantic_rewrite,
+    speak_with_lm,
 )
 
 __all__ = [
@@ -54,4 +58,5 @@ __all__ = [
     "reset_model_cache",
     "retrieve_bonus",
     "semantic_rewrite",
+    "speak_with_lm",
 ]

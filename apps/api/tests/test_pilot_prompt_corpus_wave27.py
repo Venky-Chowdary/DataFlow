@@ -26,7 +26,10 @@ def test_local_engine_is_default_without_cloud():
     agent = DataPilotAgent()
     resp = agent.chat("what can you do?")
     assert resp.method == "pilot_local_engine"
-    assert "confirm" in (resp.answer or "").lower() or "transfer" in (resp.answer or "").lower()
+    answer = (resp.answer or "").lower()
+    assert "confirm" in answer or "transfer" in answer
+    assert "chatgpt" in answer or "foundation" in answer or "gru" in answer
+    assert "first-party brain" not in answer
     stats = corpus_stats()
     assert stats["total"] >= 1000, stats
     assert stats["by_family"].get("aggregate", 0) >= 100
