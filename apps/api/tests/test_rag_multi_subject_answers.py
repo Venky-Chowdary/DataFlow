@@ -110,3 +110,17 @@ def test_pause_wording_does_not_say_activate_turns_it_off() -> None:
     body = _answer("how do i pause a pipeline")
     assert "pause a saved pipeline from pipelines to turn it off" in body, body
     assert "activate turns it back on" in body, body
+
+
+def test_source_chips_are_only_the_sections_the_answer_cites() -> None:
+    """Browser QA: the PostgreSQL body was clean but the source chips still showed
+    the Aurora and Cloud SQL cards the composer had set aside."""
+    from src.ai.copilot.tools import get_pilot_tools
+
+    result = get_pilot_tools().execute(
+        "explain_product", {"query": "how do I connect a postgres database"}
+    )
+    assert result.success, result.error
+    titles = [str(s["title"]) for s in result.output["sources"]]
+    assert titles, result.output
+    assert all("Procedure: connect a PostgreSQL" in t for t in titles), titles

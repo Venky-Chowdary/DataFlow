@@ -2355,6 +2355,19 @@ def compose_product_answer(answer: ProductAnswer) -> str:
     return legacy
 
 
+def cited_sources(answer: ProductAnswer, spoken: str) -> list[dict[str, object]]:
+    """The retrieved sources the spoken answer actually cites.
+
+    Retrieval returns every passage the ranker considered; the composer then
+    selects from them and may set whole passages aside. Showing the set-aside
+    ones as source chips re-attached the Aurora and Cloud SQL cards to a
+    PostgreSQL procedure whose text no longer used them. When the spoken form
+    names no citation at all (a legacy or narrated answer) every hit stays.
+    """
+    cited = [hit.as_source() for hit in answer.hits if hit.chunk.citation in spoken]
+    return cited or answer.sources
+
+
 def product_doc_documents() -> tuple[list[str], list[dict], list[str]]:
     """Help sections as vector-store documents so semantic search can reach them too."""
     texts: list[str] = []

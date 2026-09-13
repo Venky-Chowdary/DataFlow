@@ -11,6 +11,7 @@ from typing import Any, Callable
 from services.value_serializer import json_default
 
 from ..rag.product_docs import (
+    cited_sources,
     compose_product_answer,
     names_product_subject,
     product_doc_search,
@@ -1831,7 +1832,7 @@ class DataPilotTools:
                     # No navigate action: the citations below are the control that
                     # opens the article, and a second one only competes with them.
                     "actions": [],
-                    "sources": retrieved.sources,
+                    "sources": cited_sources(retrieved, documented),
                     "grounded": True,
                     "source": "product_documentation",
                     # A partial answer is reported as partial so the caller can
@@ -1891,12 +1892,13 @@ class DataPilotTools:
         # not trace back to any page, so a documented answer looked like a guess.
         retrieved = retrieve_product_answer(query, limit=4)
         if retrieved.answerable:
+            spoken = compose_product_answer(retrieved)
             return ToolResult(
                 name="search_knowledge",
                 success=True,
                 output={
                     "query": query,
-                    "answer": compose_product_answer(retrieved),
+                    "answer": spoken,
                     "hits": [
                         {
                             "text": hit.chunk.text[:600],
@@ -1908,7 +1910,7 @@ class DataPilotTools:
                     ],
                     "count": len(retrieved.hits),
                     "empty": False,
-                    "sources": retrieved.sources,
+                    "sources": cited_sources(retrieved, spoken),
                     "grounded": True,
                     "source": "product_documentation",
                     "coverage": retrieved.verdict.outcome,
