@@ -1295,6 +1295,11 @@ def focus_from_tool_output(name: str, output: dict[str, Any]) -> dict[str, Any]:
         update = {k: v for k, v in update.items() if v not in ("", None, [])}
         update.update(authoritative)
         return update
+    if name == "rank_connector_tables":
+        # The direction is part of the subject here: "the other way round" has to
+        # know which way the last ranking went.
+        update["descending"] = str(output.get("order") or "desc").lower() != "asc"
+        return {k: v for k, v in update.items() if v not in ("", None, [])}
     if name in ("sample_connector_object", "introspect_connector_schema"):
         cols = output.get("columns") or []
         names: list[str] = []
@@ -1368,3 +1373,172 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             candidates=listed,
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Consent and abandonment of the last proposal
+# ---------------------------------------------------------------------------
+#
+# A plan is a rehearsal and a stage is an ack in the ledger. Both were forgotten
+# the instant the turn ended, so the two turns operators always type next —
+# "run it" and "actually cancel that" — were parsed from scratch, matched no
+# tool, and were answered with a documentation refusal or an unrelated job list.
+
+#: "run it", "go ahead and run it", "yes start it". Deliberately narrow: the verb
+#: has to be about executing, or the whole turn has to be bare consent, so
+#: "run a query on orders" is never swallowed as consent for a stale plan.
+_CONSENT_RE = re.compile(
+    r"^(?:(?:yes|yeah|yep|ok|okay|sure|please|pls)[,\s]+)*"
+    r"(?:(?:go\s+ahead|proceed)(?:\s+and)?\s*)?"
+    r"(?:(?:now|then)\s+)?"
+    r"(?:run|start|execute|do|kick\s+off|fire|ship|send|launch|apply)"
+    r"(?:\s+(?:it|this|that|them|the\s+(?:plan|transfer|route|job|sync)))?"
+    r"\s*[.!]*$",
+    re.I,
+)
+
+#: Bare consent with no verb at all — "go ahead", "yes please", "sounds good".
+_BARE_CONSENT = frozenset({
+    "go ahead", "go ahead please", "proceed", "yes", "yes please", "yep", "yeah",
+    "ok", "okay", "sure", "do it", "do it please", "sounds good", "lets do it",
+    "let's do it", "confirmed", "approve", "approved", "ship it",
+})
+
+#: "actually cancel that", "never mind", "forget it", "undo that", "stop".
+_ABANDON_RE = re.compile(
+    r"^(?:(?:actually|wait|hold\s+on|no|hmm|hm)[,\s]+)*"
+    r"(?:(?:i\s+)?(?:changed\s+my\s+mind|don'?t\s+(?:do|run|schedule)\s+(?:it|that|this))|"
+    r"cancel(?:\s+(?:it|that|this|the\s+\w+))?|"
+    r"never\s*mind|nevermind|forget\s+(?:it|that|about\s+it)|"
+    r"undo(?:\s+(?:it|that|this))?|discard(?:\s+(?:it|that|this))?|"
+    r"drop\s+(?:it|that|this)|scrap\s+(?:it|that|this)|"
+    r"abort(?:\s+(?:it|that|this))?|stop(?:\s+(?:it|that|this))?|"
+    r"remove\s+that|take\s+that\s+back|not\s+anymore|no\s+don'?t)"
+    r"\s*[.!]*$",
+    re.I,
+)
+
+
+def looks_like_consent(message: str) -> bool:
+    """Is this turn "go on" and nothing else?"""
+    text = _clean(message).strip().lower().rstrip(".!")
+    if not text:
+        return False
+    if text in _BARE_CONSENT:
+        return True
+    return bool(_CONSENT_RE.match(text))
+
+
+def looks_like_abandonment(message: str) -> bool:
+    """Is this turn "never mind" about whatever was just offered?"""
+    text = _clean(message).strip()
+    if not text or len(_words(text)) > 6:
+        return False
+    return bool(_ABANDON_RE.match(text))
+
+
+#: What consenting to a rehearsal promotes it to. A plan becomes the real run;
+#: everything else is already staged and can only be Confirmed by the operator.
+_CONSENT_PROMOTION = {"plan_transfer": "start_transfer"}
+
+
+def promote_proposal(proposal: Any) -> tuple[str, dict[str, Any]] | None:
+    """The tool call that carries out the proposal the operator just consented to.
+
+    Returns ``None`` for an already-staged mutation: an ack in the ledger is the
+    operator's to Confirm, and a pilot that could approve its own stage would
+    make the Confirm gate decorative.
+    """
+    tool = str(getattr(proposal, "tool", "") or "")
+    if not tool or getattr(proposal, "staged", False):
+        return None
+    promoted = _CONSENT_PROMOTION.get(tool)
+    if not promoted:
+        return None
+    args = dict(getattr(proposal, "args", None) or {})
+    if not args:
+        return None
+    return promoted, args
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups that edit the *shape* of the previous answer
+# ---------------------------------------------------------------------------
+
+#: "and the smallest one", "the other way round". A bare superlative after a
+#: ranking is an edit of that ranking, not a new subject — parsed fresh it became
+#: an aggregate against a table the sentence never named.
+_RANK_FLIP_RE = re.compile(
+    r"^(?:and\s+|but\s+|what\s+about\s+|how\s+about\s+|now\s+|ok(?:ay)?\s+|so\s+)*"
+    r"(?:show\s+me\s+|give\s+me\s+|list\s+)?"
+    r"(?:the\s+)?"
+    r"(?:other\s+way(?:\s+round)?|reverse(?:d)?|opposite|"
+    r"(?:smallest|largest|biggest|fewest|least|most|highest|lowest|widest)"
+    r"(?:\s+(?:one|ones|table|tables|first))?)"
+    r"\s*[?.!]*$",
+    re.I,
+)
+_RANK_ASC_WORDS = re.compile(r"\b(?:smallest|fewest|least|lowest)\b", re.I)
+_RANK_DESC_WORDS = re.compile(r"\b(?:largest|biggest|most|highest|widest)\b", re.I)
+
+
+def resolve_rank_followup(
+    message: str,
+    focus: Any,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """Re-rank the connector already in focus, flipped or re-pointed."""
+    if not focus or getattr(focus, "tool", "") != "rank_connector_tables":
+        return None
+    text = _clean(message)
+    if not text or not _RANK_FLIP_RE.match(text):
+        return None
+    if _RANK_ASC_WORDS.search(text):
+        order = "asc"
+    elif _RANK_DESC_WORDS.search(text):
+        order = "desc"
+    else:
+        # "the other way round" — invert what the last ranking used.
+        order = "asc" if getattr(focus, "descending", True) else "desc"
+    args: dict[str, Any] = {"order": order}
+    if getattr(focus, "connector_id", ""):
+        args["connector_id"] = focus.connector_id
+    elif getattr(focus, "connector_name", ""):
+        args["connector_name"] = focus.connector_name
+    return [("rank_connector_tables", args)]
+
+
+#: A bare time window after a jobs answer — "what about last week", "and
+#: yesterday?". These reached no tool at all and were refused as undocumented,
+#: one turn after the same question with the window spelled out was answered.
+_BARE_TIME_WINDOW = re.compile(
+    r"^(?:and\s+|but\s+|what\s+about\s+|how\s+about\s+|ok(?:ay)?\s+|so\s+)*"
+    r"(?:for\s+|in\s+|since\s+|during\s+)?(?:the\s+)?"
+    r"(?:today|tonight|yesterday|overnight|this\s+(?:morning|afternoon|evening|week|month)|"
+    r"last\s+(?:night|week|month|hour|run|\d+\s+\w+)|"
+    r"(?:last|past)\s+(?:\d+\s+)?(?:minute|hour|day|week|month)s?)"
+    r"\s*[?.!]*$",
+    re.I,
+)
+#: Only a jobs answer can be re-pointed at another window. Matched on the wording
+#: the job renderer owns, so a documentation answer that happened to mention a
+#: pipeline does not turn "what about last week" into a jobs listing.
+_PRIOR_WAS_JOBS = re.compile(
+    r"\bno\s+transfer\s+jobs\s+yet\b|\btransfer\s+job\b|\bjob_[a-z0-9]|"
+    r"\b\d+\s+(?:transfer\s+)?jobs?\b|\brecent\s+transfers\b",
+    re.I,
+)
+
+
+def resolve_job_window_followup(
+    message: str,
+    history: list[dict] | None,
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """"what about last week" right after a jobs answer is the same read."""
+    text = _clean(message)
+    if not text or not _BARE_TIME_WINDOW.match(text):
+        return None
+    if not _PRIOR_WAS_JOBS.search(last_assistant_content(history)):
+        return None
+    # The window itself is not a filter the tool takes yet, so this widens the
+    # page rather than claiming to have filtered by a date it cannot apply.
+    return [("list_jobs", {"limit": 25})]

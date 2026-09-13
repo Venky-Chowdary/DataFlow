@@ -64,6 +64,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "inspect_schema_policy": (Permission.CONNECTOR_READ, READ),
     # Live data reads mirror /api/v1/query.
     "sample_connector_object": (Permission.QUERY_USE, READ),
+    "rank_connector_tables": (Permission.QUERY_USE, READ),
     "run_query": (Permission.QUERY_USE, READ),
     "aggregate_data": (Permission.QUERY_USE, READ),
     "analyze_result": (Permission.QUERY_USE, READ),

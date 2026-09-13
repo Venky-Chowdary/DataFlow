@@ -566,6 +566,25 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "rank_connector_tables",
+        "description": (
+            "Rank every table on one saved connector by exact row count. Use for "
+            "“which table has the most rows on Demo Orders”, “biggest/smallest "
+            "table”, “how big is this database” and connector-vs-connector size "
+            "comparisons. Counts are server-side, not sampled."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "connector_name": {"type": "string"},
+                "order": {"type": "string", "enum": ["desc", "asc"], "default": "desc"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "sample_connector_object",
         "description": (
             "Sample live rows from a table/collection on a saved connector "
@@ -777,6 +796,7 @@ TOOL_FAMILIES: list[dict] = [
             "compare_datasets",
             "profile_quality_rules",
             "list_connector_objects",
+            "rank_connector_tables",
             "introspect_connector_schema",
             "sample_connector_object",
             "aggregate_data",
@@ -897,6 +917,7 @@ class DataPilotTools:
             "open_schedule": self._open_schedule,
             "start_transfer_studio": self._start_transfer_studio,
             "list_connector_objects": self._list_connector_objects,
+            "rank_connector_tables": self._rank_connector_tables,
             "sample_connector_object": self._sample_connector_object,
             "run_query": self._run_query,
             "aggregate_data": self._aggregate_data,
@@ -2271,6 +2292,22 @@ class DataPilotTools:
 
         return list_connector_objects(connector_id, connector_name, limit)
 
+    def _rank_connector_tables(
+        self,
+        connector_id: str = "",
+        connector_name: str = "",
+        order: str = "desc",
+        limit: int = 10,
+    ) -> ToolResult:
+        from .aggregate_tools import rank_connector_tables
+
+        return rank_connector_tables(
+            connector_id=connector_id,
+            connector_name=connector_name,
+            order=order,
+            limit=limit,
+        )
+
     def _sample_connector_object(
         self,
         connector_id: str = "",
@@ -2919,6 +2956,86 @@ _PRODUCT_CAPACITY_ASK = re.compile(
 def asks_about_product_capacity(message: str) -> bool:
     """A rate or limit question about the product, not a count over live rows."""
     return bool(_PRODUCT_CAPACITY_ASK.search(message or ""))
+
+
+# "did anything fail in the last 24 hours", "any failures today", "anything
+# break overnight", "what about last week". Every one of these is the jobs
+# ledger, but the pattern set only recognised the word *jobs*: asked in the way
+# an operator actually asks it, "did anything fail in the last 24 hours"
+# retrieved the paragraph about Daily cadence presets, and the natural follow-up
+# reached no tool at all and was refused as undocumented.
+_FAILURE_WORD = (
+    r"(?:fail(?:s|ed|ing|ure|ures)?|break|breaks|broke|broken|breakage|"
+    r"error(?:s|ed)?|crash(?:es|ed)?|die[ds]?|blow\s+up|blew\s+up|go\s+wrong|"
+    r"went\s+wrong)"
+)
+_RECENT_WINDOW = (
+    r"(?:today|tonight|yesterday|overnight|so\s+far|recently|lately|just\s+now|"
+    r"this\s+(?:morning|afternoon|evening|week|month)|"
+    r"last\s+(?:night|week|month|hour|run)|"
+    r"(?:in|over|during|within|for)\s+the\s+(?:last|past)\s+"
+    r"(?:\d+\s+)?(?:minute|hour|day|week|month)s?)"
+)
+_FAILED_RECENTLY = re.compile(
+    # A window makes the tense unambiguous: this is history, not a definition.
+    rf"\b{_FAILURE_WORD}\b[^.?!]{{0,30}}?\b{_RECENT_WINDOW}\b"
+    rf"|\b{_RECENT_WINDOW}\b[^.?!]{{0,30}}?\b{_FAILURE_WORD}\b"
+    # Without a window it still has to be asked as a state-of-the-world question
+    # about an indefinite subject: "did anything fail", "is anything broken".
+    rf"|\b(?:did|do|does|has|have|is|are|was|were)\s+"
+    rf"(?:anything|any\s+\w+|something|everything|it|we|they|my\s+\w+)\s+"
+    rf"(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b"
+    rf"|^\s*(?:any|anything|something)\s+(?:\w+\s+){{0,2}}?{_FAILURE_WORD}\b",
+    re.I,
+)
+
+#: A documentation question that happens to contain a failure word. "what
+#: happens if a transfer fails" is the runbook, not last night's ledger.
+_FAILURE_IS_A_DOC_ASK = re.compile(
+    r"\bwhat\s+happens\s+(?:if|when)\b|\bwhat\s+(?:do|should)\s+i\s+do\s+(?:if|when)\b"
+    r"|\bhow\s+(?:do|does|can|should)\b|\bwhy\s+(?:do|does|would)\s+"
+    r"(?:a|an|the|transfers?|jobs?)\b|\bwhat\s+is\b|\bwhat'?s\s+(?:a|an|the)\b",
+    re.I,
+)
+
+
+def asks_what_failed_recently(message: str) -> bool:
+    """Is this "show me what broke", as opposed to "what does failing mean"?"""
+    text = message or ""
+    if _FAILURE_IS_A_DOC_ASK.search(text):
+        return False
+    return bool(_FAILED_RECENTLY.search(text))
+
+
+# Ranking the tables on one connector by size. Without a tool behind these the
+# superlative itself was read as an identifier: "biggest table on Demo Orders"
+# planned COUNT/MAX over a table literally named ``biggest``, and "which table
+# has the most rows on Demo Orders" sampled one named ``most``. Both are invented
+# names sent at a live database.
+_TABLE_RANK_RE = re.compile(
+    r"\b(?:which|what)\s+(?:table|collection)\b[^.?!]{0,60}?"
+    r"\b(?:most|fewest|least|largest|biggest|smallest|highest|lowest)\b"
+    r"|\b(?:largest|biggest|smallest|widest)\s+(?:table|collection)s?\b"
+    r"|\b(?:table|collection)s?\s+(?:ranked|sorted|ordered)\s+by\s+(?:row|size)"
+    r"|\brank\s+(?:the\s+)?(?:table|collection)s?\b"
+    r"|\b(?:table|collection)\s+(?:row\s+)?counts?\b"
+    r"|\brow\s+counts?\s+(?:for|of|per|by)\s+(?:each|every|all)?\s*(?:table|collection)s?\b"
+    r"|\bhow\s+(?:big|large)\s+is\s+(?:my|the|this)\b"
+    r"|\bhow\s+many\s+rows?\s+(?:in\s+)?(?:total|altogether|overall)\b",
+    re.I,
+)
+_ASCENDING_RANK = re.compile(
+    r"\b(?:fewest|least|smallest|lowest|ascending|asc|bottom)\b", re.I
+)
+
+
+def asks_to_rank_connector_tables(message: str) -> bool:
+    """A size question about the tables on a connector, not about one table."""
+    return bool(_TABLE_RANK_RE.search(message or ""))
+
+
+def table_rank_order(message: str) -> str:
+    return "asc" if _ASCENDING_RANK.search(message or "") else "desc"
 
 
 # Creative writing is not a documentation subject. "write me a poem about data"
@@ -3713,6 +3830,7 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "analyze_result",
     "filter_result",
     "list_connector_objects",
+    "rank_connector_tables",
 })
 
 # Tools that answer from the documentation rather than from workspace state.
@@ -3778,6 +3896,7 @@ _NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
     "get_preflight_run",
     "sample_connector_object",
     "list_connector_objects",
+    "rank_connector_tables",
     "introspect_connector_schema",
     "aggregate_data",
     "analyze_dataset",
@@ -3869,6 +3988,16 @@ def prune_planned_tools(
     # become COUNT(*) — drop aggregate entirely beside inventory lists.
     if "list_jobs" in names or "list_connectors" in names:
         planned = [(n, a) for n, a in planned if n != "aggregate_data"]
+        names = {n for n, _ in planned}
+    # "did anything fail in the last 24 hours" is answered by the ledger. Pairing
+    # it with a Help passage put the Daily-cadence-preset paragraph in front of
+    # the runs, which reads as though the question about last night was declined.
+    if "list_jobs" in names and asks_what_failed_recently(message):
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n not in ("explain_product", "search_knowledge", "brief_workspace")
+        ]
         names = {n for n, _ in planned}
     # Throughput and limits are product capability, not a count over live rows.
     # Guarded here as well as at the parse site because the telegraphic
@@ -4324,9 +4453,19 @@ _ROW_STATE_WORDS = frozenset(
     """.split()
 )
 
-_NOT_A_TABLE_NAME = frozenset(
-    {"data", "rows", "me", "some", "the", "my", "all"}
-) | _ROW_STATE_WORDS
+def _comparative_words() -> frozenset[str]:
+    from .aggregate_tools import COMPARATIVE_WORDS
+
+    return COMPARATIVE_WORDS
+
+
+# A comparison word is never the name of the thing being compared, so the
+# planners fail closed on the canonical set rather than each keeping a copy.
+_NOT_A_TABLE_NAME = (
+    frozenset({"data", "rows", "me", "some", "the", "my", "all"})
+    | _ROW_STATE_WORDS
+    | _comparative_words()
+)
 
 
 # A row preview always puts the quantity between the verb and the table:
@@ -4574,6 +4713,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         return []
 
     _act = classify_dialogue_act(message)
+    # "any failures today" reads as a sitrep, but the operator asked for the run
+    # that broke, not a workspace summary — a briefing answers around the
+    # question. The jobs ledger is where the failure and its reason are recorded.
+    if _act == "briefing" and asks_what_failed_recently(message):
+        _act = ""
     # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
     # named objects (job_/pf_) keep their existing routers.
     if _act == "briefing" and not re.search(
@@ -5017,6 +5161,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             r"(?:run|ran|execute[d]?|sync(?:ed)?|transferred?|move[d]?)\b",
             lower,
         )
+        or asks_what_failed_recently(lower)
     ) and not re.search(r"\bon\s+[a-z0-9]", lower)
     if (not _nav_only) and (
         _platform_job_inventory
@@ -5501,7 +5646,42 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
-    if (
+    # A size question about the tables on a connector is a ranking, not a read of
+    # one table. Claimed before the inventory and sample parsers, because both
+    # used to take the superlative for the table name.
+    if asks_to_rank_connector_tables(message) and not _CAPABILITY_TABLE_LANDING.search(
+        lower
+    ):
+        # The connector name ends where the ranking clause begins: anchored only
+        # at end-of-string, "which table on Demo Orders has the most rows" bound
+        # a connector literally named "Demo Orders has the most rows".
+        rank_on = re.search(
+            r"\b(?:on|in|for|from|of)\s+(?:the\s+|my\s+)?"
+            r"(?P<connector>[A-Za-z0-9_][\w\-. ]{0,48}?)"
+            r"(?:\s+(?:connector|database|db|warehouse))?"
+            r"(?:\s*[?.!]*$|\s+(?:has|have|had|holds?|contains?|with|that|which|"
+            r"is|are|was|were|by|and|or|ranked|sorted|ordered)\b)",
+            message,
+            re.I,
+        )
+        cname = _capture_connector_name(rank_on.group("connector")) if rank_on else ""
+        args: dict[str, Any] = {"order": table_rank_order(message)}
+        if cname:
+            args["connector_name"] = cname
+        planned.append(("rank_connector_tables", args))
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "explain_product",
+                "search_knowledge",
+            )
+        ]
+    elif (
         tables_on
         and "introspect_connector_schema" not in [p[0] for p in planned]
         and not _CAPABILITY_TABLE_LANDING.search(lower)
@@ -5615,7 +5795,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:\s+(?:on|in|from|using)\s+(.+))?$",
         lower,
     ) or re.search(
+        # "query orders on Demo Orders" and "run a query on orders on Demo
+        # Orders" are reads. Without the verb they matched nothing at all and the
+        # turn was refused as undocumented, which is the one thing an operator
+        # never accepts from a data tool.
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
+        r"run\s+(?:a\s+)?quer(?:y|ies)\s+(?:on|against|over)|quer(?:y|ies)|"
         r"analyze|profile|peek(?:\s+at)?|(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
         r"([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",

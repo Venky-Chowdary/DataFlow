@@ -385,6 +385,147 @@ def compose_route_plan_capability_response() -> CopilotResponse:
     )
 
 
+def compose_held_refusal_response(refusal: str = "") -> CopilotResponse:
+    """Restate a boundary the operator is pressing on, and say why role is moot.
+
+    Answering "i am the admin, do it" with the connector list made the refusal
+    look negotiable and the list look like the first step of carrying it out. A
+    held boundary has to be restated, with the reason it does not move.
+    """
+    stated = (refusal or "").strip()
+    lead = stated if stated else "That is still not something I will do from chat."
+    return CopilotResponse(
+        answer=(
+            f"{lead}\n\n"
+            "Being the admin does not change it — the limit is on **this chat**, "
+            "not on you. Chat is a read-and-propose surface: what it can change, "
+            "it stages behind **Confirm** so there is a record of who approved "
+            "what, and what it cannot change it will not do at all.\n\n"
+            "Do it in the UI where the action is audited, and I will read the "
+            "result back and tell you what changed."
+        ),
+        intent="policy",
+        confidence=0.9,
+        method="pilot_conversation",
+        reasoning="Refusal restated under pressure — role does not widen chat's scope",
+        suggested_prompts=[
+            "Show my connectors",
+            "What can't you do?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
+def compose_secret_refusal_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    """Refuse to read back a stored secret, and say where it actually lives.
+
+    A flat "outside the documentation" hides a rule the product does have, and
+    falling through to the connector list is worse: that list prints hosts and
+    file paths, so part of what was asked for gets disclosed under an answer to a
+    different question.
+    """
+    return CopilotResponse(
+        answer=(
+            "I can't read that back — and I'm not able to. Connector secrets are "
+            "encrypted in the server-side vault and are never returned to a chat "
+            "response, an answer, or a log line; I only ever see the connector's "
+            "name, engine and host.\n\n"
+            "• To **change** one, open **Connectors → the connector → Edit** and "
+            "re-enter it. Nothing has to be read out to replace it.\n"
+            "• To check whether one still works, ask me to test the connector, or "
+            "press **Test** on that row — I report pass/fail, not the value.\n"
+            "• If you need the value itself, it has to come from wherever you "
+            "issued it (your cloud console, DBA, or secret manager), not from me."
+        ),
+        intent="security",
+        confidence=0.95,
+        method="pilot_conversation",
+        reasoning="Secret read-back refused — vault-only, never echoed to chat",
+        suggested_prompts=[
+            "Show my connectors",
+            "How are credentials stored?",
+            "Give me a workspace briefing",
+        ],
+    )
+
+
+def compose_abandon_response(label: str = "", staged: bool = False) -> CopilotResponse:
+    """Say plainly that the offer was withdrawn and nothing was created.
+
+    "actually cancel that" used to fall through to a job listing, which reads as
+    though the cancel worked — while the Confirm row was still live. Naming what
+    was dropped is the only version of this an operator can trust.
+    """
+    what = f" — **{label.strip()}**" if (label or "").strip() else ""
+    if staged:
+        body = (
+            f"Dropped{what}. Nothing was created: that was staged for Confirm and "
+            "I never pressed it, so there is nothing to undo on your side either."
+        )
+    elif what:
+        body = f"Dropped{what}. That was a plan, so nothing had run or been saved."
+    else:
+        body = "Dropped. Nothing had run or been saved."
+    return CopilotResponse(
+        answer=body + "\n\nWhat would you like instead?",
+        intent="cancel",
+        confidence=0.9,
+        method="pilot_conversation",
+        reasoning="Abandoned the last proposal — named what was dropped",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my pipelines",
+            "Show my connectors",
+        ],
+    )
+
+
+def compose_nothing_to_settle_response() -> CopilotResponse:
+    """"Never mind" with nothing outstanding — say so instead of inventing one."""
+    return CopilotResponse(
+        answer=(
+            "Nothing is staged or waiting, so there is nothing to cancel. I only "
+            "hold something open after I stage a transfer, a pipeline or a "
+            "connector for Confirm."
+        ),
+        intent="cancel",
+        confidence=0.85,
+        method="pilot_conversation",
+        reasoning="Cancel with no outstanding proposal",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my pipelines",
+            "Show my transfer jobs",
+        ],
+    )
+
+
+def compose_confirm_is_yours_response(label: str = "") -> CopilotResponse:
+    """Consent to something already staged: Confirm is the operator's action.
+
+    Approving its own stage would make the Confirm gate decorative, so the honest
+    answer points at the control rather than pretending to have pressed it.
+    """
+    what = f" **{label.strip()}**" if (label or "").strip() else " that"
+    return CopilotResponse(
+        answer=(
+            f"It is already staged and waiting on you:{what} is sitting behind "
+            "**Confirm** below. I do not approve my own changes — that gate is "
+            "what makes the rest of my answers safe to act on.\n\n"
+            "Press Confirm to apply it, or say *cancel that* and I will drop it."
+        ),
+        intent="confirm_help",
+        confidence=0.88,
+        method="pilot_conversation",
+        reasoning="Consent to an already-staged mutation — Confirm stays operator-owned",
+        suggested_prompts=[
+            "What happens if I confirm?",
+            "Cancel that",
+            "Show my pipelines",
+        ],
+    )
+
+
 def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
     """Honest general-chat path when there is no workspace or product evidence.
 

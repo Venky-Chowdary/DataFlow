@@ -98,6 +98,11 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"run {o.get('name') or o.get('schedule_id')}"
     if tr.name == "list_connector_objects":
         return f"{o.get('count', 0)} objects on {o.get('connector_name')}"
+    if tr.name == "rank_connector_tables":
+        return (
+            f"{o.get('counted', 0)} tables counted on {o.get('connector_name')} "
+            f"({o.get('total_rows', 0)} rows)"
+        )
     if tr.name == "sample_connector_object":
         rid = o.get("result_id") or ""
         base = f"{o.get('row_count', 0)} rows from {o.get('table')}"
@@ -446,6 +451,59 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_table_ranking(o: dict[str, Any]) -> str:
+    """Answer "which table is biggest" with the counts it was ranked on.
+
+    The winner leads because that is the question; the table of counts is the
+    evidence. Tables that refused a count are named rather than dropped — a
+    partial inventory presented as the whole one is the silent loss this product
+    exists to refuse.
+    """
+    ranked = [r for r in (o.get("ranked") or []) if isinstance(r, dict)]
+    cname = str(o.get("connector_name") or "connector")
+    ascending = str(o.get("order") or "desc").lower() == "asc"
+    counted = int(o.get("counted") or len(ranked))
+    if not ranked:
+        return f"No table on **{cname}** returned a row count."
+
+    top = ranked[0]
+    superlative = "smallest" if ascending else "largest"
+    lines = [
+        f"The {superlative} table on **{cname}** is `{top.get('table')}` with "
+        f"**{int(top.get('rows') or 0):,} rows**."
+    ]
+    lines.append("| table | rows |")
+    lines.append("| --- | ---: |")
+    for row in ranked:
+        lines.append(f"| `{row.get('table')}` | {int(row.get('rows') or 0):,} |")
+    total = int(o.get("total_rows") or 0)
+    objects = int(o.get("total_objects") or counted)
+    tail = (
+        f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
+        "Each count is an exact server-side `COUNT(*)`, not a sample."
+    )
+    if len(ranked) < counted:
+        tail = f"Showing {len(ranked)} of {counted} counted. " + tail
+    lines.append(tail)
+    skipped = [s for s in (o.get("skipped") or []) if isinstance(s, dict)]
+    if skipped:
+        lines.append(
+            f"• **{len(skipped)} object(s) could not be counted** and are not in "
+            "the ranking: "
+            + "; ".join(
+                f"`{s.get('table')}` ({str(s.get('error') or '').strip()[:80]})"
+                for s in skipped[:4]
+            )
+            + ("…" if len(skipped) > 4 else "")
+        )
+    if o.get("truncated"):
+        lines.append(
+            "• The schema has more objects than I ranked in one pass, so this is "
+            "the largest page, not proven to be the whole database."
+        )
+    return "\n".join(lines)
+
+
 def _local_and_utc(instant: str, timezone_name: str) -> str:
     """A due instant in the zone the operator named, with the UTC one after it.
 
@@ -671,6 +729,19 @@ def _is_input_request(error: str) -> bool:
     # A question mark is what separates "What time should this run?" from
     # "What went wrong: the host refused the connection."
     return bool(_ASKS_FOR_INPUT_QUESTION.match(text) and "?" in text)
+
+#: Tools whose successful output is an offer the next turn can accept or drop.
+#: ``plan_transfer`` is the only rehearsal here — the rest already hold an ack.
+_PROPOSAL_TOOLS = frozenset(
+    {
+        "plan_transfer",
+        "start_transfer",
+        "create_schedule",
+        "run_schedule_now",
+        "create_connector",
+        "remediate_validation",
+    }
+)
 
 #: Tools that *do* something. "Lookup" is the wrong word for a failed create.
 _ACTION_TOOL_NAMES = frozenset(
@@ -1755,6 +1826,65 @@ Draft answer:
             tools_used=local.tools_used,
         )
 
+    def _settle_last_proposal(
+        self,
+        message: str,
+        data_context: dict | None,
+    ) -> CopilotResponse | None:
+        """Answer "go ahead" / "never mind" against what was actually offered.
+
+        Only the conversational outcomes land here. Consent that can be carried
+        out — a rehearsed plan promoted to a real run — is a tool plan, so it is
+        resolved in :meth:`_plan_with_memory` instead and this returns ``None``.
+        """
+        from .conversation_composer import (
+            compose_abandon_response,
+            compose_confirm_is_yours_response,
+            compose_nothing_to_settle_response,
+        )
+        from .followup import (
+            looks_like_abandonment,
+            looks_like_consent,
+            promote_proposal,
+        )
+        from .working_memory import get_working_memory
+
+        consent = looks_like_consent(message)
+        abandon = looks_like_abandonment(message)
+        if not consent and not abandon:
+            return None
+
+        session_id = self._session_id(data_context)
+        if not session_id:
+            return None
+        memory = get_working_memory()
+        proposal = memory.get_proposal(session_id)
+        pending = memory.get_pending(session_id)
+
+        if abandon:
+            # Dropping the proposal is the whole point: a stale ack that outlives
+            # "never mind" is how an operator ends up confirming something they
+            # already withdrew.
+            memory.clear_proposal(session_id)
+            memory.clear_pending(session_id)
+            if not proposal and not pending:
+                return compose_nothing_to_settle_response()
+            return compose_abandon_response(
+                label=getattr(proposal, "label", "") or getattr(pending, "question", ""),
+                staged=bool(getattr(proposal, "staged", False)),
+            )
+
+        # An open clarification owns a bare "do it": it means "yes, go on" about
+        # the question just asked, and answering the older proposal instead would
+        # silently abandon the half-described request.
+        if pending:
+            return None
+        if not proposal:
+            return None
+        if promote_proposal(proposal):
+            return None
+        return compose_confirm_is_yours_response(proposal.label)
+
     def _plan_with_memory(
         self,
         message: str,
@@ -1770,6 +1900,7 @@ Draft answer:
         """
         from .followup import (
             inherit_focus_slots,
+            looks_like_consent,
             looks_like_elliptical_edit,
             looks_like_followup,
             looks_like_fresh_intent,
@@ -1777,7 +1908,10 @@ Draft answer:
             names_pending_candidate,
             opens_a_row_predicate,
             pending_from_assistant_clarification,
+            promote_proposal,
             resolve_followup,
+            resolve_job_window_followup,
+            resolve_rank_followup,
             resolve_knowledge_engine_followup,
             resolve_ordinal_reference,
             resolve_pending_answer,
@@ -1812,6 +1946,15 @@ Draft answer:
         focus = memory.get_focus(session_id)
 
         pending = memory.get_pending(session_id)
+        # "run it" one turn after a plan is the plan, run for real. Parsed from
+        # scratch it named no route and was refused, so the operator had to retype
+        # the whole thing to execute what they had just approved on screen.
+        if not pending and looks_like_consent(message):
+            proposal = memory.get_proposal(session_id)
+            promoted = promote_proposal(proposal) if proposal else None
+            if promoted:
+                memory.clear_proposal(session_id)
+                return [promoted]
         if not pending:
             soft = pending_from_assistant_clarification(history)
             if soft:
@@ -1844,6 +1987,16 @@ Draft answer:
                 memory.clear_pending(session_id)
             else:
                 return []
+
+        # A bare superlative or time window edits the shape of the previous
+        # answer. Both used to reach no tool and be refused as undocumented one
+        # turn after the same question, spelled out, had been answered.
+        reranked = resolve_rank_followup(message, focus)
+        if reranked:
+            return reranked
+        rewindowed = resolve_job_window_followup(message, history)
+        if rewindowed:
+            return rewindowed
 
         platform = resolve_platform_coreference(message, history)
         if platform:
@@ -1961,6 +2114,34 @@ Draft answer:
                     memory.remember_pending(session_id, slot)
                     if not turn.needs_clarification:
                         turn.needs_clarification = slot.question
+
+        self._remember_proposal(planned, turn, session_id, memory)
+
+    @staticmethod
+    def _remember_proposal(
+        planned: list[tuple[str, dict]],
+        turn: PilotTurn,
+        session_id: str,
+        memory: Any,
+    ) -> None:
+        """Keep the thing just offered, so consent and cancel have a referent."""
+        from .working_memory import PilotProposal
+
+        args_by_tool = {name: args for name, args in planned}
+        offered: PilotProposal | None = None
+        for tr in turn.tool_results:
+            if not tr.success or tr.name not in _PROPOSAL_TOOLS:
+                continue
+            out = tr.output if isinstance(tr.output, dict) else {}
+            offered = PilotProposal(
+                tool=tr.name,
+                args=dict(args_by_tool.get(tr.name) or {}),
+                label=str(out.get("label") or "").strip(),
+                ack_id=str(out.get("ack_id") or "").strip(),
+                staged=bool(out.get("requires_confirm") or out.get("ack_id")),
+            )
+        if offered:
+            memory.remember_proposal(session_id, offered)
 
     def _with_result_context(self, name: str, args: dict | None, data_context: dict | None) -> dict:
         """Inject session / last_result_id so follow-ups hit the real stored rows."""
@@ -2235,6 +2416,30 @@ Respond as Datawrap Pilot — grounded in tool results."""
             is_schedule_setup_capability_ask,
         )
 
+        # Checked before anything that could read state: a secret request must not
+        # reach a tool, least of all the connector list that prints hosts.
+        from .dialogue_acts import asks_for_a_stored_secret
+
+        if asks_for_a_stored_secret(message):
+            from .conversation_composer import compose_secret_refusal_response
+
+            return compose_secret_refusal_response(ctx)
+
+        # Pressing on a boundary Pilot just stated must restate it, never fall
+        # through to a tool that looks like the first step of complying.
+        from .dialogue_acts import insists_after_refusal, refused_capability
+
+        if insists_after_refusal(message, history):
+            from .conversation_composer import compose_held_refusal_response
+
+            return compose_held_refusal_response(refused_capability(history))
+
+        # "run it" and "actually cancel that" are about the thing offered last
+        # turn, so they are settled against proposal memory before any parsing.
+        settled = self._settle_last_proposal(message, data_context)
+        if settled is not None:
+            return settled
+
         if is_schedule_setup_capability_ask(message):
             from .conversation_composer import compose_schedule_setup_response
 
@@ -2290,13 +2495,23 @@ Respond as Datawrap Pilot — grounded in tool results."""
 
                 pending = get_working_memory().get_pending(session_id)
                 if pending and pending.question:
+                    from .followup import looks_like_consent
+
                     turn.needs_clarification = pending.question
                     hint = ""
                     if pending.candidates:
                         shown = ", ".join(f"**{c}**" for c in pending.candidates[:6])
                         hint = f"\n\nAvailable: {shown}."
+                    # "do it" is consent, not a miss — and pointing at a list that
+                    # was never printed is worse than saying what is still owed.
+                    if looks_like_consent(message):
+                        tail = "I will, once you answer that — it is the one thing I still need."
+                    elif pending.candidates:
+                        tail = "I didn't match that reply — try a name from the list, or ask a new question."
+                    else:
+                        tail = "I didn't match that reply — answer that, or ask a new question."
                     return CopilotResponse(
-                        answer=f"{pending.question}{hint}\n\nI didn't match that reply — try a name from the list, or ask a new question.".strip(),
+                        answer=f"{pending.question}{hint}\n\n{tail}".strip(),
                         intent=intent,
                         confidence=0.78,
                         method="pilot_local_engine",
@@ -2388,6 +2603,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
         live_schema = any(
             tr.name in (
                 "list_connector_objects",
+                "rank_connector_tables",
                 "introspect_connector_schema",
                 "sample_connector_object",
                 "aggregate_data",
@@ -2781,6 +2997,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         f"({cols} columns):{extra}\n"
                         + "\n".join(f"• {r}" for r in rules)
                     )
+            elif tr.name == "rank_connector_tables" and tr.success:
+                parts.append(_render_table_ranking(tr.output or {}))
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
@@ -3243,6 +3461,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     "analyze_result",
                     "filter_result",
                     "list_connector_objects",
+                    "rank_connector_tables",
                     "diff_schemas",
                     "map_connector_schemas",
                 )
