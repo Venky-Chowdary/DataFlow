@@ -185,11 +185,14 @@ def test_cross_tenant_and_self_approval_are_refused(pilot):
     assert not approve.pending_actions
 
 
-def test_remove_connector_is_a_delete_refusal_not_a_transfer(pilot):
+def test_remove_connector_is_a_delete_not_a_transfer(pilot):
+    # A delete verb reaches the delete tool, which asks for a real saved
+    # connector instead of guessing a type name; it never becomes a transfer.
     resp = pilot.chat("remove the postgres connector", history=[], data_context=None)
     answer = resp.answer or ""
-    assert "Deletes are deliberately not something a prompt can trigger." in answer
+    assert "No connector matched" in answer
     assert "run that transfer" not in answer
+    assert not resp.pending_actions
 
 
 def test_one_sentence_ask_trims_multi_gate_line(pilot):

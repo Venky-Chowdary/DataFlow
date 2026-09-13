@@ -32,7 +32,50 @@ export type PilotConfirmOutcome =
       job_id: string;
       schedule_id: string;
       name: string;
+    }
+  | {
+      kind: "lifecycle";
+      op: LifecycleOp;
+      idempotent: boolean;
+      /** Job id the operation acted on (or the new job for retry). */
+      job_id: string;
+      /** Human label of the object: connector or pipeline name, or job id. */
+      subject: string;
+      screen: "jobs" | "connectors" | "schedules";
+      result: Record<string, unknown>;
     };
+
+export type LifecycleOp =
+  | "cancel_job"
+  | "retry_job"
+  | "resume_job"
+  | "replay_quarantine"
+  | "delete_connector"
+  | "set_schedule_enabled"
+  | "delete_schedule";
+
+export const LIFECYCLE_OPS: readonly LifecycleOp[] = [
+  "cancel_job",
+  "retry_job",
+  "resume_job",
+  "replay_quarantine",
+  "delete_connector",
+  "set_schedule_enabled",
+  "delete_schedule",
+];
+
+export function isLifecycleOp(type: string | undefined): type is LifecycleOp {
+  return Boolean(type) && (LIFECYCLE_OPS as readonly string[]).includes(String(type));
+}
+
+export function isDestructiveLifecycle(action: CopilotPendingAction): boolean {
+  return (
+    action.type === "delete_connector"
+    || action.type === "delete_schedule"
+    || action.type === "retry_job"
+    || Boolean(action.destructive)
+  );
+}
 
 function payloadRecord(action: CopilotPendingAction): Record<string, unknown> {
   return (action.payload && typeof action.payload === "object"
@@ -135,7 +178,69 @@ export async function confirmPilotPending(
     };
   }
 
+  if (isLifecycleOp(action.type)) {
+    const ackId = String(payload.ack_id || "");
+    if (!ackId) {
+      throw new Error("This approval is missing a server ack_id. Ask Pilot to stage the change again.");
+    }
+    const res = await confirmCopilotAction({
+      ack_id: ackId,
+      actor: "pilot-ui",
+      reason: `operator confirmed ${action.type}`,
+    });
+    const result = res as unknown as Record<string, unknown>;
+    const screen: "jobs" | "connectors" | "schedules" = action.type === "delete_connector"
+      ? "connectors"
+      : action.type === "set_schedule_enabled" || action.type === "delete_schedule"
+        ? "schedules"
+        : "jobs";
+    const subject = String(
+      preview.name || payload.name || result.name || preview.job_id || payload.job_id || result.job_id || "",
+    );
+    return {
+      kind: "lifecycle",
+      op: action.type,
+      idempotent: Boolean(res.idempotent),
+      job_id: String(result.job_id || payload.job_id || preview.job_id || ""),
+      subject,
+      screen,
+      result,
+    };
+  }
+
   throw new Error(`Unsupported Pilot action: ${action.type}`);
+}
+
+export function lifecycleConfirmPrompt(action: CopilotPendingAction): {
+  title: string;
+  message: string;
+  confirmLabel: string;
+} {
+  const payload = payloadRecord(action);
+  const preview = previewRecord(payload);
+  const name = String(preview.name || payload.name || "");
+  if (action.type === "delete_connector") {
+    const bound = Array.isArray(preview.bound_schedules) ? (preview.bound_schedules as string[]) : [];
+    return {
+      title: `Delete connector “${name}”?`,
+      message: bound.length
+        ? `${bound.length} pipeline(s) reference it (${bound.join(", ")}) and will fail on their next run. Data at the source is not touched.`
+        : "The saved credentials are removed. Data at the source is not touched.",
+      confirmLabel: "Delete connector",
+    };
+  }
+  if (action.type === "delete_schedule") {
+    return {
+      title: `Delete pipeline “${name}”?`,
+      message: "The schedule stops firing and is removed. Its past jobs stay in Jobs.",
+      confirmLabel: "Delete pipeline",
+    };
+  }
+  return {
+    title: `Retry job ${String(preview.job_id || payload.job_id || "")} from zero?`,
+    message: "A new job re-reads the source from the beginning. Rows already written stay unless the sync mode overwrites them.",
+    confirmLabel: "Retry from zero",
+  };
 }
 
 export function transferOverwriteMessage(action: CopilotPendingAction): string {

@@ -22,6 +22,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from fastapi import BackgroundTasks
 
 from src.ai.copilot import schedule_tools
 from src.ai.copilot.ack_ledger import get_ack_ledger
@@ -358,14 +359,14 @@ def test_confirm_creates_the_schedule_once_through_the_store(monkeypatch):
         preview={"name": "users"},
     )
 
-    first = asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http()))
+    first = asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http(), BackgroundTasks()))
     assert first["ok"] is True and first["idempotent"] is False
     assert first["schedule_id"] == "sch-1"
     assert first["next_run_at"] == "2026-08-18T02:00:00+00:00"
     assert len(created) == 1
 
     # Replaying the same approval must echo the first outcome, not create again.
-    replay = asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http()))
+    replay = asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http(), BackgroundTasks()))
     assert replay["idempotent"] is True
     assert replay["schedule_id"] == "sch-1"
     assert len(created) == 1
@@ -389,7 +390,7 @@ def test_a_store_refusal_is_surfaced_and_the_approval_stays_spendable(monkeypatc
         preview={"name": "x"},
     )
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http()))
+        asyncio.run(copilot_router.copilot_confirm(_Req(ack_id), _Http(), BackgroundTasks()))
     assert "fortnightly" in str(exc.value.detail)
     # The claim was released, so the operator can fix the cadence and retry.
     assert (get_ack_ledger().peek(ack_id) or {}).get("kind") == "create_schedule"

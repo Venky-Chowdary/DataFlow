@@ -24,6 +24,7 @@ from ..rag.query_analysis import (
     is_cdc_delivery_question,
 )
 from .data_analyst import get_data_analyst
+from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
@@ -799,6 +800,7 @@ TOOL_DEFINITIONS: list[dict] = [
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
+    *LIFECYCLE_TOOL_DEFINITIONS,
 ]
 
 TOOL_FAMILIES: list[dict] = [
@@ -869,6 +871,14 @@ TOOL_FAMILIES: list[dict] = [
             "start_transfer_studio",
             "create_connector",
             "list_connectors",
+            "cancel_job",
+            "retry_job",
+            "resume_job",
+            "replay_quarantine",
+            "test_connector",
+            "delete_connector",
+            "set_schedule_enabled",
+            "delete_schedule",
         ],
     },
 ]
@@ -955,6 +965,14 @@ class DataPilotTools:
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
             "brief_workspace": self._brief_workspace,
+            "cancel_job": self._cancel_job,
+            "retry_job": self._retry_job,
+            "resume_job": self._resume_job,
+            "replay_quarantine": self._replay_quarantine,
+            "test_connector": self._test_connector,
+            "delete_connector": self._delete_connector,
+            "set_schedule_enabled": self._set_schedule_enabled,
+            "delete_schedule": self._delete_schedule,
         }
         handler = handlers.get(name)
         if not handler:
@@ -2255,6 +2273,49 @@ class DataPilotTools:
                 "preview": preview,
             },
         )
+
+    # Lifecycle operations: staged acks, executed by the REST handler on Confirm.
+    def _cancel_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("cancel_job", job_id, selector)
+
+    def _retry_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("retry_job", job_id, selector)
+
+    def _resume_job(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("resume_job", job_id, selector)
+
+    def _replay_quarantine(self, job_id: str = "", selector: str = "") -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("replay_quarantine", job_id, selector)
+
+    def _test_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import test_connector
+
+        return test_connector(connector_id, name)
+
+    def _delete_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import delete_connector
+
+        return delete_connector(connector_id, name)
+
+    def _set_schedule_enabled(
+        self, schedule_id: str = "", name: str = "", enabled: bool = True
+    ) -> ToolResult:
+        from .lifecycle_tools import set_schedule_enabled
+
+        return set_schedule_enabled(self._resolve_schedule, schedule_id, name, enabled)
+
+    def _delete_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:
+        from .lifecycle_tools import delete_schedule
+
+        return delete_schedule(self._resolve_schedule, schedule_id, name)
 
     def _list_contracts(self, limit: int = 50) -> ToolResult:
         from services.contract_store import get_contract_store
@@ -4808,6 +4869,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     message = normalize_operator_typos(message)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
+
+    # Job / connector / schedule lifecycle verbs are staged operations, and they
+    # are recognised before the unsupported-mutation refusal so "delete the
+    # staging connector" becomes a Confirm card rather than a wall.
+    lifecycle = plan_lifecycle_operation(message)
+    if lifecycle:
+        return lifecycle
 
     # Delete/export/schedule paraphrases must not plan list/search tools —
     # "Warehouse connector" otherwise matches connector inventory routing.

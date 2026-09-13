@@ -23,6 +23,7 @@ from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
 from .job_narration import narrate_jobs
 from .tool_permissions import bind_current_context, is_permission_denial
+from .lifecycle_tools import LIFECYCLE_TOOL_NAMES, short_job_id
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
@@ -836,6 +837,7 @@ _PROPOSAL_TOOLS = frozenset(
         "run_schedule_now",
         "create_connector",
         "remediate_validation",
+        *(LIFECYCLE_TOOL_NAMES - {"test_connector"}),
     }
 )
 
@@ -850,6 +852,7 @@ _ACTION_TOOL_NAMES = frozenset(
         "plan_transfer_route",
         "start_transfer_studio",
         "remediate_validation",
+        *LIFECYCLE_TOOL_NAMES,
     }
 )
 
@@ -869,6 +872,53 @@ def _failure_reply(failed: list[Any]) -> str:
         else "I couldn't complete that lookup:"
     )
     return "\n".join([head, *(f"• {e}" for e in errors)])
+
+
+def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
+    """Preview text for a staged lifecycle ack, or the live probe result."""
+    p = o.get("preview") or {}
+    if name == "test_connector":
+        verdict = "reachable" if o.get("ok") else "**not reachable**"
+        msg = str(o.get("message") or "").strip()
+        line = f"**{o.get('name')}** ({o.get('type') or 'connector'}) is {verdict}."
+        return f"{line} {msg}".strip() if msg else line
+    label = o.get("label") or "Confirm this change"
+    if name in ("cancel_job", "retry_job", "resume_job", "replay_quarantine"):
+        route = " → ".join(x for x in (p.get("source"), p.get("destination")) if x)
+        bits = [f"Job **{short_job_id(str(p.get('job_id') or ''))}** is **{p.get('status') or '—'}**"]
+        if route:
+            bits.append(route + (f" · `{p.get('table')}`" if p.get("table") else ""))
+        if p.get("rows_written") is not None:
+            bits.append(f"{p.get('rows_written')} rows written")
+        if p.get("rejected_rows"):
+            bits.append(f"{p.get('rejected_rows')} quarantined")
+        effect = {
+            "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
+            "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
+            "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows through the destination writer with the original mapping.",
+        }[name]
+        return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
+    if name == "delete_connector":
+        bound = p.get("bound_schedules") or []
+        warn = (
+            f"\n⚠ {len(bound)} pipeline(s) reference it: {', '.join(f'**{b}**' for b in bound)} — they will fail on their next run."
+            if bound
+            else ""
+        )
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
+            f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "set_schedule_enabled":
+        after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
+        return f"Pipeline **{p.get('name')}** will {after}.\n\nConfirm to proceed: **{label}**."
+    if name == "delete_schedule":
+        return (
+            f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
+            f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
+        )
+    return f"Confirm to proceed: **{label}**."
 
 
 def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
@@ -922,9 +972,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         ))
     if any(w in lower for w in ("delete", "drop", "remove", "destroy")):
         options.append((
-            "Deletes are deliberately not something a prompt can trigger.",
-            "I run read-only actions and confirmed connector creates; destructive "
-            "changes have to be made in the UI.",
+            "I delete one named connector or pipeline at a time, and only after you Confirm.",
+            'Bulk deletes and table drops stay in the UI. Try: "delete the '
+            f'{src_ex} connector" or "delete pipeline <name>".',
         ))
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         options.append((
@@ -1606,6 +1656,7 @@ class DataPilotAgent:
                 or "connector not found" in err.lower()
                 or ("dataset" in err.lower() and "not found" in err.lower())
                 or tr.name in ("run_schedule_now", "get_schedule", "open_schedule", "create_connector")
+                or tr.name in LIFECYCLE_TOOL_NAMES
             ):
                 turn.needs_clarification = err
             return
@@ -2898,6 +2949,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
+            elif tr.name in LIFECYCLE_TOOL_NAMES and tr.success:
+                parts.append(_render_lifecycle(tr.name, tr.output or {}))
             elif tr.name == "create_schedule" and tr.success:
                 parts.append(_render_schedule_stage(tr.output or {}))
             elif tr.name == "create_schedule" and isinstance(tr.output, dict) and tr.output.get(
