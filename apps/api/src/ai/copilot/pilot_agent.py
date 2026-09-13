@@ -912,7 +912,7 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
             "I can read that live — I need the table and which saved connector holds it.",
             f'For example: "sample users{on_conn}" or "show orders from {dst_ex}".',
         ))
-    if any(w in lower for w in ("transfer", "sync", "move", "migrate", "copy", "replicate")):
+    if re.search(r"\b(?:transfer|sync|move|migrate|copy|replicate)\b", lower):
         options.append((
             "I can run that transfer once I know which saved connector is on each "
             "side — those names are connectors, not tables.",
@@ -1244,6 +1244,19 @@ class DataPilotAgent:
                     ctx=ctx,
                     pending_labels=pending_labels or None,
                 )
+
+        # Transcript questions, injection, attributed claims, cross-tenant reads
+        # and gate bypasses are settled here, before Help retrieval or any LLM
+        # can narrate an answer to them. Routing + lexical cue must both agree.
+        from . import intent_policy
+
+        policy = intent_policy.decide(message)
+        if policy is not None:
+            ctx = self.context_builder.build(data_context, message)
+            return _with_llm_footnote(
+                intent_policy.answer(policy, history=history, ctx=ctx),
+                _resolve_pilot_engine(),
+            )
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.

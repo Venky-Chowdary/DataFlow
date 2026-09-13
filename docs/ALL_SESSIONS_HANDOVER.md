@@ -690,6 +690,25 @@ label; signed-in `#/help` stays in-app Docs; Pilot citations open the cited
 article (not `#/docs` walkthrough, not marketing); Query tabs are workspace-scoped;
 Pilot briefing uses `count_jobs` + request workspace.
 
+## 6c. Pilot intent router + pre-retrieval policy (2026-09-13)
+
+The Pilot's dialogue-act routing is a trained model again, not a phrase table:
+`apps/api/src/ai/first_party/intent_router.py` (BLAKE2b-hashed word/char
+n-grams → softmax regression, 13 acts, confidence + top-two-margin abstention),
+labels/augmentation in `intent_labels.py`, retrained with
+`cd apps/api && ../../.venv/bin/python scripts/train_pilot_intent_router.py`
+(exits non-zero on any held-out misclassification). `src/ai/copilot/intent_policy.py`
+settles transcript questions, injection, false premises, cross-tenant reads and
+self-approval *before* Help retrieval or any LLM, and only when router and lexical
+cue agree. `src/ai/rag/spell.py` repairs misspelled product terms as a
+refusal-only retrieval fallback. Details and open items: register §8p.
+
+Pilot QA on this head: `tests/test_pilot_*.py tests/test_first_party_*.py
+tests/test_copilot_*.py tests/test_e2e_pilot_decimal_ui_fixes.py` →
+**1384 passed / 11 failed / 107 skipped**; the 11 are the `Demo Orders`
+fixture cases in `test_pilot_conversation_composer.py` and fail identically on
+`b26270b7`. Mongo for local runs: `docker run -d --name df-mongo -p 27017:27017 mongo:7`.
+
 ## 7. Continuing this work
 
 1. Read `docs/SESSION_HANDOVER.md` §1 for how to run the stack and the exact CI

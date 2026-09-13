@@ -2122,6 +2122,15 @@ def retrieve_product_answer(
         in_vocabulary=lambda term: _index()[0].idf(term) > 0,
     )
     if not verdict.answerable:
+        # Spelling repair is a fallback only: it may turn a refusal into an
+        # answer, never change the answer to a question already understood.
+        from .spell import correct_to_corpus
+
+        corrected = correct_to_corpus(query)
+        if corrected != query and verdict.uncovered_terms:
+            retry = retrieve_product_answer(corrected, limit=limit, grounding_floor=grounding_floor)
+            if retry.verdict.answerable:
+                return retry
         hits = []
     return ProductAnswer(
         query=query,
@@ -2165,9 +2174,15 @@ def names_product_subject(query: str) -> bool:
     documentation's vocabulary.
     """
     from .evidence_policy import is_subject_term
+    from .spell import correct_to_corpus
 
     analysis = analyze_query(query)
-    return any(is_subject_term(term) for term in analysis.search_terms)
+    if any(is_subject_term(term) for term in analysis.search_terms):
+        return True
+    corrected = correct_to_corpus(query)
+    if corrected == query:
+        return False
+    return any(is_subject_term(term) for term in analyze_query(corrected).search_terms)
 
 
 def nearest_articles(query: str, limit: int = 3) -> list[str]:
