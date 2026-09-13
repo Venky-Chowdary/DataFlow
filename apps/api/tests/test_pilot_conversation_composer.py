@@ -1437,3 +1437,159 @@ def test_a_rejected_column_is_not_remembered_as_the_subject():
         data_context=dict(ctx),
     )
     assert "12 rows" in recovered.answer
+
+
+def test_the_first_one_is_the_name_the_previous_list_printed():
+    """"how many tables on the first one" reached the connector lookup with the
+    literal words *the first one* and re-asked which connector was meant, while
+    the list it pointed at was still on screen.
+    """
+    from src.ai.copilot.followup import offered_names, resolve_ordinal_reference
+
+    connectors = (
+        "You have **2 saved connector(s)**.\n"
+        "\u2022 **Quarantine SQLite** (sqlite)\n"
+        "\u2022 **Demo Orders** (sqlite) \u2192 /tmp/demo.db"
+    )
+    # The heading is bold too; only the bullets are items of the list.
+    assert offered_names(connectors) == ["Quarantine SQLite", "Demo Orders"]
+
+    hist = [{"role": "assistant", "content": connectors}]
+    assert (
+        resolve_ordinal_reference("and how many tables on the first one", hist)
+        == "and how many tables on Quarantine SQLite"
+    )
+    assert (
+        resolve_ordinal_reference("sample the second connector", hist)
+        == "sample Demo Orders"
+    )
+    assert resolve_ordinal_reference("how many rows in the last one", hist) == (
+        "how many rows in Demo Orders"
+    )
+    # Beyond the end of the list is not a guess.
+    assert resolve_ordinal_reference("the fourth one", hist) is None
+    # "my last job" is a query the job tools answer, not a pointer at a list.
+    assert resolve_ordinal_reference("when did my last job run", hist) is None
+
+    tables = (
+        "**Demo Orders** (sqlite) \u2014 connected \u00b7 **2** tables.\n"
+        "\u2022 `customers`\n\u2022 `orders`"
+    )
+    assert offered_names(tables) == ["customers", "orders"]
+
+
+def test_an_ordinal_follow_up_reads_the_table_it_points_at():
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    agent = get_pilot_agent()
+    ctx = {"pilot_session_id": "test-ordinal-live"}
+    first = agent.chat("what tables are on Demo Orders", data_context=dict(ctx))
+    assert "`customers`" in first.answer
+
+    second = agent.chat(
+        "how many rows in the first one",
+        history=[
+            {"role": "user", "content": "what tables are on Demo Orders"},
+            {"role": "assistant", "content": first.answer},
+        ],
+        data_context=dict(ctx),
+    )
+    assert "`customers`" in second.answer
+    assert "rows" in second.answer
+    assert "Connector not found" not in second.answer
+
+
+def test_a_turn_that_names_the_connector_settles_the_open_question():
+    """An open "which connector?" swallowed the next turn whole, so a question
+    that named a saved connector outright was met with "I didn't match that
+    reply" and the same list again.
+    """
+    from src.ai.copilot.followup import names_pending_candidate
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+    from src.ai.copilot.working_memory import PendingSlot
+
+    slot = PendingSlot(
+        tool="list_connector_objects",
+        missing="connector_name",
+        candidates=["Quarantine SQLite", "Demo Orders"],
+        question="Which connector did you mean?",
+    )
+    assert names_pending_candidate("what tables are on Demo Orders", slot) == "Demo Orders"
+    # A bare name is the slot answer, which the slot-fill path owns.
+    assert names_pending_candidate("Demo Orders", slot) == ""
+    assert names_pending_candidate("how many jobs failed", slot) == ""
+
+    agent = get_pilot_agent()
+    ctx = {"pilot_session_id": "test-pending-named"}
+    asked = agent.chat("how many tables on the first one", data_context=dict(ctx))
+    assert "No connector matched" in asked.answer
+
+    answered = agent.chat(
+        "what tables are on Demo Orders",
+        history=[
+            {"role": "user", "content": "how many tables on the first one"},
+            {"role": "assistant", "content": asked.answer},
+        ],
+        data_context=dict(ctx),
+    )
+    assert "I didn't match that reply" not in answered.answer
+    assert "`orders`" in answered.answer
+
+
+def test_again_re_runs_the_last_query_and_a_bare_noun_swaps_the_table():
+    """"again" and "and customers" both reached no tool and came back as
+    "outside what the Datawrap documentation covers".
+    """
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+
+    agent = get_pilot_agent()
+    ctx = {"pilot_session_id": "test-again-swap"}
+    first = agent.chat("count rows in orders on Demo Orders", data_context=dict(ctx))
+    assert "12 rows" in first.answer
+
+    repeated = agent.chat("again", data_context=dict(ctx))
+    assert "12 rows" in repeated.answer
+
+    swapped = agent.chat("and customers", data_context=dict(ctx))
+    assert "`customers`" in swapped.answer
+    assert "5 rows" in swapped.answer
+
+
+def test_a_rank_phrase_is_a_limit_not_an_invented_filter():
+    """"only the top 2" became ``status = 'top 2'`` — a predicate on a column the
+    operator never named, against a value no row holds.
+    """
+    from src.ai.copilot.followup import _extract_edit_where, resolve_followup
+    from src.ai.copilot.working_memory import PilotFocus
+
+    focus = PilotFocus(table="orders", connector_name="Demo Orders", metric="count")
+    for rank in ("only the top 2", "just the first 3", "only the latest"):
+        assert _extract_edit_where(rank, focus) == "", rank
+
+    limited = resolve_followup("only the top 2", focus)
+    assert limited is not None
+    assert limited.limit == 2
+    assert limited.where == ""
+
+    # A direction on its own is a whole edit; without that it changed nothing the
+    # caller could see and the turn was refused as undocumented.
+    sorted_desc = resolve_followup("sort it descending", focus)
+    assert sorted_desc is not None
+    assert sorted_desc.descending is True
+
+
+def test_a_connector_only_focus_is_remembered():
+    """Listing a connector's tables settles the connector and nothing else, and
+    dropping that made the next named-table read answer "Connector not found".
+    """
+    from src.ai.copilot.working_memory import PilotFocus, get_working_memory
+
+    memory = get_working_memory()
+    sid = "test-connector-only-focus"
+    memory.update_focus(sid, connector_name="Demo Orders", tool="list_connector_objects")
+    focus = memory.get_focus(sid)
+    assert focus is not None
+    assert focus.connector_name == "Demo Orders"
+    # Scope without a table must not make the turn look elliptical.
+    assert not focus.has_target()
+    assert focus.has_scope()

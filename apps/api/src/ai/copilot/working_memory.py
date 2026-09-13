@@ -95,6 +95,18 @@ class PilotFocus:
         """True when we know a table to talk about."""
         return bool(self.table)
 
+    def has_scope(self) -> bool:
+        """True when we know *where* to look, even if not yet what.
+
+        Listing a connector's tables settles the connector and nothing else. That
+        is worth remembering: without it, "how many rows in the first one" right
+        after "what tables are on Demo Orders" reached the aggregator with a real
+        table name and no connector, and answered "Connector not found". Only
+        ``has_target`` gates the elliptical-edit layer, so a connector-only focus
+        fills omitted slots without ever claiming a table the operator never named.
+        """
+        return bool(self.table or self.connector_id or self.connector_name)
+
     def describe(self) -> str:
         if not self.table:
             return ""
@@ -188,7 +200,7 @@ class PilotWorkingMemory:
 
     def remember_focus(self, session_id: str, focus: PilotFocus) -> None:
         sid = (session_id or "").strip()
-        if not sid or not focus.has_target():
+        if not sid or not focus.has_scope():
             return
         focus.updated_at = _now()
         focus.columns = [str(c) for c in (focus.columns or [])][:_MAX_COLUMNS]
@@ -216,7 +228,7 @@ class PilotWorkingMemory:
                     setattr(current, key, "" if isinstance(getattr(current, key), str) else 0)
                 continue
             setattr(current, key, value)
-        if not current.has_target():
+        if not current.has_scope():
             return None
         self.remember_focus(sid, current)
         return current

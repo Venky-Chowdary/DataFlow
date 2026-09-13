@@ -75,9 +75,24 @@ _AFFIRMATIVE = frozenset({
 
 # Words that open an instruction rather than name a value, so "just tell me the
 # number" and "only show the total" are read as asks, not as filters.
+#
+# Rank words belong here for the same reason: "only the top 2" is a limit, and
+# read as a filter it became ``status = 'top 2'`` — a predicate on a column the
+# operator never named, against a value that is not in any row.
 _NOT_A_FILTER_VALUE = re.compile(
     r"^(?:tell|show|give|list|get|say|read|explain|describe|do|make|run|open|"
-    r"answer|repeat|me|us|it|that|this|one|number|count|total|sum|average)\b",
+    r"answer|repeat|me|us|it|that|this|one|number|count|total|sum|average|"
+    r"top|bottom|first|last|latest|newest|oldest|highest|lowest|biggest|"
+    r"smallest|best|worst|most|least|few|rest|others?|ones?)\b",
+    re.I,
+)
+
+# A turn that asks for the same query again, with nothing changed.
+_REPEAT_RE = re.compile(
+    r"^(?:again|same\s+again|one\s+more\s+time|once\s+more|"
+    r"(?:do|run)\s+(?:that|it|this)\s+again|re-?run(?:\s+(?:that|it|this))?|"
+    r"repeat(?:\s+(?:that|it|this))?|refresh(?:\s+(?:that|it|this))?|"
+    r"check\s+(?:that|it)\s+again)$",
     re.I,
 )
 
@@ -467,6 +482,104 @@ def resolve_table_coreference_tools(
     return None
 
 
+#: Every list the pilot prints puts one item per bullet and names it in bold
+#: (connectors) or backticks (tables). Reading the *bullets* rather than every
+#: bold span is what keeps the heading — "You have **2 saved connector(s)**" —
+#: out of the candidate set.
+_BULLET_LINE = re.compile(r"^\s*[•\-\*]\s+(.+)$")
+_BULLET_NAME = re.compile(r"^(?:\*\*([^*]{1,60})\*\*|`([^`]{1,60})`)")
+
+#: Ordinal pointers into that list. ``job`` and ``run`` are deliberately absent:
+#: "my last job" is a query the job tools answer, not a pointer at a printed list.
+_ORDINALS: tuple[tuple[str, int], ...] = (
+    (r"first|1st", 0),
+    (r"second|2nd", 1),
+    (r"third|3rd", 2),
+    (r"fourth|4th", 3),
+    (r"fifth|5th", 4),
+    (r"last|final", -1),
+)
+_ORDINAL_NOUN = (
+    r"(?:one|item|entry|connector|connection|table|collection|dataset|"
+    r"schedule|pipeline)s?"
+)
+
+
+def offered_names(assistant_text: str) -> list[str]:
+    """The list items the pilot last printed, in the order it printed them."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (assistant_text or "").splitlines():
+        bullet = _BULLET_LINE.match(raw_line)
+        if not bullet:
+            continue
+        named = _BULLET_NAME.match(bullet.group(1).strip())
+        if not named:
+            continue
+        name = (named.group(1) or named.group(2) or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    return names[:12]
+
+
+def resolve_ordinal_reference(
+    message: str,
+    history: list[dict] | None,
+) -> str | None:
+    """Rewrite "the first one" as the name the previous list gave it.
+
+    "how many connectors do i have" then "how many tables on the first one" used
+    to reach the connector lookup with the literal words *the first one*, which
+    matched nothing and re-asked which connector was meant — while the list it
+    was pointing at was still on screen. Returning a rewritten *message* keeps
+    ordinary routing in charge of what the turn then means.
+    """
+    text = _clean(message)
+    if not text:
+        return None
+    for pattern, index in _ORDINALS:
+        hit = re.search(
+            rf"\b(?:the\s+)?(?:{pattern})\s+{_ORDINAL_NOUN}\b",
+            text,
+            re.I,
+        )
+        if not hit:
+            continue
+        names = offered_names(last_assistant_content(history))
+        if not names:
+            return None
+        if index >= len(names):
+            return None
+        return f"{text[: hit.start()]}{names[index]}{text[hit.end() :]}".strip()
+    return None
+
+
+def names_pending_candidate(message: str, pending: PendingSlot | None) -> str:
+    """The offered candidate this turn names outright inside a fuller sentence.
+
+    An open "which connector did you mean?" used to swallow the next turn whole,
+    so "what tables are on Demo Orders" — which answers the question and asks a
+    new one — was met with "I didn't match that reply" and the same list again.
+    A turn that names a candidate is self-sufficient: clear the slot and route it
+    normally rather than filling the old tool with a new question's subject.
+    """
+    if not pending:
+        return ""
+    text = _clean(message).lower()
+    if not text:
+        return ""
+    for cand in pending.candidates or []:
+        name = (cand or "").strip()
+        if not name or name.lower() == text:
+            # A bare reply *is* the slot answer; that path handles it.
+            continue
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(name.lower())}(?![A-Za-z0-9])", text):
+            return name
+    return ""
+
+
 def pending_from_assistant_clarification(
     history: list[dict] | None,
 ) -> PendingSlot | None:
@@ -524,6 +637,7 @@ _ELLIPTICAL_EDIT_RE = re.compile(
     r"make\s+it|switch\s+to|filter\s+to|do\s+that\s+again|by|per|"
     r"group(?:ed)?\s+by|drop\s+(?:the\s+)?group(?:ing)?|no\s+grouping|"
     r"top\s+\d|bottom\s+\d|"
+    r"again|once\s+more|re-?run|repeat|sort|order\s+by|"
     r"where|filter|instead)\b",
     re.I,
 )
@@ -830,6 +944,18 @@ _VALUE_TAIL = (
 )
 
 
+#: "and customers" after counting ``orders`` is the same question about another
+#: table — the shortest form of "same for customers". Only a plural noun is read
+#: this way: "and pending" is far more likely to be a filter value, and reading
+#: it as a table would answer a question the operator did not ask.
+_BARE_TABLE_SWAP = re.compile(
+    r"^(?:and|also|now|then|plus)\s+(?:the\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_.]{2,48}s)"
+    r"(?:\s+(?:table|collection))?[\s.?!]*$",
+    re.I,
+)
+
+
 def _extract_edit_table(message: str) -> str:
     """"same for products", "now do orders", "what about the invoices table"."""
     m = re.search(
@@ -839,6 +965,8 @@ def _extract_edit_table(message: str) -> str:
         message,
         re.I,
     )
+    if not m:
+        m = _BARE_TABLE_SWAP.match(_clean(message))
     if not m:
         return ""
     table = _clean(m.group(1))
@@ -897,9 +1025,15 @@ def looks_like_followup(message: str, focus: PilotFocus | None) -> bool:
         and not _COREFERENCE_RE.search(text)
     ):
         return False
+    # "again" after a count is the same query re-run. It reached no tool at all
+    # and came back as "outside what the Datawrap documentation covers".
+    if _REPEAT_RE.match(text):
+        return True
     if _COREFERENCE_RE.search(text):
         return True
     if re.match(r"^(?:and|also|now|then|what\s+about|how\s+about|ok\s+)", text, re.I):
+        return True
+    if re.match(r"^(?:sort|order)\b", text, re.I):
         return True
     if _INSTEAD_RE.search(text):
         return True
@@ -947,6 +1081,10 @@ def resolve_followup(
         where=getattr(focus, "where", "") or "",
     )
 
+    # "again" changes nothing, which is exactly the edit: re-run what we ran.
+    if _REPEAT_RE.match(text):
+        return req
+
     edited = False
 
     where_clause = _extract_edit_where(text, focus)
@@ -987,6 +1125,10 @@ def resolve_followup(
         edited = True
     elif _DESC_RE.search(text) and not re.match(r"^(?:top|bottom)\s+\d", text, re.I):
         req.descending = True
+        # A direction on its own is a whole edit. Without this, "sort it
+        # descending" made no change the caller could see, so it fell through to
+        # retrieval and was refused as undocumented.
+        edited = True
 
     if not edited:
         return None

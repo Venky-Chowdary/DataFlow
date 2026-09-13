@@ -1638,10 +1638,12 @@ Draft answer:
             looks_like_followup,
             looks_like_fresh_intent,
             names_its_own_subject,
+            names_pending_candidate,
             opens_a_row_predicate,
             pending_from_assistant_clarification,
             resolve_followup,
             resolve_knowledge_engine_followup,
+            resolve_ordinal_reference,
             resolve_pending_answer,
             resolve_platform_coreference,
             resolve_repair,
@@ -1659,6 +1661,11 @@ Draft answer:
         repaired = resolve_repair(message, history)
         if repaired:
             message = repaired
+        # "the first one" is the name the previous list already printed. Resolved
+        # into the text so the rest of routing sees an ordinary named subject.
+        ordinal = resolve_ordinal_reference(message, history)
+        if ordinal:
+            message = ordinal
         if not session_id:
             platform = resolve_platform_coreference(message, history)
             if platform:
@@ -1676,8 +1683,14 @@ Draft answer:
                 if answered:
                     return [answered]
                 # Typo / non-answer against a transcript clarification — promote
-                # to hard pending and re-ask (same as memory-backed slots).
-                if not looks_like_fresh_intent(message) and not looks_like_elliptical_edit(message):
+                # to hard pending and re-ask (same as memory-backed slots). A turn
+                # that names one of the offered connectors is not a non-answer:
+                # it settled the question and asked its own.
+                if (
+                    not looks_like_fresh_intent(message)
+                    and not looks_like_elliptical_edit(message)
+                    and not names_pending_candidate(message, soft)
+                ):
                     memory.remember_pending(session_id, soft)
                     return []
         if pending:
@@ -1685,8 +1698,13 @@ Draft answer:
             if answered:
                 memory.clear_pending(session_id)
                 return [answered]
-            # Fresh intents and elliptical edits clear the slot; typos keep it open.
-            if looks_like_fresh_intent(message) or looks_like_elliptical_edit(message):
+            # Fresh intents, elliptical edits and turns that name one of the
+            # offered candidates clear the slot; typos keep it open.
+            if (
+                looks_like_fresh_intent(message)
+                or looks_like_elliptical_edit(message)
+                or names_pending_candidate(message, pending)
+            ):
                 memory.clear_pending(session_id)
             else:
                 return []
