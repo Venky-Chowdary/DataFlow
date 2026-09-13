@@ -26,7 +26,12 @@ from ..rag.query_analysis import (
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
-from .unsupported_question import is_answerable_subject, unsupported_question_output
+from .unsupported_question import (
+    asks_a_commercial_question,
+    commercial_question_output,
+    is_answerable_subject,
+    unsupported_question_output,
+)
 
 
 @dataclass
@@ -585,6 +590,27 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "compare_connectors",
+        "description": (
+            "Compare two saved connectors side by side on engine, endpoint, "
+            "connection health, transfer-readiness and live object count. Use for "
+            "“compare Demo Orders and Quarantine SQLite”, “what is the difference "
+            "between my two Postgres connectors”, “X vs Y”."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "left": {"type": "string", "description": "First saved connector name"},
+                "right": {"type": "string", "description": "Second saved connector name"},
+                "criterion": {
+                    "type": "string",
+                    "description": "The word the operator compared on, e.g. faster, better",
+                },
+            },
+            "required": ["left", "right"],
+        },
+    },
+    {
         "name": "sample_connector_object",
         "description": (
             "Sample live rows from a table/collection on a saved connector "
@@ -797,6 +823,7 @@ TOOL_FAMILIES: list[dict] = [
             "profile_quality_rules",
             "list_connector_objects",
             "rank_connector_tables",
+            "compare_connectors",
             "introspect_connector_schema",
             "sample_connector_object",
             "aggregate_data",
@@ -918,6 +945,7 @@ class DataPilotTools:
             "start_transfer_studio": self._start_transfer_studio,
             "list_connector_objects": self._list_connector_objects,
             "rank_connector_tables": self._rank_connector_tables,
+            "compare_connectors": self._compare_connectors,
             "sample_connector_object": self._sample_connector_object,
             "run_query": self._run_query,
             "aggregate_data": self._aggregate_data,
@@ -1589,6 +1617,19 @@ class DataPilotTools:
 
         lower = (query or "").lower().strip()
 
+        # A price or an SLA is not an engineering fact, so retrieval over the
+        # engineering corpus has nothing to say about it. Left to the term filter
+        # this refusal held only when the sentence named nothing else: "how much
+        # does a transfer cost" anchored on ``transfer`` and answered with the
+        # Transfer Studio walkthrough, which is the invented answer this product
+        # exists to refuse.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output=commercial_question_output(query),
+            )
+
         # Direct high-value FAQ snippets (beat generic intent templates).
         direct: list[tuple[re.Pattern[str], str, str]] = [
             (
@@ -1814,6 +1855,12 @@ class DataPilotTools:
         # fragments ("how do I cook rice" → paste a job id, your dataset has 11
         # columns). If the question names no documented subject, refuse before
         # retrieval instead of narrating whatever the index happened to be closest to.
+        if asks_a_commercial_question(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=commercial_question_output(query),
+            )
         if not is_answerable_subject(query):
             return ToolResult(
                 name="search_knowledge",
@@ -2307,6 +2354,16 @@ class DataPilotTools:
             order=order,
             limit=limit,
         )
+
+    def _compare_connectors(
+        self,
+        left: str = "",
+        right: str = "",
+        criterion: str = "",
+    ) -> ToolResult:
+        from .schema_tools import compare_connectors
+
+        return compare_connectors(left=left, right=right, criterion=criterion)
 
     def _sample_connector_object(
         self,
@@ -3036,6 +3093,89 @@ def asks_to_rank_connector_tables(message: str) -> bool:
 
 def table_rank_order(message: str) -> str:
     return "asc" if _ASCENDING_RANK.search(message or "") else "desc"
+
+
+#: The shapes a two-sided comparison arrives in. Each captures both sides so the
+#: names can be resolved against the saved connectors before anything commits to
+#: a tool: "append vs overwrite" and "Demo Orders vs Quarantine SQLite" are the
+#: same sentence and completely different questions.
+_COMPARE_FRAMES: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bcompare\s+(?P<a>.+?)\s+(?:and|to|with|against|vs\.?|versus)\s+(?P<b>.+?)"
+        r"[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:what(?:'?s| is| are)?\s+the\s+)?(?:difference|differences|diff)\s+"
+        r"between\s+(?P<a>.+?)\s+(?:and|vs\.?|versus)\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?[a-z]+"
+        r"(?:er|est)?\s*[,:]?\s*(?P<a>.+?)\s+or\s+(?P<b>.+?)[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(
+        r"\bhow\s+do(?:es)?\s+(?P<a>.+?)\s+and\s+(?P<b>.+?)\s+"
+        r"(?:differ|compare)\b[\s.?!]*$",
+        re.I,
+    ),
+    re.compile(r"^(?P<a>[^?!.]+?)\s+(?:vs\.?|versus)\s+(?P<b>[^?!.]+?)[\s.?!]*$", re.I),
+)
+
+#: Words the comparison itself contributes, which are not part of either name.
+_COMPARE_NOISE = re.compile(
+    r"^(?:my|our|the|a|an|both|two)\s+|\s+(?:connector|connectors|connection|"
+    r"connections|one|ones)$",
+    re.I,
+)
+
+#: The adjective a "which is …" comparison asked on, so the answer can say what
+#: this workspace does not measure instead of inventing a benchmark.
+_COMPARE_CRITERION = re.compile(
+    r"\b(?:which|what)\s+(?:one\s+)?(?:is|has|was)\s+(?:the\s+)?(?P<word>[a-z]+)\b",
+    re.I,
+)
+
+
+def _compare_side(text: str) -> str:
+    """One side of a comparison with the comparison's own words stripped off."""
+    want = re.sub(r"\s+", " ", (text or "").strip().strip("\"'“”‘’"))
+    for _ in range(2):
+        stripped = _COMPARE_NOISE.sub("", want).strip()
+        if stripped == want:
+            break
+        want = stripped
+    return want
+
+
+def connector_comparison(message: str) -> dict[str, str] | None:
+    """The two saved connectors this message asks to compare, or None.
+
+    Resolution happens here rather than inside the tool because the same sentence
+    shape is a documentation question when the names are product concepts. Both
+    sides must resolve to a saved connector — anything less falls through to
+    retrieval, which is the right owner for "append vs overwrite".
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    from .schema_tools import saved_connector_name
+
+    for pattern in _COMPARE_FRAMES:
+        hit = pattern.search(text)
+        if not hit:
+            continue
+        left = saved_connector_name(_compare_side(hit.group("a")))
+        right = saved_connector_name(_compare_side(hit.group("b")))
+        if not left or not right or left == right:
+            continue
+        criterion = ""
+        word = _COMPARE_CRITERION.search(text)
+        if word:
+            criterion = word.group("word").lower()
+        return {"left": left, "right": right, "criterion": criterion}
+    return None
 
 
 # Creative writing is not a documentation subject. "write me a poem about data"
@@ -3831,6 +3971,7 @@ _LIVE_SCHEMA_TOOLS = frozenset({
     "filter_result",
     "list_connector_objects",
     "rank_connector_tables",
+    "compare_connectors",
 })
 
 # Tools that answer from the documentation rather than from workspace state.
@@ -3897,6 +4038,7 @@ _NAMED_OBJECT_LOOKUP_TOOLS = frozenset({
     "sample_connector_object",
     "list_connector_objects",
     "rank_connector_tables",
+    "compare_connectors",
     "introspect_connector_schema",
     "aggregate_data",
     "analyze_dataset",
@@ -4707,6 +4849,12 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     # presented an Iceberg passage as the answer to "write me a poem about data".
     if asks_for_creative_writing(message):
         return []
+    # Price, licence and SLA are not engineering facts, so no tool here can
+    # answer them and every one that tried answered something else: "how many
+    # seats do we get" reached ``aggregate_data`` and replied "connector not
+    # found". ``explain_product`` owns the refusal that names what is missing.
+    if asks_a_commercial_question(message):
+        return [("explain_product", {"query": message})]
     if is_schedule_setup_capability_ask(message):
         return []
     if is_create_connection_capability_ask(message) or is_route_plan_capability_paste(message):
@@ -5646,6 +5794,31 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"tables?\s+availab(?:le|ale)\s+(?:on|in|from|for)\s+(.+)$",
         lower,
     )
+    # Two of the operator's own connectors, named side by side. Both names had to
+    # resolve against the store to get here, so this is not a documentation
+    # question — which is what it used to become: the shipped examples use these
+    # very names, so "compare Demo Orders and Quarantine SQLite" retrieved the
+    # destination-type table and answered about six logical types instead.
+    comparison = connector_comparison(message)
+    if comparison:
+        planned = [
+            (n, a)
+            for n, a in planned
+            if n
+            not in (
+                "explain_product",
+                "search_knowledge",
+                "list_connectors",
+                "sample_connector_object",
+                "aggregate_data",
+                "list_connector_objects",
+                "introspect_connector_schema",
+                "plan_transfer_route",
+                "get_transfer_capabilities",
+            )
+        ]
+        planned.append(("compare_connectors", dict(comparison)))
+        return planned
     # A size question about the tables on a connector is a ranking, not a read of
     # one table. Claimed before the inventory and sample parsers, because both
     # used to take the superlative for the table name.

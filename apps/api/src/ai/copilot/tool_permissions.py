@@ -58,6 +58,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "list_connectors": (Permission.CONNECTOR_READ, READ),
     "search_connectors": (Permission.CONNECTOR_READ, READ),
     "list_connector_objects": (Permission.CONNECTOR_READ, READ),
+    "compare_connectors": (Permission.CONNECTOR_READ, READ),
     "introspect_connector_schema": (Permission.CONNECTOR_READ, READ),
     "diff_schemas": (Permission.CONNECTOR_READ, READ),
     "map_connector_schemas": (Permission.CONNECTOR_READ, READ),

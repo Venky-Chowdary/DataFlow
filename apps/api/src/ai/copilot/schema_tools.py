@@ -896,3 +896,155 @@ def map_connector_schemas(
             "threshold": float(threshold or 0.85),
         },
     )
+
+
+def saved_connector_name(needle: str) -> str:
+    """The saved connector this phrase names, exactly as the store spells it.
+
+    A planner needs to know whether a phrase is one of the operator's own
+    connectors *before* it commits to a tool: "what is the difference between
+    append and overwrite" and "compare Demo Orders and Quarantine SQLite" have
+    the same shape and completely different answers. Returns "" for anything
+    that is not one saved connector, so the caller fails closed.
+    """
+    want = (needle or "").strip()
+    if not want:
+        return ""
+    try:
+        conn = _connector_dict("", want)
+    except AmbiguousConnectorError:
+        return ""
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return ""
+    if not conn:
+        return ""
+    return str(conn.get("name") or "").strip()
+
+
+def _connector_health(conn: dict[str, Any]) -> str:
+    ok = conn.get("last_test_ok")
+    if ok is True:
+        return "passed"
+    if ok is False:
+        return "failed"
+    return "untested"
+
+
+def _connector_facts(conn: dict[str, Any]) -> dict[str, Any]:
+    """One saved connector as the facts an operator compares them on.
+
+    Everything here is read from the store or measured live. Nothing is inferred
+    from the engine name: transfer-readiness comes from the capability registry
+    the transfer engine itself consults, and the object count comes from a real
+    introspection, so "connected" reports what the probe actually did.
+    """
+    engine = str(conn.get("type") or conn.get("format") or "").strip()
+    facts: dict[str, Any] = {
+        "id": str(conn.get("id") or conn.get("_id") or ""),
+        "name": str(conn.get("name") or ""),
+        "engine": engine,
+        "database": str(conn.get("database") or ""),
+        "host": str(conn.get("host") or ""),
+        "schema": str(conn.get("schema") or ""),
+        "health": _connector_health(conn),
+        "last_tested_at": conn.get("last_tested_at") or "",
+        "capability": "",
+        "transfer_ready": None,
+        "objects": None,
+        "connected": None,
+        "message": "",
+    }
+    try:
+        from src.transfer.connector_capabilities import (
+            capability_label,
+            get_capabilities,
+            transfer_ready,
+        )
+
+        caps = get_capabilities(engine, engine)
+        facts["capability"] = capability_label(caps)
+        facts["transfer_ready"] = bool(transfer_ready(caps))
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    listed = list_connector_objects(connector_id=facts["id"], connector_name=facts["name"])
+    if getattr(listed, "success", False):
+        out = getattr(listed, "output", None) or {}
+        facts["objects"] = out.get("total")
+        facts["connected"] = bool(out.get("connected"))
+        facts["message"] = str(out.get("message") or "")
+    else:
+        facts["connected"] = False
+        facts["message"] = str(getattr(listed, "error", "") or "")
+    return facts
+
+
+#: Comparisons an operator asks for that this workspace does not measure. Saying
+#: "Demo Orders is faster" from an engine name would be an invented benchmark;
+#: the connectors page records no throughput, latency or price per connector.
+UNMEASURED_CRITERIA: dict[str, str] = {
+    "faster": "per-connector throughput",
+    "fastest": "per-connector throughput",
+    "slower": "per-connector throughput",
+    "quicker": "per-connector throughput",
+    "cheaper": "per-connector cost",
+    "better": "an overall quality score",
+    "best": "an overall quality score",
+    "worse": "an overall quality score",
+    "reliable": "a reliability score",
+}
+
+
+def compare_connectors(
+    left: str = "",
+    right: str = "",
+    criterion: str = "",
+):
+    """Two saved connectors side by side, on the facts the workspace actually holds.
+
+    "compare Demo Orders and Quarantine SQLite" used to reach no tool. Retrieval
+    won the turn instead and, because the documentation uses both names in its
+    examples, answered with the destination type table for six logical types —
+    a real passage about something the operator had not asked.
+    """
+    left_conn, err = _safe_connector("", left, "compare_connectors")
+    if err:
+        return err
+    right_conn, err = _safe_connector("", right, "compare_connectors")
+    if err:
+        return err
+    if str(left_conn.get("id") or "") == str(right_conn.get("id") or ""):
+        return _tool_result(
+            "compare_connectors",
+            success=False,
+            error=(
+                f"“{left}” and “{right}” resolve to the same saved connector "
+                f"({left_conn.get('name')}). Name two different ones to compare."
+            ),
+        )
+
+    a = _connector_facts(left_conn)
+    b = _connector_facts(right_conn)
+    differs = [
+        field
+        for field in ("engine", "database", "host", "health", "capability")
+        if str(a.get(field) or "") != str(b.get(field) or "")
+    ]
+    if a.get("objects") != b.get("objects"):
+        differs.append("objects")
+    want = (criterion or "").strip().lower()
+    return _tool_result(
+        "compare_connectors",
+        success=True,
+        output={
+            "left": a,
+            "right": b,
+            "differs": differs,
+            "same_engine": a["engine"].lower() == b["engine"].lower(),
+            # Named so the renderer can say what it cannot compare instead of
+            # answering a throughput question with an engine name.
+            "criterion": want,
+            "unmeasured": UNMEASURED_CRITERIA.get(want, ""),
+        },
+    )

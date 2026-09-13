@@ -103,6 +103,10 @@ def _tool_summary(tr: ToolResult) -> str:
             f"{o.get('counted', 0)} tables counted on {o.get('connector_name')} "
             f"({o.get('total_rows', 0)} rows)"
         )
+    if tr.name == "compare_connectors":
+        left = (o.get("left") or {}).get("name") or "?"
+        right = (o.get("right") or {}).get("name") or "?"
+        return f"{left} vs {right} · {len(o.get('differs') or [])} field(s) differ"
     if tr.name == "sample_connector_object":
         rid = o.get("result_id") or ""
         base = f"{o.get('row_count', 0)} rows from {o.get('table')}"
@@ -502,6 +506,98 @@ def _render_table_ranking(o: dict[str, Any]) -> str:
             "the largest page, not proven to be the whole database."
         )
     return "\n".join(lines)
+
+
+def _connector_side(f: dict[str, Any]) -> dict[str, str]:
+    """One connector's column of the comparison table, already formatted."""
+    endpoint = str(f.get("database") or "") or str(f.get("host") or "") or "—"
+    objects = f.get("objects")
+    tested = str(f.get("last_tested_at") or "")
+    return {
+        "engine": str(f.get("engine") or "—"),
+        "endpoint": f"`{endpoint}`" if endpoint != "—" else "—",
+        "health": str(f.get("health") or "untested")
+        + (f" ({tested[:10]})" if tested else ""),
+        "capability": str(f.get("capability") or "—"),
+        "objects": f"{int(objects):,}" if isinstance(objects, int) else "not read",
+        "reachable": "yes" if f.get("connected") else "no",
+    }
+
+
+def _render_connector_comparison(o: dict[str, Any]) -> str:
+    """Two saved connectors side by side, on facts the workspace actually holds.
+
+    A comparison has to say what differs, or the operator has to diff the table
+    themselves. It must also say what it *cannot* compare: this workspace records
+    no throughput or price per connector, so "which is faster" has no answer here
+    and inventing one from the engine name would be a benchmark we never ran.
+    """
+    left = o.get("left") or {}
+    right = o.get("right") or {}
+    a_name = str(left.get("name") or "A")
+    b_name = str(right.get("name") or "B")
+    a = _connector_side(left)
+    b = _connector_side(right)
+    rows = (
+        ("Engine", "engine"),
+        ("Endpoint", "endpoint"),
+        ("Connection test", "health"),
+        ("Transfer readiness", "capability"),
+        ("Tables / collections", "objects"),
+        ("Reachable now", "reachable"),
+    )
+    lines = [f"**{a_name}** vs **{b_name}** — what your workspace records:"]
+    lines.append(f"| | {a_name} | {b_name} |")
+    lines.append("| --- | --- | --- |")
+    for label, key in rows:
+        lines.append(f"| {label} | {a[key]} | {b[key]} |")
+
+    differs = [str(d) for d in (o.get("differs") or [])]
+    if differs:
+        spoken = {
+            "engine": "engine",
+            "database": "endpoint",
+            "host": "endpoint",
+            "health": "connection test",
+            "capability": "transfer readiness",
+            "objects": "object count",
+        }
+        named = []
+        for d in differs:
+            word = spoken.get(d, d)
+            if word not in named:
+                named.append(word)
+        lines.append(f"They differ on {_including_clause_words(named)}.")
+    else:
+        lines.append("Every field the workspace records is identical.")
+    if o.get("same_engine"):
+        lines.append(
+            "Same engine on both sides, so a transfer between them needs no type "
+            "coercion beyond the mapping."
+        )
+
+    unmeasured = str(o.get("unmeasured") or "")
+    if unmeasured:
+        lines.append(
+            f"I cannot rank them on {unmeasured} — this workspace does not record "
+            "it per connector, and reading it off the engine name would be a "
+            "benchmark nobody ran."
+        )
+    for side in (left, right):
+        note = str(side.get("message") or "")
+        if note and not side.get("connected"):
+            lines.append(f"• **{side.get('name')}** did not answer: {note[:140]}")
+    return "\n".join(lines)
+
+
+def _including_clause_words(words: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c`` — the list read out loud."""
+    kept = [w for w in words if w]
+    if not kept:
+        return "nothing"
+    if len(kept) == 1:
+        return kept[0]
+    return ", ".join(kept[:-1]) + " and " + kept[-1]
 
 
 def _local_and_utc(instant: str, timezone_name: str) -> str:
@@ -2604,6 +2700,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             tr.name in (
                 "list_connector_objects",
                 "rank_connector_tables",
+                "compare_connectors",
                 "introspect_connector_schema",
                 "sample_connector_object",
                 "aggregate_data",
@@ -2999,6 +3096,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
             elif tr.name == "rank_connector_tables" and tr.success:
                 parts.append(_render_table_ranking(tr.output or {}))
+            elif tr.name == "compare_connectors" and tr.success:
+                parts.append(_render_connector_comparison(tr.output or {}))
             elif tr.name == "list_connector_objects" and tr.success:
                 o = tr.output or {}
                 objs = o.get("objects") or []
@@ -3462,6 +3561,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     "filter_result",
                     "list_connector_objects",
                     "rank_connector_tables",
+                    "compare_connectors",
                     "diff_schemas",
                     "map_connector_schemas",
                 )
