@@ -89,6 +89,79 @@ _NEXT_ACTION = re.compile(
 )
 
 # Product / workspace nouns — if present, this is not "general internet chat".
+_CALENDAR = re.compile(
+    r"^\s*(?:"
+    r"(?:what(?:'s| is)\s+)?(?:the\s+)?(?:today'?s|todays)\s+date"
+    r"|what\s+(?:day|date)\s+is\s+(?:it|today)"
+    r"|(?:what\s+is\s+)?date\s+today"
+    r"|today'?s\s+date"
+    r"|what\s+is\s+today"
+    r"|tell\s+me\s+(?:the\s+)?(?:today'?s\s+)?(?:date|day)"
+    r"|what\s+day\s+is\s+it"
+    r")\s*[.!?]*\s*$",
+    re.I,
+)
+
+_SCHEDULE_HEALTH = re.compile(
+    r"\b(?:"
+    r"(?:why\s+)?(?:are|is|aren'?t|isn'?t|are\s+not|is\s+not)\s+"
+    r"(?:my\s+|the\s+)?"
+    r"(?:schedules?|pipelines?)\s*"
+    r"(?:working|running|ok|okay|fine|broken|failing|down|parked|stuck|"
+    r"not\s+working|not\s+running)?"
+    r"|(?:why\s+)?(?:schedules?|pipelines?)\s+(?:are|is|aren'?t|isn'?t)\s+"
+    r"(?:not\s+)?(?:working|running|ok|okay|fine|broken|failing|down|parked|stuck)"
+    r"|(?:schedules?|pipelines?)\s+(?:not\s+working|not\s+running|broken|failing|stuck|down)"
+    r"|why\s+(?:aren'?t|are\s+not|isn'?t|is\s+not|won'?t)\s+(?:my\s+|the\s+)?"
+    r"(?:schedules?|pipelines?)"
+    r")\b",
+    re.I,
+)
+
+_CREATE_CONNECTION_CAPABILITY = re.compile(
+    r"^\s*(?:can|could|will)\s+you\s+"
+    r"(?:create|add|make|set\s*up|setup|save)\s+"
+    r"(?:a\s+|an\s+|the\s+|new\s+)?"
+    r"(?:connection|connector)\s*[.!?]*\s*$",
+    re.I,
+)
+
+_ROUTE_PLAN_CAPABILITY = re.compile(
+    r"^\s*plan\s+source\s*[→\->]{1,3}\s*destination\s+routes?"
+    r"(?:\s+and\s+sync\s+modes?)?\s*[.!?]*\s*$",
+    re.I,
+)
+
+_HOW_TO_OR_DELETE_SCHEDULE = re.compile(
+    r"\b(?:how\s+(?:do|can|to)|what\s+happens|delete|drop|export|yaml|gitops|"
+    r"cdc\s+schedule)\b",
+    re.I,
+)
+
+
+def is_calendar_question(message: str) -> bool:
+    """Clock/calendar — not a DATE-column or transform question."""
+    return bool(_CALENDAR.match((message or "").strip()))
+
+
+def is_schedule_health_question(message: str) -> bool:
+    """Live pipeline health — not the CDC-delete or GitOps procedure."""
+    text = (message or "").strip()
+    if not text or _HOW_TO_OR_DELETE_SCHEDULE.search(text):
+        return False
+    return bool(_SCHEDULE_HEALTH.search(text))
+
+
+def is_create_connection_capability_ask(message: str) -> bool:
+    """Bare 'can you create a connection' — no host, so do not demand credentials."""
+    return bool(_CREATE_CONNECTION_CAPABILITY.match((message or "").strip()))
+
+
+def is_route_plan_capability_paste(message: str) -> bool:
+    """Capability-list line pasted as a turn, not a named source→dest."""
+    return bool(_ROUTE_PLAN_CAPABILITY.match((message or "").strip()))
+
+
 _WORKSPACE_MARKERS = re.compile(
     r"\b(?:"
     r"connectors?|pipelines?|schedules?|jobs?|transfers?|validate|preflight|quarantine|"

@@ -11,6 +11,7 @@ and not a JSON pretty-print.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from .agent import CopilotResponse
@@ -147,6 +148,101 @@ def compose_thanks() -> str:
     return (
         "You're welcome. If you want the short version of the last answer, "
         "say *summarize that*. If you want the next move, ask *what should I do next?*"
+    )
+
+
+def compose_calendar(ctx: dict[str, Any] | None = None) -> str:
+    """Answer a clock ask. Never retrieve DATE-type or transform docs."""
+    spoken = datetime.now(timezone.utc).strftime("%A, %d %B %Y")
+    ctx = ctx or {}
+    n_conn = len(ctx.get("connectors") or [])
+    n_jobs = len(ctx.get("recent_jobs") or [])
+    offer = " I can brief the workspace, check a pipeline, or open a failed job."
+    if n_conn or n_jobs:
+        offer = (
+            f" I can see **{n_conn}** connector(s) and **{n_jobs}** recent "
+            "job(s) if you want the sitrep instead."
+        )
+    return (
+        f"Today is **{spoken}** (UTC). I am not a personal calendar — "
+        f"I keep your Datawrap workspace.{offer}"
+    )
+
+
+def compose_calendar_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    return CopilotResponse(
+        answer=compose_calendar(ctx),
+        intent="greeting",
+        confidence=0.9,
+        method="pilot_conversation",
+        reasoning="Calendar ask — spoken UTC date, no warehouse claim",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my pipelines",
+            "Show my transfer jobs",
+        ],
+    )
+
+
+def compose_create_connection_capability(ctx: dict[str, Any] | None = None) -> str:
+    ctx = ctx or {}
+    connectors = ctx.get("connectors") or []
+    n = len(connectors) if isinstance(connectors, list) else 0
+    lead = (
+        "Yes. Paste a host or connection URL and I will **stage Confirm** — "
+        "credentials stay on the server and nothing is saved until you accept."
+    )
+    if n:
+        names = [
+            str(c.get("name") or c.get("id") or "")
+            for c in connectors[:6]
+            if isinstance(c, dict)
+        ]
+        named = ", ".join(f"**{x}**" for x in names if x)
+        extra = f" You already have **{n}** saved connector(s)"
+        if named:
+            extra += f": {named}"
+        lead += extra + "."
+    else:
+        lead += " Name the engine (Postgres, MySQL, Snowflake) if you want me to walk the fields."
+    return lead
+
+
+def compose_create_connection_response(ctx: dict[str, Any] | None = None) -> CopilotResponse:
+    return CopilotResponse(
+        answer=compose_create_connection_capability(ctx),
+        intent="connector_help",
+        confidence=0.86,
+        method="pilot_conversation",
+        reasoning="Create-connection capability — Confirm-gated, no procedure dump",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my connectors",
+            "What can you do?",
+        ],
+    )
+
+
+def compose_route_plan_capability() -> str:
+    return (
+        "Name a saved **source** and **destination** and I will propose a "
+        "sync mode, then stage Confirm. Nothing writes until you accept. "
+        "Example: *plan a transfer from MySQL to Snowflake*."
+    )
+
+
+def compose_route_plan_capability_response() -> CopilotResponse:
+    return CopilotResponse(
+        answer=compose_route_plan_capability(),
+        intent="transfer_help",
+        confidence=0.84,
+        method="pilot_conversation",
+        reasoning="Capability-list paste — ask for a named route",
+        suggested_prompts=[
+            "Give me a workspace briefing",
+            "Show my connectors",
+            "Show my pipelines",
+        ],
     )
 
 

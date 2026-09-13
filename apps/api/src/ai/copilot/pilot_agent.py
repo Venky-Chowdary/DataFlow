@@ -2018,6 +2018,26 @@ Respond as Datawrap Pilot — grounded in tool results."""
         intent = self._detect_intent(message)
         turn = PilotTurn()
 
+        from .dialogue_acts import (
+            is_calendar_question,
+            is_create_connection_capability_ask,
+            is_route_plan_capability_paste,
+            is_schedule_health_question,
+        )
+
+        if is_calendar_question(message):
+            from .conversation_composer import compose_calendar_response
+
+            return compose_calendar_response(ctx)
+        if is_create_connection_capability_ask(message):
+            from .conversation_composer import compose_create_connection_response
+
+            return compose_create_connection_response(ctx)
+        if is_route_plan_capability_paste(message):
+            from .conversation_composer import compose_route_plan_capability_response
+
+            return compose_route_plan_capability_response()
+
         planned = self._plan_with_memory(message, data_context, history)
         if not planned:
             # Typo / non-answer while a clarification is open — re-ask, keep slot.
@@ -2098,6 +2118,9 @@ Respond as Datawrap Pilot — grounded in tool results."""
             w in lower
             for w in ("fail", "error", "blocked", "why", "status", "fix", "quarantine", "integrity")
         )
+        # "why schedules are not working" is pipeline health, not the last job.
+        if is_schedule_health_question(message):
+            wants_triage = False
         if data_context and wants_triage:
             have_job = any(tr.name == "get_job" for tr in turn.tool_results)
             have_pf = any(tr.name == "get_preflight_run" for tr in turn.tool_results)
@@ -2204,6 +2227,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
         )
 
     def _compose_local_answer(self, message, intent, turn, insight, ctx) -> str:
+        from .dialogue_acts import is_schedule_health_question
+
         parts: list[str] = []
 
         for tr in turn.tool_results:
@@ -2235,7 +2260,53 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "list_schedules" and tr.success:
                 rows = tr.output.get("schedules", [])
                 if rows:
-                    lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
+                    enabled = [
+                        s for s in rows
+                        if isinstance(s, dict) and s.get("enabled")
+                    ]
+                    failed_last = [
+                        s for s in rows
+                        if isinstance(s, dict)
+                        and str(s.get("last_status") or "").lower() in {"failed", "error"}
+                    ]
+                    parked = [
+                        s for s in rows
+                        if isinstance(s, dict)
+                        and (s.get("needs_approval") or s.get("approval_finding"))
+                    ]
+                    if is_schedule_health_question(message):
+                        lead = f"You have **{len(rows)}** pipeline(s)."
+                        if parked:
+                            names = ", ".join(
+                                f"**{s.get('name')}**" for s in parked[:4] if s.get("name")
+                            )
+                            lead += (
+                                f" **{len(parked)}** are parked on approval"
+                                + (f" ({names})" if names else "")
+                                + " — they will not tick until someone approves."
+                            )
+                        elif failed_last:
+                            lead += (
+                                f" **{len(failed_last)}** last run failed. "
+                                "Ask me for that pipeline and I'll open the finding."
+                            )
+                        elif not enabled:
+                            lead += " None are enabled, so they will not fire."
+                        else:
+                            nxt = next(
+                                (
+                                    str(s.get("next_run_at") or "").strip()
+                                    for s in enabled
+                                    if s.get("next_run_at")
+                                ),
+                                "",
+                            )
+                            lead += f" **{len(enabled)}** enabled."
+                            if nxt:
+                                lead += f" Next due: {nxt}."
+                        lines = [lead]
+                    else:
+                        lines = [f"You have **{len(rows)} pipeline schedule(s)**."]
                     for s in rows[:8]:
                         bind = _schedule_bind_phrase(s)
                         lines.append(
@@ -2247,7 +2318,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         )
                     parts.append("\n".join(lines))
                 else:
-                    parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
+                    if is_schedule_health_question(message):
+                        parts.append(
+                            "No pipelines are scheduled yet, so nothing is running "
+                            "on a cadence. Create one on **Pipelines** after a transfer."
+                        )
+                    else:
+                        parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
             elif tr.name == "get_schedule" and tr.success:
                 parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
@@ -3056,8 +3133,10 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     break
             else:
                 prompts.append("Null rates on that result")
-        if not any(tr.name == "analyze_dataset" for tr in turn.tool_results):
-            # Only suggest dataset analysis when indexed uploads actually exist.
+        tool_names = {tr.name for tr in turn.tool_results}
+        # Dataset chips only after a dataset turn — "Tell me about retail"
+        # on every CDC/product answer made the thread feel like a FAQ loop.
+        if "analyze_dataset" in tool_names or "list_datasets" in tool_names:
             try:
                 datasets = self.analyst.list_datasets()
             except Exception:
@@ -3077,13 +3156,32 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                     if label and len(label) < 40:
                         prompts.append(f"Tell me about {label}")
                         break
-        prompts.extend([
-            "Give me a workspace briefing",
-            "Summarize that",
-            "What should I do next?",
-            "Show my pipelines",
-            "Show my transfer jobs",
-        ])
+        if "list_schedules" in tool_names or "get_schedule" in tool_names:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Show my transfer jobs",
+                "What should I do next?",
+            ])
+        elif "brief_workspace" in tool_names:
+            prompts.extend([
+                "Show my transfer jobs",
+                "Show my pipelines",
+                "What should I do next?",
+            ])
+        elif "explain_product" in tool_names:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Show my pipelines",
+                "What should I do next?",
+            ])
+        else:
+            prompts.extend([
+                "Give me a workspace briefing",
+                "Summarize that",
+                "What should I do next?",
+                "Show my pipelines",
+                "Show my transfer jobs",
+            ])
         try:
             from .example_phrases import example_connector_name
 

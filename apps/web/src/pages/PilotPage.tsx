@@ -500,7 +500,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                       </button>
                     ) : null;
                   })}
-                  {msg.suggested_prompts && msg.suggested_prompts.length > 0 && (
+                  {i === messages.length - 1 && msg.suggested_prompts && msg.suggested_prompts.length > 0 && (
                     <div className="df2-pilot-followups">
                       {msg.suggested_prompts.map((p) => (
                         <button key={p} type="button" className="df2-pilot-followup" onClick={() => send(p)} disabled={loading}>
