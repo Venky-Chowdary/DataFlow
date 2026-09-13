@@ -1391,10 +1391,12 @@ class DataPilotTools:
                 "role": "Datawrap Pilot",
                 "runtime": "local_engine",
                 "runtime_note": (
-                    "First-party brain is Datawrap's own local Pilot engine "
-                    "(dual encoder + copy-grounded pointer-generator, then "
-                    "NL → tools → compose). OpenAI / Anthropic / Ollama stay "
-                    "opt-in polish — never required, never the source of transfer facts."
+                    "Not a conversational LLM. The local path is retrieve "
+                    "(BM25 + capability cards) → live tools → extractive compose. "
+                    "The first-party pointer-generator may add a closed prefix "
+                    "and usually copies the draft unchanged. OpenAI / Anthropic / "
+                    "Ollama stay opt-in under Settings → AI — never the source "
+                    "of transfer facts."
                 ),
                 "can": [
                     "Answer analytics questions with exact aggregates "

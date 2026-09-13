@@ -39,26 +39,26 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
 
     if n_conn == 0 and n_jobs == 0:
         return (
-            "I'm **Datawrap Pilot** — talk to me the way you would a colleague "
-            "on the migration desk. I read your live workspace: connectors, "
-            "tables, jobs, pipelines, and Validate proof. Nothing moves until "
-            "you **Confirm**.\n\n"
+            "I'm **Datawrap Pilot**. I am not a general chatbot. I read your "
+            "live workspace — connectors, tables, jobs, pipelines, and Validate "
+            "proof — and I compose from that evidence. Nothing moves until you "
+            "**Confirm**.\n\n"
             "Start anywhere: *give me a workspace briefing*, *show my jobs*, "
             "or name a table and a saved connector."
         )
 
     lead = (
-        f"I'm **Datawrap Pilot**. Right now I can see **{n_conn}** saved "
-        f"connector(s) and **{n_jobs}** recent job(s)"
+        f"I'm **Datawrap Pilot**. I am not a general chatbot. Right now I can "
+        f"see **{n_conn}** saved connector(s) and **{n_jobs}** recent job(s)"
     )
     if failed:
         lead += f" — **{failed}** of those jobs failed and need a look"
     lead += "."
     return (
         f"{lead}\n\n"
-        "Ask in plain language. I can brief the workspace, count or sample a "
-        "live table, explain a failed job, plan a transfer (Confirm before "
-        "write), or walk a pipeline. Try *what's going on in my workspace?* "
+        "Ask for a briefing, a live count, a failed job, or a transfer plan "
+        "(Confirm before write). I retrieve and compose — I do not invent "
+        "warehouse facts. Try *what's going on in my workspace?* "
         "or *summarize my pipelines*."
     )
 

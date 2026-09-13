@@ -127,6 +127,7 @@ def test_compose_route_plan_asks_for_named_connectors():
 def test_compose_greeting_empty_workspace_does_not_invent_counts():
     text = compose_greeting({"connectors": [], "recent_jobs": []})
     assert "Datawrap Pilot" in text
+    assert "not a general chatbot" in text.lower()
     assert "0" not in text or "still empty" in text.lower() or "Start anywhere" in text
     # No fake inventory.
     assert "650" not in text

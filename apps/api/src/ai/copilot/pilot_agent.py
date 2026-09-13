@@ -2814,10 +2814,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
             elif tr.name == "describe_pilot" and tr.success:
                 o = tr.output or {}
                 lines = [
-                    "I'm **Datawrap Pilot** — Datawrap's own local engine. I help "
-                    "with analytics, routes, schema risk, mappings, jobs, and fixes. "
-                    "A third-party LLM is optional polish in Settings → AI; I never "
-                    "invent warehouse facts and I never need a cloud key to answer.",
+                    "I'm **Datawrap Pilot**. I am a grounded workspace operator, "
+                    "not a general chatbot. I do not generate free-form answers — "
+                    "I retrieve product evidence, run live tools, and compose from "
+                    "that evidence. OpenAI / Anthropic / Ollama stay optional under "
+                    "**Settings → AI** if you want a real language model to speak "
+                    "over the same tools. I still will not invent warehouse facts.",
                     "**I can:**",
                 ]
                 for item in (o.get("can") or [])[:8]:
