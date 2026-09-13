@@ -127,7 +127,10 @@ def test_schedule_setup_is_a_capability_not_a_yaml_export():
     assert not is_schedule_setup_capability_ask("show my pipelines")
 
     text = compose_schedule_setup_capability({"pipeline_count": 2})
-    assert "Pipelines" in text
+    # Chat stages the cadence itself now, so the answer names the route and the
+    # cadence it needs rather than redirecting to the Pipelines screen.
+    assert "cadence" in text
+    assert "Confirm" in text
     assert "YAML" not in text
     assert "Export YAML" not in text
     assert "2" in text
@@ -1797,3 +1800,72 @@ def test_what_cant_you_do_answers_with_the_limits():
 
     can = agent.chat("what can you do", data_context={"pilot_session_id": "test-can"})
     assert "**I can:**" in can.answer
+
+
+def test_a_staged_schedule_is_shown_not_refused():
+    """A fully resolved schedule staged a Confirm row and then published "that is
+    outside what the Datawrap documentation covers" above it, because no renderer
+    branch claimed a successful ``create_schedule``.
+    """
+    from src.ai.copilot.pilot_agent import get_pilot_agent
+    from src.ai.copilot.tools import parse_transfer_intent
+
+    # "schedule <table> on <source> to <dest>" is a route, not the schedule noun.
+    intent = parse_transfer_intent(
+        "can you schedule orders on Demo Orders to Quarantine SQLite nightly"
+    )
+    assert intent
+    assert intent.get("source_connector_name") == "Demo Orders"
+    assert intent.get("dest_connector_name") == "Quarantine SQLite"
+    assert intent.get("source_table") == "orders"
+
+    staged = get_pilot_agent().chat(
+        "schedule orders from Demo Orders to Quarantine SQLite every day at "
+        "02:00 Asia/Kolkata",
+        data_context={"pilot_session_id": "test-stage-schedule"},
+    )
+    assert staged.pending_actions, staged.answer
+    assert "outside what the Datawrap documentation covers" not in staged.answer
+    assert "Staged pipeline" in staged.answer
+    assert "Demo Orders.orders" in staged.answer
+    assert "Quarantine SQLite.orders" in staged.answer
+    # The wall clock they asked for leads; UTC stays as the audit value.
+    assert "Asia/Kolkata" in staged.answer
+    assert "Nothing is scheduled until you Confirm" in staged.answer
+
+
+def test_a_missing_cadence_is_a_question_not_a_failure():
+    """"What time should the nightly run start?" was published under "I could not
+    complete that", which reads as a break rather than one word still owed.
+    """
+    from src.ai.copilot.pilot_agent import _is_input_request, get_pilot_agent
+
+    assert _is_input_request(
+        "What time should the nightly run start, and in which timezone?"
+    )
+    assert _is_input_request("Which connector holds that table?")
+    assert _is_input_request("How often should this run?")
+    # A real failure that happens to open with an interrogative word is not a
+    # request for input — no question is being asked.
+    assert not _is_input_request("What went wrong: the host refused the connection.")
+    assert not _is_input_request("Preflight is blocked-grade for this route.")
+
+    asked = get_pilot_agent().chat(
+        "can you schedule orders on Demo Orders to Quarantine SQLite nightly",
+        data_context={"pilot_session_id": "test-cadence-question"},
+    )
+    assert "I could not complete that" not in asked.answer
+    assert "what time" in asked.answer.lower()
+
+
+def test_setting_up_a_schedule_from_chat_is_no_longer_refused():
+    """The capability answer still sent operators to the Pipelines screen after
+    chat gained a Confirm-gated ``create_schedule``.
+    """
+    from src.ai.copilot.conversation_composer import compose_schedule_setup_capability
+
+    answer = compose_schedule_setup_capability({"pipeline_count": 2})
+    assert "Not from chat yet" not in answer
+    assert "stage it for Confirm" in answer
+    assert "cadence" in answer
+    assert "**2** pipeline(s)" in answer

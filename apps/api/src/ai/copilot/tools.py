@@ -4036,6 +4036,43 @@ _TRANSFER_TO_FROM_RE = re.compile(
     rf"{_TRANSFER_TRAIL}",
     re.IGNORECASE,
 )
+# "sync orders on Demo Orders to Warehouse" — the source connector qualified with
+# ``on``, which is how every read in this product is phrased ("count rows in orders
+# *on* Demo Orders"). Only the ``from`` form was parsed, so a request that named
+# the table, both endpoints and a cadence resolved to nothing and was answered with
+# the pause-a-schedule procedure.
+_TRANSFER_ON_RE = re.compile(
+    rf"\b(?:{_TRANSFER_VERBS})\b"
+    r"(?:\s+(?:a|an|the|all|my|our|these|those))?"
+    r"(?:\s+(?:transfer|copy|sync|data|rows|records|everything))?"
+    r"(?:\s+(?:of|for))?"
+    r"\s+(?P<table>[A-Za-z_][\w.$]*)"
+    r"(?:\s+(?:table|collection|dataset))?"
+    r"\s+(?:on|in)\s+(?P<src>.+?)"
+    r"\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    rf"{_TRANSFER_TRAIL}",
+    re.IGNORECASE,
+)
+
+# ``schedule`` is not a transfer verb: it also names the *object* ("open schedule
+# Nightly Load"), so putting it in _TRANSFER_VERBS would change how every route
+# regex reads a sentence. When it is unmistakably the verb of a route — a table
+# and an endpoint follow it — swap in a verb the route parser already knows and
+# let the cadence parser keep the rest.
+_SCHEDULE_AS_TRANSFER_VERB = re.compile(
+    r"^(?P<lead>\s*(?:(?:hey|hi|ok|okay|so|please|pls)\s+|"
+    r"(?:can|could|would|will)\s+(?:you|u)\s+(?:please\s+)?|"
+    r"(?:i|we)\s+(?:want|need|would\s+like)\s+to\s+)*)"
+    r"schedule\b(?=\s+(?:a|an|the|all|my|our)?\s*[A-Za-z_][\w.$]*\s+"
+    r"(?:from|on|in|to|into)\b)",
+    re.IGNORECASE,
+)
+
+
+def _schedule_verb_as_transfer(text: str) -> str:
+    return _SCHEDULE_AS_TRANSFER_VERB.sub(lambda m: f"{m.group('lead')}sync", text or "")
+
+
 # "transfer orders to Warehouse" (source omitted — plan route / clarify later)
 _TRANSFER_TO_ONLY_RE = re.compile(
     rf"\b(?:{_TRANSFER_VERBS})\b"
@@ -4374,13 +4411,14 @@ def parse_transfer_intent(message: str) -> dict | None:
     cleaned, extras = parse_transfer_bind_and_rules(normalize_operator_typos(message))
     cleaned, rules = parse_transfer_data_rules(cleaned)
     extras.update(rules.as_intent_fields())
-    text = cleaned.strip()
+    text = _schedule_verb_as_transfer(cleaned.strip())
     if not text:
         return None
     match = (
         _TRANSFER_RE.search(text)
         or _TRANSFER_TO_FROM_RE.search(text)
         or _TRANSFER_ARROW_RE.search(text)
+        or _TRANSFER_ON_RE.search(text)
     )
     _matched_table = match.group("table").strip().lower() if match else ""
     if match and (

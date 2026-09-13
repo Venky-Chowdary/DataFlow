@@ -446,6 +446,104 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _local_and_utc(instant: str, timezone_name: str) -> str:
+    """A due instant in the zone the operator named, with the UTC one after it.
+
+    The scheduler stores UTC, so "02:00 Asia/Kolkata" published as
+    ``2026-09-13T20:30:00+00:00`` looks like the cadence was misread. Lead with
+    the wall clock they asked for and keep UTC as the audit value.
+    """
+    text = (instant or "").strip()
+    zone = (timezone_name or "").strip()
+    if not text or not zone or zone.upper() == "UTC":
+        return f"`{text}`" if text else "—"
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        local = datetime.fromisoformat(text).astimezone(ZoneInfo(zone))
+    except Exception:
+        return f"`{text}`"
+    return f"`{local.strftime('%Y-%m-%d %H:%M')}` **{zone}** (`{text}`)"
+
+
+def _render_schedule_stage(o: dict[str, Any]) -> str:
+    """Show the standing instruction an operator is about to sign off on.
+
+    A staged schedule had no renderer at all, so a fully resolved route with a
+    Confirm row already attached fell through to the “outside the documentation”
+    refusal — the operator was told their request was unanswerable underneath a
+    button that would have created it.
+    """
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
+    name = str(preview.get("name") or "pipeline")
+    source = str(preview.get("source") or "?")
+    destination = str(preview.get("destination") or "?")
+    cadence = str(preview.get("cadence") or "").strip()
+    sync = str(preview.get("sync_mode") or "").strip()
+    lines = [
+        f"Staged pipeline **{name}** — `{source}` → `{destination}`"
+        + (f", {cadence}" if cadence else "")
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    cron = str(preview.get("cron") or "").strip()
+    zone = str(preview.get("timezone") or "").strip()
+    if cron and cron != "(preset interval)":
+        lines.append(f"• Cron `{cron}`" + (f" in **{zone}**" if zone else "") + ".")
+    elif zone:
+        lines.append(f"• Timezone **{zone}**.")
+    if preview.get("first_run_at"):
+        lines.append(f"• First run {_local_and_utc(str(preview['first_run_at']), zone)}.")
+    note = str(preview.get("timezone_note") or "").strip()
+    if note:
+        lines.append(f"• {note}")
+    mapped = preview.get("mapped_columns")
+    if mapped is not None:
+        unmapped = preview.get("unmapped_source_columns") or []
+        detail = f"• Mapping approved at stage time: **{mapped}** column(s)"
+        if unmapped:
+            detail += (
+                f", **{len(unmapped)} unmapped**: "
+                + ", ".join(f"`{c}`" for c in list(unmapped)[:6])
+                + ("…" if len(unmapped) > 6 else "")
+            )
+        lines.append(detail + ". Every run writes that mapping, not a re-derivation.")
+    if preview.get("cursor_column"):
+        lines.append(
+            f"• Advances on watermark `{preview['cursor_column']}` — "
+            "each run only reads rows past the last one."
+        )
+    if preview.get("upsert_key"):
+        lines.append(f"• Idempotent on key `{preview['upsert_key']}`.")
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — "
+            + (
+                "every run fails closed unless it is SIGNED."
+                if preview.get("require_signed_contract")
+                else "enforcement is advisory until you require SIGNED."
+            )
+        )
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+    run_id = str(preview.get("preflight_run_id") or "").strip()
+    if run_id:
+        lines.append(f"• Cleared preflight run `{run_id}` before staging.")
+    if o.get("destructive"):
+        lines.append(
+            "• **Every run overwrites the destination table** — that is the "
+            "standing instruction, not a one-off."
+        )
+    lines.append(
+        "Nothing is scheduled until you Confirm below; it starts enabled once you do."
+    )
+    return "\n".join(lines)
+
+
 def _render_schedule_run(o: dict[str, Any]) -> str:
     """Show the pipeline an operator has to sign off on: route, bind, breaker."""
     preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
@@ -552,6 +650,28 @@ _ASKS_FOR_INPUT = re.compile(
     re.I,
 )
 
+#: The same thing said as a question rather than an imperative — "What time
+#: should the nightly run start, and in which timezone?". Only the imperative
+#: openers were listed, so a cadence prompt was published under "I could not
+#: complete that", which reads as a failure the operator has to work around
+#: instead of one word they still owe.
+_ASKS_FOR_INPUT_QUESTION = re.compile(
+    r"^(?:what|when|where|who|how\s+often|how\s+many|how\s+should)\b",
+    re.I,
+)
+
+
+def _is_input_request(error: str) -> bool:
+    """Is this failure really Pilot asking for one missing input?"""
+    text = (error or "").strip()
+    if not text:
+        return False
+    if _ASKS_FOR_INPUT.match(text):
+        return True
+    # A question mark is what separates "What time should this run?" from
+    # "What went wrong: the host refused the connection."
+    return bool(_ASKS_FOR_INPUT_QUESTION.match(text) and "?" in text)
+
 #: Tools that *do* something. "Lookup" is the wrong word for a failed create.
 _ACTION_TOOL_NAMES = frozenset(
     {
@@ -573,7 +693,7 @@ def _failure_reply(failed: list[Any]) -> str:
     errors = [e for e in errors if e]
     if not errors:
         return "I could not complete that."
-    if all(_ASKS_FOR_INPUT.match(e) for e in errors):
+    if all(_is_input_request(e) for e in errors):
         # Nothing went wrong — Pilot is missing one input and is asking for it.
         return errors[0] if len(errors) == 1 else "\n".join(f"• {e}" for e in errors)
     head = (
@@ -2452,6 +2572,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
+            elif tr.name == "create_schedule" and tr.success:
+                parts.append(_render_schedule_stage(tr.output or {}))
+            elif tr.name == "create_schedule" and isinstance(tr.output, dict) and tr.output.get(
+                "action"
+            ) == "plan_transfer":
+                # Preflight refused the cadence but the plan is real evidence:
+                # show the gates that blocked it, not just the sentence.
+                parts.append(f"{tr.error}\n\n{_render_transfer('plan_transfer', tr.output)}")
             elif tr.name == "list_contracts" and tr.success:
                 rows = tr.output.get("contracts", [])
                 if rows:

@@ -829,6 +829,11 @@ def looks_like_elliptical_edit(message: str) -> bool:
     reply = _clean(message)
     if not reply or len(_words(reply)) > _MAX_FOLLOWUP_WORDS:
         return False
+    # "do it" and "go ahead" are consent, not an edit of the last query. Read as
+    # an edit they cleared the open clarification, so a staged schedule waiting
+    # only on its cadence was thrown away and the next turn started from nothing.
+    if reply.lower() in _AFFIRMATIVE:
+        return False
     if asks_its_own_question(reply):
         return False
     if _ELLIPTICAL_EDIT_RE.search(reply):
@@ -866,6 +871,18 @@ def resolve_pending_answer(
 
     lower = reply.lower()
     candidates = [c for c in (pending.candidates or []) if c]
+
+    # A cadence is a phrase, not an identifier — "nightly at 02:00 Asia/Kolkata"
+    # is four words and none of them is a name. The scheduler's own parser is the
+    # judge, so a reply it cannot resolve keeps the question open.
+    if pending.missing == "cadence":
+        from .schedule_cadence import parse_cadence
+
+        if parse_cadence(reply).resolved:
+            args = dict(pending.args or {})
+            args["cadence"] = reply
+            return pending.tool, args
+        return None
 
     value = ""
     if candidates:
@@ -1320,6 +1337,22 @@ def clarification_slot(name: str, args: dict[str, Any], error: str) -> PendingSl
             tool=name,
             args=dict(args or {}),
             missing="table",
+            question=text,
+        )
+    # A staged schedule that is missing only its cadence asks for the time and the
+    # zone. Left off this list the question was unanswerable: the next turn
+    # ("nightly at 02:00 Asia/Kolkata") reached routing as a brand-new request and
+    # matched nothing, so the schedule the operator had already described was lost.
+    if re.search(
+        r"what\s+time\b|which\s+timezone\b|how\s+often\s+should\b|"
+        r"\bnot\s+a\s+5-field\s+cron\b|\bcannot\s+schedule\s+cron\b|"
+        r"don'?t\s+recognise\s+the\s+timezone\b",
+        lowered,
+    ):
+        return PendingSlot(
+            tool=name,
+            args=dict(args or {}),
+            missing="cadence",
             question=text,
         )
     if re.search(r"which column|which date column", lowered):

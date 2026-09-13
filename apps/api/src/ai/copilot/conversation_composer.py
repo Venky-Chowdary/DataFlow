@@ -313,7 +313,13 @@ def compose_create_connection_response(ctx: dict[str, Any] | None = None) -> Cop
 
 
 def compose_schedule_setup_capability(ctx: dict[str, Any] | None = None) -> str:
-    """Honest scheduling capability: I run existing ones, Pipelines defines new."""
+    """Honest scheduling capability: chat stages the cadence, Confirm creates it.
+
+    This used to answer "not from chat yet" and send the operator to the
+    Pipelines screen. That stopped being true once ``create_schedule`` staged a
+    real payload through the ack ledger, so the honest answer is what it needs
+    from them — a route and a cadence — instead of a redirect.
+    """
     ctx = ctx or {}
     n = ctx.get("pipeline_count")
     if n is None:
@@ -326,14 +332,18 @@ def compose_schedule_setup_capability(ctx: dict[str, Any] | None = None) -> str:
     have = ""
     if int(n or 0):
         have = f" You already have **{int(n)}** pipeline(s) I can list, run, or explain."
+    from .example_phrases import example_connector_name, example_dest_connector_name
+
+    src = example_connector_name(ctx)
+    dst = example_dest_connector_name(ctx, source_hint=src)
     return (
-        "Not from chat yet — defining a **new** schedule is a **Pipelines** "
-        "screen action, because a cadence binds a saved route, a contract, and "
-        "an approval owner. I can list your pipelines, run one now (Confirm "
-        "required), explain why one is parked, and stage the transfer it "
-        f"wraps.{have}\n\n"
-        "Open **Pipelines → New pipeline** to define the cadence, then ask me "
-        "*is schedules working* and I will watch it."
+        "Yes — name the **route** and the **cadence** and I will stage it for "
+        "Confirm. Nothing is scheduled until you accept, and I will not stage a "
+        "cadence over a route whose preflight is blocked, because an unattended "
+        f"run would fail the same way every night.{have}\n\n"
+        f'For example: *"schedule orders from {src} to {dst} nightly at 02:00 '
+        'Asia/Kolkata"*. I also list your pipelines, run one now (Confirm '
+        "required), and explain why one is parked."
     )
 
 
@@ -343,7 +353,7 @@ def compose_schedule_setup_response(ctx: dict[str, Any] | None = None) -> Copilo
         intent="schedule_help",
         confidence=0.84,
         method="pilot_conversation",
-        reasoning="Schedule-setup capability — honest no-from-chat, not GitOps export",
+        reasoning="Schedule-setup capability — stage a cadence for Confirm",
         suggested_prompts=[
             "Show my pipelines",
             "Is schedules working?",
