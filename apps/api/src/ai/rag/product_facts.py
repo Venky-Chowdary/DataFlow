@@ -614,6 +614,54 @@ def _capture_mode_section() -> GeneratedSection | None:
     )
 
 
+def _cdc_engines_section() -> GeneratedSection | None:
+    """Which engines carry a CDC route, read from the capability registry.
+
+    "Which engines support CDC" retrieved the engine list and the sync-mode
+    glossary and answered neither the question nor its honesty: the engine
+    list names what can connect, not what can stream changes. The registry
+    flag is the same one ``supports_cdc`` reads, and only transfer-ready
+    entries are named so a tile is not promoted to a live capture route.
+    """
+    try:
+        from services.connector_capability_registry import (
+            CAPABILITY_REGISTRY,
+            get_connector_capability,
+        )
+    except Exception:
+        return None
+    live: list[str] = []
+    prerequisites: list[str] = []
+    for key in sorted(CAPABILITY_REGISTRY):
+        cap = get_connector_capability(key)
+        if not (cap.get("supports_cdc") and cap.get("transfer_ready")):
+            continue
+        live.append(key)
+        note = str(cap.get("cdc_prerequisites") or "").strip()
+        if note:
+            prerequisites.append(f"{key}: {note.split('. ')[0].rstrip('.')}.")
+    if not live:
+        return None
+    lines = [
+        f"The engines that support CDC (change data capture) — the ones whose "
+        f"capability registry entry carries a CDC route — {len(live)} of them: "
+        + ", ".join(live)
+        + ". "
+        "Every other connectable engine moves data in batch sync modes only; "
+        "being connectable is not the same as being CDC-capable.",
+        "CDC delivery is at-least-once upsert by default; a route is not "
+        "described as exactly-once until that is proven on it.",
+        *prerequisites,
+    ]
+    return GeneratedSection(
+        doc_title="Sync modes",
+        section_title="Which engines support CDC",
+        text="\n".join(lines),
+        source_module="services/connector_capability_registry.py",
+        category="transfer",
+    )
+
+
 def _snapshot_handoff_section() -> GeneratedSection:
     """The snapshot→stream boundary, asked without the heading words."""
     return GeneratedSection(
@@ -716,6 +764,28 @@ def _toast_cdc_section() -> GeneratedSection:
             "toast_incomplete rather than applied."
         ),
         source_module="services/cdc_toast.py",
+        category="transfer",
+    )
+
+
+def _empty_string_null_section() -> GeneratedSection:
+    """NULL polarity: '' and SQL NULL are distinct values, never conflated."""
+    return GeneratedSection(
+        doc_title="Type fidelity & coercion",
+        section_title="How are empty strings and NULL handled",
+        text=(
+            "An empty string and a SQL NULL are different values and travel as "
+            "different values: readers carry NULL as a null sentinel rather "
+            "than as an empty string, and writers never invent an empty string "
+            "for a missing value or a NULL for an empty one. The one exception "
+            "is engine law — Oracle VARCHAR2 stores an empty string as NULL — "
+            "and those cells are counted in the run summary as "
+            "empty_string_as_null_cells and named in its proof line, not "
+            "treated as a row drop. A NULL written "
+            "under an approved coercion is a coerced-null row, which the row "
+            "ledger counts as landed."
+        ),
+        source_module="connectors/bulk_export.py · src/transfer/copy_route.py",
         category="transfer",
     )
 
@@ -2598,11 +2668,13 @@ def generated_sections() -> tuple[GeneratedSection, ...]:
         _throughput_section,
         _capture_mode_section,
         _snapshot_handoff_section,
+        _cdc_engines_section,
         _postgres_cdc_prereq_section,
         _replication_slot_section,
         _pgoutput_plugin_section,
         _cdc_schedule_delete_section,
         _toast_cdc_section,
+        _empty_string_null_section,
         _replica_identity_section,
         _mysql_cdc_prereq_section,
         _publication_section,

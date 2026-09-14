@@ -124,3 +124,80 @@ def test_source_chips_are_only_the_sections_the_answer_cites() -> None:
     titles = [str(s["title"]) for s in result.output["sources"]]
     assert titles, result.output
     assert all("Procedure: connect a PostgreSQL" in t for t in titles), titles
+
+
+# ── Quality wave: topic shares, procedure completion, tail cohesion ───────────
+
+
+def test_question_topics_groups_terms_by_clause() -> None:
+    from src.ai.rag.evidence_policy import is_subject_term
+    from src.ai.rag.query_analysis import analyze_query, question_topics
+
+    def topics(q: str) -> list[list[str]]:
+        a = analyze_query(q)
+        return question_topics(a.text, [t for t in a.terms if is_subject_term(t)])
+
+    assert topics("explain preflight gates and sync modes") == [
+        ["preflight", "gate"],
+        ["sync", "mode"],
+    ]
+    assert len(topics("how do I connect to snowflake")) == 1
+    assert len(topics("what is quarantine and what is reconcile")) == 2
+
+
+def test_each_joined_topic_gets_its_share_of_the_answer() -> None:
+    """"Explain preflight gates and sync modes" spent five sentences on sync
+    modes and one imperative on gates; the gate half was three fragments of
+    "it requires a cursor field; preflight refuses the run" from the sync-mode
+    passage."""
+    body = _answer("explain preflight gates and sync modes")
+    assert "validate" in body and "gate" in body, body
+    assert "sync mode upsert" in body, body
+    assert "it requires a cursor field" not in body, body
+    gate_sentences = [s for s in body.split(". ") if "gate" in s or "validate" in s]
+    assert len(gate_sentences) >= 2, body
+
+
+def test_second_topic_is_retrieved_from_its_own_section() -> None:
+    """"Checksum MATCH" — the reconcile passage — sat below fusion depth and the
+    answer's reconcile half was one step of the first-transfer walkthrough."""
+    result = retrieve_product_answer("what is quarantine and what is reconcile")
+    titles = {h.chunk.section_title for h in result.hits}
+    assert "Checksum MATCH" in titles, titles
+    body = compose_product_answer(result).lower()
+    assert "row counts and content hashes" in body, body
+    assert body.startswith("quarantine is"), body
+
+
+def test_a_procedure_answer_keeps_its_later_steps() -> None:
+    body = _answer("how do I connect to snowflake")
+    assert "click new connection and pick the snowflake driver" in body, body
+    assert "click test, and save" in body, body
+
+
+def test_a_definition_is_not_followed_by_an_unrelated_sections_sentence() -> None:
+    """"What is BYOK" ended on the audit-log retention sentence and "very large
+    decimals" on the array-carriage rule — both from a passage retrieved on a
+    common word, sharing no word with the question or the lead."""
+    assert "audit log" not in _answer("what is BYOK")
+    assert "g4 column mappings" not in _answer("what is the g7 gate").split(". ")[0]
+
+
+def test_empty_string_and_null_are_distinct_values() -> None:
+    body = _answer("how do you handle empty strings versus null")
+    assert "empty string and a sql null are different values" in body, body
+    assert "empty_string_as_null_cells" in body, body
+
+
+def test_cdc_engines_come_from_the_capability_registry() -> None:
+    from services.connector_capability_registry import CAPABILITY_REGISTRY, get_connector_capability
+
+    expected = sorted(
+        k
+        for k in CAPABILITY_REGISTRY
+        if get_connector_capability(k).get("supports_cdc")
+        and get_connector_capability(k).get("transfer_ready")
+    )
+    body = _answer("which engines support CDC")
+    assert f"{len(expected)} of them: " + ", ".join(expected) in body, body
+    assert "at-least-once" in body, body

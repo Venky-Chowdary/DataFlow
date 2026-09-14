@@ -3304,6 +3304,31 @@ def expand_terms_tiered(
     return tuple(phrase_out), tuple(loose_out)
 
 
+_TOPIC_JOIN = re.compile(
+    r"\s*(?:,|;|\band\b|\bor\b|\bvs\.?\b|\bversus\b|\bplus\b|\bas well as\b)\s*", re.I
+)
+
+
+def question_topics(text: str, subjects: tuple[str, ...] | list[str]) -> list[list[str]]:
+    """The question's subject terms grouped by the clause that named them.
+
+    "Explain preflight gates and sync modes" names four subject terms but two
+    topics; a share of the answer is owed per topic, not per word, or a
+    one-topic question like "how do I connect to snowflake" would be split
+    between ``connect`` and ``snowflake``. Clauses that name no subject
+    ("what is the difference between") do not count.
+    """
+    want = set(subjects)
+    groups: list[list[str]] = []
+    seen: set[str] = set()
+    for clause in _TOPIC_JOIN.split(text):
+        group = [t for t in content_terms(clause) if t in want and t not in seen]
+        if group:
+            groups.append(group)
+            seen.update(group)
+    return groups
+
+
 def phrase_evidence(
     question: str,
 ) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]:

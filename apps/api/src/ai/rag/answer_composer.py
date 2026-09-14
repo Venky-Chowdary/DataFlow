@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 
 from .evidence_policy import is_subject_term
 from .lexical_index import adjacent_shingles, content_terms, normalize
-from .query_analysis import QueryAnalysis, phrase_evidence
+from .query_analysis import QueryAnalysis, phrase_evidence, question_topics
 
 # "what is a pipeline and how do I pause one": the clause that asks for a
 # definition, so its subject is owed a definitional sentence even when the
@@ -118,6 +118,9 @@ SUBJECT_ANCHOR_BAND = 0.75
 
 MAX_SENTENCES = 6
 MAX_CITED_SECTIONS = 3
+#: Sentences each named subject of a multi-subject question is owed, when the
+#: evidence has that many that clear the relevance floor.
+MIN_SUBJECT_SHARE = 2
 
 # Content terms in a typical help sentence. Sentences longer than this have
 # their term matches discounted proportionally, the way BM25 discounts a long
@@ -193,6 +196,7 @@ _IMPERATIVE = re.compile(
     r"Go|Navigate|Upload|Download|Export|Import|Enable|Disable|Start|Stop|"
     r"Pause|Activate|Cancel|Retry|Resume|Turn)\b"
 )
+_NEXT_STEP = re.compile(r"^\s*(?:Then|Next|Finally|After that|Once)\b")
 _DEFINITIONAL = re.compile(
     r"^\s*(?:\*\*)?[A-Z][\w \-/()`*]{0,60}(?:\*\*)?\s+"
     r"(?:is|are|means|refers to|describes|holds|records|names)\b"
@@ -823,7 +827,8 @@ def _owe_subjects(
 
     def defines(cand: Candidate, names: set[str]) -> bool:
         head = _DEFINITIONAL.match(cand.text)
-        if not head:
+        # "Confirm **Quarantine** is empty" is a step, not a definition.
+        if not head or _IMPERATIVE.match(cand.text):
             return False
         # The subject has to be what the sentence is *about*: "A pipeline is a
         # scheduled route" defines it; "the drawer on a saved pipeline is where
@@ -831,8 +836,10 @@ def _owe_subjects(
         definiendum = content_terms(head.group(0))
         return len(definiendum) <= 3 and bool(set(definiendum) & names)
 
+    names_of = {term: {term, *spelled.get(term, ())} for term in subjects}
+
     for term in subjects:
-        names = {term, *spelled.get(term, ())}
+        names = names_of[term]
         if not any(c.terms & names for c in out):
             admit(
                 max(
@@ -850,6 +857,94 @@ def _owe_subjects(
                 ),
                 first=True,
             )
+
+    topics = [
+        set().union(*(names_of[t] for t in group))
+        for group in question_topics(analysis.text, subjects)
+    ]
+    if len(topics) < 2:
+        return out
+
+    heading_terms: dict[str, set[str]] = {}
+
+    def headed_by(cand: Candidate, topic: set[str]) -> bool:
+        if cand.section_title not in heading_terms:
+            heading_terms[cand.section_title] = set(content_terms(cand.section_title))
+        return bool(heading_terms[cand.section_title] & topic)
+
+    def speaks_for(cand: Candidate, topic: set[str]) -> bool:
+        # "Gate-8 / post-load proof compares source and destination row
+        # counts and content hashes" never says reconcile; its heading,
+        # "Checksum MATCH" under "Job Theater & reconciliation", does.
+        return bool(cand.terms & topic) or headed_by(cand, topic)
+
+    def owned_by(cand: Candidate, topic: set[str]) -> bool:
+        # "It requires a cursor field; preflight refuses the run" mentions
+        # preflight, but it is a sync-mode sentence: its heading says so. A
+        # sentence belongs to the topic its heading names, else to any it
+        # mentions.
+        if not speaks_for(cand, topic):
+            return False
+        return headed_by(cand, topic) or not any(
+            headed_by(cand, other) for other in topics if other != topic
+        )
+
+    def only_about(cand: Candidate, topic: set[str]) -> bool:
+        return owned_by(cand, topic) and not any(
+            owned_by(cand, other) for other in topics if other != topic
+        )
+
+    def anchors(cand: Candidate) -> bool:
+        return cand is lead or any(defines(cand, names_of[t]) for t in defined)
+
+    # Each topic the question joined with "and" owns an equal share of the
+    # answer. Presence is the floor above; the share is what stops "explain
+    # preflight gates and sync modes" from spending five sentences on sync
+    # modes and one imperative on gates.
+    share = max(MIN_SUBJECT_SHARE, limit // len(topics))
+    for topic in topics:
+        have = sum(1 for c in out if owned_by(c, topic))
+        own = [c for c in candidates if c not in out and owned_by(c, topic)]
+        if not own:
+            continue
+        # The second topic's passage scores below the first's, because the
+        # question's words split between them; its sentences are held to the
+        # floor of their own best, not the lead's.
+        mine = [*own, *(c for c in out if owned_by(c, topic))]
+        headed = [c for c in mine if headed_by(c, topic)] or mine
+        floor = RELEVANCE_FLOOR * max(c.score for c in headed)
+        owed = sorted(
+            (c for c in own if c.score >= floor),
+            key=lambda c: (headed_by(c, topic), c.score),
+            reverse=True,
+        )
+        for cand in owed[: max(0, share - have)]:
+            if len(out) >= limit:
+                # Give up a sentence that speaks only for a topic already over
+                # its share, never an anchor and never a topic's last word.
+                crowded = [
+                    c
+                    for c in out
+                    if not anchors(c)
+                    and any(
+                        only_about(c, other)
+                        and sum(1 for x in out if owned_by(x, other)) > share
+                        for other in topics
+                        if other != topic
+                    )
+                ]
+                if not crowded:
+                    break
+                out.remove(min(crowded, key=lambda c: c.score))
+            out.append(cand)
+    # A "what is X and what is Y" answer opens on a definition, not on the
+    # procedure step that happened to mention both.
+    if defined and not any(defines(out[0], names_of[t]) for t in defined):
+        for cand in out[1:]:
+            if any(defines(cand, names_of[t]) for t in defined):
+                out.remove(cand)
+                out.insert(0, cand)
+                break
     return out
 
 
@@ -867,6 +962,25 @@ _INSTRUCTIONAL = re.compile(
 )
 # Capability cards are written as a question about one named thing.
 _CAPABILITY_CARD = re.compile(r"^(?:do you|does \w+|can i|is \w+ supported)\b", re.I)
+# A verdict sentence answers a yes/no question; out of its card it answers one
+# nobody asked.
+_VERDICT = re.compile(r"^\s*(?:Yes|No)\s*(?:—|-|,)", re.I)
+
+
+def _cohesive(analysis: QueryAnalysis, lead: Candidate, cand: Candidate) -> bool:
+    """Whether a supporting sentence from another section stays on the question.
+
+    It does when it repeats a word the question used or a word the lead used;
+    a sentence that shares neither is there on the strength of its section's
+    retrieval score alone, which is how "what is BYOK" was followed by the
+    audit-log retention sentence and "how do you handle very large decimals"
+    by the array-carriage rule. Items of a list the question asked for are
+    vouched by their heading and exempt.
+    """
+    if cand.list_vouched or cand.section_title == lead.section_title:
+        return True
+    asked = set(analysis.anchor_terms)
+    return bool(cand.terms & asked) or bool(cand.terms & lead.terms)
 
 
 def _prune_tails(analysis: QueryAnalysis, chosen: list[Candidate]) -> list[Candidate]:
@@ -896,6 +1010,15 @@ def _prune_tails(analysis: QueryAnalysis, chosen: list[Candidate]) -> list[Candi
             and _CAPABILITY_CARD.match(cand.section_title)
             and not (set(content_terms(cand.section_title)) & asked)
         ):
+            continue
+        if (
+            analysis.ask != "capability"
+            and cand.section_title != lead.section_title
+            and _VERDICT.match(cand.text)
+            and not (set(content_terms(cand.section_title)) & asked)
+        ):
+            continue
+        if not _cohesive(analysis, lead, cand):
             continue
         out.append(cand)
     return out
@@ -971,6 +1094,53 @@ def _complete_lists(
     return out
 
 
+def _complete_procedure(
+    analysis: QueryAnalysis,
+    chosen: list[Candidate],
+    candidates: Sequence[Candidate],
+    *,
+    limit: int,
+) -> list[Candidate]:
+    """Add the remaining steps of the procedure the answer opened on.
+
+    A procedure is one unit of evidence, like a list: "how do I connect to
+    snowflake" opened on "Click New connection and pick the Snowflake driver"
+    and stopped, because the next step — enter details, Test, Save — repeats
+    none of the question's words and sits under the relevance floor. Steps
+    are taken from the lead's own section, in source order, only when the
+    question asked how and the lead is itself a step.
+    """
+    if analysis.ask != "procedure" or not chosen:
+        return chosen
+    lead = chosen[0]
+    if not _IMPERATIVE.match(lead.text.lstrip("*")):
+        return chosen
+    picked = {c.order for c in chosen}
+    steps = sorted(
+        (
+            c
+            for c in candidates
+            if c.section_title == lead.section_title
+            and c.order > lead.order
+            and c.order not in picked
+            and (_IMPERATIVE.match(c.text.lstrip("*")) or _NEXT_STEP.match(c.text))
+        ),
+        key=lambda c: c.order,
+    )
+    out = list(chosen)
+    for step in steps:
+        if len(out) >= limit:
+            spare = [c for c in out[1:] if c.section_title != lead.section_title]
+            if not spare:
+                break
+            out.remove(min(spare, key=lambda c: c.score))
+        out.append(step)
+    # Steps read in source order, after the lead.
+    lead_steps = sorted((c for c in out if c.section_title == lead.section_title), key=lambda c: c.order)
+    others = [c for c in out if c.section_title != lead.section_title]
+    return [*lead_steps, *others]
+
+
 def compose_answer(
     analysis: QueryAnalysis,
     sections: Sequence[tuple[str, str, str, str]],
@@ -993,6 +1163,7 @@ def compose_answer(
         return ""
     chosen = _owe_subjects(analysis, candidates, chosen, limit=limit)
     chosen = _prune_tails(analysis, chosen)
+    chosen = _complete_procedure(analysis, chosen, candidates, limit=limit)
 
     body = " ".join(c.text for c in chosen)
     parts = [body]
