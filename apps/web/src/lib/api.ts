@@ -885,6 +885,7 @@ export interface ModelCapabilities {
     available: boolean;
     status: string;
     blocked_reason?: string;
+    key_state?: "ready" | "none" | "disabled" | "undecryptable";
   }[];
   settings_storage?: { path: string; persistent: boolean; reason: string };
   guarantees: string[];
@@ -3284,6 +3285,12 @@ export type PilotEngineStatus = {
   reason: string;
   configured_providers: string[];
 };
+
+export async function removeAiProviderKey(provider: string): Promise<Record<string, unknown>> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/key`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove the saved key"));
+  return res.json();
+}
 
 export async function testAiProviderKey(provider: string): Promise<{
   ok: boolean;

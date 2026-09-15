@@ -611,10 +611,10 @@ def pilot_engine_decision() -> dict:
     """Which engine Pilot will use, and the reason — never a credential.
 
     Precedence: DATAFLOW_PILOT_ENGINE, then the saved workspace preference,
-    then ``auto``. ``auto`` stays on the local engine even when a key is
-    saved — a data product must not send schemas, samples, or job
-    evidence to a third-party LLM because someone pasted a key. Hybrid
-    and cloud are explicit opt-in only.
+    then ``auto``. ``auto`` is local with no usable key and hybrid once the
+    operator saves one: tools, gates and facts still run on-box, the saved
+    provider only narrates, until the key is removed or the workspace pins
+    "Our engine only".
     """
     from services.integrations_store import get_pilot_engine_preference
 
@@ -661,14 +661,13 @@ def pilot_engine_decision() -> dict:
         }
 
     if configured:
-        idle = ", ".join(configured)
         return {
-            "engine": "local",
+            "engine": "hybrid",
             "source": "default",
             "reason": (
-                f"Auto keeps Pilot on the local engine so workspace evidence "
-                f"does not leave the box. Saved key(s) for {idle} stay idle "
-                "until you pick Hybrid or Cloud in Settings → AI."
+                f"Auto uses the saved {', '.join(configured)} key to word answers; "
+                "tools and facts stay on-box. Remove the key or pick \"Our engine only\" "
+                "to stop using it."
             ),
             "configured_providers": configured,
         }
@@ -798,6 +797,7 @@ def get_model_capabilities() -> dict:
             "available": available,
             "status": status,
             "blocked_reason": blocked_reason,
+            "key_state": persisted.get("key_state", "ready" if item["tier"] != "cloud" else "none"),
         })
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
@@ -827,7 +827,7 @@ def get_model_capabilities() -> dict:
         "settings_storage": storage_status(),
         "guarantees": [
             "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
-            "A saved provider key does not send traffic. Hybrid or Cloud must be chosen explicitly — this is a data product; schemas and job evidence stay on-box by default.",
+            "With no key saved Pilot runs entirely on-box. A saved key is used (Hybrid) until you remove it or pin \"Our engine only\".",
             "DATAFLOW_PILOT_ENGINE, when set, overrides the workspace choice.",
             "Cloud providers are optional and only narrate: tools, gates and proofs always run locally, so a provider outage changes wording, never correctness.",
             "Grounded tool results are executed once; mutations always require operator Confirm.",

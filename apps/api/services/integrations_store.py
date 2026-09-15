@@ -125,20 +125,27 @@ def _encrypt_field(value: str, keep_existing: str = "") -> str:
     return encrypt_secret(value)
 
 
+_KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+# Env keys this process copied out of the store, so deleting the stored key can
+# un-hydrate exactly those and never an operator-set variable.
+_HYDRATED_ENV: set[str] = set()
+
+
 def apply_integrations_to_env() -> None:
     """Hydrate process env from persisted AI provider keys (env vars take precedence)."""
     import os
 
     data = _load_raw()
     env_map = {
-        "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
-        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
+        "openai": (_KEY_ENV["openai"], "OPENAI_MODEL"),
+        "anthropic": (_KEY_ENV["anthropic"], "ANTHROPIC_MODEL"),
     }
     for provider, (env_key, model_env_key) in env_map.items():
         if not os.environ.get(env_key):
             plain = resolve_provider_api_key(provider)
             if plain:
                 os.environ[env_key] = plain
+                _HYDRATED_ENV.add(env_key)
         model = data["ai_providers"].get(provider, {}).get("model")
         if model and not os.environ.get(model_env_key):
             os.environ[model_env_key] = str(model)
@@ -326,6 +333,23 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     data["updated_at"] = _now()
     _save(data)
     apply_integrations_to_env()
+    return get_ai_provider_configs()[provider]
+
+
+def delete_ai_provider_key(provider: str) -> dict[str, Any]:
+    """Forget a saved cloud key. Pilot drops back to the local engine on auto."""
+    import os
+
+    if provider not in _CLOUD_PROVIDERS:
+        raise ValueError(f"{provider} has no cloud key to remove")
+    data = _load_raw()
+    data["ai_providers"][provider]["api_key"] = ""
+    data["updated_at"] = _now()
+    _save(data)
+    env_key = _KEY_ENV[provider]
+    if env_key in _HYDRATED_ENV:
+        os.environ.pop(env_key, None)
+        _HYDRATED_ENV.discard(env_key)
     return get_ai_provider_configs()[provider]
 
 

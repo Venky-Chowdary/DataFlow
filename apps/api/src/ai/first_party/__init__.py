@@ -30,9 +30,9 @@ this.
 
 Honesty bar (do not regress)
 ----------------------------
-* Third-party providers stay **explicit Hybrid/Cloud opt-in**. A saved
-  key does not send traffic. Default is on-box because this is a data
-  product (schemas, samples, credentials, job evidence).
+* With no key saved Pilot is fully on-box. A saved key is used for
+  wording (Hybrid) until the operator removes it or pins "Our engine
+  only"; tools, gates and facts never come from the provider.
 * CDC default remains **at-least-once upsert on ``_df_lsn``**.
 * dbt and SSH are **not** product capabilities. The claim gate refuses
   them unless the evidence already names them (it should not).
