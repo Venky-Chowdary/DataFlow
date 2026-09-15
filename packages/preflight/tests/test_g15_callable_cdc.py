@@ -61,7 +61,9 @@ def _ctx(*, source_read_mode: str = "table", sync_mode: str = "full_refresh_over
 
 
 def test_g15_names_source_superset_and_does_not_block() -> None:
-    result = gate_g15_dest_exists_shape(_ctx())
+    # An append run lands rows in the table listed now, so G15 grades the live
+    # dest shape; an overwrite run drops it first (see the next test).
+    result = gate_g15_dest_exists_shape(_ctx(sync_mode="full_refresh_append"))
     assert result.gate_id == GateId.G15_DEST_EXISTS_SHAPE
     assert result.status != GateStatus.BLOCK
     assert result.details.get("shape") in {"source_superset", "overlap"}
@@ -69,6 +71,13 @@ def test_g15_names_source_superset_and_does_not_block() -> None:
     extras = result.details.get("extra_source_columns") or result.details.get("unaccounted_sources")
     assert extras and "loyalty_tier" in extras
     assert result.details.get("primary_action") in {"review_map", "review_mappings"}
+
+
+def test_g15_overwrite_types_the_recreated_table_as_create() -> None:
+    result = gate_g15_dest_exists_shape(_ctx(sync_mode="full_refresh_overwrite"))
+    assert result.status != GateStatus.BLOCK
+    assert result.details.get("shape") == "create_new_table"
+    assert result.details.get("write_by") == "name"
 
 
 def test_g9_sync_blocks_cdc_on_procedure_source() -> None:
