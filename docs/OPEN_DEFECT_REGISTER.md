@@ -508,12 +508,35 @@ stay in the tools/server; the router is a routing aid, not a security boundary.
 
 Still open (not measured / not built):
 
-* Two-subject answers now name both subjects, but the second subject still gets one sentence ("Wait for checksum MATCH…" for reconcile) rather than a balanced half; the per-engine procedure card is one generated sentence pair, not engine-specific field guidance (account / project / warehouse) — that would have to come from the connector form schema, not be written by hand.
-* "what does the g7 gate check" now leads with the G7 card but the tail still pulls two `check`-matched passages (Query Playground, Team roles); "which engines can i connect" appends the Debezium/Kafka Connect disclaimer. Same class: a supporting sentence that matches a common word, not the subject.
-* Provider-backed (OpenAI/Anthropic) loops are unit-tested with fake clients only; no browser run has exercised a live provider key.
+* The per-engine procedure card is one generated sentence pair, not engine-specific field guidance (account / project / warehouse) — that would have to come from the connector form schema, not be written by hand.
+* Provider-backed (OpenAI/Anthropic) loops are unit-tested with fake clients only; `tests/test_pilot_provider_eval.py` (§8q) is the harness but no run with a live key has been recorded.
 * Code-switched or non-English asks (`kya validate step skip kar sakte hain`) are refused as off-corpus. No translation layer exists; adding one is a mechanism decision, not a phrase table.
 * `who is the president of france` is the one held-out abstention (falls to the existing off-corpus refusal, which is correct behaviour, but not via the router).
 * `tests/test_pilot_conversation_composer.py` has 11 cases that need a saved `Demo Orders` / `Quarantine SQLite` connector in the local Mongo workspace. They fail identically on the base head (`b26270b7`) on a fresh box — environment fixture, not a regression from this wave.
+
+## 8q. Pilot answer focus and multi-topic balance (2026-09-13, branch `feature/Venkat-Analysis`)
+
+The two "same class" items left open in §8p, measured before and after on the
+177-question answer audit (`scripts/pilot_answer_audit.py`, local engine).
+The focus metric is `off-focus supporting sentences`: a sentence after the
+lead that shares no content term with the question, the lead, or its own
+section heading. Baseline **38/427 = 8.9 %**; after this wave **27/427 =
+6.3 %**; on-target held at **170/170**, outcomes unchanged (158 answered /
+12 deflected / 7 refused). Nothing here is a per-question rule: every change
+is in the shared composer / retrieval path and asserted on questions the
+change was not written for.
+
+| Symptom | Closure | Proof |
+|---|---|---|
+| Common-word tails: "what is BYOK" ended on the audit-log retention sentence, "very large decimals" on the array-carriage rule, "g7 gate" pulled Query Playground / Team roles on `check` | `answer_composer._cohesive`: a supporting sentence must share a content term with the question, the lead, or its own heading; evidence *verdicts* ("Catalog tile count is not…") are suppressed when they answer nothing the question asked | `tests/test_rag_multi_subject_answers.py::test_a_definition_is_not_followed_by_an_unrelated_sections_sentence`; focus metric above |
+| Procedure answers stopped after step one ("Click New connection and pick the Snowflake driver.") | `answer_composer._complete_procedure` keeps the later imperative / Then-Next-Finally steps of the *same* section the lead came from | `::test_a_procedure_answer_keeps_its_later_steps` |
+| Two-topic asks gave the second topic one sentence; "explain preflight gates and sync modes" spent five sentences on sync modes and answered gates with three fragments of a sync-mode sentence that merely *mentioned* preflight | `query_analysis.question_topics` groups subject terms by the clause that named them (`connect to snowflake` is one topic; `preflight gates and sync modes` are two). The composer gives each topic `max(2, limit // topics)` sentences, owned by heading first (a sentence belongs to the topic its section heading names, else to any it mentions), each topic floored against its *own* best sentence rather than the lead's. Retrieval does the same: `product_docs._select_covering` admits a heading-titled passage per topic ("Checksum MATCH" for reconcile) that sat below fusion depth, with matched-term metadata preserved | `::test_question_topics_groups_terms_by_clause`, `::test_each_joined_topic_gets_its_share_of_the_answer`, `::test_second_topic_is_retrieved_from_its_own_section`; single-topic leads asserted unchanged |
+| "how do you handle empty strings versus null" and "which engines support CDC" had no grounded section | `product_facts._empty_string_null_section` (NULL polarity: `''` ≠ SQL NULL, Oracle VARCHAR2 exception counted as `empty_string_as_null_cells`, coerced-null rows counted as landed) and `_cdc_engines_section`, generated from `connector_capability_registry` (`supports_cdc` ∧ transfer-ready — a tile is not a capture route), stating at-least-once upsert | `::test_empty_string_and_null_are_distinct_values`, `::test_cdc_engines_come_from_the_capability_registry` |
+| No way to measure the provider path on the same fixture | `tests/test_pilot_provider_eval.py`: opt-in via `DATAFLOW_PILOT_EVAL_PROVIDER=openai\|anthropic` + that key; runs every audit suite locally then with `DATAFLOW_PILOT_ENGINE=hybrid`, asserts the provider was actually used (an invalid key **fails**, verified), no on-target answer is lost, off-subject stays refused, every answer carries evidence; writes `scripts/fixtures/pilot_provider_eval_<provider>.json`. Skips (11) without a key — never passes | `pytest tests/test_pilot_provider_eval.py -rs` |
+
+Still open: 27 off-focus supporting sentences remain, mostly G-gate list
+sentences answering an adjacent gate question and quarantine sentences under
+"do you ever drop rows silently" — on-subject by heading, weak by wording.
 
 ## 9. Closure protocol
 

@@ -51,6 +51,7 @@ from .query_analysis import (
     analyze_query,
     distinctive_procedure_terms,
     phrase_evidence,
+    question_topics,
 )
 
 HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
@@ -1963,6 +1964,7 @@ def _select_covering(
     limit: int,
     typed_terms: Sequence[str],
     spelled_as: Mapping[str, set[str]] | None = None,
+    topics: Sequence[set[str]] = (),
 ) -> list[ProductDocHit]:
     """Fill the evidence window to cover the question, not to repeat its best match.
 
@@ -2048,6 +2050,46 @@ def _select_covering(
         weakest = min(chosen[1:], key=lambda hit: rank_of[id(hit)])
         chosen[chosen.index(weakest)] = owed[1]
         pool.remove(owed)
+
+    # A question that joins two topics is owed, for each, the passage whose
+    # heading is most about that topic — not merely one that mentions it.
+    # "Explain preflight gates and sync modes" filled its window with sync-mode
+    # passages that say ``preflight`` in passing and "Procedure: fix a blocked
+    # gate"; the gate list itself, headed "Core gates", never entered.
+    if len(topics) >= 2:
+        def about(hit: ProductDocHit, topic: set[str]) -> int:
+            # "Checksum MATCH" under "Job Theater & reconciliation" is more
+            # about reconcile than "export checksum proof" under "Job Theater
+            # & proof": the article counts, the section counts double.
+            section = set(content_terms(hit.chunk.section_title or ""))
+            doc = set(content_terms(hit.chunk.doc_title or ""))
+            return sum(
+                2 * _covers(t, section) + _covers(t, doc) for t in topic
+            )
+
+        held: set[int] = set()
+        for topic in topics:
+            best = max((about(hit, topic) for _, hit in ranked), default=0)
+            if not best:
+                continue
+            already = [hit for hit in chosen if about(hit, topic) == best]
+            if already:
+                held.update(id(h) for h in already)
+                continue
+            owed = max(
+                (p for p in pool if about(p[1], topic) == best),
+                key=lambda p: p[0],
+                default=None,
+            )
+            if owed is None or len(chosen) < 2:
+                continue
+            spare = [h for h in chosen[1:] if id(h) not in held]
+            if not spare:
+                continue
+            weakest = min(spare, key=lambda hit: rank_of[id(hit)])
+            chosen[chosen.index(weakest)] = owed[1]
+            pool.remove(owed)
+            held.add(id(owed[1]))
     return chosen
 
 
@@ -2092,7 +2134,11 @@ def _rank_hits(
     # a loose expansion term the passage happens to use is not something the
     # operator asked about, and reporting it as matched would misstate the
     # evidence. This is a separate search from the ranking one for that reason.
-    reported = index.search(" ".join(typed_terms) or analysis.text, limit=depth)
+    # Every passage, not the fusion depth: a section titled for a subject can
+    # join the candidates from below that depth, and it has to carry the same
+    # matched-term report as the rest or the coverage step will read it as
+    # covering nothing and never charge it for repeating the lead.
+    reported = index.search(" ".join(typed_terms) or analysis.text, limit=len(by_id))
     grounding = {hit.id: hit.grounding for hit in reported}
     matched = {hit.id: hit.matched_terms for hit in reported}
     bm25_score = {hit.id: hit.score for hit in typed}
@@ -2161,13 +2207,21 @@ def _rank_hits(
         if not is_subject_term(term):
             continue
         names = [term, *sorted(spelled.get(term, ()))]
-        for own in index.search(" ".join(names), limit=3):
+        # One search per spelling, to fusion depth: "reconcile checksum" as a
+        # single query ranked the passages that say both above "Checksum
+        # MATCH", the section titled for the second spelling, and a
+        # one-word BM25 top-3 is all passages that repeat the word.
+        titled = 0
+        for own in (hit for name in names for hit in index.search(name, limit=depth)):
+            if titled >= 3:
+                break
             chunk = by_id.get(own.id)
             if chunk is None or own.id in present:
                 continue
             section = set(content_terms(chunk.section_title or ""))
             if not any(_covers(t, section) for t in names):
                 continue
+            titled += 1
             rank = FUSED_RANK_SCALE * (1.0 - RRF_WEIGHT) * (own.score / bm25_best)
             rank += TITLE_WEIGHT * _title_coverage(chunk, anchor_terms)
             rank += _section_intent_bonus(chunk, analysis)
@@ -2184,7 +2238,14 @@ def _rank_hits(
                 )
             )
     ranked.sort(key=lambda pair: pair[0], reverse=True)
-    return _select_covering(ranked, limit, typed_terms, spelled_as=spelled)
+    subjects = [t for t in typed_terms if is_subject_term(t)]
+    topics = [
+        set().union(*({t, *spelled.get(t, ())} for t in group))
+        for group in question_topics(analysis.text, subjects)
+    ]
+    return _select_covering(
+        ranked, limit, typed_terms, spelled_as=spelled, topics=topics
+    )
 
 
 def retrieve_product_answer(

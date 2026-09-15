@@ -480,6 +480,106 @@ def test_polish_keeps_facts_only_when_the_rewrite_carries_them():
     assert keeps_draft_facts("Counted 1,000,000 rows.", "Counted 1000000 rows.")
 
 
+def test_snake_case_identifiers_are_facts_a_rewrite_must_keep():
+    from src.ai.rag.evidence import keeps_draft_facts
+
+    draft = "For a nightly load use full_refresh_overwrite; to add only new rows use incremental_append."
+    assert keeps_draft_facts(draft, "Use full_refresh_overwrite nightly, or incremental_append for new rows only.")
+    # Spelling the words out in order is a rewrite, not a lost identifier.
+    assert keeps_draft_facts(draft, "Use **Full Refresh Overwrite** nightly, or **Incremental Append** for new rows.")
+    assert not keeps_draft_facts(draft, "Use a full overwrite nightly, or append for new rows only.")
+
+
+def test_a_rewrite_may_only_deny_what_the_draft_denied():
+    from src.ai.rag.evidence import contradicts_draft
+
+    draft = (
+        "Export a schedule as YAML from the schedule detail drawer with Export YAML — "
+        "a GitOps read that does not include credentials."
+    )
+    # The live OpenAI run narrated this from that draft.
+    assert contradicts_draft(
+        draft,
+        "You cannot export a schedule as YAML directly. The export does not include any credentials.",
+    )
+    assert not contradicts_draft(
+        draft,
+        "Open the schedule's detail drawer and click Export YAML. The export never includes credentials.",
+    )
+    quarantine = "Quarantine is the rule that no row disappears silently: a bad row is quarantined rather than dropped."
+    assert not contradicts_draft(
+        quarantine, "Quarantine ensures no row is lost without notice; a bad row is not dropped."
+    )
+    assert not contradicts_draft("Upsert needs a reliable key.", "Upsert requires a reliable key.")
+
+
+def test_trailing_chat_filler_is_stripped_but_the_answer_body_is_kept():
+    from src.ai.rag.evidence import strip_chat_filler
+
+    body = "- **full_refresh_overwrite**: replaces the table.\n- **incremental_append**: adds new rows."
+    assert strip_chat_filler(body + "\n\nWould you like to know more about sync modes?") == body
+    assert strip_chat_filler(body + " If you need further clarification, feel free to ask!") == body
+    assert strip_chat_filler("Would you like the CSV or the JSON export?") == (
+        "Would you like the CSV or the JSON export?"
+    )
+
+
+def test_polish_that_denies_what_the_draft_explained_is_discarded(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+    from src.ai.llm.provider import LLMResponse
+
+    class _Inverting:
+        def generate(self, prompt: str, system: str = "", max_tokens: int = 0) -> LLMResponse:
+            return LLMResponse(
+                content=(
+                    "You cannot export a schedule as YAML directly. The export feature provides "
+                    "a read-only view of the schedule manifest and does not include credentials."
+                ),
+                success=True,
+                provider="openai",
+            )
+
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: (_Inverting(), "openai_polish"),
+    )
+    local = pa.CopilotResponse(
+        answer=(
+            "Export a schedule as YAML from the schedule detail drawer with Export YAML — "
+            "a GitOps read that does not include credentials."
+        ),
+        intent="product_help",
+        confidence=0.9,
+        method="pilot_local_engine",
+        tools_used=[{"name": "search_knowledge", "success": True, "summary": "2 hits"}],
+        sources=[{"title": "GitOps & YAML export", "href": "#/help/gitops"}],
+    )
+    kept = pa.DataPilotAgent()._polish_with_llm("how do I export a schedule as YAML", [], local, "")
+    assert kept.answer == local.answer
+    assert kept.method == "pilot_local_engine"
+
+
+def test_navigation_acknowledgements_are_not_narrated(monkeypatch):
+    from src.ai.copilot import pilot_agent as pa
+
+    called = []
+    monkeypatch.setattr(
+        "src.ai.llm.provider.pick_narration_provider",
+        lambda: called.append(1) or (None, "openai_polish"),
+    )
+    local = pa.CopilotResponse(
+        answer="Opening **Jobs** for you.",
+        intent="transfer_help",
+        confidence=0.95,
+        method="pilot_local_engine",
+        tools_used=[{"name": "navigate", "success": True, "summary": "jobs"}],
+        sources=[{"title": "Jobs", "href": "#/jobs"}],
+    )
+    kept = pa.DataPilotAgent()._polish_with_llm("open jobs", [], local, "")
+    assert kept is local
+    assert not called
+
+
 def test_provider_that_ignores_the_prompt_cannot_replace_a_grounded_answer(monkeypatch):
     from src.ai.copilot import pilot_agent as pa
     from src.ai.llm.provider import LLMResponse

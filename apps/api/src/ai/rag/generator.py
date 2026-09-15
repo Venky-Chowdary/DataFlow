@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from .evidence import retains_evidence
+from .evidence import contradicts_draft, retains_evidence, strip_chat_filler
 from .lexical_index import content_terms
 from .product_docs import ProductDocHit, compose_documented_answer, nearest_articles
 from .retriever import RetrievalResult
@@ -239,11 +239,16 @@ class DataTransferRAGGenerator:
             return None
         if not llm_response.success or not (llm_response.content or "").strip():
             return None
-        answer = llm_response.content.strip()
+        answer = strip_chat_filler(llm_response.content)
         if answer.startswith(("{", "[")):
             # A structured document is not an answer to an operator's question.
             return None
-        return answer if self._retains_evidence(answer, hits) else None
+        if not self._retains_evidence(answer, hits):
+            return None
+        # The passages are the only thing the narration may deny.
+        if contradicts_draft(context, answer):
+            return None
+        return answer
 
     @staticmethod
     def _retains_evidence(answer: str, hits: list[ProductDocHit]) -> bool:
