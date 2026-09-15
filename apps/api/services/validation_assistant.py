@@ -46,10 +46,14 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
         findings.append({
             "source": raw.get("source"),
             "target": raw.get("target"),
+            "source_type": raw.get("source_type"),
             "target_type": raw.get("target_type"),
             "unfit_rows": raw.get("unfit_rows"),
             "example_values": list(raw.get("example_values") or [])[:_EXPLAIN_EXAMPLE_CAP],
+            "example_rows": list(raw.get("example_rows") or [])[:_EXPLAIN_EXAMPLE_CAP],
             "suggested_target_type": raw.get("suggested_target_type"),
+            "apply_proven": raw.get("apply_proven"),
+            "apply_proven_scope": raw.get("apply_proven_scope"),
             "suggested_fix": raw.get("suggested_fix"),
             "reason": raw.get("reason") or raw.get("unfit_reason"),
             "unfit_reason": raw.get("unfit_reason"),
@@ -68,7 +72,12 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
             "failed": col.get("failed", 0),
             "sentinel_nulls": col.get("sentinel_nulls", 0),
             "sampled": col.get("sampled", 0),
+            "sample_failures": (col.get("sample_failures") or [])[:3],
             "suggested_fix": col.get("suggested_fix"),
+            "suggested_target_type": col.get("suggested_target_type"),
+            "suggested_transform": col.get("suggested_transform"),
+            "destination_exists": col.get("destination_exists"),
+            "table_exists": col.get("table_exists"),
         })
     blockers: list[dict[str, Any]] = []
     for raw in pf.get("blockers") or []:
@@ -147,6 +156,9 @@ def _population_fit_column_fixes(
     for col in fit.get("findings") or []:
         if not isinstance(col, dict):
             continue
+        # A widen the scan never re-checked against every overflow witness is
+        # unproven, not merely unknown: Approve & apply must not stamp it.
+        proven = col.get("apply_proven") is True
         try:
             unfit = int(col.get("unfit_rows") or 0)
         except (TypeError, ValueError):
@@ -177,6 +189,8 @@ def _population_fit_column_fixes(
             "suggested_transform": None,
             "destination_exists": table_exists,
             "table_exists": table_exists,
+            "apply_proven": proven,
+            "apply_proven_scope": str(col.get("apply_proven_scope") or ""),
         })
     return out
 
@@ -185,7 +199,12 @@ def _merge_column_fixes(
     coercion: list[dict[str, Any]],
     population: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """One row per source+target. Population-fit dest widen wins."""
+    """One row per source+target. Population-fit dest widen wins.
+
+    Population fit only proves numeric widens; when a column fails because
+    values are not numbers at all (``Invalid decimal: 'abc'``) it has no
+    target type to offer, so the coercion probe's text fallback is kept.
+    """
 
     def _key(row: dict[str, Any]) -> tuple[str, str]:
         return (
@@ -193,9 +212,22 @@ def _merge_column_fixes(
             str(row.get("target") or "").strip().lower(),
         )
 
-    pop_keys = {_key(r) for r in population}
-    out = [r for r in coercion if _key(r) not in pop_keys]
-    out.extend(population)
+    by_key = {_key(r): r for r in coercion}
+    out = [r for r in coercion if _key(r) not in {_key(p) for p in population}]
+    for pop in population:
+        base = by_key.get(_key(pop))
+        if base and base.get("suggested_target_type") and not pop.get("suggested_target_type"):
+            pop = {
+                **pop,
+                "suggested_target_type": base["suggested_target_type"],
+                "suggested_fix": base.get("suggested_fix") or pop.get("suggested_fix"),
+                "apply_proven": base.get("apply_proven"),
+                "apply_proven_scope": base.get("apply_proven_scope") or "",
+                "source_type": pop.get("source_type") or base.get("source_type") or "",
+                "destination_exists": bool(pop.get("destination_exists") or base.get("destination_exists")),
+                "table_exists": bool(pop.get("table_exists") or base.get("table_exists")),
+            }
+        out.append(pop)
     return out
 
 

@@ -121,7 +121,9 @@ def test_normalized_mysql_default_is_carried_onto_create_new():
     assert items["status"].status == "carried", items["status"].reason
     assert plan.column_defaults["status"] == "'active'"
     assert items["created_at"].status == "carried", items["created_at"].reason
-    assert plan.column_defaults["created_at"] == "CURRENT_TIMESTAMP"
+    # DATETIME(6) DEFAULT CURRENT_TIMESTAMP is MySQL error 1067; the clock
+    # default must carry the column's own fractional precision.
+    assert plan.column_defaults["created_at"] == "CURRENT_TIMESTAMP(6)"
 
 
 def test_raw_mysql_bare_default_would_have_been_refused():

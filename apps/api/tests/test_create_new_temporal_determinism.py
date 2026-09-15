@@ -7,6 +7,7 @@ wider projection then carried its own execution policy. A create-new DDL that
 changes with the sample draw is not a migration plan.
 """
 
+from services.decision_kernel.type_invent import _split_string_qualifiers
 from services.mapping_pipeline import run_mapping_pipeline
 
 DECLARED_DATE = [
@@ -99,7 +100,7 @@ def test_declared_text_source_creates_a_text_column_not_a_signed_cast():
     loss, charged the operator a Risk Contract for the pipeline's own choice.
     """
     m = _project_text()
-    assert m["target_type"].upper() in {"TEXT", "LONGTEXT"}, m
+    assert _split_string_qualifiers(m["target_type"])[0].upper() in {"TEXT", "LONGTEXT"}, m
     assert m["fidelity"] == "preserve", m
     assert not m.get("requires_risk_contract"), m
     assert m["transform"] == "none", m
@@ -113,7 +114,7 @@ def test_absent_table_target_schema_is_a_proposal_not_a_declared_type():
     provenance for a table the probe proved absent.
     """
     m = _project_text(target_schemas=[{"name": "HIRE_DATE", "inferred_type": "DATETIME(6)"}])
-    assert m["target_type"].upper() in {"TEXT", "LONGTEXT"}, m
+    assert _split_string_qualifiers(m["target_type"])[0].upper() in {"TEXT", "LONGTEXT"}, m
     assert m["fidelity"] == "preserve", m
     assert not m.get("requires_risk_contract"), m
     assert m.get("target_type_origin") != "destination_catalog", m

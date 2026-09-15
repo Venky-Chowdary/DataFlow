@@ -2183,8 +2183,13 @@ def _try_copy_fast_path(
     from services.copy_fast_path import (
         FastPathUnavailable,
         copy_between_postgres,
+        pg_pg_copy_enabled,
         source_column_types,
     )
+
+    if not pg_pg_copy_enabled():
+        note_copy_decline("PostgreSQL→PostgreSQL COPY disabled (PG_PG_COPY)")
+        return None
 
     # Both sides are described by the source catalog: the destination is created
     # from the source's own declarations, so "identical" is true by construction

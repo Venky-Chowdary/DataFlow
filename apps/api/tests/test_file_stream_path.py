@@ -82,9 +82,15 @@ def test_stream_file_to_database_from_path(monkeypatch, copy_fast_path):
         assert summary.get("checksum")
         if copy_fast_path == "1":
             assert summary.get("copy_fast_path") == "used"
-            assert is_count_proof_token(summary["checksum"])
+            # Full-refresh fast path fingerprints mapped rows during the write
+            # pass (real value digest) while the engine count fields stay
+            # cardinality proof — the two must never be graded against each other.
+            assert len(summary["checksum"]) == 64
+            assert not is_count_proof_token(summary["checksum"])
+            assert summary.get("checksum_mode") == "inline_write_pass"
+            assert is_count_proof_token(summary["engine_source_checksum"])
+            assert is_count_proof_token(summary["engine_target_checksum"])
             assert "dest_count_equals_source_snapshot" in str(summary.get("proof_scope"))
-            assert summary.get("checksum_mode") != "inline_write_pass"
         else:
             assert summary.get("copy_fast_path") != "used"
             assert summary.get("checksum_mode") == "inline_write_pass"

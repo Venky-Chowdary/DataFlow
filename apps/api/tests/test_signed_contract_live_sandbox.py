@@ -112,7 +112,10 @@ def _pg_ep(table: str) -> EndpointConfig:
 
 
 def _run(req: TransferRequest):
-    return UniversalTransferEngine().execute_tracked(req, "0" * 24)
+    # Terminal job statuses are sticky in every job store, so each live run
+    # needs its own job id; a shared constant makes the second run's first
+    # checkpoint a refused completed→running rewrite.
+    return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
 
 
 def _identity_maps() -> list[dict]:

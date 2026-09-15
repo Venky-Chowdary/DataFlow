@@ -137,14 +137,33 @@ def test_integrity_audit_never_stamps_full_selected_on_error_status() -> None:
     assert probe["status"] == "error"
 
 
-def test_probe_result_unsupported_redis_is_not_ran() -> None:
+def test_probe_result_redis_key_identity_is_unique_by_construction() -> None:
+    result = probe_source_duplicate_keys_result(
+        source_config={"type": "redis", "host": "localhost"},
+        source_table="ignored",
+        primary_key="redis_key",
+    )
+    assert isinstance(result, SourceDuplicateProbeResult)
+    assert result.status == "ran"
+    assert result.findings == []
+
+
+def test_probe_result_unreachable_redis_payload_identity_is_error_not_unproven_green(
+    monkeypatch,
+) -> None:
+    """A payload identity needs a real SCAN; no server means ``error``, never a skip."""
+    import services.source_duplicate_probe as probe_mod
+
+    def _refused(cfg, keyspace, pk_columns, *, limit):
+        raise ConnectionError("Error 111 connecting to localhost:6379")
+
+    monkeypatch.setattr(probe_mod, "_redis_duplicates", _refused)
     result = probe_source_duplicate_keys_result(
         source_config={"type": "redis", "host": "localhost"},
         source_table="ignored",
         primary_key="id",
     )
-    assert isinstance(result, SourceDuplicateProbeResult)
-    assert result.status == "skipped_unsupported"
+    assert result.status == "error"
     assert result.ran is False
     assert result.findings == []
 

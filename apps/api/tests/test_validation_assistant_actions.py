@@ -159,3 +159,37 @@ def test_create_new_fit_widen_does_not_add_review_mappings():
     kinds = [a["kind"] for a in actions]
     assert kinds.count("change_target_type") == 2
     assert "review_mappings" not in kinds
+
+
+def test_unproven_population_fit_widen_is_not_mapping_applyable():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "gates": [{"id": "g3f_population_fit", "status": "block", "message": "overflow"}],
+            "blockers": [{"id": "g3f_population_fit", "message": "overflow", "details": {}}],
+            "coercion_report": {"columns": []},
+            "population_fit": {
+                "evidence": "exact",
+                "findings": [{
+                    "source": "amount",
+                    "target": "amount",
+                    "target_type": "DECIMAL(10,2)",
+                    "unfit_rows": 3,
+                    "example_rows": [7],
+                    "example_values": ["123456789012.34"],
+                    "suggested_target_type": "DECIMAL(20,2)",
+                    "apply_proven": False,
+                    "apply_proven_scope": "sampled",
+                }],
+            },
+            "destination_table_exists": False,
+        },
+        dest_kind="postgres",
+        use_llm=False,
+    )
+    fix = explained["column_fixes"][0]
+    assert fix["apply_proven"] is False
+    assert fix["apply_proven_scope"] == "sampled"
+    widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
+    assert widen["apply_proven"] is False
+    assert widen["mapping_applyable"] is False

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,13 +23,15 @@ def test_netezza_merge_temp_stage_and_null_safe_on():
         def execute(self, stmt, params=None):  # noqa: ANN001
             executed.append(str(getattr(stmt, "text", stmt)).upper())
 
-    class _Table:
-        name = "DIM_CUSTOMER"
-        schema = "DW"
+    table = sa.Table(
+        "DIM_CUSTOMER", sa.MetaData(),
+        sa.Column("id", sa.Integer), sa.Column("name", sa.String),
+        schema="DW",
+    )
 
     n = _netezza_merge_upsert(
         _Conn(),
-        _Table(),
+        table,
         [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}],
         ["id"],
         ["id", "name"],

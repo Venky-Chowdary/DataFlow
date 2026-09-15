@@ -165,12 +165,24 @@ def _start_snapshot_session(client: Any) -> Any:
     from pymongo.read_concern import ReadConcern
 
     try:
+        # start_transaction is lazy in pymongo: a standalone mongod only rejects
+        # it on the first operation (code 20 IllegalOperation). Probe the
+        # topology first so a non-replica-set source declines the fast path
+        # before anything is created at the destination.
+        hello = client.admin.command("hello")
+        if not (hello.get("setName") or hello.get("msg") == "isdbgrid"):
+            raise FastPathUnavailable(
+                "Mongo snapshot read concern unavailable: standalone mongod "
+                "(transactions need a replica set or mongos)"
+            )
         session = client.start_session()
         session.start_transaction(
             read_concern=ReadConcern("snapshot"),
             read_preference=ReadPreference.PRIMARY,
         )
         return session
+    except FastPathUnavailable:
+        raise
     except Exception as exc:
         raise FastPathUnavailable(
             f"Mongo snapshot read concern unavailable (need replica set): {exc}"

@@ -610,6 +610,16 @@ def _build_destination(
     sftp_server: Any = None,
 ) -> EndpointConfig:
     if kind == "file_export":
+        if fmt == "fixed_width":
+            # Widths are declared, never guessed — same contract an operator meets.
+            return EndpointConfig(
+                kind="file_export",
+                format=fmt,
+                extra={"fixed_width_layout": [
+                    {"name": "id", "width": 8},
+                    {"name": "amount", "width": 40},
+                ]},
+            )
         return EndpointConfig(kind="file_export", format=fmt)
     return _build_db_endpoint(
         fmt, tmp_path, "dst", suffix, object_store=object_store, sftp_server=sftp_server

@@ -965,9 +965,11 @@ def run_mapping_pipeline(
                 destination_db_type, ddl_carrier_type(str(tgt_type))
             )
             tgt_name = str(m.get("target") or "").strip()
-            if tgt_name and tgt_type:
+            if tgt_name and tgt_type and destination_table_exists is not False:
                 # stamp_additive rebinds from live dest types; keep that map
                 # on the same physical spelling so target_type is not lattice.
+                # A proven-absent table has no live types: its echoed schema
+                # is a proposal and must not become the verdict's declared type.
                 declared_target_types[tgt_name] = str(tgt_type)
             # Create-new already stamped bare DECIMAL/FLOAT — upgrade from samples.
             if (

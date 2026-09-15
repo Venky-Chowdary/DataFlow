@@ -495,3 +495,21 @@ def test_validate_mapping_item_keeps_code_crosswalk() -> None:
     assert dumped["code_crosswalk_system"] == "legacy_status→v2"
     empty = MappingItem(source="status", target="status", code_crosswalk={})
     assert empty.model_dump()["code_crosswalk"] == {}
+
+
+def test_crosswalk_mapping_is_never_a_plain_copy_carry() -> None:
+    """Engine COPY fast paths and engine digests carry cells verbatim; a
+    crosswalk column must fall to the row path where the rewrite happens
+    (live PG→PG landed 'A' instead of 'active')."""
+    from services.copy_pg_mysql import mapping_is_plain_carry
+    from services.engine_checksum import comparable_column_pairs
+
+    plain = [{"source": "status", "target": "status", "transform": "none"}]
+    coded = [dict(plain[0], code_crosswalk={"A": "active"})]
+    types = {"status": "VARCHAR(16)"}
+
+    assert mapping_is_plain_carry(plain) == (True, "")
+    ok, reason = mapping_is_plain_carry(coded)
+    assert ok is False and "crosswalk" in reason
+    assert comparable_column_pairs(plain, types, types) == [("status", "status")]
+    assert comparable_column_pairs(coded, types, types) is None

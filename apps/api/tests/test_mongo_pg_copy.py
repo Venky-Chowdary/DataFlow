@@ -166,6 +166,37 @@ def test_mongo_pg_copy_kill_switch(monkeypatch):
         )
 
 
+class _Admin:
+    def __init__(self, hello: dict):
+        self._hello = hello
+
+    def command(self, name: str) -> dict:
+        assert name == "hello"
+        return self._hello
+
+
+class _Client:
+    def __init__(self, hello: dict):
+        self.admin = _Admin(hello)
+        self.sessions_started = 0
+
+    def start_session(self):
+        self.sessions_started += 1
+        raise AssertionError("standalone must decline before start_session")
+
+
+def test_snapshot_session_declines_standalone_before_any_session():
+    """pymongo's start_transaction is lazy; a standalone mongod only fails on the
+    first op. The probe must decline the fast path (row path takes over) before
+    a session — or a destination table — is created."""
+    from services.copy_mongo_pg import _start_snapshot_session
+
+    client = _Client({"ok": 1.0, "isWritablePrimary": True})
+    with pytest.raises(FastPathUnavailable, match="standalone"):
+        _start_snapshot_session(client)
+    assert client.sessions_started == 0
+
+
 def test_live_mongo_pg_dest_count(monkeypatch):
     pytest.importorskip("pymongo")
     monkeypatch.delenv("DATAFLOW_MONGO_PG_COPY", raising=False)

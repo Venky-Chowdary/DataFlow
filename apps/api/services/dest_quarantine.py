@@ -18,11 +18,10 @@ import logging
 import re
 import uuid
 from contextlib import closing
-from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from services.procedure_destination import DEST_PROCEDURE_EXTRA_KEYS
+from services.procedure_destination import sibling_table_endpoint
 from services.type_system import materialize_dest_ddl
 
 logger = logging.getLogger(__name__)
@@ -89,14 +88,11 @@ def dlq_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:
     contract onto the clone: the ``_df_*`` rows would be bound into the
     client's INSERT or CALL (which has none of those columns), the hooks would
     fire a second time, and no ``*_df_quarantine`` table would ever exist.
+    The parent table's probed live shape (``schema_types`` ...) is dropped for
+    the same reason: graded against it, every ``_df_*`` column is "missing".
     """
     table = dest_table or getattr(destination, "table", None) or getattr(destination, "collection", None) or "import"
-    dlq = dlq_table_name(str(table))
-    extra = getattr(destination, "extra", None)
-    if isinstance(extra, dict) and any(k in extra for k in DEST_PROCEDURE_EXTRA_KEYS):
-        extra = {k: v for k, v in extra.items() if k not in DEST_PROCEDURE_EXTRA_KEYS}
-        return replace(destination, table=dlq, collection=dlq, extra=extra)
-    return replace(destination, table=dlq, collection=dlq)
+    return sibling_table_endpoint(destination, dlq_table_name(str(table)))
 
 
 def rejected_details_to_dlq_records(

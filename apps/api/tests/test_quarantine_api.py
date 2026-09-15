@@ -81,17 +81,23 @@ def test_no_policy_silently_discards_a_bad_row():
         )
 
 
-def test_job_quarantine_endpoint(monkeypatch):
+def test_job_quarantine_endpoint(monkeypatch, tmp_path):
     from services import connector_store
     from src.transfer import engine as engine_mod
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
 
     monkeypatch.setattr(engine_mod, "_enforce_ddl_identity", lambda *a, **k: None)
+    # The destination has no inline path: the engine resolves it as the *single*
+    # saved sqlite connector, so the store must be this test's own, not the
+    # developer workspace's.
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setattr(connector_store, "_backend_choice", None)
 
     # Create a tiny CSV that fails integer coercion for one row.
     csv = b"id,age\n1,30\n2,not-a-number\n"
-    dest_path = Path(_API_ROOT) / "exports" / "quarantine_test.db"
+    dest_path = tmp_path / "quarantine_test.db"
     try:
         connector_store.create_connector({
             "name": "Quarantine SQLite",

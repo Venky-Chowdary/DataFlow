@@ -77,7 +77,7 @@ def _redis_client(cfg: dict[str, Any]):
     return redis.Redis(
         host=cfg.get("host") or "localhost",
         port=int(cfg.get("port") or 6379),
-        db=int(cfg["database"]) if str(cfg.get("database") or "0").isdigit() else 0,
+        db=int(cfg.get("database") or 0) if str(cfg.get("database") or "0").isdigit() else 0,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
         ssl=bool(cfg.get("ssl")),

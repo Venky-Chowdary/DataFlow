@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import sqlalchemy as sa
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -20,13 +22,15 @@ def test_hana_merge_local_temp_and_null_safe_on():
         def execute(self, stmt, params=None):  # noqa: ANN001
             executed.append(str(getattr(stmt, "text", stmt)).upper())
 
-    class _Table:
-        name = "ORDERS"
-        schema = "SALES"
+    table = sa.Table(
+        "ORDERS", sa.MetaData(),
+        sa.Column("id", sa.Integer), sa.Column("amt", sa.Integer),
+        schema="SALES",
+    )
 
     n = _hana_merge_upsert(
         _Conn(),
-        _Table(),
+        table,
         [{"id": 1, "amt": 10}, {"id": 2, "amt": 20}],
         ["id"],
         ["id", "amt"],
@@ -52,13 +56,15 @@ def test_vertica_merge_local_temp_and_null_safe_on():
         def execute(self, stmt, params=None):  # noqa: ANN001
             executed.append(str(getattr(stmt, "text", stmt)).upper())
 
-    class _Table:
-        name = "facts"
-        schema = "analytics"
+    table = sa.Table(
+        "facts", sa.MetaData(),
+        sa.Column("id", sa.Integer), sa.Column("v", sa.String),
+        schema="analytics",
+    )
 
     n = _vertica_merge_upsert(
         _Conn(),
-        _Table(),
+        table,
         [{"id": 1, "v": "a"}],
         ["id"],
         ["id", "v"],
