@@ -33,10 +33,15 @@ PHASE_TRANSFORM_WRITE = "transform_write"
 PHASE_CHECKSUM = "checksum"
 PHASE_INTROSPECT = "introspect"
 PHASE_DDL = "ddl"
+#: Engine-side COPY / ATTACH-INSERT-SELECT: the source read and the destination
+#: write are one statement, so they are one phase — splitting them would be a
+#: guess, not a measurement.
+PHASE_BULK_COPY = "bulk_copy"
 
 _PHASE_LABELS = {
     PHASE_READ: "Reading source",
     PHASE_TRANSFORM_WRITE: "Transforming and writing",
+    PHASE_BULK_COPY: "Engine-side bulk copy (read + write)",
     PHASE_CHECKSUM: "Verifying checksum",
     PHASE_INTROSPECT: "Inspecting schema",
     PHASE_DDL: "Applying DDL",

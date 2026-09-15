@@ -1323,6 +1323,8 @@ def _run_cdc_multi_stream(
         validation_mode=validation_mode,
         limit=limit,
         delivery_guarantee=delivery_guarantee,
+        workspace_id=workspace_id,
+        schedule_id=schedule_id,
     )
 
 
@@ -1959,6 +1961,8 @@ def _run_cdc_multi_stream_sequential(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    workspace_id: str = "",
+    schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Legacy path: N independent CDC readers (N slots / N server_ids)."""
     total_rows = 0

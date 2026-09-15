@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.conversion_contract import classify_conversion  # noqa: E402
 from services.decision_kernel.type_invent import (  # noqa: E402
+    _split_string_qualifiers,
     create_new_mapping_target_type,
     ddl_type,
 )
@@ -164,9 +165,17 @@ def test_int64_long_does_not_land_in_an_oracle_clob() -> None:
     ],
 )
 def test_oracle_text_long_invents_the_destinations_text_carrier(dest: str, expected: str) -> None:
-    """An Oracle text LOB stays text everywhere, not just on Oracle."""
+    """An Oracle text LOB stays text everywhere, not just on Oracle.
+
+    Case-sensitive engines (MySQL, SQL Server) also get the dest-native binary
+    collation carried onto the create-new stamp so equality is not collapsed.
+    """
     with bind_source_engine("oracle"):
-        assert create_new_mapping_target_type("long", dest, source_db="oracle") == expected
+        stamped = create_new_mapping_target_type("long", dest, source_db="oracle")
+    base, qualifiers = _split_string_qualifiers(stamped)
+    assert base == expected, stamped
+    if dest in {"mysql", "mssql"}:
+        assert "COLLATE" in qualifiers.upper(), stamped
 
 
 def test_an_unknown_source_keeps_the_prior_carrier() -> None:

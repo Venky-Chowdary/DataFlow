@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,13 +24,15 @@ def test_sybase_merge_temp_stage_and_null_safe_on():
         def execute(self, stmt, params=None):  # noqa: ANN001
             executed.append(str(getattr(stmt, "text", stmt)).upper())
 
-    class _Table:
-        name = "GlobalSales"
-        schema = "dbo"
+    table = sa.Table(
+        "GlobalSales", sa.MetaData(),
+        sa.Column("Item_number", sa.Integer), sa.Column("Quantity", sa.Integer),
+        schema="dbo",
+    )
 
     n = _sybase_merge_upsert(
         _Conn(),
-        _Table(),
+        table,
         [{"Item_number": 1, "Quantity": 5}],
         ["Item_number"],
         ["Item_number", "Quantity"],

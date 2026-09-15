@@ -6,7 +6,10 @@ DECIMAL(38,0)→BIGINT and DECIMAL(12,2)→NUMERIC(9,4) on Validate).
 
 from __future__ import annotations
 
-from services.decision_kernel.type_invent import create_new_mapping_target_type
+from services.decision_kernel.type_invent import (
+    _split_string_qualifiers,
+    create_new_mapping_target_type,
+)
 from services.type_system import is_lossy_coercion, is_precision_collapse_coercion
 
 # Named fixture — 8/8 must preserve. "100%" means this matrix, not marketing.
@@ -109,7 +112,10 @@ def test_create_new_numeric_matrix_preserves_declared_typmod():
         collapse = is_precision_collapse_coercion(
             src, stamped, dest_db=dest, dest_table_exists=False
         )
-        got = stamped.upper().replace(" ", "")
+        # Case-sensitive dests carry a binary COLLATE on string invents; the
+        # declared typmod is what this matrix measures.
+        base, _qualifiers = _split_string_qualifiers(stamped)
+        got = base.upper().replace(" ", "")
         want = expected.upper().replace(" ", "")
         if got != want or collapse:
             failed.append(f"{src}→{dest} got {stamped} want {expected} collapse={collapse}")

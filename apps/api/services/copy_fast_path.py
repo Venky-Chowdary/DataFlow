@@ -451,6 +451,34 @@ def declared_copy_carrier(
     )
 
 
+#: Mapping transforms that bind a text cell *as* a typed value on the row path.
+_TYPED_PARSE_TRANSFORMS = frozenset(
+    {"integer", "decimal", "boolean", "date", "datetime", "time"}
+)
+
+
+def census_logical_type(item: dict[str, Any], declared: str) -> str:
+    """The logical type the fast-path cell census must grade a column under.
+
+    A file cell is text; the row path binds it through the mapping's typed
+    transform (``decimal`` reads ``1,234`` as 1.234 under EU), so a census that
+    grades only the declared carrier lets an exact-decimal column that SQLite
+    spells ``TEXT`` pass ``1,234`` verbatim — the fast path and the row path
+    would then store different values for the same cell. When the carrier is
+    text (or unknown) and the transform names a parse, the census grades the
+    cell under the transform's kind and declines anything non-canonical.
+    """
+    transform = str(item.get("transform") or "").strip().lower()
+    if transform not in _TYPED_PARSE_TRANSFORMS:
+        return declared
+    from services.decision_kernel import normalize_logical_type
+
+    kind = normalize_logical_type(declared) if declared else ""
+    if kind in {"", "string", "text"}:
+        return transform
+    return declared
+
+
 #: Digits the destination engine's own text→number parser accepts verbatim.
 CANONICAL_DECIMAL_TEXT = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _CANONICAL_INTEGER_TEXT = re.compile(r"^[+-]?\d+$")
