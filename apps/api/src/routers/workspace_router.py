@@ -242,6 +242,30 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     return updated
 
 
+@router.delete("/ai-providers/{provider}/key")
+def delete_ai_provider_key_route(provider: str, request: Request):
+    """Forget the saved key; on auto Pilot returns to the local engine."""
+    from services.audit_log import append_audit_event
+    from services.integrations_store import delete_ai_provider_key
+
+    from ..ai.llm.provider import clear_auth_failures
+
+    try:
+        updated = delete_ai_provider_key(provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    clear_auth_failures()
+
+    append_audit_event(
+        action="workspace.ai_provider.key_removed",
+        resource=f"/workspace/ai-providers/{provider}",
+        actor=_actor(request),
+        level="info",
+        details={"provider": provider},
+    )
+    return updated
+
+
 @router.post("/ai-providers/{provider}/test")
 def test_ai_provider(provider: str):
     """Live-check the stored key for a provider without asking for it again.
