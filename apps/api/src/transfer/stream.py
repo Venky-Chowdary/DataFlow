@@ -1105,6 +1105,7 @@ def _stream_database_transfer_impl(
             "destination — schema evolution runs on the writer path",
             dest_type,
         )
+    _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
         fast = None if (shape_runner is not None or writer_owns_evolution) else _try_copy_fast_path(
@@ -1132,7 +1133,6 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
-        _copy_profile = PhaseProfile()
         _copy_profile.add(
             PHASE_BULK_COPY,
             time.perf_counter() - _copy_started,

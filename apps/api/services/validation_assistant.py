@@ -53,6 +53,7 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
             "example_rows": list(raw.get("example_rows") or [])[:_EXPLAIN_EXAMPLE_CAP],
             "suggested_target_type": raw.get("suggested_target_type"),
             "apply_proven": raw.get("apply_proven"),
+            "apply_proven_scope": raw.get("apply_proven_scope"),
             "suggested_fix": raw.get("suggested_fix"),
             "reason": raw.get("reason") or raw.get("unfit_reason"),
             "unfit_reason": raw.get("unfit_reason"),
@@ -155,6 +156,9 @@ def _population_fit_column_fixes(
     for col in fit.get("findings") or []:
         if not isinstance(col, dict):
             continue
+        # A widen the scan never re-checked against every overflow witness is
+        # unproven, not merely unknown: Approve & apply must not stamp it.
+        proven = col.get("apply_proven") is True
         try:
             unfit = int(col.get("unfit_rows") or 0)
         except (TypeError, ValueError):
@@ -185,6 +189,8 @@ def _population_fit_column_fixes(
             "suggested_transform": None,
             "destination_exists": table_exists,
             "table_exists": table_exists,
+            "apply_proven": proven,
+            "apply_proven_scope": str(col.get("apply_proven_scope") or ""),
         })
     return out
 
@@ -215,6 +221,8 @@ def _merge_column_fixes(
                 **pop,
                 "suggested_target_type": base["suggested_target_type"],
                 "suggested_fix": base.get("suggested_fix") or pop.get("suggested_fix"),
+                "apply_proven": base.get("apply_proven"),
+                "apply_proven_scope": base.get("apply_proven_scope") or "",
                 "source_type": pop.get("source_type") or base.get("source_type") or "",
                 "destination_exists": bool(pop.get("destination_exists") or base.get("destination_exists")),
                 "table_exists": bool(pop.get("table_exists") or base.get("table_exists")),
