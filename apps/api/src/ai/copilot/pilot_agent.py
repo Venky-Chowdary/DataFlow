@@ -17,7 +17,7 @@ from typing import Any
 
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
-from ..rag.evidence import keeps_draft_facts
+from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 # Per-provider hard cap. Client abort is 120s — keep native LLM attempts under that
 # so the local agent can always answer before the browser times out.
 _LLM_TURN_TIMEOUT_S = 20
+# Tools whose result is a screen change the client performs; their acknowledgement
+# is not prose to narrate.
+_NAVIGATION_TOOLS = frozenset({"navigate", "open_job", "open_schedule", "start_transfer_studio"})
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pilot-llm")
 # Bounds on what a provider model may do inside one native tool loop.
 _NATIVE_MAX_TOOL_CALLS = 8
@@ -1969,6 +1972,13 @@ class DataPilotAgent:
         # only add invention — that is how "how do I cook rice" came back narrated.
         if not carries_evidence(local) and not local.pending_actions:
             return local
+        # A navigation acknowledgement is the UI action, not prose to improve:
+        # "Opening Jobs for you" narrated as "I will open Jobs now" describes a
+        # future the client already performed.
+        if all(
+            t.get("name") in _NAVIGATION_TOOLS for t in tools if t.get("success")
+        ) and not local.pending_actions:
+            return local
 
         provider = None
         method = "llm_polish"
@@ -1997,10 +2007,12 @@ class DataPilotAgent:
 
 Rules:
 - Keep every fact from the draft answer and tool summaries — do not invent IDs, row counts, or connectors
+- Never add a claim the draft does not make; in particular never say something is not possible, not supported or cannot be done unless the draft says so
+- Keep product identifiers exactly as written (sync modes such as full_refresh_overwrite, gate IDs such as G7, flags, column and table names)
 - Do not mention tools, APIs, or method names
 - If the draft asks a clarification question, keep it
 - If Confirm is required, say so plainly
-- Be concise (2–8 short sentences or a short bullet list)
+- Be concise (2–8 short sentences or a short bullet list); end on the last fact — no offers of further help and no follow-up questions
 
 Tool evidence:
 {chr(10).join(tool_bits) or 'None'}
@@ -2019,7 +2031,7 @@ Draft answer:
             return local
         if not response.success or not (response.content or "").strip():
             return local
-        polished = response.content.strip()
+        polished = strip_chat_filler(response.content)
         # Guardrail: empty or tiny polish is useless; keep local.
         if len(polished) < 20:
             return local
@@ -2028,6 +2040,12 @@ Draft answer:
         if not keeps_draft_facts(local.answer, polished):
             logger.warning(
                 "%s narration dropped the draft's evidence — keeping the local answer",
+                method,
+            )
+            return local
+        if contradicts_draft(local.answer, polished):
+            logger.warning(
+                "%s narration denied something the draft did not — keeping the local answer",
                 method,
             )
             return local

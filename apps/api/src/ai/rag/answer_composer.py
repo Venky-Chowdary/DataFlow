@@ -201,6 +201,10 @@ _DEFINITIONAL = re.compile(
     r"^\s*(?:\*\*)?[A-Z][\w \-/()`*]{0,60}(?:\*\*)?\s+"
     r"(?:is|are|means|refers to|describes|holds|records|names)\b"
 )
+_YES_NO = re.compile(r"^\s*(?:can|could|does|do|is|are|will|would|should)\b", re.I)
+# A verdict sentence answers a yes/no question; out of its card it answers one
+# nobody asked.
+_VERDICT = re.compile(r"^\s*(?:Yes|No)\s*(?:—|-|,)", re.I)
 
 # Section titles whose sentences answer a given ask better than the corpus
 # average. Derived from how the help corpus is written: definitions live in FAQ
@@ -456,6 +460,18 @@ def _shape_bonus(ask: str, sentence: str, analysis=None) -> float:
             elif distinctive:
                 bonus -= 1.6
         return bonus
+    if (
+        ask == "comparison"
+        and analysis is not None
+        and _YES_NO.match(analysis.text)
+        and _VERDICT.match(sentence)
+    ):
+        # A comparison asked as yes/no ("can I use X instead of Y") is answered
+        # by the sentence that says yes or no, not by the one that defines both
+        # sides. Without this the log-capture credit below opened "can I use
+        # change tracking instead of CDC on SQL Server" on the definition of
+        # CDC, ahead of "Yes — SQL Server change tracking is a separate cursor".
+        return 2.0
     if ask == "definition" and _DEFINITIONAL.match(sentence):
         return 2.0
     if ask == "enumeration" and ("·" in sentence or sentence.count(",") >= 2):
@@ -962,10 +978,6 @@ _INSTRUCTIONAL = re.compile(
 )
 # Capability cards are written as a question about one named thing.
 _CAPABILITY_CARD = re.compile(r"^(?:do you|does \w+|can i|is \w+ supported)\b", re.I)
-# A verdict sentence answers a yes/no question; out of its card it answers one
-# nobody asked.
-_VERDICT = re.compile(r"^\s*(?:Yes|No)\s*(?:—|-|,)", re.I)
-
 
 def _cohesive(analysis: QueryAnalysis, lead: Candidate, cand: Candidate) -> bool:
     """Whether a supporting sentence from another section stays on the question.

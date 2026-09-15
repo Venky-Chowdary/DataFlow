@@ -13,7 +13,14 @@ What is asserted is relative, because a provider's absolute numbers change with
 the model behind the key:
 
 * the provider path must not lose questions the local engine answers on
-  target — hybrid narrates local evidence, it does not get to replace it;
+  target — hybrid narrates local evidence, it does not get to replace it. A
+  narration that keeps the local answer's facts and denies nothing it did
+  not deny is a *paraphrase* and counts as on target even when the fixture's
+  marker phrase was reworded; the paraphrase count is reported, not hidden;
+* no narration contradicts the local draft it was given (the live OpenAI run
+  that shaped this turned "export from the detail drawer" into "you cannot
+  export");
+* no narration ends in chat filler ("Would you like to know more?");
 * off-subject questions stay refused — fluency is the failure mode here;
 * no question raises;
 * every answered turn still carries evidence (sources or tool output). An
@@ -53,6 +60,19 @@ SUITES = [*ON_TARGET_FLOORS, "off_subject"]
 
 def _on_target(rows: list[dict]) -> set[str]:
     return {r["question"] for r in rows if r.get("on_target")}
+
+
+def _faithful(local: dict, hybrid: dict) -> bool:
+    """A reworded answer that still carries the local facts and denies nothing new."""
+    from src.ai.rag.evidence import contradicts_draft, keeps_draft_facts
+
+    draft = local.get("answer") or ""
+    rewrite = hybrid.get("answer") or ""
+    return (
+        hybrid.get("outcome") == "answered"
+        and keeps_draft_facts(draft, rewrite)
+        and not contradicts_draft(draft, rewrite)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -98,12 +118,50 @@ def test_the_provider_was_actually_used(measured) -> None:
 
 @pytest.mark.parametrize("suite", list(ON_TARGET_FLOORS))
 def test_provider_path_keeps_every_local_on_target_answer(measured, suite: str) -> None:
-    lost = _on_target(measured["local"][suite]) - _on_target(measured["hybrid"][suite])
+    local = {r["question"]: r for r in measured["local"][suite]}
     got = {r["question"]: r for r in measured["hybrid"][suite]}
+    reworded = _on_target(measured["local"][suite]) - _on_target(measured["hybrid"][suite])
+    paraphrased = {q for q in reworded if _faithful(local[q], got[q])}
+    lost = reworded - paraphrased
+    print(
+        f"[{PROVIDER}/{suite}] {len(local) - len(reworded)} verbatim on target, "
+        f"{len(paraphrased)} faithful paraphrases, {len(lost)} lost"
+    )
     assert not lost, "\n".join(
         f"  {q}\n      expected one of {got[q].get('expected')}\n"
         f"      got: {(got[q].get('answer') or got[q].get('error') or '')[:200]}"
         for q in sorted(lost)
+    )
+
+
+def test_no_narration_contradicts_its_local_draft(measured) -> None:
+    from src.ai.rag.evidence import contradicts_draft
+
+    local = {r["question"]: r for suite in ON_TARGET_FLOORS for r in measured["local"][suite]}
+    inverted = [
+        r
+        for suite in ON_TARGET_FLOORS
+        for r in measured["hybrid"][suite]
+        if (r.get("method") or "").startswith(f"{PROVIDER}_")
+        and contradicts_draft(local[r["question"]].get("answer") or "", r.get("answer") or "")
+    ]
+    assert not inverted, "\n".join(
+        f"  {r['question']}\n      got: {(r.get('answer') or '')[:200]}" for r in inverted
+    )
+
+
+def test_no_narration_ends_in_chat_filler(measured) -> None:
+    from src.ai.rag.evidence import strip_chat_filler
+
+    chatty = [
+        r
+        for suite in ON_TARGET_FLOORS
+        for r in measured["hybrid"][suite]
+        if (r.get("method") or "").startswith(f"{PROVIDER}_")
+        and strip_chat_filler(r.get("answer") or "") != (r.get("answer") or "").strip()
+    ]
+    assert not chatty, "\n".join(
+        f"  {r['question']}\n      got: …{(r.get('answer') or '')[-120:]}" for r in chatty
     )
 
 

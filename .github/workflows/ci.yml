@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "feature/**"]
 
 jobs:
   # Lean evidence pack — no databases. Regenerates claim→metric catalog and
@@ -105,6 +105,45 @@ jobs:
             tests/test_item1_llm_never_correctness_path.py \
             tests/test_llm_mapping.py \
             -q --tb=short
+
+  # Data Pilot answer floors: local engine only, no network LLM. The provider
+  # eval skips here (no key) — run it by hand with DATAFLOW_PILOT_EVAL_PROVIDER.
+  pilot-answer-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Pilot policy, retrieval, narration guards and answer audit
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          python -m pytest \
+            tests/test_pilot_answer_audit_eval.py \
+            tests/test_pilot_provider_eval.py \
+            tests/test_pilot_intent_policy.py \
+            tests/test_pilot_lifecycle_tools.py \
+            tests/test_pilot_native_loop_guards.py \
+            tests/test_pilot_tool_permissions.py \
+            tests/test_rag_grounded_answers.py \
+            tests/test_rag_multi_subject_answers.py \
+            -q --tb=short -rs
 
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
   # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
@@ -836,6 +875,12 @@ jobs:
           src/services/auth_service.py
           connectors/elasticsearch_writer.py
           connectors/sqlite_writer.py
+          src/ai/rag/evidence.py
+          src/ai/rag/generator.py
+          src/ai/copilot/intent_policy.py
+          src/ai/copilot/tool_permissions.py
+          src/ai/first_party/intent_router.py
+          src/ai/first_party/intent_labels.py
 
       - name: Mypy Decision Kernel (Phase B8)
         # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
