@@ -69,6 +69,51 @@ DEST_PROCEDURE_EXTRA_KEYS = frozenset(
     }
 )
 
+#: Live-shape facts the engine stamps on ``destination.extra`` after probing
+#: the *target* table (schema_types, nullability, PK, identity, ...). They
+#: describe that one table only; a sibling table DataFlow owns (DLQ, staging)
+#: must not inherit them or the writer grades ``_df_*`` columns against the
+#: parent's live DDL and refuses to create the sibling.
+DEST_TABLE_SHAPE_EXTRA_KEYS = frozenset(
+    {
+        "schema_types",
+        "schema_nullability",
+        "schema_defaults",
+        "schema_carrier_authority",
+        "schema_probe_error",
+        "schema_probe_message",
+        "destination_column_types",
+        "primary_key_columns",
+        "unique_keys",
+        "foreign_keys",
+        "identity_columns",
+        "generated_columns",
+        "overwrite_replaced_column_types",
+        "table_exists",
+        "privilege_probe",
+        "source_schema_catalog",
+    }
+)
+
+
+def sibling_table_endpoint(destination: Any, table: str) -> Any:
+    """Clone ``destination`` onto a plain DataFlow-owned table named ``table``.
+
+    Strips procedure/DML hooks (they would bind ``_df_*`` rows into the
+    client's CALL) and the parent table's live-shape stamps (they would make
+    the writer grade the sibling against the wrong DDL).
+    """
+    from dataclasses import replace
+
+    extra = getattr(destination, "extra", None)
+    if isinstance(extra, dict):
+        drop = DEST_PROCEDURE_EXTRA_KEYS | DEST_TABLE_SHAPE_EXTRA_KEYS
+        if any(k in extra for k in drop):
+            extra = {k: v for k, v in extra.items() if k not in drop}
+            return replace(destination, table=table, collection=table, extra=extra)
+    return replace(destination, table=table, collection=table)
+
+
 REASON_DEST_ENGINE = "dest_procedure_engine_refused"
 REASON_DEST_CDC = "dest_procedure_refuses_history_sync"
 REASON_UNBOUND = "dest_procedure_unbound_param"

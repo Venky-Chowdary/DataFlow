@@ -52,6 +52,8 @@ from collections.abc import Callable
 from contextvars import ContextVar, Token
 from typing import Any, NamedTuple
 
+from services.brand_env import getenv_brand
+
 logger = logging.getLogger(__name__)
 
 #: Pipe buffer between the two COPY cursors. Large enough that the reader is not
@@ -1248,6 +1250,11 @@ def _plan_pg_pk_partitions(
             f"PK range source COUNTs {accounted} != snapshot {source_count}"
         )
     return partitions
+
+
+def pg_pg_copy_enabled() -> bool:
+    raw = (getenv_brand("PG_PG_COPY", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def copy_between_postgres(

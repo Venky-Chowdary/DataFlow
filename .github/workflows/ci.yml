@@ -348,7 +348,9 @@ jobs:
         # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
         # production credentials. Snowflake is exercised through fakesnow.
         run: |
-          docker run -d --name dataflow-bigquery-emulator \
+          # The emulator is a single Go process; a panic on one request must not
+          # take the later warehouse SKU proof down with it.
+          docker run -d --name dataflow-bigquery-emulator --restart unless-stopped \
             -p 9050:9050 -p 9060:9060 \
             ghcr.io/goccy/bigquery-emulator:latest \
             --project=dataflow-test --dataset=dataflow --log-level=error
@@ -462,6 +464,16 @@ jobs:
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
         run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
+              echo "BigQuery emulator ready for warehouse proof"
+              break
+            fi
+            echo "BigQuery emulator not answering on 9050 (attempt $i)"
+            docker ps -a --filter name=dataflow-bigquery-emulator --format '{{.Status}}' || true
+            sleep 2
+          done
+          docker logs --tail 50 dataflow-bigquery-emulator || true
           set +e
           python scripts/warehouse_sku_report.py
           code=$?

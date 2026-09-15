@@ -131,11 +131,16 @@ def test_sqlite_insert_ledger_mid_chunk_kill_resume(tmp_path: Path, monkeypatch)
 
 @pytest.mark.skipif(not pg_up("P4"), reason="PostgreSQL not reachable")
 def test_pg_insert_ledger_mid_chunk_kill_resume(monkeypatch):
-    """Live PG: same kill/resume/checksum proof with the write ledger."""
+    """Live PG: same kill/resume/checksum proof with the write ledger.
+
+    The identity PG→PG COPY fast path has its own copy ledger; this proof is
+    about the chunked row-path ledger, so the COPY route is switched off.
+    """
     import psycopg2
 
     import connectors.postgresql_writer as pg_writer_mod
 
+    monkeypatch.setenv("DATAFLOW_PG_PG_COPY", "0")
     monkeypatch.setattr(pg_writer_mod, "write_chunk_size", lambda *_a, **_k: 2)
 
     creds = pg_creds("P4")
