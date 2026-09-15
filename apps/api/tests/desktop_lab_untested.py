@@ -1675,7 +1675,7 @@ def _seed_saas_src(table: str) -> None:
     _pg_exec(
         f"""
         CREATE TABLE public."{table}" (
-          id VARCHAR(255) PRIMARY KEY,
+          id BIGINT PRIMARY KEY,
           email VARCHAR(255) NOT NULL,
           name VARCHAR(255) NOT NULL,
           description VARCHAR(255) NOT NULL

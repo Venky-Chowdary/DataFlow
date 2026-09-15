@@ -36,6 +36,7 @@ import threading
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.code_crosswalk import declared_crosswalk
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
@@ -108,6 +109,8 @@ def mapping_is_plain_carry(mappings: list[dict]) -> tuple[bool, str]:
         transform = str(item.get("transform") or "none").strip().lower()
         if transform not in _NO_OP_TYPE_TRANSFORMS:
             return False, f"transform {transform!r} changes values"
+        if declared_crosswalk(item):
+            return False, "code crosswalk rewrites values"
         source = str(item.get("source") or "").strip()
         target = str(item.get("target") or "").strip()
         if not source or not target:

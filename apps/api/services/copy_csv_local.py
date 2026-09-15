@@ -44,6 +44,7 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    census_logical_type,
     text_cell_copy_safe,
 )
 from services.copy_incremental import (
@@ -285,7 +286,8 @@ def _identity_cell(value: Any, *, column: str) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return _empty_to_none(value)
+        # JSON spells NULL as ``null``; ``""`` is a value the source declared.
+        return value
     from services.value_serializer import present_cell_text
 
     return present_cell_text(value)
@@ -623,6 +625,7 @@ def _write_mapped_csv(
     declared_types: list[str] | None = None,
     physical_types: list[str] | None = None,
     dest_db: str = "",
+    digest: Any = None,
 ) -> int:
     """Write dest-ordered CSV with HEADER. Returns data-row COUNT.
 
@@ -631,6 +634,12 @@ def _write_mapped_csv(
     all-or-nothing, so a cell it would reject declines the whole fast path
     here — before any destination object exists — and the row path
     quarantines it.
+
+    ``digest`` is a ``FingerprintAccumulator``: when given, every mapped row
+    is fingerprinted against the destination DDL on the way through, so the
+    fast path produces the same Gate-8 source digest the row path would
+    (``_iter_fingerprints`` canonicalizes both sides through one
+    materializer) without a second pass over the file.
     """
     kind = (file_type or "").strip().lower()
     delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
@@ -647,6 +656,27 @@ def _write_mapped_csv(
         for col, logical, physical in zip(source_cols, carriers, physicals, strict=True)
         if logical
     ]
+    fingerprints: Any = None
+    if digest is not None:
+        from services.reconciliation import _iter_fingerprints
+
+        dest_types = {
+            dest: ddl for dest, ddl in zip(dest_cols, physicals, strict=True) if ddl
+        }
+
+        def fingerprints(rows: list[dict[str, str | None]]) -> None:
+            digest.add_many(
+                _iter_fingerprints(
+                    (
+                        {dest: rec.get(src) for src, dest in pairs}
+                        for rec in rows
+                    ),
+                    dest_cols,
+                    dest_db_type=dest_db,
+                    dest_types=dest_types,
+                )
+            )
+
     count = 0
     unbounded = 0
     pending: list[dict[str, str | None]] = []
@@ -666,6 +696,8 @@ def _write_mapped_csv(
                     )
             writer.writerow([_csv_cell(rec.get(col)) for col in source_cols])
             written += 1
+        if fingerprints is not None and rows:
+            fingerprints(rows)
         return written
 
     with open(dest_path, "w", encoding="utf-8", newline="") as handle:
@@ -687,8 +719,11 @@ def _write_mapped_csv(
                     count += _flush(delta, writer)
                     pending = []
             else:
-                count += _flush([record], writer)
-        if pending:
+                pending.append(record)
+                if len(pending) >= _FILTER_BATCH:
+                    count += _flush(pending, writer)
+                    pending = []
+        if pending and incremental:
             delta, n = records_after_watermark(
                 pending,
                 cursor_column,
@@ -697,6 +732,8 @@ def _write_mapped_csv(
             )
             unbounded += n
             count += _flush(delta, writer)
+        elif pending:
+            count += _flush(pending, writer)
     if incremental and unbounded:
         raise ValueError(
             f"{unbounded} row(s) carry no value for cursor "
@@ -723,6 +760,7 @@ def _mapped_csv_file(
     declared_types: list[str] | None = None,
     physical_types: list[str] | None = None,
     dest_db: str = "",
+    digest: Any = None,
 ) -> Iterator[tuple[str, int, str]]:
     kind = (file_type or "").strip().lower()
     ext = "tsv" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else "csv"
@@ -743,6 +781,7 @@ def _mapped_csv_file(
             declared_types=declared_types,
             physical_types=physical_types,
             dest_db=dest_db,
+            digest=digest,
         )
         yield path, count, ext
     finally:
@@ -778,6 +817,20 @@ def _count_result(source_count: int, dest_count: int, extra: dict[str, Any] | No
         source_snapshot=_snapshot(extra),
         proof_scope="dest_count_equals_source_snapshot_count",
     )
+
+
+def _with_source_digest(result: FastPathResult, digest: str) -> FastPathResult:
+    """Carry the write-pass source digest on a full-refresh COPY result.
+
+    Full-refresh file COPY only lands into an empty or replaced destination and
+    refuses a dest COUNT(*) that differs from the mapped source COUNT, so the
+    destination population *is* the mapped source rows and a value digest of
+    them is comparable to the Gate-8 read-back. The count token stays as the
+    target side: the read-back computes the destination digest independently.
+    """
+    if not digest or result.rows_copied != result.source_rows:
+        return result
+    return result._replace(source_checksum=digest)
 
 
 def _empty_incremental(dest_count_before: int, mode: str, extra: dict[str, Any] | None = None) -> FastPathResult:
@@ -1516,7 +1569,7 @@ def _pairs_and_ddls(
                 )
             ddls.append(physical)
         pairs.append((source_col, target_col))
-        declared_types.append(declared)
+        declared_types.append(census_logical_type(item, declared))
     return pairs, ddls, declared_types
 
 
@@ -1537,17 +1590,24 @@ def _format_csv_copy(
         file_type, dest_type, sync_mode if incremental else ""
     )
     dest_n = (dest_type or "").strip().lower()
+    from src.transfer.reconcile_step import is_count_proof_token
+
+    write_pass_digest = (
+        "" if is_count_proof_token(result.source_checksum) else result.source_checksum
+    )
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
         "rows_written": result.source_rows,
-        "checksum": result.target_checksum,
+        "checksum": write_pass_digest or result.target_checksum,
         "load_method": load_method,
         "source_row_count": result.source_rows,
         "source_row_count_source": "engine_population_in_snapshot",
         # Same pair SQL COPY stamps. Without it Gate-8 re-hashes dest rows
         # and compares that fingerprint to dest_count:N.
-        "engine_source_checksum": result.source_checksum,
+        "engine_source_checksum": (
+            result.target_checksum if write_pass_digest else result.source_checksum
+        ),
         "engine_target_checksum": result.target_checksum,
         "rejected_rows": 0,
         "coerced_null_rows": 0,
@@ -1564,6 +1624,11 @@ def _format_csv_copy(
         "csv_read": snapshot.get("csv_read"),
         "copy_fast_path": "used",
     }
+    if write_pass_digest:
+        # Mapped rows fingerprinted during the CSV write pass: the Gate-8 source
+        # digest the read-back is compared against, not the loader's own ack.
+        dest_summary["checksum_mode"] = "inline_write_pass"
+        dest_summary["source_independently_reread"] = False
     inc_wm = str(snapshot.get("incremental_watermark") or "")
     if incremental:
         dest_summary["incremental_watermark"] = inc_wm
@@ -1717,6 +1782,9 @@ def try_copy_local_csv(
                     declared_types=declared_types,
                 )
         else:
+            from services.fingerprint_accumulator import FingerprintAccumulator
+
+            write_pass = FingerprintAccumulator()
             with _mapped_csv_file(
                 content,
                 filename,
@@ -1726,6 +1794,7 @@ def try_copy_local_csv(
                 declared_types=declared_types,
                 physical_types=ddls,
                 dest_db=dest_n,
+                digest=write_pass,
             ) as (path, source_count, ext):
                 if dest_n in {"postgresql", "postgres"}:
                     result = copy_csv_to_postgres(
@@ -1762,6 +1831,7 @@ def try_copy_local_csv(
                         replace_destination=replace_destination,
                         declared_types=declared_types,
                     )
+            result = _with_source_digest(result, write_pass.digest())
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None

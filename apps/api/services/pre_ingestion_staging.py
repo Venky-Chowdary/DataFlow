@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import replace
 from typing import Any, Callable
+
+from services.procedure_destination import sibling_table_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def dest_supports_staging(dest_type: str) -> bool:
 def staging_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:
     table = dest_table or getattr(destination, "table", None) or getattr(destination, "collection", None) or "import"
     name = staging_table_name(str(table))
-    return replace(destination, table=name, collection=name)
+    return sibling_table_endpoint(destination, name)
 
 
 def _drop_table(destination: Any) -> bool:

@@ -132,6 +132,7 @@ def comparable_column_pairs(
     """
     if not mappings:
         return None
+    from services.code_crosswalk import declared_crosswalk
     from services.mapping_constraints import is_intentional_omit
 
     eng = normalize_engine(engine)
@@ -153,6 +154,10 @@ def comparable_column_pairs(
             return None
         transform = str(mapping.get("transform") or "").strip().lower()
         if transform not in _NO_OP_TYPE_TRANSFORMS:
+            return None
+        if declared_crosswalk(mapping):
+            # A code crosswalk rewrites the cell (A→active); the populations
+            # are meant to differ, so neither COPY nor a digest may carry it.
             return None
         left = src_types.get(source.lower())
         right = dst_types.get(target.lower())

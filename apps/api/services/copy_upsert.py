@@ -39,7 +39,7 @@ def staging_table_name(dest_table: str, *, max_len: int = 64) -> str:
     raw = f"{STAGING_PREFIX}{dest_table}"
     if len(raw) <= max_len:
         return raw
-    digest = hashlib.sha1(dest_table.encode("utf-8")).hexdigest()[:8]
+    digest = hashlib.sha1(dest_table.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
     keep = max(1, max_len - len(STAGING_PREFIX) - 1 - len(digest))
     return f"{STAGING_PREFIX}{dest_table[:keep]}_{digest}"
 

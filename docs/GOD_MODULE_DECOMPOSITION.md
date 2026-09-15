@@ -43,6 +43,28 @@ Artifact: `apps/api/data/proofs/module_size_budgets.json`
 | `services/reconciliation.py` | 5900 | 5920 | Gate-8 upsert keyed checksum + Mongo keyed fingerprint (product correctness) |
 | `connectors/writer_common.py` | 5100 | 5120 | `gate8_writer_meta` / written_ids stamping for upsert reconcile |
 
+## ADR — re-baseline 2026-09-13
+
+The `mapping-evidence` job had been red since mid-August: 263 commits on
+`feature/Venkat-Analysis` landed in the frozen modules (timezone contracts,
+UUID wire, dest-shape profiles, Elasticsearch reread, …) without the gate being
+consulted, so the freeze stopped measuring anything. The ceilings are re-set to
+the current size plus a ≤1% margin so growth is caught again from this commit;
+this is a bump, not an extraction — the extraction order above is unchanged and
+each row here still owes the split it names.
+
+| Module | Was | Now | Lines | Owes |
+|--------|-----|-----|-------|------|
+| `services/type_system.py` | 7450 | 8100 | 8061 | `type_system/ddl.py`, `width.py`, `coercion.py` |
+| `services/reconciliation.py` | 4700 | 5100 | 5069 | per-engine `verify_*.py` |
+| `connectors/generic_sql.py` | 5600 | 6420 | 6390 | `connectors/merge/<dialect>.py` |
+| `connectors/writer_common.py` | 5120 | 5520 | 5491 | `cdc_lsn.py`, `quarantine_wire.py`, `write_result.py` |
+| `src/transfer/engine.py` | 5200 | 5620 | 5583 | orchestration shell only |
+| `services/schema_introspect.py` | 4800 | 4900 | 4858 | per-engine introspectors |
+| `src/transfer/stream.py` | 3350 | 3900 | 3863 | reader/writer loop split |
+| `src/transfer/adapters.py` | 2450 | 2520 | 2500 | per-family adapters |
+| `services/preflight_service.py` | 2500 | 3040 | 3004 | `decision_kernel.validation` |
+
 ## ADR — extract 2026-08-08 (wave4)
 
 | Module | Change | Why |

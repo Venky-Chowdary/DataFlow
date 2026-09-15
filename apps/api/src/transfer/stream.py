@@ -82,6 +82,7 @@ from .stream_foreign_keys import (
 )
 
 from services.phase_profile import (  # noqa: E402
+    PHASE_BULK_COPY,
     PHASE_CHECKSUM,
     PHASE_READ,
     PHASE_TRANSFORM_WRITE,
@@ -1104,6 +1105,8 @@ def _stream_database_transfer_impl(
             "destination — schema evolution runs on the writer path",
             dest_type,
         )
+    _copy_profile = PhaseProfile()
+    _copy_started = time.perf_counter()
     try:
         fast = None if (shape_runner is not None or writer_owns_evolution) else _try_copy_fast_path(
             source=source,
@@ -1130,6 +1133,12 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        _copy_profile.add(
+            PHASE_BULK_COPY,
+            time.perf_counter() - _copy_started,
+            rows=int(rows_copied or 0),
+        )
+        dest_summary.setdefault("phase_profile", _copy_profile.snapshot())
         _certificate = _create_scope.certificate()
         if _certificate is not None:
             dest_summary.setdefault("schema_fidelity", _certificate)

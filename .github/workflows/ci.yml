@@ -163,35 +163,16 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=10
-      mysql:
-        image: public.ecr.aws/docker/library/mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: dataflow
-          MYSQL_DATABASE: dataflow
-          MYSQL_USER: dataflow
-          MYSQL_PASSWORD: dataflow
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
-      mongo:
-        image: public.ecr.aws/docker/library/mongo:7
-        ports:
-          - 27017:27017
-        # Without a healthcheck the step can start before mongod accepts
-        # connections; the Mongo routes then skip, and the no-skip guard fails
-        # the job for an image that was configured correctly.
-        options: >-
-          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Service containers cannot take a command line, so MySQL (local_infile
+      # for LOAD DATA LOCAL) and Mongo (--replSet for snapshot reads, as in
+      # docker-compose.yml) are started in steps that mirror production.
+      - name: Start MySQL (local_infile) and Mongo replica set
+        run: |
+          bash .github/scripts/start_ci_databases.sh mysql mongo
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -318,34 +299,9 @@ jobs:
   api-and-web:
     runs-on: ubuntu-latest
     services:
-      mongo:
-        image: public.ecr.aws/docker/library/mongo:7
-        ports:
-          - 27017:27017
-        # Without a healthcheck the step can start before mongod accepts
-        # connections; the Mongo routes then skip, and the no-skip guard fails
-        # the job for an image that was configured correctly.
-        options: >-
-          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-      # MySQL 8 enables ROW-based binlog by default, so MySQL matrix + binlog
-      # CDC tests run here instead of silently skipping.
-      mysql:
-        image: public.ecr.aws/docker/library/mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: dataflow
-          MYSQL_DATABASE: dataflow
-          MYSQL_USER: dataflow
-          MYSQL_PASSWORD: dataflow
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
+      # MySQL and Mongo are started in a step (see start_ci_databases.sh):
+      # service containers cannot take a command line, and the COPY paths
+      # need local_infile=ON and a Mongo replica set (snapshot read concern).
       # Postgres is started in a step (not as a service) so we can enable
       # wal_level=logical for CDC integration tests. See Dockerfile.postgres-cdc.
       redis:
@@ -360,6 +316,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
+        # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
+        # execute cells (same flags as docker-compose.yml; emulator, not tenant).
+        run: |
+          bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls
 
       - name: Start Postgres with logical CDC
         run: |
@@ -387,22 +349,7 @@ jobs:
         # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
         # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
         # production credentials. Snowflake is exercised through fakesnow.
-        run: |
-          docker run -d --name dataflow-bigquery-emulator \
-            -p 9050:9050 -p 9060:9060 \
-            ghcr.io/goccy/bigquery-emulator:latest \
-            --project=dataflow-test --dataset=dataflow --log-level=error
-          for i in $(seq 1 30); do
-            # The emulator does not serve /; use the BigQuery discovery API.
-            if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
-              echo "BigQuery emulator ready"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "BigQuery emulator failed to start" >&2
-          docker logs dataflow-bigquery-emulator || true
-          exit 1
+        run: bash .github/scripts/start_ci_databases.sh bigquery
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -502,9 +449,16 @@ jobs:
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
         run: |
+          # Fresh emulator process + catalog: the api slice's DROP history must
+          # not be able to corrupt the proof run (see start_bigquery).
+          docker logs --tail 40 dataflow-bigquery-emulator 2>&1 | grep -c panic \
+            | sed 's/^/emulator panics logged during api slice: /' || true
+          bash ../../.github/scripts/start_ci_databases.sh bigquery
           set +e
           python scripts/warehouse_sku_report.py
           code=$?
+          docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
+          docker logs --tail 80 dataflow-bigquery-emulator || true
           echo "### Warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
           if [ -f data/proofs/warehouse_sku_report.json ]; then
             python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
