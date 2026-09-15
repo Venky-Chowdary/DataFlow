@@ -886,6 +886,7 @@ export interface ModelCapabilities {
     status: string;
     blocked_reason?: string;
   }[];
+  settings_storage?: { path: string; persistent: boolean; reason: string };
   guarantees: string[];
 }
 

@@ -732,7 +732,7 @@ def pick_narration_provider():
 
 def get_model_capabilities() -> dict:
     """Expose model/provider readiness without making network calls to cloud APIs."""
-    from services.integrations_store import get_ai_provider_configs
+    from services.integrations_store import get_ai_provider_configs, storage_status
 
     stored = get_ai_provider_configs()
     providers = {
@@ -778,6 +778,11 @@ def get_model_capabilities() -> dict:
                 )
             elif not persisted.get("enabled", True):
                 blocked_reason = "Disabled in Settings — enable it to let Pilot use it."
+            elif persisted.get("key_state") == "undecryptable":
+                blocked_reason = (
+                    "A key is saved but cannot be decrypted — DATAFLOW_SECRETS_KEY (or the "
+                    "AUTH_SECRET it falls back to) changed since it was saved. Save the key again."
+                )
             elif not configured:
                 blocked_reason = "No API key saved for this provider."
             else:
@@ -819,6 +824,7 @@ def get_model_capabilities() -> dict:
         "configured_providers": decision["configured_providers"],
         "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
+        "settings_storage": storage_status(),
         "guarantees": [
             "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
             "A saved provider key does not send traffic. Hybrid or Cloud must be chosen explicitly — this is a data product; schemas and job evidence stay on-box by default.",

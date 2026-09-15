@@ -941,6 +941,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     </p>
                   </div>
                 )}
+                {modelCapabilities?.settings_storage && !modelCapabilities.settings_storage.persistent && (
+                  <div className="df2-permission-notice" role="alert" data-testid="settings-storage-warning">
+                    <DtIcon name="alert" size={16} />
+                    <p>
+                      <strong>Saved keys will not survive a restart. </strong>
+                      {modelCapabilities.settings_storage.reason}
+                    </p>
+                  </div>
+                )}
                 <div className="df2-model-grid">
                   {!modelCapabilitiesLoaded ? (
                     <SectionLoader title="Loading model providers" hint="Fetching AI routing configuration…" />

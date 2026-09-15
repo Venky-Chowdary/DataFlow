@@ -9,8 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from services.platform_config import data_dir
-from services.secret_vault import decrypt_secret, encrypt_secret
+from services.platform_config import data_dir, is_railway
+from services.secret_vault import SecretVaultError, decrypt_secret, encrypt_secret
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "integrations.json"
@@ -243,6 +243,57 @@ def get_sso_config_raw(sso_type: str) -> dict[str, Any]:
 # ── AI providers ─────────────────────────────────────────────────────────────
 
 
+def storage_status() -> dict[str, Any]:
+    """Where Settings are written and whether that location survives a restart.
+
+    A container without a mounted volume writes to its own filesystem, so
+    every redeploy or restart reverts the store to whatever the image shipped
+    with. Reporting that is the difference between "the key vanished" and
+    "the key was never going to stay".
+    """
+    import os
+
+    path = STORE_PATH
+    persistent = True
+    reason = ""
+    if is_railway():
+        root = path.parent.parent if path.parent.name == "data" else path.parent
+        if not (os.path.ismount(root) or os.path.ismount(path.parent)):
+            persistent = False
+            reason = (
+                f"{path.parent} is not a mounted volume on this Railway service, so "
+                "saved settings are lost on every deploy or restart. Attach a volume at "
+                f"{root} (or set DATAFLOW_DATA_DIR to a mounted path)."
+            )
+    return {"path": str(path), "persistent": persistent, "reason": reason}
+
+
+def provider_key_state(provider: str) -> str:
+    """``ready`` / ``none`` / ``disabled`` / ``undecryptable`` for a provider's key.
+
+    ``undecryptable`` means a ciphertext is stored but the current secrets key
+    cannot open it — the operator rotated DATAFLOW_SECRETS_KEY (or fell back to
+    a different AUTH_SECRET) after saving. Only re-saving the key fixes that.
+    """
+    import os
+
+    if provider == "ollama":
+        return "ready"
+    if not ai_provider_enabled(provider):
+        return "disabled"
+    env_val = os.environ.get({"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, ""), "")
+    if env_val and not _is_invalid_secret(env_val):
+        return "ready"
+    stored = _load_raw()["ai_providers"].get(provider, {}).get("api_key", "")
+    if not stored:
+        return "none"
+    try:
+        plain = decrypt_secret(stored)
+    except SecretVaultError:
+        return "undecryptable"
+    return "undecryptable" if _is_invalid_secret(plain) else "ready"
+
+
 def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
     data = _load_raw()
     out: dict[str, dict[str, Any]] = {}
@@ -252,6 +303,7 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
         # Configured means a key we can actually use (env or store), not merely
         # a byte string sitting in the file.
         row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
+        row["key_state"] = provider_key_state(provider)
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -341,7 +393,10 @@ def resolve_provider_api_key(provider: str) -> str:
     stored = cfg.get("api_key", "")
     if not stored:
         return ""
-    plain = decrypt_secret(stored)
+    try:
+        plain = decrypt_secret(stored)
+    except SecretVaultError:
+        return ""
     return "" if _is_invalid_secret(plain) else plain
 
 
