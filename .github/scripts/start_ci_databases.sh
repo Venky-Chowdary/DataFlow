@@ -4,11 +4,17 @@
 # product ships against:
 #   mysql — ROW binlog + GTID (CDC) and local_infile=1 (LOAD DATA LOCAL COPY path)
 #   mongo — single-node replica set rs0 (snapshot read concern, change streams)
-# Usage: start_ci_databases.sh [mysql] [mongo]
+#   gcs   — fake-gcs-server (desktop lab postgresql->gcs execute cell)
+#   adls  — Azurite blob (desktop lab postgresql->adls execute cell)
+# Emulator greens are labelled emulator_not_customer_tenant by the lab; they
+# are not customer-tenant certificates.
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls]
 set -euo pipefail
 
 MYSQL_IMAGE="${MYSQL_IMAGE:-public.ecr.aws/docker/library/mysql:8.0}"
 MONGO_IMAGE="${MONGO_IMAGE:-public.ecr.aws/docker/library/mongo:7}"
+GCS_IMAGE="${GCS_IMAGE:-docker.io/fsouza/fake-gcs-server:latest}"
+AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -85,10 +91,29 @@ start_mongo() {
   docker exec dataflow-ci-mongo mongosh --quiet --eval 'printjson({setName: db.hello().setName, primary: db.hello().isWritablePrimary})'
 }
 
+start_gcs() {
+  GCS_IMAGE=$(pull_image "$GCS_IMAGE" "$GCS_IMAGE")
+  docker run -d --name dataflow-ci-fake-gcs -p 4443:4443 "$GCS_IMAGE" \
+    -scheme http -port 4443 -public-host localhost -external-url http://localhost:4443
+  wait_for "fake-gcs" 30 2 curl -fsS http://127.0.0.1:4443/storage/v1/b \
+    || { docker logs dataflow-ci-fake-gcs || true; exit 1; }
+}
+
+start_adls() {
+  AZURITE_IMAGE=$(pull_image "$AZURITE_IMAGE" "$AZURITE_IMAGE")
+  docker run -d --name dataflow-ci-azurite -p 10000:10000 "$AZURITE_IMAGE" \
+    azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --loose --skipApiVersionCheck
+  # Azurite answers any path with a well-formed HTTP error once it is listening.
+  wait_for "Azurite" 30 2 curl -s -o /dev/null http://127.0.0.1:10000/ \
+    || { docker logs dataflow-ci-azurite || true; exit 1; }
+}
+
 for svc in "$@"; do
   case "$svc" in
     mysql) start_mysql ;;
     mongo) start_mongo ;;
+    gcs) start_gcs ;;
+    adls) start_adls ;;
     *) echo "unknown service: $svc" >&2; exit 2 ;;
   esac
 done

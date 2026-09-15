@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -49,6 +50,33 @@ from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from connectors.writer_common import writer_meta_with_source_rows
+
+logger = logging.getLogger(__name__)
+
+#: Bound on the staging-table drop. The google client's default retry keeps
+#: re-issuing a 5xx ``tables.delete`` for ten minutes; a scratch table that
+#: has already been merged is not worth stalling the run for.
+STAGING_DROP_DEADLINE_SECONDS = 30.0
+
+
+def drop_bigquery_staging(client: Any, staging_id: str) -> str | None:
+    """Drop the MERGE staging table; best effort, never fatal.
+
+    The staging table is DataFlow-owned scratch that only exists after the
+    MERGE it fed has committed, so failing to drop it must not fail rows that
+    are already in the destination (same rule as
+    ``services.staging_reaper.drop_staging_table``). Returns an operator-facing
+    warning naming the leftover when the drop did not go through.
+    """
+    try:
+        from google.api_core import retry as _retry
+
+        bounded = _retry.Retry(deadline=STAGING_DROP_DEADLINE_SECONDS)
+        client.delete_table(staging_id, not_found_ok=True, retry=bounded)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not mask the write
+        logger.warning("could not drop BigQuery staging table %s: %s", staging_id, exc)
+        return f"staging table {staging_id} was not dropped after MERGE ({exc}); drop it manually"
+    return None
 
 
 @dataclass
@@ -1540,7 +1568,9 @@ def write_mapped_rows(
                 del finished
         finally:
             if staging_id:
-                client.delete_table(staging_id, not_found_ok=True)
+                leftover = drop_bigquery_staging(client, staging_id)
+                if leftover:
+                    transform_errors.append(leftover)
         rejected_rows = _rejected_row_count(
             data_rows,
             [()] * write_acc.accepted_row_count,

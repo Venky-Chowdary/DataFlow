@@ -317,9 +317,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Start MySQL (local_infile) and Mongo replica set
+      - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
+        # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
+        # execute cells (same flags as docker-compose.yml; emulator, not tenant).
         run: |
-          bash .github/scripts/start_ci_databases.sh mysql mongo
+          bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls
 
       - name: Start Postgres with logical CDC
         run: |
