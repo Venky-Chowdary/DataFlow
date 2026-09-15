@@ -571,8 +571,8 @@ MODEL_CAPABILITY_MATRIX = [
             "(GRU decoder, Luong attention, pointer-generator mix) in front of a "
             "deterministic local tool loop: NL→tools→compose for aggregates, "
             "schema, transfers-with-Confirm, jobs, and product how-tos. Not a "
-            "foundation model. OpenAI/Anthropic/Ollama only reword the answer "
-            "and only when an operator picks Hybrid or Cloud."
+            "foundation model. OpenAI/Anthropic/Ollama only reword the answer, "
+            "and only while a key is saved (or Hybrid/Cloud is pinned)."
         ),
     },
 ]

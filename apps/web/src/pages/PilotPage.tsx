@@ -69,13 +69,20 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const [pilotOnline, setPilotOnline] = useState<boolean | null>(null);
   const [prompts, setPrompts] = useState<string[]>([]);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
+  /** Narration method of the latest answer (e.g. `openai_polish`, `pilot_local_engine`). */
+  const [lastMethod, setLastMethod] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
 
   const session = sessions.find((s) => s.id === activeId) ?? sessions[0];
   const started = session.messages.length > 0;
   const cloudProviders = (modelCapabilities?.providers ?? []).filter((p) => p.tier === "cloud");
-  const anyCloudReady = cloudProviders.some((p) => p.available);
+  const lastNarrator = lastMethod.endsWith("_polish") ? lastMethod.replace(/_polish$/, "") : "";
+  const engineUsesProvider =
+    Boolean(lastNarrator) ||
+    ((modelCapabilities?.pilot_engine === "hybrid" || modelCapabilities?.pilot_engine === "cloud") &&
+      cloudProviders.some((p) => p.available));
+  const anyCloudReady = engineUsesProvider;
 
   useEffect(() => {
     fetchCopilotPrompts().then(setPrompts).catch(() => {});
@@ -189,6 +196,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
         nameFallback: "pilot",
       });
       const res = await copilotChat(q, session.history, pilotContext);
+      setLastMethod(res.method || "");
+      fetchModelCapabilities().then(setModelCapabilities).catch(() => {});
       const newHistory: CopilotChatMessage[] = [
         ...session.history,
         { role: "user" as const, content: q },
@@ -272,7 +281,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       : pilotOnline == null
         ? "Connecting…"
         : anyCloudReady
-          ? `LLM · ${modelCapabilities?.active_provider || "cloud"}`
+          ? `LLM · ${lastNarrator || modelCapabilities?.active_provider || "cloud"}`
           : cloudBroken
             ? "Local · fix API key"
             : "Local engine";

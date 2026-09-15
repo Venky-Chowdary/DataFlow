@@ -915,7 +915,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-head">
                     <div>
                       <h2>Active model route</h2>
-                      <p>Datawrap is a data-movement product. Pilot stays on-box by default so schemas, samples, credentials, and job evidence are not sent to OpenAI or Anthropic. Saving a key stores it; nothing leaves this workspace until you explicitly pick Hybrid or Cloud.</p>
+                      <p>Datawrap is a data-movement product. With no key saved, Pilot runs entirely on-box — nothing is sent to OpenAI or Anthropic. Once you save a key, Pilot uses that provider to word its answers until you remove the key; tools, gates and facts still run here. Pick “Our engine only” to keep a key saved but idle.</p>
                     </div>
                   </div>
                   <div className="df2-settings-section-body">
