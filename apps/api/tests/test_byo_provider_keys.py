@@ -449,3 +449,17 @@ def test_credential_and_engine_routes_need_workspace_administration():
     assert Permission.WORKSPACE_MANAGE not in role_permissions("editor")
     assert Permission.WORKSPACE_MANAGE not in role_permissions("viewer")
     assert Permission.WORKSPACE_MANAGE in role_permissions("admin")
+
+
+def test_models_route_exposes_settings_storage(client, monkeypatch):
+    """The response model must not strip the persistence verdict Settings renders."""
+    monkeypatch.setenv("DATAFLOW_ENV", "development")  # Railway alone would flip auth on
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    res = client.get("/api/v1/copilot/models")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["settings_storage"]["persistent"] is False
+    assert "volume" in body["settings_storage"]["reason"]
+
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT")
+    assert client.get("/api/v1/copilot/models").json()["settings_storage"]["persistent"] is True
