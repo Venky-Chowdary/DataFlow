@@ -349,27 +349,7 @@ jobs:
         # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
         # so the warehouse SKU matrix (file→BigQuery, PG→BigQuery) is proven without
         # production credentials. Snowflake is exercised through fakesnow.
-        run: |
-          # The emulator is a single Go process; a panic on one request must not
-          # take the later warehouse SKU proof down with it. --database keeps
-          # tables on the container filesystem so a restart does not wipe the
-          # in-memory catalog between a write and its Gate-8 read-back.
-          docker run -d --name dataflow-bigquery-emulator --restart unless-stopped \
-            -p 9050:9050 -p 9060:9060 \
-            ghcr.io/goccy/bigquery-emulator:latest \
-            --project=dataflow-test --dataset=dataflow --log-level=error \
-            --database=/tmp/dataflow-bq.db
-          for i in $(seq 1 30); do
-            # The emulator does not serve /; use the BigQuery discovery API.
-            if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
-              echo "BigQuery emulator ready"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "BigQuery emulator failed to start" >&2
-          docker logs dataflow-bigquery-emulator || true
-          exit 1
+        run: bash .github/scripts/start_ci_databases.sh bigquery
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -469,16 +449,11 @@ jobs:
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
         run: |
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
-              echo "BigQuery emulator ready for warehouse proof"
-              break
-            fi
-            echo "BigQuery emulator not answering on 9050 (attempt $i)"
-            docker ps -a --filter name=dataflow-bigquery-emulator --format '{{.Status}}' || true
-            sleep 2
-          done
-          docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
+          # Fresh emulator process + catalog: the api slice's DROP history must
+          # not be able to corrupt the proof run (see start_bigquery).
+          docker logs --tail 40 dataflow-bigquery-emulator 2>&1 | grep -c panic \
+            | sed 's/^/emulator panics logged during api slice: /' || true
+          bash ../../.github/scripts/start_ci_databases.sh bigquery
           set +e
           python scripts/warehouse_sku_report.py
           code=$?

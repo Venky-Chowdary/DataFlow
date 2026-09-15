@@ -6,15 +6,18 @@
 #   mongo — single-node replica set rs0 (snapshot read concern, change streams)
 #   gcs   — fake-gcs-server (desktop lab postgresql->gcs execute cell)
 #   adls  — Azurite blob (desktop lab postgresql->adls execute cell)
+#   bigquery — goccy/bigquery-emulator (warehouse SKU proof); re-runnable:
+#              an existing container is replaced with a fresh catalog
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls]
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery]
 set -euo pipefail
 
 MYSQL_IMAGE="${MYSQL_IMAGE:-public.ecr.aws/docker/library/mysql:8.0}"
 MONGO_IMAGE="${MONGO_IMAGE:-public.ecr.aws/docker/library/mongo:7}"
 GCS_IMAGE="${GCS_IMAGE:-docker.io/fsouza/fake-gcs-server:latest}"
 AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
+BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -108,12 +111,36 @@ start_adls() {
     || { docker logs dataflow-ci-azurite || true; exit 1; }
 }
 
+start_bigquery() {
+  # The emulator is one Go process over a googlesqlite catalog. DROP TABLE on
+  # a catalog that has accumulated many tables can panic inside its catalog
+  # rebuild and lose unrelated live tables (seen as "Table not found" on the
+  # Gate-8 read-back of an already-MERGEd table). Each caller therefore gets a
+  # fresh process + fresh --database file; the api slice and the warehouse SKU
+  # proof do not share catalog history. --restart keeps a mid-run panic from
+  # taking the port down; --database keeps tables across such a restart.
+  BIGQUERY_IMAGE=$(pull_image "$BIGQUERY_IMAGE" "$BIGQUERY_IMAGE")
+  docker rm -f dataflow-bigquery-emulator >/dev/null 2>&1 || true
+  docker run -d --name dataflow-bigquery-emulator --restart unless-stopped \
+    -p 9050:9050 -p 9060:9060 \
+    "$BIGQUERY_IMAGE" \
+    --project=dataflow-test --dataset=dataflow --log-level=error \
+    --database=/tmp/dataflow-bq.db
+  # The emulator does not serve /; use the BigQuery discovery API.
+  wait_for "BigQuery emulator" 30 2 curl -fsS \
+    http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest \
+    || { docker logs dataflow-bigquery-emulator || true; exit 1; }
+  docker inspect dataflow-bigquery-emulator \
+    --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}'
+}
+
 for svc in "$@"; do
   case "$svc" in
     mysql) start_mysql ;;
     mongo) start_mongo ;;
     gcs) start_gcs ;;
     adls) start_adls ;;
+    bigquery) start_bigquery ;;
     *) echo "unknown service: $svc" >&2; exit 2 ;;
   esac
 done
