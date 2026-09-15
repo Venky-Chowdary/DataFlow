@@ -106,8 +106,10 @@ def test_sqlite_insert_ledger_mid_chunk_kill_resume(tmp_path: Path, monkeypatch)
     assert not first.success, "kill simulation must abort the first attempt"
     monkeypatch.setattr(sqlite_writer_mod, "mark_raw_chunk_committed", orig_mark)
 
-    # Resume / retry same job_id + same payload — ledger skips chunk 0.
-    second = engine.execute_tracked(_req(dst_kill), job_id)
+    # Resume same job_id + same payload — ledger skips chunk 0. ``resume=True``
+    # is the sanctioned exit from the terminal ``failed`` status; a bare re-run
+    # is refused by the job-status fence when a job store is live.
+    second = engine.execute_tracked(_req(dst_kill), job_id, resume=True)
     assert second.success, second.error
 
     conn = sqlite3.connect(str(dst_kill))
@@ -239,7 +241,7 @@ def test_pg_insert_ledger_mid_chunk_kill_resume(monkeypatch):
         assert not first.success
         monkeypatch.setattr(pg_writer_mod, "mark_raw_chunk_committed", orig_mark)
 
-        second = engine.execute_tracked(_req(dst_kill), job_id)
+        second = engine.execute_tracked(_req(dst_kill), job_id, resume=True)
         assert second.success, second.error
 
         conn = psycopg2.connect(

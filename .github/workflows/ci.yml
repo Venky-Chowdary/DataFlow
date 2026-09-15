@@ -349,11 +349,14 @@ jobs:
         # production credentials. Snowflake is exercised through fakesnow.
         run: |
           # The emulator is a single Go process; a panic on one request must not
-          # take the later warehouse SKU proof down with it.
+          # take the later warehouse SKU proof down with it. --database keeps
+          # tables on the container filesystem so a restart does not wipe the
+          # in-memory catalog between a write and its Gate-8 read-back.
           docker run -d --name dataflow-bigquery-emulator --restart unless-stopped \
             -p 9050:9050 -p 9060:9060 \
             ghcr.io/goccy/bigquery-emulator:latest \
-            --project=dataflow-test --dataset=dataflow --log-level=error
+            --project=dataflow-test --dataset=dataflow --log-level=error \
+            --database=/tmp/dataflow-bq.db
           for i in $(seq 1 30); do
             # The emulator does not serve /; use the BigQuery discovery API.
             if curl -fsS http://127.0.0.1:9050/discovery/v1/apis/bigquery/v2/rest >/dev/null 2>&1; then
@@ -473,10 +476,12 @@ jobs:
             docker ps -a --filter name=dataflow-bigquery-emulator --format '{{.Status}}' || true
             sleep 2
           done
-          docker logs --tail 50 dataflow-bigquery-emulator || true
+          docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
           set +e
           python scripts/warehouse_sku_report.py
           code=$?
+          docker inspect dataflow-bigquery-emulator --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}' || true
+          docker logs --tail 80 dataflow-bigquery-emulator || true
           echo "### Warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
           if [ -f data/proofs/warehouse_sku_report.json ]; then
             python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
