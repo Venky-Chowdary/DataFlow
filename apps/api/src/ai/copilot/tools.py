@@ -1985,15 +1985,18 @@ class DataPilotTools:
             if planned.success:
                 return planned
 
-        # ``preflight.gates`` has never existed, so this always fell to [] and
-        # the note claimed "this is the standard gate sequence" while listing
-        # none. ``PREFLIGHT_GATE_RULES`` is the table Validate actually enforces.
-        try:
-            from services.preflight_rules import PREFLIGHT_GATE_RULES
+        # Engine registry first; the rules table also carries non-gate entries
+        # (proof_bundle, schema_drift) a run never emits.
+        gate_ids = self._engine_gate_ids()
+        if not gate_ids:
+            try:
+                from services.preflight_rules import PREFLIGHT_GATE_RULES
 
-            gate_ids = [str(gid) for gid in PREFLIGHT_GATE_RULES]
-        except Exception:
-            gate_ids = []
+                gate_ids = [
+                    str(gid) for gid in PREFLIGHT_GATE_RULES if str(gid).startswith("g")
+                ]
+            except ImportError:
+                gate_ids = []
 
         from .example_phrases import example_connector_name, example_dest_connector_name
 
@@ -2095,20 +2098,23 @@ class DataPilotTools:
             },
         })
 
+    @staticmethod
+    def _engine_gate_ids() -> list[str]:
+        """Gate ids from the engine registry; [] when the package is absent."""
+        try:
+            from preflight.gates import PREFLIGHT_GATES
+        except ImportError:
+            return []
+        return [
+            gid.value if hasattr(gid, "value") else str(gid)
+            for gid, _ in PREFLIGHT_GATES
+        ]
+
     def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
         schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
         columns = schema.columns if schema else []
         pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
-        gate_ids: list[str] = []
-        try:
-            from preflight.gates import PREFLIGHT_GATES
-
-            gate_ids = [
-                gid.value if hasattr(gid, "value") else str(gid)
-                for gid, _ in PREFLIGHT_GATES
-            ]
-        except Exception:
-            gate_ids = []
+        gate_ids = self._engine_gate_ids()
         return ToolResult(name="profile_quality_rules", success=True, output={
             "dataset": schema.name if schema else dataset_name or "active dataset",
             "rules": [

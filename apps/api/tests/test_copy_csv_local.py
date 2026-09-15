@@ -245,6 +245,10 @@ def test_csv_sqlite_overwrite_dest_count_equals_source(tmp_path):
     assert written == 3
     assert summary.get("copy_fast_path") == "used"
     assert summary.get("load_method") == "csv_executemany_sqlite"
+    # Full-refresh COPY fingerprints the mapped rows during the write pass, so
+    # Gate-8 compares a value digest to the dest read-back — not dest_count:N.
+    assert len(summary.get("checksum") or "") == 64
+    assert summary.get("checksum_mode") == "inline_write_pass"
     assert summary.get("engine_source_checksum") == "dest_count:3"
     assert summary.get("engine_target_checksum") == "dest_count:3"
     assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
@@ -647,3 +651,28 @@ def test_file_incremental_duckdb_still_uses_row_path(monkeypatch, tmp_path):
     )
     assert written == 2
     assert summary.get("copy_fast_path") != "used"
+
+
+@pytest.mark.parametrize(
+    ("item", "declared", "expected"),
+    [
+        ({"transform": "decimal"}, "TEXT", "decimal"),
+        ({"transform": "decimal"}, "", "decimal"),
+        ({"transform": "integer"}, "VARCHAR(20)", "integer"),
+        ({"transform": "decimal"}, "DECIMAL(12,2)", "DECIMAL(12,2)"),
+        ({"transform": "string"}, "TEXT", "TEXT"),
+        ({}, "TEXT", "TEXT"),
+    ],
+)
+def test_census_grades_text_carriers_under_the_typed_transform(item, declared, expected):
+    from services.copy_fast_path import census_logical_type
+
+    assert census_logical_type(item, declared) == expected
+
+
+def test_csv_sqlite_grouped_decimal_under_text_carrier_declines_fast_path():
+    """SQLite spells exact decimals TEXT; ``1,234`` must not land verbatim."""
+    from services.copy_fast_path import text_cell_copy_safe
+
+    assert not text_cell_copy_safe("1,234", "decimal", physical="TEXT", dest_db="sqlite")
+    assert text_cell_copy_safe("1234.50", "decimal", physical="TEXT", dest_db="sqlite")

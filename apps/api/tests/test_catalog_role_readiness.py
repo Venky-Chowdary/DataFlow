@@ -56,9 +56,12 @@ def test_destination_picker_never_offers_a_read_only_feed():
     assert unusable == [], f"offered as destinations but cannot be written: {unusable}"
 
 
-@pytest.mark.parametrize("connector_id", ["pinecone", "weaviate", "milvus", "qdrant"])
+@pytest.mark.parametrize("connector_id", ["pinecone", "weaviate", "milvus"])
 def test_vector_stores_are_destinations_only(connector_id: str):
-    """The specific tiles the source picker used to offer."""
+    """The specific tiles the source picker used to offer.
+
+    Qdrant is no longer in this list: its payload-scroll reader makes it duplex.
+    """
     row = enrich_catalog_entry({"id": connector_id, "status": "live"})
     assert row["dest_ready"] is True
     assert row["source_ready"] is False
@@ -100,15 +103,16 @@ def test_side_counts_differ_from_the_transfer_total():
     """One number cannot answer both questions; the catalog now says so.
 
     ``transfer_live`` counts engines usable in *a* transfer — the union of both
-    sides — so it necessarily exceeds at least one of them whenever any
-    connector is single-sided.
+    sides — so it strictly exceeds the smaller side whenever any connector is
+    single-sided (the two sides may still tie, e.g. 3 source-only vs 3 dest-only).
     """
     summary = catalog_summary()
     assert summary["source_live"] > 0
     assert summary["dest_live"] > 0
-    assert summary["source_live"] != summary["dest_live"], (
-        "single-sided connectors exist, so the two sides cannot have equal counts"
+    assert summary["transfer_live"] > min(summary["source_live"], summary["dest_live"]), (
+        "single-sided connectors exist, so the union must exceed the smaller side"
     )
+    assert summary["transfer_live"] >= max(summary["source_live"], summary["dest_live"])
     unscoped = search_catalog(role="all", transfer_only=True, limit=1000)
     assert unscoped["role_live"] == unscoped["transfer_live"]
 
@@ -157,9 +161,12 @@ def test_transfer_capabilities_splits_the_two_sides():
     destinations = set(caps["destination_databases"])
 
     # Write-only stores are destinations, never sources.
-    for write_only in ("pinecone", "weaviate", "qdrant", "milvus", "pgvector"):
+    for write_only in ("pinecone", "weaviate", "milvus", "pgvector"):
         assert write_only not in sources, f"{write_only} cannot be read"
         assert write_only in destinations, f"{write_only} should be offered as a destination"
+
+    # Qdrant reads point payloads (scroll), so it sits on both sides.
+    assert "qdrant" in sources and "qdrant" in destinations
 
     # Read-only connectors are sources, never destinations.
     for read_only in ("couchbase", "neo4j", "influxdb"):

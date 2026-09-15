@@ -97,7 +97,9 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
-    with patch.object(cdc, "_conn", return_value=conn):
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(
+        cdc, "_mining_conn", return_value=conn
+    ):
         with patch.object(cdc, "_acquire_cdc_lease"):
             with patch(
                 "connectors.oracle_logminer.assert_resume_scn_in_redo",
@@ -160,7 +162,9 @@ def test_poll_fails_closed_when_resume_before_oldest_redo() -> None:
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
-    with patch.object(cdc, "_conn", return_value=conn):
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(
+        cdc, "_mining_conn", return_value=conn
+    ):
         with patch.object(cdc, "_acquire_cdc_lease"):
             with patch(
                 "services.cdc_incremental_runner.interleave_incremental_snapshot",
@@ -204,7 +208,9 @@ def test_poll_maps_ora_01291_to_scn_gap() -> None:
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
-    with patch.object(cdc, "_conn", return_value=conn):
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(
+        cdc, "_mining_conn", return_value=conn
+    ):
         with patch.object(cdc, "_acquire_cdc_lease"):
             with patch(
                 "services.cdc_incremental_runner.interleave_incremental_snapshot",

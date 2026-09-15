@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from tests.desktop_lab_untested import run_desktop_lab_untested
-from tests.typed_fidelity_helpers import require_ports
+from tests.typed_fidelity_helpers import reachable, require_ports
 
 
 def test_desktop_lab_untested_important_dimensions():
@@ -40,7 +40,6 @@ def test_desktop_lab_untested_important_dimensions():
         "postgresql_logical->postgresql",
         "dest_only_not_null postgresql->postgresql",
         "postgresql->sqlite",
-        "postgresql->sqlserver",
         "xml dest_exists postgresql->postgresql",
         "point dest_exists postgresql->postgresql",
         "nested_explode csv->postgresql",
@@ -59,6 +58,13 @@ def test_desktop_lab_untested_important_dimensions():
     if oracle["status"] == "skipped":
         err = (oracle.get("error") or "").lower()
         assert "not reachable" in err or "1521" in err, oracle
+
+    mssql = by_name.get("postgresql->sqlserver")
+    assert mssql and mssql["status"] in {"passed", "skipped"}, mssql
+    if mssql["status"] == "skipped":
+        assert not reachable("localhost", 1433), mssql
+        err = (mssql.get("error") or "").lower()
+        assert "not reachable" in err or "1433" in err, mssql
 
     geo = by_name.get("geography dest_exists postgresql->postgresql")
     assert geo and geo["status"] in {"passed", "skipped"}, geo

@@ -47,7 +47,7 @@ def test_a_control_character_the_transform_strips_is_not_a_validate_finding() ->
         rows=rows,
         dest_types=dest_types,
     )
-    assert "control" in _findings(raw), "the raw source really does carry the defect"
+    assert "format-control character" in _findings(raw), "the raw source really does carry the defect"
 
     image = shaped_preflight_image(
         {"steps": [{"op": "strip_characters", "column": "note", "options": {"characters": "non_printable"}}]},
@@ -62,7 +62,7 @@ def test_a_control_character_the_transform_strips_is_not_a_validate_finding() ->
         rows=image.sample_rows or [],
         dest_types=dest_types,
     )
-    assert "control" not in _findings(shaped)
+    assert "format-control character" not in _findings(shaped)
 
 
 def test_a_fractional_value_rounded_by_the_transform_fits_the_integer_column() -> None:

@@ -49,6 +49,12 @@ def _sqlite_amount(monkeypatch, number_locale: str, amount: str) -> tuple[object
             self.jobs[job_id]["status"] = status
             return True
 
+        def update_job_fields(self, job_id: str, fields: dict) -> bool:
+            if not fields:
+                return False
+            self.jobs.setdefault(job_id, {}).update(fields)
+            return True
+
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _FakeMongo())
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "nloc.db"

@@ -298,7 +298,10 @@ def test_live_bigquery_bigquery_empty_string_and_null_preserved():
         _drop(dest)
 
 
-def test_live_bigquery_bigquery_skip_when_dest_count_matches():
+def test_live_bigquery_bigquery_equal_count_is_not_a_skip():
+    """A dest COUNT equal to the source COUNT is not proof the load happened;
+    Append must accumulate, so the row-addressed COPY declines into an
+    occupied dest instead of reporting a silent skip."""
     tag = uuid.uuid4().hex[:8]
     src = f"bq_copy_skip_{tag}"
     dest = f"bq_copy_skip_dst_{tag}"
@@ -315,17 +318,17 @@ def test_live_bigquery_bigquery_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_bigquery_to_bigquery(
-            source_cfg=_bq_cfg(src),
-            source_table=src,
-            dest_cfg=_bq_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            bigquery_ddls=["INT64", "STRING"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        assert first.source_snapshot.get("partitions_skipped") == 0
+        with pytest.raises(FastPathUnavailable, match="occupied BigQuery dest"):
+            copy_bigquery_to_bigquery(
+                source_cfg=_bq_cfg(src),
+                source_table=src,
+                dest_cfg=_bq_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                bigquery_ddls=["INT64", "STRING"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         _drop(src)

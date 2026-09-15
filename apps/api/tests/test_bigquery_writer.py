@@ -134,3 +134,23 @@ def test_bigquery_numeric_quarantine_holds_out_overflow():
     )
     assert out == [("1.50",)]
     assert details and "BigQuery NUMERIC(10,2)" in details[0]["reason"]
+
+
+def test_staging_drop_is_best_effort_and_bounded():
+    """A MERGE that committed must not be failed by its scratch-table cleanup;
+    the drop is bounded (no ten-minute default retry) and the leftover is named."""
+    from connectors.bigquery_writer import (
+        STAGING_DROP_DEADLINE_SECONDS,
+        drop_bigquery_staging,
+    )
+
+    client = MagicMock()
+    assert drop_bigquery_staging(client, "p.d.t_stg_1") is None
+    kwargs = client.delete_table.call_args.kwargs
+    assert kwargs["not_found_ok"] is True
+    assert kwargs["retry"]._timeout == STAGING_DROP_DEADLINE_SECONDS
+
+    client.delete_table.side_effect = RuntimeError("internalError: panic")
+    warning = drop_bigquery_staging(client, "p.d.t_stg_1")
+    assert warning is not None
+    assert "p.d.t_stg_1" in warning and "drop it manually" in warning

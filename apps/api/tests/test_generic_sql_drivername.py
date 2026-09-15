@@ -143,7 +143,15 @@ def test_build_url_encodes_at_in_password():
     assert "demo" in url
 
 
-def test_build_url_sqlserver_trust_server_certificate():
+def _pin_odbc_driver(monkeypatch) -> None:
+    """ODBC-only keywords are refused on a pymssql-only host; test the ODBC vocabulary."""
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: "ODBC Driver 18 for SQL Server")
+
+
+def test_build_url_sqlserver_trust_server_certificate(monkeypatch):
+    _pin_odbc_driver(monkeypatch)
     url = _build_url(
         {
             "type": "sqlserver",
@@ -161,7 +169,8 @@ def test_build_url_sqlserver_trust_server_certificate():
     assert str(query.get("Encrypt") or "").lower() == "yes"
 
 
-def test_with_connection_options_flattens_nested_extra_tls():
+def test_with_connection_options_flattens_nested_extra_tls(monkeypatch):
+    _pin_odbc_driver(monkeypatch)
     cfg = with_connection_options(
         {
             "type": "sqlserver",

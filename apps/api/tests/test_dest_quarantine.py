@@ -128,6 +128,53 @@ def test_dlq_endpoint_is_a_plain_table_even_for_procedure_destinations(tmp_path:
         ).fetchall() == [("age", "x")]
 
 
+def test_dlq_endpoint_drops_parent_live_shape_stamps(tmp_path: Path):
+    """The engine stamps the probed target shape on ``destination.extra``;
+    graded against it every ``_df_*`` column is "missing" and the DLQ table
+    is never created (live PG QUARANTINE_ROW hold-out left 0 DLQ rows)."""
+    from services.dest_quarantine import dlq_endpoint, write_dest_quarantine
+    from src.transfer.models import EndpointConfig
+
+    dest_path = tmp_path / "shape.db"
+    with sqlite3.connect(dest_path) as db:
+        db.execute("CREATE TABLE users (id INTEGER, age INTEGER)")
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        table="users",
+        database=str(dest_path),
+        extra={
+            "table_exists": True,
+            "schema_types": {"id": "INTEGER", "age": "INTEGER"},
+            "schema_nullability": {"id": False, "age": True},
+            "primary_key_columns": ["id"],
+            "unrelated_option": "kept",
+        },
+    )
+    clone = dlq_endpoint(dest)
+    assert clone.extra == {"unrelated_option": "kept"}
+    assert dest.extra["schema_types"] == {"id": "INTEGER", "age": "INTEGER"}
+
+    details = [
+        {
+            "row": 2,
+            "column": "age",
+            "target": "age",
+            "value": "x",
+            "reason": "invalid integer",
+            "policy": "quarantine",
+            "values": {"id": "2", "age": "x"},
+        }
+    ]
+    result = write_dest_quarantine(dest, details, job_id="job-dlq-shape")
+    assert result["ok"] is True, result
+    assert result["rows_written"] == 1
+    with sqlite3.connect(dest_path) as db:
+        assert db.execute(
+            "SELECT _df_column, _df_value FROM users_df_quarantine"
+        ).fetchall() == [("age", "x")]
+
+
 def test_mysql_dlq_idents_use_backticks_not_double_quotes():
     """MySQL without ANSI_QUOTES treats "col" as a string — open_rows would stay 0."""
     from services.dest_quarantine import _quote_ident

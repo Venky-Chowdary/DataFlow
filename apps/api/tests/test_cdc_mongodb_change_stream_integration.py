@@ -116,7 +116,9 @@ def test_mongodb_business_key_delete_without_pre_images_fails_closed():
     """Without pre-images a business-key delete cannot be addressed: refuse.
 
     Applying nothing would leave the deleted row at the destination forever, so
-    the poll raises with the ``collMod`` remedy instead of advancing.
+    the reader refuses with the ``collMod`` remedy. The refusal is raised at
+    attach time (before the snapshot lands a single row) and again on a
+    resumed poll, so neither run 1 nor a later catch-up can diverge silently.
     """
     from services.cdc_capability import LogCaptureUnavailable
 
@@ -127,16 +129,15 @@ def test_mongodb_business_key_delete_without_pre_images_fails_closed():
     coll = cdc.coll
     try:
         coll.insert_many([{"id": 1, "amount": "10.00"}, {"id": 2, "amount": "20.00"}])
-        batches = list(cdc.snapshot())
-        resume = batches[-1].resume_token
-        assert resume is not None
+        with pytest.raises(LogCaptureUnavailable, match="collMod|pre-image"):
+            next(iter(cdc.snapshot()))
 
         coll.delete_one({"id": 2})
         cdc_resume = MongodbChangeStreamCdc(
             CFG,
             collection=collection,
             primary_key="id",
-            resume_token=resume,
+            resume_token=None,
             max_wait_seconds=8.0,
         )
         with pytest.raises(LogCaptureUnavailable, match="collMod|pre-image"):

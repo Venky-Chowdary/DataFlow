@@ -6,6 +6,10 @@ the composer never invents a job or connector count the stores did not return.
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from src.ai.copilot.conversation_composer import (
     compose_briefing,
     compose_calendar,
@@ -28,6 +32,66 @@ from src.ai.copilot.dialogue_acts import (
 from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
 from src.ai.copilot.tools import TOOL_DEFINITIONS, infer_tools_from_message
 from src.ai.copilot.workspace_briefing import collect_workspace_briefing
+
+
+@pytest.fixture(scope="module", autouse=True)
+def demo_orders_workspace(tmp_path_factory):
+    """The live-turn tests below read two saved connectors: **Demo Orders**
+    (SQLite: `customers` 5 rows, `orders` 12 rows — no `customer` column, so a
+    "top customers" ask is a rejected column, not a subject) and an empty
+    **Quarantine SQLite** destination. Seed them into an isolated store so the
+    suite proves the same answers on a fresh box as on a developer workspace.
+    """
+    from services import connector_store
+    from src.ai.copilot import tools as tools_mod
+    from src.ai.copilot import working_memory as memory_mod
+
+    root = tmp_path_factory.mktemp("demo_orders")
+    demo = root / "demo.db"
+    con = sqlite3.connect(demo)
+    con.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, region TEXT)")
+    con.executemany(
+        "INSERT INTO customers VALUES (?,?,?)",
+        [(i, f"Customer {i}", "emea" if i % 2 else "apac") for i in range(1, 6)],
+    )
+    con.execute(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, buyer_ref INTEGER,"
+        " status TEXT, amount REAL, ordered_at TEXT)"
+    )
+    con.executemany(
+        "INSERT INTO orders VALUES (?,?,?,?,?)",
+        [
+            (i, (i % 5) + 1, "paid" if i % 3 else "pending", 10.0 * i, f"2024-01-{i:02d}")
+            for i in range(1, 13)
+        ],
+    )
+    con.commit()
+    con.close()
+    quarantine = root / "quarantine.db"
+    sqlite3.connect(quarantine).close()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("DATAFLOW_CONNECTOR_STORE", str(root / "connectors.json"))
+        mp.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+        mp.setenv("DATAFLOW_PILOT_ENGINE", "local")
+        mp.setenv("DATAFLOW_PILOT_MEMORY_PATH", str(root / "pilot_memory.json"))
+        connector_store._backend_choice = None
+        tools_mod._tools = None
+        memory_mod._memory = None
+        for name, db in (("Demo Orders", demo), ("Quarantine SQLite", quarantine)):
+            connector_store.create_connector(
+                {
+                    "name": name,
+                    "type": "sqlite",
+                    "role": "both",
+                    "connection_string": f"sqlite:///{db.resolve().as_posix()}",
+                    "workspace_id": "",
+                }
+            )
+        yield
+    connector_store._backend_choice = None
+    tools_mod._tools = None
+    memory_mod._memory = None
 
 
 def test_short_history_does_not_force_workspace_for_off_topic():
@@ -881,11 +945,13 @@ def test_hybrid_never_replaces_a_grounded_workspace_answer(monkeypatch):
 def test_a_generic_route_sketch_leads_with_the_next_action_and_real_gates():
     """"Move data from mysql to postgres" names engine families, not connectors.
 
-    ``preflight.gates`` has never existed in this repo, so the gate list was
-    always empty and the sketch rendered as a bare "**Standard gate sequence**:"
-    heading in front of the only sentence the operator could act on.
+    The gate list once rendered empty, leaving a bare "**Standard gate
+    sequence**:" heading in front of the only sentence the operator could act
+    on. It must name the engine registry — the sequence a real run executes —
+    and never a rules-table entry a run does not emit as a gate.
     """
-    from services.preflight_rules import PREFLIGHT_GATE_RULES
+    from preflight.gates import PREFLIGHT_GATES
+
     from src.ai.copilot.tools import get_pilot_tools
 
     result = get_pilot_tools().execute(
@@ -894,7 +960,9 @@ def test_a_generic_route_sketch_leads_with_the_next_action_and_real_gates():
     assert result.success
     gates = result.output.get("required_gates") or []
     assert gates, "the sketch must name the gates Validate actually enforces"
-    assert set(gates) == set(PREFLIGHT_GATE_RULES)
+    real = {gid.value if hasattr(gid, "value") else str(gid) for gid, _ in PREFLIGHT_GATES}
+    assert set(gates) == real
+    assert not {"proof_bundle", "schema_drift", "constraint_fk"} & set(gates)
     assert result.output["note"].startswith("Name two saved connectors")
 
 
@@ -1585,7 +1653,7 @@ def test_a_connector_only_focus_is_remembered():
     """Listing a connector's tables settles the connector and nothing else, and
     dropping that made the next named-table read answer "Connector not found".
     """
-    from src.ai.copilot.working_memory import PilotFocus, get_working_memory
+    from src.ai.copilot.working_memory import get_working_memory
 
     memory = get_working_memory()
     sid = "test-connector-only-focus"

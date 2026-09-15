@@ -127,7 +127,7 @@ _VIEW_SQL: dict[str, str] = {
         "AND (:s = '' OR lower(table_schema) = lower(:s))"
     ),
     "mysql": (
-        "SELECT DISTINCT table_name FROM information_schema.view_table_usage "
+        "SELECT DISTINCT view_name FROM information_schema.view_table_usage "
         "WHERE lower(table_name) = lower(:t) "
         "AND lower(table_schema) = lower(IFNULL(NULLIF(:s, ''), DATABASE()))"
     ),
