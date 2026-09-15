@@ -20,7 +20,24 @@ wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   return 1
 }
 
+# pull_image <primary> <fallback>: public.ecr.aws and docker.io both rate-limit
+# anonymous pulls; retry with backoff, then try the other registry. Prints the
+# ref that was actually pulled.
+pull_image() {
+  local primary=$1 fallback=$2 ref
+  for ref in "$primary" "$fallback"; do
+    for attempt in 1 2 3 4; do
+      if docker pull --quiet "$ref" >/dev/null 2>&1; then echo "$ref"; return 0; fi
+      echo "pull ${ref} failed (attempt ${attempt})" >&2
+      sleep $((attempt * 15))
+    done
+  done
+  echo "could not pull ${primary} or ${fallback}" >&2
+  return 1
+}
+
 start_mysql() {
+  MYSQL_IMAGE=$(pull_image "$MYSQL_IMAGE" "docker.io/library/mysql:8.0")
   docker run -d --name dataflow-ci-mysql \
     -e MYSQL_ROOT_PASSWORD=dataflow \
     -e MYSQL_DATABASE=dataflow \
@@ -51,6 +68,7 @@ start_mysql() {
 }
 
 start_mongo() {
+  MONGO_IMAGE=$(pull_image "$MONGO_IMAGE" "docker.io/library/mongo:7")
   docker run -d --name dataflow-ci-mongo -p 27017:27017 \
     "$MONGO_IMAGE" --replSet rs0 --bind_ip_all
   wait_for "mongod" 40 2 docker exec dataflow-ci-mongo \
