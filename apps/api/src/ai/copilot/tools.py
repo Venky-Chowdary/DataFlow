@@ -1764,8 +1764,8 @@ class DataPilotTools:
                     "first-party copy-grounded generator (NL → tools → compose) "
                     "with no OpenAI, Anthropic, or Ollama key. This is a data product: "
                     "schemas and job evidence stay on-box. A third-party LLM is optional "
-                    "polish you turn on explicitly in Settings → AI (Hybrid or Cloud); "
-                    "saving a key does not send traffic. It never supplies transfer, "
+                    "polish: save a key in Settings → AI Models and Pilot uses it for "
+                    "wording until you remove it. It never supplies transfer, "
                     "aggregate, or Confirm facts."
                 ),
             ),

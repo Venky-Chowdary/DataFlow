@@ -571,8 +571,8 @@ MODEL_CAPABILITY_MATRIX = [
             "(GRU decoder, Luong attention, pointer-generator mix) in front of a "
             "deterministic local tool loop: NL→tools→compose for aggregates, "
             "schema, transfers-with-Confirm, jobs, and product how-tos. Not a "
-            "foundation model. OpenAI/Anthropic/Ollama only reword the answer "
-            "and only when an operator picks Hybrid or Cloud."
+            "foundation model. OpenAI/Anthropic/Ollama only reword the answer, "
+            "and only while a key is saved (or Hybrid/Cloud is pinned)."
         ),
     },
 ]
@@ -611,10 +611,10 @@ def pilot_engine_decision() -> dict:
     """Which engine Pilot will use, and the reason — never a credential.
 
     Precedence: DATAFLOW_PILOT_ENGINE, then the saved workspace preference,
-    then ``auto``. ``auto`` stays on the local engine even when a key is
-    saved — a data product must not send schemas, samples, or job
-    evidence to a third-party LLM because someone pasted a key. Hybrid
-    and cloud are explicit opt-in only.
+    then ``auto``. ``auto`` is local with no usable key and hybrid once the
+    operator saves one: tools, gates and facts still run on-box, the saved
+    provider only narrates, until the key is removed or the workspace pins
+    "Our engine only".
     """
     from services.integrations_store import get_pilot_engine_preference
 
@@ -661,14 +661,13 @@ def pilot_engine_decision() -> dict:
         }
 
     if configured:
-        idle = ", ".join(configured)
         return {
-            "engine": "local",
+            "engine": "hybrid",
             "source": "default",
             "reason": (
-                f"Auto keeps Pilot on the local engine so workspace evidence "
-                f"does not leave the box. Saved key(s) for {idle} stay idle "
-                "until you pick Hybrid or Cloud in Settings → AI."
+                f"Auto uses the saved {', '.join(configured)} key to word answers; "
+                "tools and facts stay on-box. Remove the key or pick \"Our engine only\" "
+                "to stop using it."
             ),
             "configured_providers": configured,
         }
@@ -732,7 +731,7 @@ def pick_narration_provider():
 
 def get_model_capabilities() -> dict:
     """Expose model/provider readiness without making network calls to cloud APIs."""
-    from services.integrations_store import get_ai_provider_configs
+    from services.integrations_store import get_ai_provider_configs, storage_status
 
     stored = get_ai_provider_configs()
     providers = {
@@ -778,6 +777,11 @@ def get_model_capabilities() -> dict:
                 )
             elif not persisted.get("enabled", True):
                 blocked_reason = "Disabled in Settings — enable it to let Pilot use it."
+            elif persisted.get("key_state") == "undecryptable":
+                blocked_reason = (
+                    "A key is saved but cannot be decrypted — DATAFLOW_SECRETS_KEY (or the "
+                    "AUTH_SECRET it falls back to) changed since it was saved. Save the key again."
+                )
             elif not configured:
                 blocked_reason = "No API key saved for this provider."
             else:
@@ -793,6 +797,7 @@ def get_model_capabilities() -> dict:
             "available": available,
             "status": status,
             "blocked_reason": blocked_reason,
+            "key_state": persisted.get("key_state", "ready" if item["tier"] != "cloud" else "none"),
         })
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
@@ -819,9 +824,10 @@ def get_model_capabilities() -> dict:
         "configured_providers": decision["configured_providers"],
         "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
+        "settings_storage": storage_status(),
         "guarantees": [
             "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
-            "A saved provider key does not send traffic. Hybrid or Cloud must be chosen explicitly — this is a data product; schemas and job evidence stay on-box by default.",
+            "With no key saved Pilot runs entirely on-box. A saved key is used (Hybrid) until you remove it or pin \"Our engine only\".",
             "DATAFLOW_PILOT_ENGINE, when set, overrides the workspace choice.",
             "Cloud providers are optional and only narrate: tools, gates and proofs always run locally, so a provider outage changes wording, never correctness.",
             "Grounded tool results are executed once; mutations always require operator Confirm.",

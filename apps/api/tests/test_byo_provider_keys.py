@@ -141,23 +141,46 @@ def test_no_provider_uses_local_engine(store):
     assert "no ai provider key" in decision["reason"].lower()
 
 
-def test_saved_key_stays_local_until_hybrid_opt_in(store):
-    """A pasted key must not exfiltrate workspace evidence on auto."""
+def test_saved_key_is_used_on_auto_until_removed(store, monkeypatch):
+    """Auto: local with no key, hybrid once a key is saved, local again on delete."""
     from src.ai.llm.provider import pilot_engine_decision, resolve_pilot_engine
 
-    _save_key("openai", "sk-persisted-key")
-
-    decision = pilot_engine_decision()
     assert resolve_pilot_engine() == "local"
-    assert decision["engine"] == "local"
+
+    _save_key("openai", "sk-persisted-key")
+    decision = pilot_engine_decision()
+    assert decision["engine"] == "hybrid"
+    assert decision["source"] == "default"
     assert decision["configured_providers"] == ["openai"]
-    assert "idle" in decision["reason"].lower() or "does not leave" in decision["reason"].lower()
+    assert "remove the key" in decision["reason"].lower()
     assert "sk-persisted-key" not in decision["reason"]
 
-    assert integrations_store.set_pilot_engine_preference("hybrid") == "hybrid"
-    opted = pilot_engine_decision()
-    assert opted["engine"] == "hybrid"
-    assert opted["source"] == "workspace_setting"
+    row = integrations_store.delete_ai_provider_key("openai")
+    assert row["configured"] is False
+    assert row["key_state"] == "none"
+    assert row["api_key"] == ""
+    assert integrations_store.resolve_provider_api_key("openai") == ""
+    assert resolve_pilot_engine() == "local"
+
+
+def test_delete_key_only_unhydrates_env_it_set(store, monkeypatch):
+    """An operator-set OPENAI_API_KEY is never removed by the Settings delete."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-operator-env")
+    _save_key("openai", "sk-persisted-key")
+    integrations_store.delete_ai_provider_key("openai")
+    assert os.environ["OPENAI_API_KEY"] == "sk-from-operator-env"
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    _save_key("openai", "sk-persisted-key")
+    integrations_store.apply_integrations_to_env()
+    assert os.environ["OPENAI_API_KEY"] == "sk-persisted-key"
+    integrations_store.delete_ai_provider_key("openai")
+    assert "OPENAI_API_KEY" not in os.environ
+
+
+def test_delete_key_rejects_local_provider(store):
+    with pytest.raises(ValueError):
+        integrations_store.delete_ai_provider_key("ollama")
 
 
 def test_saved_workspace_preference_pins_local_despite_key(store):
@@ -292,6 +315,20 @@ def client(store):
         yield c
 
 
+def test_delete_key_route_returns_to_local(client, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_ENV", "development")
+    _save_key("openai", "sk-persisted-key")
+    assert client.get("/api/v1/workspace/pilot-engine").json()["engine"] == "hybrid"
+
+    res = client.delete("/api/v1/workspace/ai-providers/openai/key")
+    assert res.status_code == 200, res.text
+    assert res.json()["configured"] is False
+    assert res.json()["key_state"] == "none"
+    assert client.get("/api/v1/workspace/pilot-engine").json()["engine"] == "local"
+
+    assert client.delete("/api/v1/workspace/ai-providers/ollama/key").status_code == 400
+
+
 def test_pilot_engine_routes_round_trip(client):
     got = client.get("/api/v1/workspace/pilot-engine")
     assert got.status_code == 200, got.text
@@ -358,7 +395,7 @@ def test_rejected_key_stops_the_engine_promising_that_provider(store):
 
     _save_key("openai", "sk-rejected-key")
     provider_mod.clear_auth_failures()
-    assert provider_mod.pilot_engine_decision()["engine"] == "local"
+    assert provider_mod.pilot_engine_decision()["engine"] == "hybrid"
 
     provider_mod._mark_provider_auth_failed("openai", "Error code: 401 - invalid_api_key")
     try:
@@ -449,3 +486,17 @@ def test_credential_and_engine_routes_need_workspace_administration():
     assert Permission.WORKSPACE_MANAGE not in role_permissions("editor")
     assert Permission.WORKSPACE_MANAGE not in role_permissions("viewer")
     assert Permission.WORKSPACE_MANAGE in role_permissions("admin")
+
+
+def test_models_route_exposes_settings_storage(client, monkeypatch):
+    """The response model must not strip the persistence verdict Settings renders."""
+    monkeypatch.setenv("DATAFLOW_ENV", "development")  # Railway alone would flip auth on
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    res = client.get("/api/v1/copilot/models")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["settings_storage"]["persistent"] is False
+    assert "volume" in body["settings_storage"]["reason"]
+
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT")
+    assert client.get("/api/v1/copilot/models").json()["settings_storage"]["persistent"] is True

@@ -92,6 +92,7 @@ class ModelCapabilitiesResponse(BaseModel):
     configured_providers: list[str] = []
     fallback_order: list[str]
     providers: list[dict]
+    settings_storage: dict = {}
     guarantees: list[str]
 
 

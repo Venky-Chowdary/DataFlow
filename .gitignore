@@ -23,7 +23,6 @@ packages/ml/data/
 # directory and opt the few tracked catalogs back in.
 apps/api/data/*
 !apps/api/data/connector_catalog.json
-!apps/api/data/integrations.json
 apps/api/localhost
 apps/api/exports/
 apps/api/test

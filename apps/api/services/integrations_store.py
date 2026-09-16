@@ -9,8 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from services.platform_config import data_dir
-from services.secret_vault import decrypt_secret, encrypt_secret
+from services.platform_config import data_dir, is_railway
+from services.secret_vault import SecretVaultError, decrypt_secret, encrypt_secret
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "integrations.json"
@@ -125,20 +125,27 @@ def _encrypt_field(value: str, keep_existing: str = "") -> str:
     return encrypt_secret(value)
 
 
+_KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+# Env keys this process copied out of the store, so deleting the stored key can
+# un-hydrate exactly those and never an operator-set variable.
+_HYDRATED_ENV: set[str] = set()
+
+
 def apply_integrations_to_env() -> None:
     """Hydrate process env from persisted AI provider keys (env vars take precedence)."""
     import os
 
     data = _load_raw()
     env_map = {
-        "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
-        "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
+        "openai": (_KEY_ENV["openai"], "OPENAI_MODEL"),
+        "anthropic": (_KEY_ENV["anthropic"], "ANTHROPIC_MODEL"),
     }
     for provider, (env_key, model_env_key) in env_map.items():
         if not os.environ.get(env_key):
             plain = resolve_provider_api_key(provider)
             if plain:
                 os.environ[env_key] = plain
+                _HYDRATED_ENV.add(env_key)
         model = data["ai_providers"].get(provider, {}).get("model")
         if model and not os.environ.get(model_env_key):
             os.environ[model_env_key] = str(model)
@@ -243,6 +250,57 @@ def get_sso_config_raw(sso_type: str) -> dict[str, Any]:
 # ── AI providers ─────────────────────────────────────────────────────────────
 
 
+def storage_status() -> dict[str, Any]:
+    """Where Settings are written and whether that location survives a restart.
+
+    A container without a mounted volume writes to its own filesystem, so
+    every redeploy or restart reverts the store to whatever the image shipped
+    with. Reporting that is the difference between "the key vanished" and
+    "the key was never going to stay".
+    """
+    import os
+
+    path = STORE_PATH
+    persistent = True
+    reason = ""
+    if is_railway():
+        root = path.parent.parent if path.parent.name == "data" else path.parent
+        if not (os.path.ismount(root) or os.path.ismount(path.parent)):
+            persistent = False
+            reason = (
+                f"{path.parent} is not a mounted volume on this Railway service, so "
+                "saved settings are lost on every deploy or restart. Attach a volume at "
+                f"{root} (or set DATAFLOW_DATA_DIR to a mounted path)."
+            )
+    return {"path": str(path), "persistent": persistent, "reason": reason}
+
+
+def provider_key_state(provider: str) -> str:
+    """``ready`` / ``none`` / ``disabled`` / ``undecryptable`` for a provider's key.
+
+    ``undecryptable`` means a ciphertext is stored but the current secrets key
+    cannot open it — the operator rotated DATAFLOW_SECRETS_KEY (or fell back to
+    a different AUTH_SECRET) after saving. Only re-saving the key fixes that.
+    """
+    import os
+
+    if provider == "ollama":
+        return "ready"
+    if not ai_provider_enabled(provider):
+        return "disabled"
+    env_val = os.environ.get({"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, ""), "")
+    if env_val and not _is_invalid_secret(env_val):
+        return "ready"
+    stored = _load_raw()["ai_providers"].get(provider, {}).get("api_key", "")
+    if not stored:
+        return "none"
+    try:
+        plain = decrypt_secret(stored)
+    except SecretVaultError:
+        return "undecryptable"
+    return "undecryptable" if _is_invalid_secret(plain) else "ready"
+
+
 def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
     data = _load_raw()
     out: dict[str, dict[str, Any]] = {}
@@ -252,6 +310,7 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
         # Configured means a key we can actually use (env or store), not merely
         # a byte string sitting in the file.
         row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
+        row["key_state"] = provider_key_state(provider)
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -274,6 +333,23 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     data["updated_at"] = _now()
     _save(data)
     apply_integrations_to_env()
+    return get_ai_provider_configs()[provider]
+
+
+def delete_ai_provider_key(provider: str) -> dict[str, Any]:
+    """Forget a saved cloud key. Pilot drops back to the local engine on auto."""
+    import os
+
+    if provider not in _CLOUD_PROVIDERS:
+        raise ValueError(f"{provider} has no cloud key to remove")
+    data = _load_raw()
+    data["ai_providers"][provider]["api_key"] = ""
+    data["updated_at"] = _now()
+    _save(data)
+    env_key = _KEY_ENV[provider]
+    if env_key in _HYDRATED_ENV:
+        os.environ.pop(env_key, None)
+        _HYDRATED_ENV.discard(env_key)
     return get_ai_provider_configs()[provider]
 
 
@@ -341,7 +417,10 @@ def resolve_provider_api_key(provider: str) -> str:
     stored = cfg.get("api_key", "")
     if not stored:
         return ""
-    plain = decrypt_secret(stored)
+    try:
+        plain = decrypt_secret(stored)
+    except SecretVaultError:
+        return ""
     return "" if _is_invalid_secret(plain) else plain
 
 

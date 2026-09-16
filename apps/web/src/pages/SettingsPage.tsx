@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -77,6 +77,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
   const [aiSaving, setAiSaving] = useState(false);
   const [aiTesting, setAiTesting] = useState<string | null>(null);
+  const [aiRemoving, setAiRemoving] = useState<string | null>(null);
   const [engineStatus, setEngineStatus] = useState<PilotEngineStatus | null>(null);
   const [engineSaving, setEngineSaving] = useState(false);
   const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
@@ -345,6 +346,34 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       });
     } finally {
       setAiTesting(null);
+    }
+  };
+
+  const removeProviderKey = async (provider: string, label: string) => {
+    if (aiRemoving || !mayAdminister()) return;
+    const ok = await confirm({
+      title: `Remove the ${label} key?`,
+      message: "Pilot goes back to our local engine until you save a key again.",
+      confirmLabel: "Remove key",
+      cancelLabel: "Keep key",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setAiRemoving(provider);
+    try {
+      await removeAiProviderKey(provider);
+      const [caps, engine] = await Promise.all([fetchModelCapabilities(), fetchPilotEngineStatus()]);
+      setModelCapabilities(caps);
+      setEngineStatus(engine);
+      toast({ title: `${label} key removed`, message: "Pilot now answers on our local engine.", tone: "success" });
+    } catch (err) {
+      toast({
+        title: "Could not remove key",
+        message: err instanceof Error ? err.message : "The saved key was not removed.",
+        tone: "error",
+      });
+    } finally {
+      setAiRemoving(null);
     }
   };
 
@@ -886,7 +915,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-settings-section-head">
                     <div>
                       <h2>Active model route</h2>
-                      <p>Datawrap is a data-movement product. Pilot stays on-box by default so schemas, samples, credentials, and job evidence are not sent to OpenAI or Anthropic. Saving a key stores it; nothing leaves this workspace until you explicitly pick Hybrid or Cloud.</p>
+                      <p>Datawrap is a data-movement product. With no key saved, Pilot runs entirely on-box — nothing is sent to OpenAI or Anthropic. Once you save a key, Pilot uses that provider to word its answers until you remove the key; tools, gates and facts still run here. Pick “Our engine only” to keep a key saved but idle.</p>
                     </div>
                   </div>
                   <div className="df2-settings-section-body">
@@ -909,7 +938,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           value={engineStatus?.preference ?? "auto"}
                           onChange={(e) => void saveEngineChoice(e.target.value as PilotEngineChoice)}
                         >
-                          <option value="auto">Auto — our engine only (keys stay idle)</option>
+                          <option value="auto">Auto — our engine; uses a saved third-party key if you add one</option>
                           <option value="local">Our engine only</option>
                           <option value="hybrid">Hybrid — our tools, third-party wording (sends evidence off-box)</option>
                           <option value="cloud">Third-party provider (sends evidence off-box)</option>
@@ -938,6 +967,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <p>
                       <strong>Pilot routing could not be read. </strong>
                       {modelError || engineError} What is shown below is not the active routing.
+                    </p>
+                  </div>
+                )}
+                {modelCapabilities?.settings_storage && !modelCapabilities.settings_storage.persistent && (
+                  <div className="df2-permission-notice" role="alert" data-testid="settings-storage-warning">
+                    <DtIcon name="alert" size={16} />
+                    <p>
+                      <strong>Saved keys will not survive a restart. </strong>
+                      {modelCapabilities.settings_storage.reason}
                     </p>
                   </div>
                 )}
@@ -988,6 +1026,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               onClick={() => void testProviderKey(provider.provider)}
                             >
                               {aiTesting === provider.provider ? "Testing…" : "Test key"}
+                            </button>
+                          )}
+                          {provider.tier === "cloud" && provider.key_state && provider.key_state !== "none" && (
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-sm df2-btn-danger"
+                              data-testid={`remove-key-${provider.provider}`}
+                              disabled={aiRemoving === provider.provider}
+                              onClick={() => void removeProviderKey(provider.provider, provider.label)}
+                            >
+                              {aiRemoving === provider.provider ? "Removing…" : "Remove key"}
                             </button>
                           )}
                         </div>
