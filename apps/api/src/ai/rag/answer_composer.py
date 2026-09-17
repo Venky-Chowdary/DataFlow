@@ -320,6 +320,10 @@ class Candidate:
     #: its rarest typed word, or a phrase expansion restating it in the
     #: corpus's own spelling. See ``subject_words``.
     names_subject: bool = False
+    #: True when the sentence is a step of a retrieved ``Procedure:`` section
+    #: that matched none of the question. It is kept for ``_complete_procedure``
+    #: only — it may follow a step that answered, never speak on its own.
+    step_only: bool = False
 
 
 def _split_annotated(text: str, section_title: str = "") -> list[tuple[str, bool]]:
@@ -614,6 +618,8 @@ def build_candidates(
     prose: list[frozenset[str]] = []
     order = 0
     top_score = max((s for s in (scores or ()) if s > 0), default=0.0)
+    step_only_orders: set[int] = set()
+    unvouched_steps: set[int] = set()
     for rank, (section_title, citation, href, text) in enumerate(sections):
         rank_prior = 1.0 / (1.0 + rank)
         # An ordinal prior treats "retrieval preferred this one" and "retrieval
@@ -713,8 +719,25 @@ def build_candidates(
                 # question's shape, and there is no fit to grade when the
                 # sentence matched none of it.
                 score = HEADING_CREDIT + 0.8 * rank_prior
+            elif section_title.startswith("Procedure:") and (
+                _IMPERATIVE.match(sentence.lstrip("*")) or _NEXT_STEP.match(sentence)
+            ):
+                # A step of a retrieved procedure is evidence on the strength
+                # of the procedure it belongs to: "Enter Service account JSON,
+                # GCP project ID" shares no word with "what fields do I need
+                # to connect bigquery", and is the answer. It is scored as
+                # support so that only ``_complete_procedure`` promotes it.
+                subject_view = heading_terms
+                score = HEADING_CREDIT + 0.8 * rank_prior
+                step_only_orders.add(order)
             else:
                 continue
+            if (
+                section_title.startswith("Procedure:")
+                and heading_match < anchor_bar
+                and (_IMPERATIVE.match(sentence.lstrip("*")) or _NEXT_STEP.match(sentence))
+            ):
+                unvouched_steps.add(order)
             candidates.append(
                 Candidate(
                     text=sentence,
@@ -726,6 +749,7 @@ def build_candidates(
                     score=score,
                     list_item=is_list_item,
                     list_vouched=is_list_item and list_vouched,
+                    step_only=order in step_only_orders,
                 )
             )
             prose.append(subject_view)
@@ -739,6 +763,21 @@ def build_candidates(
             replace(cand, names_subject=bool(words & subject))
             for cand, words in zip(candidates, prose)
         ]
+    # A step of a procedure the question did not ask for — its heading does
+    # not vouch for it and the step itself names no subject word — matched
+    # on a word every connect form shares. "Enter Host, Port, Database" is
+    # not an answer to "can I connect through a bastion host"; it may still
+    # complete the procedure if a sibling step that names the subject leads.
+    candidates = [
+        replace(cand, step_only=True)
+        if cand.order in unvouched_steps and not cand.names_subject
+        else cand
+        for cand in candidates
+    ]
+    # A step is only worth keeping behind a step of the same procedure that
+    # did match; a procedure none of whose steps answered is not evidence.
+    answered = {c.section_title for c in candidates if not c.step_only}
+    candidates = [c for c in candidates if not c.step_only or c.section_title in answered]
     candidates.sort(key=lambda c: (c.score, -c.order), reverse=True)
     return candidates
 
@@ -1170,10 +1209,11 @@ def compose_answer(
     cannot act on a refusal.
     """
     candidates = build_candidates(analysis, sections, scores=scores, idf=idf)
-    chosen = select_sentences(candidates, limit=limit)
+    spoken = [c for c in candidates if not c.step_only]
+    chosen = select_sentences(spoken, limit=limit)
     if not chosen:
         return ""
-    chosen = _owe_subjects(analysis, candidates, chosen, limit=limit)
+    chosen = _owe_subjects(analysis, spoken, chosen, limit=limit)
     chosen = _prune_tails(analysis, chosen)
     chosen = _complete_procedure(analysis, chosen, candidates, limit=limit)
 

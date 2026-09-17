@@ -361,7 +361,7 @@ export function getConnectorDefaults(type: string): { host: string; port: number
   }
 
   const base = BASE_DEFAULTS[driver] || { host: "localhost", port: 0 };
-  return { host: base.host, port: base.port, label };
+  return { host: base.host, port: base.port || item?.port || 0, label };
 }
 
 const REST_API_DEFAULT_HOSTS: Record<string, string> = {

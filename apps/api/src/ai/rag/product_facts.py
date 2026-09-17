@@ -40,6 +40,10 @@ class GeneratedSection:
     text: str
     source_module: str
     category: str = "reference"
+    # When set, the section is indexed as one passage per step (``text`` is
+    # their concatenation) so a short lead step ranks the way a short card
+    # does and the later steps rejoin it through the procedure sibling pull.
+    steps: tuple[str, ...] = ()
 
     @property
     def section_id(self) -> str:
@@ -2415,10 +2419,17 @@ def _connect_engine_sections() -> tuple[GeneratedSection, ...]:
     a private key"), which never mention New connection. The card is generated,
     not written, so it exists exactly for the engines the registry ships and the
     catalog marks transfer-ready — a planned engine gets no procedure.
+
+    The field list comes from ``data/connector_form_schema.json``, exported
+    from the web form config, so the card names the same fields the New
+    connection dialog shows (Snowflake asks for Account host, Warehouse and
+    Schema; BigQuery for a service account and project; Mongo for an auth
+    source). An engine with no exported form keeps the generic wording.
     """
     try:
         import registry
         from services.connector_catalog import get_connector_meta
+        from services.connector_form_schema import describe_connector_fields, get_connector_form
     except ImportError:
         return ()
     out: list[GeneratedSection] = []
@@ -2428,19 +2439,53 @@ def _connect_engine_sections() -> tuple[GeneratedSection, ...]:
         if not meta or not meta.get("transfer_ready"):
             continue
         name = str(meta.get("name") or engine)
+        form = get_connector_form(engine)
+        mode = form.default_mode if form else None
+        steps: tuple[str, ...] = ()
+        if form and mode:
+            fields = describe_connector_fields(mode)
+            others = [m.label for m in form.auth_modes if m.value != mode.value]
+            sign_in = f"Sign in with {mode.label} (pre-selected)"
+            if others:
+                sign_in += ", or switch to " + " or ".join(others)
+            steps = (
+                f"Click New connection and pick the {name} driver.",
+                f"{sign_in}.",
+                fields,
+                "Then click Test, and Save before using it in Transfer Studio or Pipelines.",
+            )
+            text = " ".join(steps)
+            source = (
+                "registry.py · connector_catalog.json · connector_form_schema.json "
+                "(connectorFormConfig.ts) · Procedure: add a connector"
+            )
+        else:
+            text = (
+                f"Click New connection and pick the {name} driver. "
+                "Then enter its connection details and credentials, click Test, and Save "
+                "before using it in Transfer Studio or Pipelines."
+            )
+            source = "registry.py · connector_catalog.json · Procedure: add a connector"
         out.append(
             GeneratedSection(
                 doc_title="Connections & engines",
                 section_title=f"Procedure: connect a {name} database",
-                text=(
-                    f"Click New connection and pick the {name} driver. "
-                    "Then enter its connection details and credentials, click Test, and Save "
-                    "before using it in Transfer Studio or Pipelines."
-                ),
-                source_module="registry.py · connector_catalog.json · Procedure: add a connector",
+                text=text,
+                source_module=source,
                 category="connectors",
+                steps=steps,
             )
         )
+        if form and form.setup_steps:
+            out.append(
+                GeneratedSection(
+                    doc_title="Connections & engines",
+                    section_title=f"{name} connection setup notes",
+                    text=" ".join(form.setup_steps),
+                    source_module="connector_form_schema.json (connectorSetupGuide.ts)",
+                    category="connectors",
+                )
+            )
     return tuple(out)
 
 
