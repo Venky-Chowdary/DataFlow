@@ -165,6 +165,11 @@ class ProductDocHit:
     score: float
     grounding: float
     matched_terms: tuple[str, ...]
+    # The fused ranking score this hit was ordered by: BM25 plus the heading
+    # and intent priors. ``score`` is the raw BM25 term match, which can run
+    # higher on a passage the ranking placed lower, so the composer's rank
+    # margin reads this and not ``score``.
+    rank: float = 0.0
 
     def as_source(self) -> dict[str, object]:
         source: dict[str, object] = {
@@ -322,19 +327,33 @@ def load_generated_chunks() -> tuple[ProductDocChunk, ...]:
 
     chunks: list[ProductDocChunk] = []
     for index, section in enumerate(generated_sections()):
-        chunks.append(
-            ProductDocChunk(
-                id=f"fact-{index}-{section.section_id}",
-                doc_id=FACT_DOC_SLUG,
-                doc_slug=FACT_DOC_SLUG,
-                doc_title=section.doc_title,
-                category=section.category,
-                section_id=section.section_id,
-                section_title=section.section_title,
-                text=section.text,
-                source_module=section.source_module,
-            )
+        whole = ProductDocChunk(
+            id=f"fact-{index}-{section.section_id}",
+            doc_id=FACT_DOC_SLUG,
+            doc_slug=FACT_DOC_SLUG,
+            doc_title=section.doc_title,
+            category=section.category,
+            section_id=section.section_id,
+            section_title=section.section_title,
+            text=section.text,
+            source_module=section.source_module,
         )
+        if len(section.steps) < 2:
+            chunks.append(whole)
+            continue
+        # A generated procedure is indexed step by step, like a long help
+        # procedure split by ``_as_step_chunks``: BM25 length normalisation
+        # would otherwise rank the one-line capability cards above a card
+        # that also lists the form's fields.
+        for step_index, step in enumerate(section.steps):
+            chunks.append(
+                replace(
+                    whole,
+                    id=f"{whole.id}#s{step_index}",
+                    section_id=f"{whole.section_id}-s{step_index}",
+                    text=step,
+                )
+            )
     return tuple(chunks)
 
 
@@ -566,6 +585,14 @@ def _section_intent_bonus(
         ):
             return -8.0
         if re.search(r"\bconfidential\s+ledger\b", analysis.text, re.I) and "row ledger" in title:
+            return -8.0
+        # "Do you use OpenAI" is about Pilot's engine; the Azure AI cards say
+        # "OpenAI" only to tell two Azure products apart.
+        if (
+            re.search(r"\b(?:openai|chatgpt|anthropic)\b", analysis.text, re.I)
+            and not re.search(r"\bazure\b", analysis.text, re.I)
+            and "azure ai" in title
+        ):
             return -8.0
         if re.search(r"\bearth\s+engine\b", analysis.text, re.I) and (
             "airflow" in title or "spark" in title
@@ -845,6 +872,10 @@ def _section_intent_bonus(
         "chatgpt" in title or "third-party llm" in title or "hybrid" in title
     ):
         bonus -= 6.0
+    # The Azure OpenAI card is about a *destination*; a question about which
+    # LLM Pilot uses names "openai" and gets the Pilot engine card instead.
+    if "azure openai" in title:
+        bonus += 6.0 if re.search(r"\bazure\b", analysis.text, re.I) else -3.2
     if "sharepoint" in title:
         bonus += 6.0 if re.search(r"\bsharepoint\b", analysis.text, re.I) else -3.2
     if re.search(r"\bsharepoint\b", analysis.text, re.I) and "bigquery as a destination" in title:
@@ -2187,6 +2218,7 @@ def _rank_hits(
                     score=bm25_score.get(fused_hit.id, 0.0),
                     grounding=hit_grounding,
                     matched_terms=matched.get(fused_hit.id, ()),
+                    rank=rank,
                 ),
             )
         )
@@ -2234,6 +2266,7 @@ def _rank_hits(
                         score=own.score,
                         grounding=grounding.get(own.id, 0.0),
                         matched_terms=matched.get(own.id, ()),
+                        rank=rank,
                     ),
                 )
             )
@@ -2246,6 +2279,44 @@ def _rank_hits(
     return _select_covering(
         ranked, limit, typed_terms, spelled_as=spelled, topics=topics
     )
+
+
+# ``<chunk id>#s<step index>`` — the ids ``_split_steps`` and
+# ``load_generated_chunks`` give the steps of one section.
+_STEP_ID = re.compile(r"^(.*)#s(\d+)$")
+
+
+def _with_procedure_siblings(hits: list[ProductDocHit]) -> list[ProductDocHit]:
+    """The remaining steps of every retrieved procedure that is indexed as steps.
+
+    A procedure indexed step by step is retrieved by whichever step names the
+    question's words; the steps that follow it repeat none of them and never
+    reach the candidate set, so the composer could not complete the procedure
+    it opened on. They are appended after the ranked hits, in source order,
+    with the retrieved step's grounding but no score of their own: they are
+    there to be completed from, not to outrank anything. Reference grids are
+    split the same way and are left alone — a grid has no next step.
+    """
+    _, by_id = _index()
+    present = {hit.chunk.id for hit in hits}
+    out = list(hits)
+    for hit in hits:
+        step = _STEP_ID.match(hit.chunk.id)
+        if step is None or not hit.chunk.section_title.startswith("Procedure:"):
+            continue
+        base = step.group(1)
+        siblings: list[tuple[int, ProductDocChunk]] = []
+        for chunk_id, chunk in by_id.items():
+            other = _STEP_ID.match(chunk_id)
+            if other and other.group(1) == base and chunk_id not in present:
+                siblings.append((int(other.group(2)), chunk))
+        siblings.sort(key=lambda pair: pair[0])
+        for _, chunk in siblings:
+            present.add(chunk.id)
+            out.append(
+                ProductDocHit(chunk=chunk, score=0.0, grounding=hit.grounding, matched_terms=())
+            )
+    return out
 
 
 def retrieve_product_answer(
@@ -2261,6 +2332,7 @@ def retrieve_product_answer(
     """
     analysis = analyze_query(query)
     hits = _rank_hits(analysis, limit=limit, grounding_floor=grounding_floor)
+    hits = _with_procedure_siblings(hits)
     # Headings are evidence of coverage too. Judging on body text alone reported
     # "column" as uncovered for a question answered out of three sections of
     # "Semantic column mapping", because the sections say "field" and "edge" in

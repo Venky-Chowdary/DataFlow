@@ -727,7 +727,7 @@ def main() -> int:
             body = (row.get("answer") or row.get("error") or "").replace("\n", " ")
             print(f"       -> {body[:260]}")
             if miss:
-                print(f"       expected one of: {row['expected']}")
+                print(f"       expected one of: {row.get('expected', [])}")
 
     total = len(rows) or 1
     print()

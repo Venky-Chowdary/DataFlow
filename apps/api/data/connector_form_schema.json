@@ -1,0 +1,3430 @@
+{
+  "adls": {
+    "label": "Azure Data Lake",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Storage account name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mystorageaccount"
+          },
+          {
+            "key": "database",
+            "label": "Container / filesystem",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "my-container"
+          },
+          {
+            "key": "username",
+            "label": "Account name",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Optional when using connection string."
+          },
+          {
+            "key": "password",
+            "label": "Account key",
+            "type": "password",
+            "optional": true,
+            "sensitive": true,
+            "hint": "Optional when using connection string."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Azure Blob connection string",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Found under Access keys in the Azure Portal.",
+            "placeholder": "DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
+          },
+          {
+            "key": "database",
+            "label": "Container / filesystem",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          }
+        ]
+      },
+      {
+        "value": "service_account",
+        "label": "Service principal JSON",
+        "description": "JSON key or file path for cloud identity.",
+        "fields": [
+          {
+            "key": "serviceAccount",
+            "label": "Service principal JSON",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Azure AD application with Storage Blob Data Contributor role.",
+            "placeholder": "{\n  \"tenantId\": \"...\",\n  \"clientId\": \"...\",\n  \"clientSecret\": \"...\"\n}"
+          },
+          {
+            "key": "host",
+            "label": "Storage account name",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "database",
+            "label": "Container / filesystem",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "avro": {
+    "label": "Avro",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "bigquery": {
+    "label": "BigQuery",
+    "default_auth_mode": "service_account",
+    "auth_modes": [
+      {
+        "value": "service_account",
+        "label": "Service account JSON",
+        "description": "JSON key or file path for cloud identity.",
+        "fields": [
+          {
+            "key": "serviceAccount",
+            "label": "Service account JSON or file path",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
+            "placeholder": "{\n  \"type\": \"service_account\",\n  ...\n}"
+          },
+          {
+            "key": "database",
+            "label": "GCP project ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "schema",
+            "label": "Dataset",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "dataflow"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "clickhouse": {
+    "label": "ClickHouse",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "9000"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "clickhouse+native://user:pass@host:9000/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "couchbase": {
+    "label": "Couchbase",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "8093"
+          },
+          {
+            "key": "database",
+            "label": "Bucket",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "table",
+            "label": "Scope / collection (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "csv": {
+    "label": "CSV",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "databricks": {
+    "label": "Databricks",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "443"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "databricks+thrift://token:dapi***@xxx.cloud.databricks.com:443?http_path=/sql/1.0/endpoints/..."
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "docx": {
+    "label": "Word (DOCX)",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "druid": {
+    "label": "Apache Druid",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "8082"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "druid://user:pass@host:8082/druid/v2/sql"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "duckdb": {
+    "label": "DuckDB",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "5432"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "sqlite:////path/to/db.sqlite"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "dynamodb": {
+    "label": "Amazon DynamoDB",
+    "default_auth_mode": "aws_keys",
+    "auth_modes": [
+      {
+        "value": "aws_keys",
+        "label": "AWS access keys",
+        "description": "Access key ID and secret access key.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "AWS region or local endpoint",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "us-east-1"
+          },
+          {
+            "key": "database",
+            "label": "Table name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Access Key ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Secret Access Key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "endpointUrl",
+            "label": "Custom endpoint URL (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "For DynamoDB Local or private AWS-compatible stacks.",
+            "placeholder": "https://s3.wasabisys.com or http://localhost:9000"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "elasticsearch": {
+    "label": "Elasticsearch",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost:9200 or Elastic Cloud endpoint"
+          },
+          {
+            "key": "database",
+            "label": "Index (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Elasticsearch URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "https://user:pass@localhost:9200"
+          }
+        ]
+      },
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost:9200 or Elastic Cloud endpoint"
+          },
+          {
+            "key": "database",
+            "label": "Index (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "apiKey",
+            "label": "API key",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
+            "placeholder": "id:api_key or encoded API key"
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "email": {
+    "label": "Email (SMTP)",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "SMTP host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "smtp.gmail.com"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "587"
+          },
+          {
+            "key": "authSource",
+            "label": "From address",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "noreply@datawrap.app"
+          },
+          {
+            "key": "database",
+            "label": "Recipients",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "alice@example.com, bob@example.com"
+          },
+          {
+            "key": "username",
+            "label": "SMTP username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "SMTP password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use TLS / STARTTLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Enable for ports 587/465."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "SMTP URL",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SMTP URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
+            "placeholder": "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "excel": {
+    "label": "Excel",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Pick Excel for a workbook file — not Snowflake.",
+      "Provide a .xlsx path or object-store URI. Prefer .xlsx over legacy .xls.",
+      "Test proves the file is readable. A missing path is not Connected."
+    ]
+  },
+  "firebolt": {
+    "label": "Firebolt",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "443"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "firebolt://user:pass@host:443/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "fixed_width": {
+    "label": "Fixed-width",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "gcs": {
+    "label": "Google Cloud Storage",
+    "default_auth_mode": "service_account",
+    "auth_modes": [
+      {
+        "value": "service_account",
+        "label": "Service account JSON",
+        "description": "JSON key or file path for cloud identity.",
+        "fields": [
+          {
+            "key": "serviceAccount",
+            "label": "Service account JSON or file path",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
+            "placeholder": "{\n  \"type\": \"service_account\",\n  ...\n}"
+          },
+          {
+            "key": "database",
+            "label": "Bucket name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "html": {
+    "label": "HTML",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "hubspot": {
+    "label": "HubSpot",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host / instance URL",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "api.hubapi.com"
+          },
+          {
+            "key": "database",
+            "label": "Object / table (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "contacts"
+          },
+          {
+            "key": "apiKey",
+            "label": "API token",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the hubspot access token. Default object/table used when none is specified: contacts.",
+            "placeholder": "Paste access token"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "iceberg": {
+    "label": "Apache Iceberg",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Warehouse path",
+        "description": "Local or mounted lakehouse root. No REST/Glue committer.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Warehouse root",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Filesystem CoW writer. Overwrite leftover MERGE lists dest-engine file footers. Incremental leftover MERGE is a hard no-op.",
+            "placeholder": "/data/iceberg-warehouse or file:///mnt/lake"
+          },
+          {
+            "key": "database",
+            "label": "Default namespace (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Used as the Iceberg namespace folder under the warehouse when set. Table name is chosen in Transfer Studio.",
+            "placeholder": "analytics"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "REST catalog",
+        "description": "REST catalog URI plus warehouse. Overwrite leftover MERGE is dest-engine catalog snapshot + delete.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "REST catalog URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Iceberg REST catalog. Leftover MERGE commits deletes through RestCatalog. Glue and Nessie stay Planned.",
+            "placeholder": "http://127.0.0.1:8181"
+          },
+          {
+            "key": "warehouse",
+            "label": "Warehouse",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Object-store or file warehouse the REST catalog commits into.",
+            "placeholder": "file:///mnt/lake or s3://bucket/wh"
+          },
+          {
+            "key": "database",
+            "label": "Default namespace (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "analytics"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "json": {
+    "label": "JSON",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "jsonl": {
+    "label": "JSON Lines",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "kafka": {
+    "label": "Apache Kafka",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "9092"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "milvus": {
+    "label": "Milvus",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "19530"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "root"
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": true,
+            "sensitive": true,
+            "hint": "Default local auth is root:Milvus when both are blank."
+          },
+          {
+            "key": "database",
+            "label": "Database (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "default"
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      },
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "19530"
+          },
+          {
+            "key": "apiKey",
+            "label": "API key / token",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Milvus REST uses Bearer user:pass or a cloud API key.",
+            "placeholder": "root:Milvus or Zilliz Cloud API key"
+          },
+          {
+            "key": "connection_string",
+            "label": "Base URL override (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "https://xxx.api.gcp-us-west1.zillizcloud.com"
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "mongodb": {
+    "label": "MongoDB",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "cluster0.mongodb.net"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "27017"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "authSource",
+            "label": "Auth source",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Database where the user is defined.",
+            "placeholder": "admin"
+          },
+          {
+            "key": "ssl",
+            "label": "Use TLS / SSL",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Required for MongoDB Atlas and most cloud deployments."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "MongoDB connection string",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "mongodb:// or mongodb+srv:// URL. Datawrap will auto-detect authSource and TLS settings.",
+            "placeholder": "mongodb+srv://user:pass@cluster.mongodb.net/mydb?retryWrites=true&w=majority"
+          },
+          {
+            "key": "authSource",
+            "label": "Auth source override",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "admin"
+          },
+          {
+            "key": "ssl",
+            "label": "Force TLS / SSL",
+            "type": "checkbox",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Toggle on if the URI does not include tls=true."
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "mysql": {
+    "label": "MySQL",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "3306"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Connection string",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
+            "placeholder": "mysql+pymysql://user:pass@host:3306/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "neo4j": {
+    "label": "Neo4j",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "7474"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "table",
+            "label": "Node label (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "oracle": {
+    "label": "Oracle",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "1521"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "orc": {
+    "label": "ORC",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "parquet": {
+    "label": "Parquet",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "pdf": {
+    "label": "PDF",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "pgvector": {
+    "label": "pgvector (PostgreSQL)",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "5432"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "vectors"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "pinecone": {
+    "label": "Pinecone",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Index host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Pinecone data-plane index host (not the control-plane API).",
+            "placeholder": "my-index-xxxx.svc.pinecone.io"
+          },
+          {
+            "key": "apiKey",
+            "label": "API key",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Required. Namespace defaults to the destination table name.",
+            "placeholder": "pcsk_…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "postgresql": {
+    "label": "PostgreSQL",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "5432"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Connection string",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
+            "placeholder": "postgresql+psycopg2://user:pass@host:5432/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "qdrant": {
+    "label": "Qdrant",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "6333"
+          },
+          {
+            "key": "password",
+            "label": "API key (optional)",
+            "type": "password",
+            "optional": true,
+            "sensitive": true,
+            "hint": "Leave blank for local unauthenticated Qdrant."
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "redis": {
+    "label": "Redis",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "6379"
+          },
+          {
+            "key": "database",
+            "label": "Database index",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "0"
+          },
+          {
+            "key": "username",
+            "label": "Username (ACL)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Redis 6+ ACL username. Leave blank for legacy auth."
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use TLS / SSL",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Redis URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "redis:// or rediss:// URL. rediss:// enables TLS.",
+            "placeholder": "redis://user:pass@localhost:6379/0"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "redshift": {
+    "label": "Amazon Redshift",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "5439"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Connection string",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
+            "placeholder": "postgresql+psycopg2://user:pass@host:5439/db"
+          }
+        ]
+      },
+      {
+        "value": "aws_keys",
+        "label": "AWS access keys",
+        "description": "Access key ID and secret access key.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "AWS region or local endpoint",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "us-east-1"
+          },
+          {
+            "key": "database",
+            "label": "Table name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Access Key ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Secret Access Key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "endpointUrl",
+            "label": "Custom endpoint URL (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "For DynamoDB Local or private AWS-compatible stacks.",
+            "placeholder": "https://s3.wasabisys.com or http://localhost:9000"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "rest_api": {
+    "label": "REST / OpenAPI",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host / instance URL",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "rest_api"
+          },
+          {
+            "key": "database",
+            "label": "Object / table (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false
+          },
+          {
+            "key": "apiKey",
+            "label": "API token",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the rest_api access token. Default object/table used when none is specified: .",
+            "placeholder": "Paste access token"
+          },
+          {
+            "key": "connection_string",
+            "label": "Advanced config (JSON, optional)",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Override pagination, data path, auth header, or query parameters as JSON.",
+            "placeholder": "{\"pagination_type\":\"cursor\",\"data_path\":\"data\",\"cursor_param\":\"after\"}"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "s3": {
+    "label": "Amazon S3",
+    "default_auth_mode": "aws_keys",
+    "auth_modes": [
+      {
+        "value": "aws_keys",
+        "label": "AWS access keys",
+        "description": "Access key ID and secret access key.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "AWS region or endpoint",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "us-east-1"
+          },
+          {
+            "key": "database",
+            "label": "Bucket name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Access Key ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Secret Access Key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "endpointUrl",
+            "label": "Custom endpoint URL (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "For MinIO, LocalStack, Wasabi, or S3-compatible stores.",
+            "placeholder": "https://s3.wasabisys.com or http://localhost:9000"
+          },
+          {
+            "key": "pathStyle",
+            "label": "Use path-style addressing",
+            "type": "checkbox",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Required for MinIO and some S3-compatible stores."
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "salesforce": {
+    "label": "Salesforce",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Instance URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Use your org instance URL (*.my.salesforce.com). Do not use login.salesforce.com.",
+            "placeholder": "https://yourorg.my.salesforce.com"
+          },
+          {
+            "key": "database",
+            "label": "Object / table (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "Account"
+          },
+          {
+            "key": "apiKey",
+            "label": "Access token (Bearer)",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste a Bearer access token (not username/password). Default object/table used when none is specified: Account.",
+            "placeholder": "00D…!AQEA… (session access token)"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "sftp": {
+    "label": "SFTP",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "SFTP host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "sftp.example.com"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "22"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password (optional if using key)",
+            "type": "password",
+            "optional": true,
+            "sensitive": true
+          },
+          {
+            "key": "database",
+            "label": "Remote path / directory",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "/uploads"
+          },
+          {
+            "key": "privateKey",
+            "label": "SSH private key (optional)",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Paste the private key text. If provided, password is optional.",
+            "placeholder": "-----BEGIN OPENSSH PRIVATE KEY----- ..."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "SFTP URL",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SFTP URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "The path component becomes the remote directory or file.",
+            "placeholder": "sftp://user:pass@sftp.example.com:22/path"
+          },
+          {
+            "key": "privateKey",
+            "label": "SSH private key (optional)",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Pick SFTP for a remote file host — not Snowflake.",
+      "Enter host, user, and the remote path to the CSV, Excel, or Parquet file.",
+      "Test before you save. Then use Transfer to write into Postgres or Snowflake."
+    ]
+  },
+  "singlestore": {
+    "label": "SingleStore",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "3306"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "mysql+pymysql://user:pass@host:3306/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "snowflake": {
+    "label": "Snowflake",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Account host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "myorg-acctname"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "schema",
+            "label": "Schema",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "PUBLIC"
+          },
+          {
+            "key": "warehouse",
+            "label": "Warehouse",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "COMPUTE_WH"
+          },
+          {
+            "key": "authRole",
+            "label": "Role",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "Default role"
+          }
+        ]
+      },
+      {
+        "value": "pat",
+        "label": "Programmatic access token",
+        "description": "Token from Snowsight.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Account host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "myorg-acctname"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Programmatic access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "schema",
+            "label": "Schema",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "PUBLIC"
+          },
+          {
+            "key": "warehouse",
+            "label": "Warehouse",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "COMPUTE_WH"
+          },
+          {
+            "key": "authRole",
+            "label": "Role",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "Leave blank for default role"
+          }
+        ]
+      },
+      {
+        "value": "key_pair",
+        "label": "Key-pair (JWT)",
+        "description": "PKCS#8 private key.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Account host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "myorg-acctname"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "privateKey",
+            "label": "PKCS#8 private key",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "-----BEGIN PRIVATE KEY-----"
+          },
+          {
+            "key": "password",
+            "label": "Key passphrase (optional)",
+            "type": "password",
+            "optional": true,
+            "sensitive": true
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "schema",
+            "label": "Schema",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "PUBLIC"
+          },
+          {
+            "key": "warehouse",
+            "label": "Warehouse",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "COMPUTE_WH"
+          },
+          {
+            "key": "authRole",
+            "label": "Role",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "Leave blank for default role"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "Snowflake login URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "snowflake://USER:PASSWORD@myorg-acctname/DATABASE/SCHEMA?warehouse=COMPUTE_WH"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Pick the Snowflake tile. AWS, Azure, GCP, Standard, and Enterprise are the same login — not different products.",
+      "In Snowsight, open the account menu and copy the account identifier (org-account, for example myorg-acctname).",
+      "Paste that in Account host. A browser URL is the host, not a login. Locator-only hosts can return HTTP 404.",
+      "Leave Role blank unless you know a role this user can assume.",
+      "Test. A 250001 means the host was reached — check username and password. If Snowsight uses MFA, switch to Programmatic access token."
+    ]
+  },
+  "sqlite": {
+    "label": "SQLite",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "database",
+            "label": "Database file / :memory:",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/path/to/db.sqlite"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLite / DuckDB file path",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/path/to/db.sqlite"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "sqlserver": {
+    "label": "SQL Server",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "1433"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "stripe": {
+    "label": "Stripe",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host / instance URL",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "api.stripe.com"
+          },
+          {
+            "key": "database",
+            "label": "Object / table (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "customers"
+          },
+          {
+            "key": "apiKey",
+            "label": "Secret key",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the Stripe secret key. Default object/table used when none is specified: customers.",
+            "placeholder": "sk_..."
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "synapse": {
+    "label": "Azure Synapse",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "1433"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "mssql+pyodbc://user:pass@host:1433/db?driver=ODBC+Driver+17+for+SQL+Server"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "teradata": {
+    "label": "Teradata",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "1025"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "teradatasql://user:pass@host:1025/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "trino": {
+    "label": "Trino / Presto",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "8080"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "trino://user:pass@host:8080/catalog"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "tsv": {
+    "label": "TSV",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "vertica": {
+    "label": "Vertica",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "Username & password",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "5433"
+          },
+          {
+            "key": "database",
+            "label": "Database",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "mydb"
+          },
+          {
+            "key": "username",
+            "label": "Username",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "password",
+            "label": "Password",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "ssl",
+            "label": "Use SSL / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Encrypt the connection to the server."
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "Connection string",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "SQLAlchemy connection URL",
+            "type": "textarea",
+            "optional": false,
+            "sensitive": false,
+            "hint": "Paste the full SQLAlchemy URL for your engine. Datawrap will validate connectivity and introspect schema.",
+            "placeholder": "vertica+vertica_python://user:pass@host:5433/db"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "weaviate": {
+    "label": "Weaviate",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "localhost"
+          },
+          {
+            "key": "port",
+            "label": "Port",
+            "type": "number",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "8080"
+          },
+          {
+            "key": "apiKey",
+            "label": "API key (optional)",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Required for Weaviate Cloud; optional for local.",
+            "placeholder": "Weaviate API key"
+          },
+          {
+            "key": "connection_string",
+            "label": "Base URL override (optional)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "hint": "When set, host/port are ignored.",
+            "placeholder": "https://xxx.weaviate.network"
+          },
+          {
+            "key": "ssl",
+            "label": "Use HTTPS / TLS",
+            "type": "checkbox",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "xml": {
+    "label": "XML",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "yaml": {
+    "label": "YAML",
+    "default_auth_mode": "file_path",
+    "auth_modes": [
+      {
+        "value": "file_path",
+        "label": "Local / mounted file path",
+        "description": "Local path or object-store URI.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "File path or URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "/mnt/data/files, s3://bucket/file.csv, or https://host/file.csv"
+          }
+        ]
+      },
+      {
+        "value": "connection_string",
+        "label": "URL or object-store URI",
+        "description": "Login URL. If the password contains @, encode it as %40.",
+        "fields": [
+          {
+            "key": "connection_string",
+            "label": "URL or URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "s3://bucket/path or https://host/file.csv"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  }
+}

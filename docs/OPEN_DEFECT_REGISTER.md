@@ -508,8 +508,8 @@ stay in the tools/server; the router is a routing aid, not a security boundary.
 
 Still open (not measured / not built):
 
-* The per-engine procedure card is one generated sentence pair, not engine-specific field guidance (account / project / warehouse) — that would have to come from the connector form schema, not be written by hand.
-* Provider-backed (OpenAI/Anthropic) loops are unit-tested with fake clients only; `tests/test_pilot_provider_eval.py` (§8q) is the harness but no run with a live key has been recorded.
+* ~~The per-engine procedure card is one generated sentence pair, not engine-specific field guidance~~ — closed in §8r from the connector form schema.
+* Provider-backed loops: OpenAI measured live (§8q harness, 13/13 on the tested path, `scripts/fixtures/pilot_provider_eval_openai.json`; browser QA in hybrid mode on #273). **Anthropic has never been run with a live key** — the harness skips honestly without one.
 * Code-switched or non-English asks (`kya validate step skip kar sakte hain`) are refused as off-corpus. No translation layer exists; adding one is a mechanism decision, not a phrase table.
 * `who is the president of france` is the one held-out abstention (falls to the existing off-corpus refusal, which is correct behaviour, but not via the router).
 * `tests/test_pilot_conversation_composer.py` has 11 cases that need a saved `Demo Orders` / `Quarantine SQLite` connector in the local Mongo workspace. They fail identically on the base head (`b26270b7`) on a fresh box — environment fixture, not a regression from this wave.
@@ -537,6 +537,32 @@ change was not written for.
 Still open: 27 off-focus supporting sentences remain, mostly G-gate list
 sentences answering an adjacent gate question and quarantine sentences under
 "do you ever drop rows silently" — on-subject by heading, weak by wording.
+
+## 8r. Engine-specific connect guidance from the form schema (2026-09-13, branch `feature/Venkat-Analysis`)
+
+The §8p item "per-engine field guidance must come from the connector form
+schema, not be written by hand". The UI's `connectorFormConfig.ts` is the only
+owner of which fields a driver's connect form has; the backend cannot import
+it, so it is exported.
+
+| Symptom | Closure | Proof |
+|---|---|---|
+| "what fields do I need to connect bigquery / snowflake / mongodb" answered with the generic "enter its connection details" pair | `apps/web/scripts/export_connector_form_schema.ts` serialises `connectorFormConfig.ts` (labels, auth modes, field key/label/type/optional/sensitive/hint/placeholder, specialised setup steps — **no validators, no values**) to `apps/api/data/connector_form_schema.json`; `services/connector_form_schema.py` loads it; `product_facts._connect_engine_sections` builds each transfer-ready engine's `Procedure: connect a <engine> database` from it as four discrete steps (driver → sign-in mode(s) → required / optional fields / toggles → Test + Save). SQL Server / Oracle default ports (1433 / 1521) come from the catalog, not PostgreSQL's | `apps/web/src/lib/connectorFormSchemaExport.test.ts` (committed JSON must equal the TypeScript output — drift fails), `tests/test_connector_form_schema_guidance.py` (schema covers every transfer-ready engine, metadata-only, engine-specific fields for Snowflake/BigQuery/MongoDB/SQL Server/PostgreSQL/Redis, final Pilot answers name the fields) |
+| The generated procedure ranked below short capability cards (BM25 length normalisation), so the fields never reached the answer | `product_docs.load_generated_chunks` indexes a stepped procedure one step per passage (`…#s0`…); `_with_procedure_siblings` re-attaches the remaining steps of every retrieved procedure, score 0, so the composer can complete it. `answer_composer` marks a step that matched none of the question as `step_only`: it can follow a step that answered (`_complete_procedure`) but never lead or fill — "Enter Host, Port, Database" is not an answer to "can I connect through a bastion host" | `::test_pilot_answers_name_the_fields`, `test_rag_retrieval_layers.py::test_a_heading_that_half_matches_does_not_vouch`, `test_pilot_enterprise_qa_matrix.py` bastion case; RAG/Pilot slice 2177 passed / 128 skipped / 0 failed |
+| `#security`-style anchors in help chunk ids were parsed as step indexes (`ValueError` on "how do I connect Cursor to this") | `_STEP_ID = ^(.*)#s(\d+)$` is the only reader of the step-id shape | `test_pilot_answer_audit_eval.py` product floor 77/77 |
+| "do you use openai by default" opened on the Azure OpenAI / Azure AI Search destination cards | `_section_intent_bonus`: an LLM-vendor ask that does not say *azure* is not about the Azure AI cards | `test_rag_multi_subject_answers.py::test_single_subject_answers_are_unchanged_by_the_subject_debt` |
+
+Answer audit after this wave (local engine): on-target **170/170**, 158
+answered / 12 deflected / 7 refused (unchanged); off-focus supporting
+sentences **28/432 = 6.5 %** (§8q: 27/427 = 6.3 % — the one new tail is a
+connect-field step under a capability question, within noise, recorded
+rather than hidden). Note: the audit must be run with
+`DATAFLOW_PILOT_ENGINE=local`; a saved provider key otherwise puts it in
+hybrid mode and measures the provider's rewrite.
+
+Still open (unchanged): Anthropic never measured live; non-English /
+code-switched asks refused; the 11 `Demo Orders` fixture cases in
+`test_pilot_conversation_composer.py`; 28 weak tail sentences.
 
 ## 9. Closure protocol
 
