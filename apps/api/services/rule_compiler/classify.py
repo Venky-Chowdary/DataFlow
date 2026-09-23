@@ -16,9 +16,11 @@ from typing import Any
 # Closed vocabulary operators actually type in mapping workbooks.
 _DIRECT = re.compile(
     r"^(?:direct|1\s*[:\-–]\s*1|1\s+to\s+1|map|mapped|passthrough|"
-    r"pass[\s-]?through|as[\s-]?is|preserve|identity|copy|none|n/?a|-)?$",
+    r"pass[\s-]?through|as[\s-]?is|preserve|identity|copy|"
+    r"same\s+as\s+source|copy\s+from\s+source|as\s+source|none|-)?$",
     re.I,
 )
+_NA_CELL = re.compile(r"^(?:n/?a|na|n\.a\.|not\s+applicable)$", re.I)
 _OMIT = re.compile(
     r"\b(?:omit|do\s+not\s+(?:map|load|transfer|send)|"
     r"(?:skip|drop|exclude|ignore)(?!\s+(?:rows?|columns?|fields?)\b))\b",
@@ -27,7 +29,7 @@ _OMIT = re.compile(
 _LOWER = re.compile(r"\b(?:lower(?:case)?|lcase|tolower)\b", re.I)
 _UPPER = re.compile(r"\b(?:upper(?:case)?|ucase|toupper)\b", re.I)
 _TITLE = re.compile(r"\b(?:title[\s-]?case|proper(?:\s+case)?|initcap)\b", re.I)
-_TRIM = re.compile(r"\b(?:trim|strip(?:\s+space)?|ltrim|rtrim)\b", re.I)
+_TRIM = re.compile(r"\b(?:trim|btrim|strip(?:\s+space)?|ltrim|rtrim)\b", re.I)
 _COLLAPSE = re.compile(r"\b(?:collapse\s+whitespace|squeeze\s+spaces?|normalize\s+spaces?)\b", re.I)
 _STRIP_CTRL = re.compile(
     r"\b(?:strip\s+controls?|non[\s-]?printable|zero[\s-]?width|control\s+char)\b",
@@ -47,7 +49,8 @@ _TIME = re.compile(
 _EMAIL = re.compile(r"\bemail\b", re.I)
 _PHONE = re.compile(r"\bphone\b", re.I)
 _DEFAULT = re.compile(
-    r"\b(?:default(?:\s+to)?|if\s+null(?:\s+then)?|nvl|coalesce)\b\s*[:\s]+(?P<value>.+)$",
+    r"\b(?:default(?:\s+to)?|if\s+null(?:\s+then)?)\b\s*[:\s]+(?P<value>.+)$"
+    r"|\b(?:nvl|coalesce)\s*:\s*(?P<nvl_value>.+)$",
     re.I,
 )
 _DEFAULT_BARE = re.compile(
@@ -55,8 +58,10 @@ _DEFAULT_BARE = re.compile(
     re.I,
 )
 _DERIVE = re.compile(
-    r"(?P<expr>[A-Za-z_][\w.]*\s*[*+/x×-]\s*[\d.]+"
-    r"|[\d.]+\s*[*+/x×-]\s*[A-Za-z_][\w.]*)",
+    r"(?P<expr>[A-Za-z_][\w.]*\s*[*+/x×]\s*[\d.]+"
+    r"|[\d.]+\s*[*+/x×]\s*[A-Za-z_][\w.]*"
+    r"|[A-Za-z_][\w.]*\s+-\s+[\d.]+"
+    r"|[\d.]+\s+-\s+[A-Za-z_][\w.]*)",
     re.I,
 )
 _CONCAT_HINT = re.compile(
@@ -246,9 +251,26 @@ _COALESCE = re.compile(
     re.I,
 )
 _NULLIF_FN = re.compile(
-    r"\bnullif\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<value>.+?)\s*\)",
+    r"\bnullif\s*\(\s*(?P<col>(?:(?:trim|ltrim|rtrim|btrim|upper|lower)\s*\(\s*"
+    r"[A-Za-z_][\w.]*\s*\)|[A-Za-z_][\w.]*))\s*,\s*(?P<value>.+?)\s*\)",
     re.I,
 )
+_TO_NUMBER_FN = re.compile(
+    r"\bto_number\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*"
+    r"(?:,\s*['\"](?P<fmt>.+?)['\"])?\s*\)",
+    re.I,
+)
+_TRY_CAST = re.compile(
+    r"\b(?:try_cast|try_to_(?:number|decimal|date|timestamp)|safe_cast|"
+    r"try_convert)\b",
+    re.I,
+)
+_CHARSET = re.compile(
+    r"\b(?:utf-?8|utf-?16|latin-?1|iso-?8859|windows-?1252|al32utf8|"
+    r"nls_charset|charset|code[\s-]?page)\b",
+    re.I,
+)
+_COALESCE_BARE = re.compile(r"\b(?:coalesce|nvl|ifnull)\b(?!\s*\()", re.I)
 _LEN = re.compile(r"\b(?:len|length)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*\)", re.I)
 _TO_DATE = re.compile(r"\bto_date\b", re.I)
 _TO_NUMBER = re.compile(r"\bto_number\b", re.I)
@@ -375,7 +397,7 @@ _DROP_COL = re.compile(
 )
 _FLATTEN = re.compile(r"\bflatten\s+json\b", re.I)
 _CASE_INSENSITIVE = re.compile(r"\bcase[\s-]?insensitive\b", re.I)
-_IIF = re.compile(r"^=?\s*iif\s*\(", re.I)
+_IIF = re.compile(r"^=?\s*(?:iif|iff)\s*\(", re.I)
 _NVL2 = re.compile(
     r"^=?\s*nvl2\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<present>.+?)\s*,\s*(?P<missing>.+?)\s*\)\s*$",
     re.I | re.S,
@@ -789,14 +811,15 @@ _VOLATILE_VALUE = re.compile(
     r"current[_ ](?:timestamp|date|time)|"
     r"newid(?:\s*\(\s*\))?|newsequentialid(?:\s*\(\s*\))?|"
     r"uuid(?:\s*\(\s*\))?|gen_random_uuid(?:\s*\(\s*\))?|"
-    r"rand(?:om)?(?:\s*\(\s*\))?)$",
+    r"generate\s+uuid|new\s+guid|rand(?:om)?(?:\s*\(\s*\))?)$",
     re.I,
 )
 _VOLATILE_EXPR = re.compile(
     r"\b(?:now\s*\(|getdate\s*\(|getutcdate\s*\(|sysdatetime\s*\(|"
     r"sysutcdatetime\s*\(|sysdate\b|current[_ ](?:timestamp|date|time)\b|"
     r"today\s*\(|newid\s*\(|newsequentialid\s*\(|gen_random_uuid\s*\(|"
-    r"uuid(?:_generate|_v4)?\s*\(|random\s*\(|rand\s*\()",
+    r"uuid(?:_generate|_v4)?\s*\(|generate\s+uuid|new\s+guid|"
+    r"random\s*\(|rand\s*\()",
     re.I,
 )
 _EXCEL_SERIAL = re.compile(
@@ -1337,13 +1360,10 @@ def parse_row_policy(text: str) -> dict[str, Any] | None:
     return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": pred, "keep": keep}
 
 
-def parse_coalesce(text: str) -> dict[str, Any] | None:
-    """COALESCE/NVL/IFNULL. Two-arg literal → default; otherwise shape coalesce()."""
+def _balanced_call(text: str) -> tuple[str, str] | None:
+    """Inner args and leftover after the first balanced ``fn(...)``."""
     raw = (text or "").strip()
-    match = _COALESCE_FN.match(raw)
-    if not match:
-        return None
-    start = raw.find("(", match.start())
+    start = raw.find("(")
     if start < 0:
         return None
     depth = 0
@@ -1367,9 +1387,35 @@ def parse_coalesce(text: str) -> dict[str, Any] | None:
     if end < 0:
         return None
     leftover = raw[end + 1:].strip().rstrip(";").strip()
+    return raw[start + 1:end], leftover
+
+
+def _leftover_review(flags: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "kind": "unknown",
+        "plane": "review",
+        "confidence": 0.4,
+        "reason": (
+            "Function call has leftover text after ')'. A half-applied "
+            "NVL / IIF / TO_NUMBER is silent loss — it was not applied."
+        ),
+        **(flags or {}),
+    }
+
+
+def parse_coalesce(text: str) -> dict[str, Any] | None:
+    """COALESCE/NVL/IFNULL. Two-arg literal → default; otherwise shape coalesce()."""
+    raw = (text or "").strip()
+    match = _COALESCE_FN.match(raw)
+    if not match:
+        return None
+    parsed = _balanced_call(raw)
+    if not parsed:
+        return None
+    inner, leftover = parsed
     if leftover:
         return None
-    args = _split_sql_args(raw[start + 1:end], strip_quotes=False)
+    args = _split_sql_args(inner, strip_quotes=False)
     if len(args) < 2:
         return None
     if len(args) == 2 and not _is_column_token(args[1]):
@@ -1398,8 +1444,13 @@ def parse_iif(text: str) -> dict[str, Any] | None:
         }
     if not _IIF.match(raw):
         return None
-    inner = raw[raw.find("(") + 1: raw.rfind(")")] if "(" in raw else ""
-    args = _split_sql_args(inner)
+    parsed = _balanced_call(raw)
+    if not parsed:
+        return None
+    inner, leftover = parsed
+    if leftover:
+        return _leftover_review()
+    args = _split_sql_args(inner, strip_quotes=False)
     if len(args) < 2:
         return None
     cond = _rewrite_informatica_pred(args[0])
@@ -1411,6 +1462,32 @@ def parse_iif(text: str) -> dict[str, Any] | None:
         "confidence": 0.92,
         "expression": f"if({cond}, {_case_atom(then)}, {_case_atom(else_)})",
     }
+
+
+def parse_to_number(text: str) -> dict[str, Any] | None:
+    """TO_NUMBER is cast_number only without a format mask.
+
+    Oracle ``TO_NUMBER(x, '999D99')`` depends on NLS_NUMERIC_CHARACTERS.
+    A guessed mask is silent loss — same honesty as TO_CHAR number masks.
+    """
+    raw = text or ""
+    match = _TO_NUMBER_FN.search(raw)
+    if match:
+        fmt = (match.group("fmt") or "").strip()
+        if fmt and (_NUM_MASK.search(fmt) or re.search(r"[DG]|99", fmt, re.I)):
+            return {
+                "kind": "unknown",
+                "plane": "review",
+                "confidence": 0.4,
+                "reason": (
+                    "TO_NUMBER format mask / NLS decimal is not parse_number. "
+                    "Name US or EU locale on Destination Advanced — it was not applied."
+                ),
+            }
+        return {"kind": "cast_number", "plane": "map", "confidence": 0.95}
+    if _TO_NUMBER.search(raw):
+        return {"kind": "cast_number", "plane": "map", "confidence": 0.95}
+    return None
 
 
 def _concat_columns(text: str) -> tuple[list[str], str]:
@@ -1568,6 +1645,9 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
                 ),
             }
     if fn in {"VALUE", "TO_NUMBER"}:
+        parsed = parse_to_number(f"{fn}({inner})")
+        if parsed:
+            return parsed
         return {"kind": "cast_number", "plane": "map", "confidence": 0.94}
     if fn in {"DATEVALUE", "TO_DATE"}:
         return {"kind": "date", "plane": "map", "confidence": 0.94}
@@ -1716,6 +1796,9 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         }
 
     if raw.startswith("=") or _EXCEL_FN.match(raw):
+        parsed_call = _balanced_call(raw)
+        if parsed_call and parsed_call[1]:
+            return _leftover_review(flags)
         excel = _excel_formula(raw)
         if excel:
             extras = list(excel.get("extras") or [])
@@ -1733,6 +1816,17 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if clock:
         return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": clock, **flags}
 
+    if _NA_CELL.match(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "N/A is not Direct. Name omit or Direct — a guessed "
+                "passthrough writes the source as-is."
+            ),
+            **flags,
+        }
     if _DIRECT.match(raw):
         return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
 
@@ -1751,11 +1845,13 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return extrema
     nf = _NULLIF_FN.search(raw)
     if nf:
+        extras = _compound_extras(raw, "null_if")
         return {
             "kind": "null_if",
             "plane": "shape",
             "confidence": 0.92,
             "values": [nf.group("value").strip().strip("\"'")],
+            **({"extras": extras} if extras else {}),
             **flags,
         }
     length = _LEN.search(raw)
@@ -1829,8 +1925,32 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
-    if _TO_NUMBER.search(raw):
-        return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
+    numbered = parse_to_number(raw)
+    if numbered:
+        numbered.update(flags)
+        return numbered
+    if _TRY_CAST.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "TRY_CAST / SAFE_CAST swallows bad rows as null. That is "
+                "silent loss — name cast or quarantine. It was not applied."
+            ),
+            **flags,
+        }
+    if _CHARSET.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Charset / UTF-8 convert is not a derive (utf-8 is not "
+                "utf minus 8). Name encoding on the connector — it was not applied."
+            ),
+            **flags,
+        }
 
     decoded = parse_decode(raw)
     if decoded:
@@ -2150,7 +2270,7 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
 
     default = _DEFAULT.search(raw) or _DEFAULT_BARE.search(raw)
     if default:
-        value = default.group("value").strip().strip("\"'")
+        value = (default.group("value") or default.groupdict().get("nvl_value") or "").strip().strip("\"'")
         reason = volatile_reason(raw, value)
         if reason:
             return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": reason, **flags}
@@ -2159,6 +2279,17 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.93,
             "value": value,
+            **flags,
+        }
+    if _COALESCE_BARE.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "COALESCE / NVL without (col, value) is not a default. "
+                "Name NVL(col, 'X') — it was not applied."
+            ),
             **flags,
         }
 

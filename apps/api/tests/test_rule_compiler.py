@@ -1404,3 +1404,84 @@ def test_scd_timezone_isnull_jsonpath_and_regex_are_not_silent():
     assert by["blob"]["status"] == "executable"
     filt = next(s for s in report["shape_steps"] if s["op"] == "filter_rows")
     assert "regex_matches(code" in filt["options"]["condition"]
+
+
+def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
+    """N/A ≠ passthrough; utf-8 ≠ utf minus 8; TRY_CAST swallows rows."""
+    na = classify_rule("N/A")
+    assert na["kind"] == "unknown"
+    assert na["plane"] == "review"
+    assert classify_rule("n/a")["kind"] == "unknown"
+    assert classify_rule("not applicable")["kind"] == "unknown"
+    assert classify_rule("Direct")["kind"] == "direct"
+    assert classify_rule("same as source")["kind"] == "direct"
+    assert classify_rule("copy from source")["kind"] == "direct"
+    assert classify_rule("-")["kind"] == "direct"
+
+    utf = classify_rule("convert to utf-8")
+    assert utf["kind"] == "unknown"
+    assert utf["plane"] == "review"
+    assert "utf" in utf["reason"].lower() or "charset" in utf["reason"].lower()
+    assert classify_rule("latin1 to utf8")["kind"] == "unknown"
+    salary = classify_rule("salary × 12")
+    assert salary["kind"] == "derive"
+    assert "*" in salary["expression"]
+    assert classify_rule("salary * 12")["kind"] == "derive"
+
+    leftover = classify_rule("nvl(status,'X') leftover extra")
+    assert leftover["kind"] == "unknown"
+    assert leftover["plane"] == "review"
+    assert classify_rule("NVL(status, 'X')")["kind"] == "default"
+    coal = classify_rule("coalesce empty")
+    assert coal["kind"] == "unknown"
+
+    numbered = classify_rule("to_number(amount, '999D99')")
+    assert numbered["kind"] == "unknown"
+    assert numbered["plane"] == "review"
+    assert classify_rule("to_number(amount)")["kind"] == "cast_number"
+    assert classify_rule("VALUE(amount)")["kind"] == "cast_number"
+
+    wrapped = classify_rule("nullif(trim(status), '')")
+    assert wrapped["kind"] == "null_if"
+    assert wrapped["values"] == [""]
+    extras = {item.get("kind") or item.get("op") for item in wrapped.get("extras") or []}
+    assert "trim" in extras
+
+    quoted = classify_rule("iif(isnull(status), 'X', status)")
+    assert quoted["kind"] == "derive"
+    assert '"X"' in quoted["expression"]
+    iff = classify_rule("iff(status='A','Y','N')")
+    assert iff["kind"] == "derive"
+    assert '"Y"' in iff["expression"] or "Y" in iff["expression"]
+
+    assert classify_rule("try_cast(amount as number)")["kind"] == "unknown"
+    assert classify_rule("safe_cast(amount as number)")["kind"] == "unknown"
+    assert classify_rule("generate uuid")["kind"] == "unknown"
+    assert classify_rule("btrim(name)")["kind"] == "trim"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "notes,notes,N/A\n"
+        "name,name,convert to utf-8\n"
+        "amount,amount,\"to_number(amount, '999D99')\"\n"
+        "status,status,\"nvl(status,'X') leftover extra\"\n"
+        "flag,flag,\"iif(isnull(flag), 'X', flag)\"\n"
+        "qty,qty,try_cast(qty as number)\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "na-utf8-trycast.csv",
+        csv,
+        source_columns=["notes", "name", "amount", "status", "flag", "qty"],
+        dest_columns=["notes", "name", "amount", "status", "flag", "qty"],
+    )
+    by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    assert by["notes"]["status"] == "needs_confirmation"
+    assert by["notes"]["kind"] != "direct"
+    assert by["name"]["status"] == "needs_confirmation"
+    assert by["name"]["kind"] != "derive"
+    assert by["amount"]["status"] == "needs_confirmation"
+    assert by["amount"]["kind"] != "cast_number"
+    assert by["status"]["status"] == "needs_confirmation"
+    assert by["flag"]["kind"] == "derive"
+    assert by["flag"]["status"] == "executable"
+    assert by["qty"]["status"] == "needs_confirmation"
