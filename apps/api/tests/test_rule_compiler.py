@@ -7,7 +7,17 @@ import json
 
 import pytest
 
-from services.rule_compiler.classify import classify_rule, parse_date_spec, parse_lookup
+from services.code_crosswalk import apply_code_crosswalk
+from services.rule_compiler.classify import (
+    classify_rule,
+    named_rule_ref,
+    named_rule_targets,
+    parse_date_spec,
+    parse_decode,
+    parse_lookup,
+    parse_sql_case,
+    unknown_code_policy,
+)
 from services.rule_compiler.compile import compile_rule_workbook
 from services.rule_compiler.ingest import RuleIngestError, ingest_rule_file
 from services.rule_compiler.match import name_similarity, unique_linguistic_match
@@ -682,3 +692,206 @@ def test_orphan_enumeration_sheet_attaches_to_named_lookup():
     )
     assert any("matches 2 columns" in (r.get("rule_text") or "") for r in report["rules"])
     assert not any(r.get("code_crosswalk") and r["status"] == "executable" for r in report["rules"])
+
+
+def test_named_rule_ref_forms_and_bare_direct_is_not_a_catalog_hit():
+    assert named_rule_ref("%EmailClean%") == "EmailClean"
+    assert named_rule_ref("use EmailClean") == "EmailClean"
+    assert named_rule_ref("apply EmailClean") == "EmailClean"
+    assert named_rule_ref("EmailClean()") == "EmailClean"
+    assert named_rule_ref("Direct") == ""
+    assert named_rule_ref("use the legacy id unless migrated") == ""
+    name, cols = named_rule_targets("apply EmailClean to email, alt_email")
+    assert name == "EmailClean"
+    assert cols == ["email", "alt_email"]
+
+
+def test_unknown_code_policy_is_recorded_never_identity():
+    assert unknown_code_policy("A → ACTIVE, unmapped → OTHER") == {
+        "action": "default",
+        "value": "OTHER",
+    }
+    assert unknown_code_policy("* → OTHER")["action"] == "default"
+    assert unknown_code_policy("default unmapped to 0") == {"action": "default", "value": "0"}
+    assert unknown_code_policy("quarantine unknown codes") == {"action": "divert", "value": ""}
+    assert unknown_code_policy("A → ACTIVE") == {"action": "refuse", "value": ""}
+    assert "unmapped" not in parse_lookup("A → ACTIVE, unmapped → OTHER")
+    assert "*" not in parse_lookup("A → ACTIVE, * → OTHER")
+
+
+def test_oracle_decode_and_sql_case_are_closed_lookups():
+    decoded = parse_decode("DECODE(status, 'A', 'ACTIVE', 'I', 'INACTIVE', 'OTHER')")
+    assert decoded and decoded["kind"] == "lookup"
+    assert decoded["mapping"] == {"A": "ACTIVE", "I": "INACTIVE"}
+    assert decoded["unmapped"] == "OTHER"
+    simple = parse_sql_case(
+        "CASE status WHEN 'A' THEN 'ACTIVE' WHEN 'I' THEN 'INACTIVE' ELSE 'OTHER' END"
+    )
+    assert simple and simple["kind"] == "lookup"
+    assert simple["mapping"]["A"] == "ACTIVE"
+    assert simple["unmapped"] == "OTHER"
+    searched = parse_sql_case(
+        "CASE WHEN status = 'A' THEN 'ACTIVE' WHEN status = 'I' THEN 'INACTIVE' END"
+    )
+    assert searched and searched["mapping"]["I"] == "INACTIVE"
+    ranged = parse_sql_case("CASE WHEN amount > 0 THEN amount ELSE 0 END")
+    assert ranged and ranged["kind"] == "derive"
+    assert "if(amount > 0" in ranged["expression"]
+
+
+def test_named_catalog_expands_and_missing_stays_in_review():
+    csv = (
+        "Rule Name,Source Column,Destination Column,Rule\n"
+        "EmailClean,,,trim then lowercase then email\n"
+        "TrimName,,,trim\n"
+        ",email,email,%EmailClean%\n"
+        ",alt_email,alt_email,use EmailClean\n"
+        ",notes,notes,EmailClean()\n"
+        ",fname,first_name,Direct\n"
+        ",mystery,segment,%Missing%\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "named.csv",
+        csv,
+        source_columns=["email", "alt_email", "notes", "fname", "mystery"],
+        dest_columns=["email", "alt_email", "notes", "first_name", "segment"],
+    )
+    assert set(report["named_rules"]) >= {"EmailClean", "TrimName"}
+    by_src = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    email = by_src["email"]
+    assert email["status"] == "executable"
+    assert email["named_rule"] == "EmailClean"
+    assert email["transform"] == "email"
+    assert email["resolved_rule"]
+    assert by_src["alt_email"]["status"] == "executable"
+    assert by_src["notes"]["named_rule"] == "EmailClean"
+    assert by_src["fname"]["kind"] == "direct"
+    assert by_src["fname"].get("named_rule") in {"", None}
+    mystery = by_src["mystery"]
+    assert mystery["status"] == "needs_confirmation"
+    assert any("Missing" in issue for issue in mystery["issues"])
+
+
+def test_nested_named_rules_cycle_and_duplicate_definitions_fail_closed():
+    nested = (
+        "Rule Name,Source Column,Destination Column,Rule\n"
+        "Inner,,,trim\n"
+        "Outer,,, %Inner% \n"
+        ",email,email,%Outer%\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "nested.csv",
+        nested,
+        source_columns=["email"],
+        dest_columns=["email"],
+    )
+    email = next(r for r in report["rules"] if r.get("source_column") == "email")
+    assert email["status"] == "executable"
+    assert email["named_rule"] == "Outer"
+    assert email["transform"] == "trim"
+
+    cycle = (
+        "Rule Name,Source Column,Destination Column,Rule\n"
+        "A,,,%B%\n"
+        "B,,,%A%\n"
+        ",email,email,%A%\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "cycle.csv",
+        cycle,
+        source_columns=["email"],
+        dest_columns=["email"],
+    )
+    email = next(r for r in report["rules"] if r.get("source_column") == "email")
+    assert email["status"] == "needs_confirmation"
+    assert any("cycle" in issue.lower() for issue in email["issues"])
+
+    clash = (
+        "Rule Name,Source Column,Destination Column,Rule\n"
+        "EmailClean,,,trim\n"
+        "EmailClean,,,lowercase\n"
+        ",email,email,%EmailClean%\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "clash.csv",
+        clash,
+        source_columns=["email"],
+        dest_columns=["email"],
+    )
+    assert any("more than once" in (r.get("rule_text") or "") for r in report["rules"])
+    email = next(r for r in report["rules"] if r.get("source_column") == "email")
+    assert email["transform"] == "trim"
+
+
+def test_apply_named_rule_to_many_columns():
+    csv = (
+        "Rule Name,Source Column,Destination Column,Rule\n"
+        "EmailClean,,,lowercase + validate email\n"
+        ",,,apply EmailClean to email and alt_email\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "apply-to.csv",
+        csv,
+        source_columns=["email", "alt_email", "phone"],
+        dest_columns=["email", "alt_email", "phone"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    assert by_src["email"]["status"] == "executable"
+    assert by_src["alt_email"]["status"] == "executable"
+    assert by_src["email"]["transform"] == "email"
+    assert "phone" not in by_src or by_src.get("phone", {}).get("status") != "executable"
+
+
+def test_unknown_code_policy_does_not_weaken_g20():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"A → ACTIVE, I → INACTIVE, unmapped → OTHER\"\n"
+        "state,state,\"A → ACTIVE, I → INACTIVE, quarantine unknown\"\n"
+        "flag,flag,\"DECODE(flag, 'Y', 'YES', 'N', 'NO', 'OTHER')\"\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "policy.csv",
+        csv,
+        source_columns=["status", "state", "flag"],
+        dest_columns=["status", "state", "flag"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    status = by_src["status"]
+    assert status["status"] == "executable"
+    assert status["code_crosswalk"] == {"A": "ACTIVE", "I": "INACTIVE"}
+    assert "OTHER" not in status["code_crosswalk"]
+    assert "*" not in status["code_crosswalk"]
+    assert status["unknown_code_policy"]["action"] == "default"
+    assert status["unknown_code_policy"]["value"] == "OTHER"
+    assert any("G20 still refuses" in issue for issue in status["issues"])
+    state = by_src["state"]
+    assert state["unknown_code_policy"]["action"] == "divert"
+    flag = by_src["flag"]
+    assert flag["code_crosswalk"] == {"Y": "YES", "N": "NO"}
+    assert flag["unknown_code_policy"]["value"] == "OTHER"
+    rewritten, err = apply_code_crosswalk(
+        "Z",
+        {"source": "status", "target": "status", "code_crosswalk": status["code_crosswalk"]},
+    )
+    assert rewritten is None
+    assert err and "unmapped" in err
+
+
+def test_name_expression_catalog_headers_are_inferred():
+    csv = (
+        "Name,Expression\n"
+        "EmailClean,lowercase + validate email\n"
+        "TrimName,trim\n"
+    ).encode()
+    report = compile_rule_workbook("catalog.csv", csv)
+    roles = {item["header"]: item["role"] for item in report["header_roles"]}
+    assert roles.get("Name") == "rule_name"
+    assert roles.get("Expression") == "rule"
+    assert set(report["named_rules"]) >= {"EmailClean", "TrimName"}
+    kinds = {item["kind"] for item in report["sheet_kinds"]}
+    assert "catalog" in kinds
+
+
+def test_mapplet_header_alias():
+    assert canonical_header("Mapplet") == "rule_name"
+    assert canonical_header("Macro Name") == "rule_name"

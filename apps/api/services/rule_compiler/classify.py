@@ -217,6 +217,227 @@ _DATE_WORDS = re.compile(
     r"\b(?:date|datetime|timestamp|convert|parse|to|iso|iso-?8601|format)\b",
     re.I,
 )
+_NAMED_REF = re.compile(
+    r"^(?:%(?P<pct>[A-Za-z_][\w]*)%|"
+    r"(?:use|apply|rule)\s+(?P<use>[A-Za-z_][\w]*)|"
+    r"(?P<call>[A-Za-z_][\w]*)\s*\(\s*\))$",
+    re.I,
+)
+_APPLY_TO = re.compile(
+    r"^(?:apply|use)\s+(?P<name>[A-Za-z_][\w]*)\s+to\s+(?P<cols>.+)$",
+    re.I,
+)
+_UNMAPPED_DEFAULT = re.compile(
+    r"(?:(?:unmapped|unknown|unmatched|else)(?:\s+codes?)?|\*)\s*"
+    r"(?:→|->|=>|:|=|to)\s*(?P<value>.+)$",
+    re.I,
+)
+_UNMAPPED_DEFAULT_PHRASE = re.compile(
+    r"\bdefault\s+(?:unmapped|unknown|unmatched)(?:\s+codes?)?\s+(?:to\s+)?(?P<value>.+)$",
+    re.I,
+)
+_UNMAPPED_DIVERT = re.compile(
+    r"\b(?:quarantine|divert)\s+(?:unknown|unmapped|unmatched)(?:\s+codes?)?\b",
+    re.I,
+)
+_DECODE = re.compile(
+    r"^=?\s*decode\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<args>.+?)\s*\)\s*;?\s*$",
+    re.I | re.S,
+)
+_CASE_BLOCK = re.compile(
+    r"^=?\s*case\b(?P<body>.+)\bend\s*;?\s*$",
+    re.I | re.S,
+)
+_SIMPLE_CASE_COL = re.compile(
+    r"^\s*(?P<col>[A-Za-z_][\w.]*)\s+(?P<rest>when\b.+)$",
+    re.I | re.S,
+)
+_WHEN_THEN = re.compile(
+    r"when\s+(?P<cond>.+?)\s+then\s+(?P<then>.+?)(?=\s+when\b|\s+else\b|\s*$)",
+    re.I | re.S,
+)
+_CASE_ELSE = re.compile(r"\belse\s+(?P<else>.+?)\s*$", re.I | re.S)
+_EQ_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s*=\s*(?P<val>.+)$",
+    re.I,
+)
+
+
+def named_rule_ref(text: str) -> str:
+    """Informatica ``%RuleName%`` / ``use RuleName`` / ``RuleName()``."""
+    match = _NAMED_REF.match((text or "").strip())
+    if not match:
+        return ""
+    return (match.group("pct") or match.group("use") or match.group("call") or "").strip()
+
+
+def named_rule_targets(text: str) -> tuple[str, list[str]]:
+    """Informatica mapplet reuse: ``apply EmailClean to email, alt_email``."""
+    match = _APPLY_TO.match((text or "").strip())
+    if not match:
+        return "", []
+    columns: list[str] = []
+    for part in re.split(r"\s*(?:,|\band\b)\s*", match.group("cols") or ""):
+        name = part.strip().strip("\"'")
+        if re.fullmatch(r"[A-Za-z_][\w.]*", name or ""):
+            if name not in columns:
+                columns.append(name)
+    return match.group("name").strip(), columns
+
+
+def unknown_code_policy(text: str) -> dict[str, str]:
+    """G20 / OMOP: unmapped codes are refuse, never identity.
+
+    A declared catch-all or quarantine is recorded. It does not pass the
+    source code through unchanged, and it is never written as a ``*``
+    identity pair on ``code_crosswalk``.
+    """
+    raw = (text or "").strip()
+    if _UNMAPPED_DIVERT.search(raw):
+        return {"action": "divert", "value": ""}
+    default = _UNMAPPED_DEFAULT_PHRASE.search(raw) or _UNMAPPED_DEFAULT.search(raw)
+    if default:
+        value = default.group("value").strip().strip("\"'").rstrip(".")
+        if value and value.lower() not in {"end", "null"}:
+            return {"action": "default", "value": value}
+    return {"action": "refuse", "value": ""}
+
+
+def _split_sql_args(text: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    depth = 0
+    for ch in text or "":
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            continue
+        if ch == "," and depth == 0:
+            parts.append("".join(buf).strip().strip("\"'"))
+            buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        parts.append("".join(buf).strip().strip("\"'"))
+    return [part for part in parts if part]
+
+
+def _case_atom(value: str) -> str:
+    text = (value or "").strip().strip("\"'")
+    if re.fullmatch(r"-?[\d.]+", text) or re.fullmatch(r"[A-Za-z_][\w.]*", text or ""):
+        return text
+    return json_escape(text)
+
+
+def parse_decode(text: str) -> dict[str, Any] | None:
+    """Oracle DECODE(col, k, v, … [, default]) → closed lookup, never identity."""
+    match = _DECODE.match((text or "").strip())
+    if not match:
+        return None
+    args = _split_sql_args(match.group("args"))
+    if len(args) < 2:
+        return None
+    pairs: dict[str, str] = {}
+    unmapped = ""
+    index = 0
+    while index + 1 < len(args):
+        key, value = args[index], args[index + 1]
+        if key.lower() not in {"unmapped", "unknown", "unmatched", "else", "*"}:
+            pairs[key] = value
+        index += 2
+    if index < len(args):
+        unmapped = args[index]
+    if not pairs:
+        return None
+    out: dict[str, Any] = {
+        "kind": "lookup",
+        "plane": "map",
+        "confidence": 0.96,
+        "mapping": pairs,
+    }
+    if unmapped:
+        out["unmapped"] = unmapped
+    return out
+
+
+def parse_sql_case(text: str) -> dict[str, Any] | None:
+    """ANSI CASE: equality branches become G20 pairs; the rest become ``if()``."""
+    match = _CASE_BLOCK.match((text or "").strip())
+    if not match:
+        return None
+    body = match.group("body").strip()
+    simple = _SIMPLE_CASE_COL.match(body)
+    subject = ""
+    rest = body
+    if simple:
+        subject = simple.group("col")
+        rest = simple.group("rest")
+    else_val = ""
+    else_match = _CASE_ELSE.search(rest)
+    work = rest
+    if else_match:
+        else_val = else_match.group("else").strip().strip("\"'")
+        work = rest[: else_match.start()].strip()
+    branches = list(_WHEN_THEN.finditer(work))
+    if not branches:
+        return None
+    pairs: dict[str, str] = {}
+    same_col = subject
+    all_eq = True
+    derived: list[tuple[str, str]] = []
+    for branch in branches:
+        cond = branch.group("cond").strip()
+        then = branch.group("then").strip()
+        if subject:
+            pairs[cond.strip("\"'")] = then.strip("\"'")
+            derived.append((f"{subject} = {_case_atom(cond)}", then))
+            continue
+        eq = _EQ_ATOM.match(cond)
+        if eq:
+            col = eq.group("col")
+            val = eq.group("val").strip().strip("\"'")
+            if not same_col:
+                same_col = col
+            if col.lower() != same_col.lower():
+                all_eq = False
+            pairs[val] = then.strip("\"'")
+            derived.append((cond, then))
+        else:
+            all_eq = False
+            derived.append((cond, then))
+    if (subject or all_eq) and pairs:
+        out: dict[str, Any] = {
+            "kind": "lookup",
+            "plane": "map",
+            "confidence": 0.96,
+            "mapping": pairs,
+        }
+        if else_val:
+            out["unmapped"] = else_val
+        return out
+    expr = _case_atom(else_val) if else_val else "null"
+    for cond, then in reversed(derived):
+        expr = f"if({cond}, {_case_atom(then)}, {expr})"
+    return {
+        "kind": "derive",
+        "plane": "shape",
+        "confidence": 0.9,
+        "expression": expr,
+    }
 
 
 def parse_lookup(text: str) -> dict[str, str]:
@@ -229,7 +450,9 @@ def parse_lookup(text: str) -> dict[str, str]:
     for key, value in _LOOKUP_PAIR.findall(text or ""):
         k = key.strip()
         v = value.strip().rstrip(",")
-        if k and v and k.lower() not in {"if", "when", "default"}:
+        if k and v and k.lower() not in {
+            "if", "when", "default", "unmapped", "unknown", "unmatched", "else", "*",
+        }:
             pairs[k] = v
     if len(pairs) >= 2:
         return pairs
@@ -591,6 +814,15 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return {"kind": "date", "plane": "map", "confidence": 0.94, **flags}
     if _TO_NUMBER.search(raw):
         return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
+
+    decoded = parse_decode(raw)
+    if decoded:
+        decoded.update(flags)
+        return decoded
+    cased = parse_sql_case(raw)
+    if cased:
+        cased.update(flags)
+        return cased
 
     divert = _DIVERT.search(raw)
     if divert:

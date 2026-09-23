@@ -15,13 +15,19 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from .classify import classify_rule
+from .classify import (
+    classify_rule,
+    named_rule_ref,
+    named_rule_targets,
+    unknown_code_policy,
+)
 from .ingest import RuleIngestError, ingest_rule_workbook
 from .match import name_similarity, unique_linguistic_match
 from .normalize import fold, resolve_name, resolve_name_ex, split_qualified
 from .roles import GROUNDED_METHODS, ground_workbook_rows
 
 _MAX_SHAPE_STEPS = 100
+_MAX_MACRO_DEPTH = 8
 
 _KIND_TO_TRANSFORM = {
     "trim": "trim",
@@ -135,6 +141,7 @@ def compile_rule_workbook(
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
     lookup_pairs = _collect_lookup_pairs(rows)
     orphan_notices = _attach_orphan_enumerations(rows, lookup_pairs, src_cols, dst_cols)
+    named_catalog, catalog_conflicts = _collect_named_catalog(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
     seen_edges: dict[tuple[str, str], int] = {}
@@ -152,34 +159,63 @@ def compile_rule_workbook(
         ))
     for notice in orphan_notices:
         compiled.append(_review_notice(notice, notice, source_table, dest_table))
+    for notice in catalog_conflicts:
+        compiled.append(_review_notice(notice, notice, source_table, dest_table))
 
     for raw in rows:
         if str(raw.get("_sheet") or "") in notes_sheets:
             continue
         if _is_pair_only(raw):
             continue
-        item = _compile_row(
-            raw,
-            src_cols=src_cols,
-            dst_cols=dst_cols,
-            source_table=source_table,
-            dest_table=dest_table,
-            lookup_pairs=lookup_pairs,
-        )
-        _mark_edge_conflicts(item, seen_edges, seen_dest)
-        compiled.append(item)
-        for step in _item_shape_steps(item):
-            shape_steps.append(step)
-        join_item = _join_review_item(raw, source_table, dest_table)
-        if join_item:
-            key = (
-                str(join_item.get("source_column") or ""),
-                str(join_item.get("rule_text") or ""),
-                str(join_item["provenance"].get("row") or ""),
+        if _is_catalog_def(raw):
+            continue
+        apply_name, apply_cols = named_rule_targets(str(raw.get("rule") or ""))
+        spoken_src = str(raw.get("source_column") or "").strip()
+        spoken_dst = str(raw.get("dest_column") or "").strip()
+        fanout_rows = [raw]
+        if apply_name and apply_cols and not spoken_src:
+            if spoken_dst and len(apply_cols) > 1:
+                compiled.append(_review_notice(
+                    f"apply {apply_name} to {len(apply_cols)} columns names one destination",
+                    "One destination for many sources is a grain conflict. "
+                    "Name each edge — they were not applied.",
+                    source_table,
+                    dest_table,
+                ))
+                continue
+            fanout_rows = [
+                {
+                    **raw,
+                    "source_column": col,
+                    "dest_column": spoken_dst or col,
+                    "rule": f"%{apply_name}%",
+                }
+                for col in apply_cols
+            ]
+        for work in fanout_rows:
+            item = _compile_row(
+                work,
+                src_cols=src_cols,
+                dst_cols=dst_cols,
+                source_table=source_table,
+                dest_table=dest_table,
+                lookup_pairs=lookup_pairs,
+                named_catalog=named_catalog,
             )
-            if key not in seen_joins:
-                seen_joins.add(key)
-                compiled.append(join_item)
+            _mark_edge_conflicts(item, seen_edges, seen_dest)
+            compiled.append(item)
+            for step in _item_shape_steps(item):
+                shape_steps.append(step)
+            join_item = _join_review_item(work, source_table, dest_table)
+            if join_item:
+                key = (
+                    str(join_item.get("source_column") or ""),
+                    str(join_item.get("rule_text") or ""),
+                    str(join_item["provenance"].get("row") or ""),
+                )
+                if key not in seen_joins:
+                    seen_joins.add(key)
+                    compiled.append(join_item)
 
     for edge, mapping in lookup_pairs.items():
         src, dst = edge
@@ -254,6 +290,7 @@ def compile_rule_workbook(
         "sheet_kinds": sheet_kinds,
         "bind_methods": _bind_method_counts(compiled),
         "lookup_coverage": _lookup_coverage(lookup_pairs),
+        "named_rules": sorted(named_catalog),
         "matcher": "cupid-linguistic+instance",
         "honesty": (
             "Headers are inferred from the uploaded file and the selected "
@@ -264,7 +301,12 @@ def compile_rule_workbook(
             "rules stay in the review queue — they are never applied to a "
             "row. Date masks must name MM/DD vs DD/MM. Orphan enumeration "
             "sheets attach only when the edge is unique. Commentary sheets "
-            "are not executed. Unused destination "
+            "are not executed. Named rules expand like Informatica "
+            "mapplets / dbt macros (cycle and missing stay in review). "
+            "Oracle DECODE and equality CASE compile to code_crosswalk; "
+            "complex CASE becomes if(). Unknown-code policy is "
+            "recorded only — G20 still refuses unmapped codes, never "
+            "silent identity. Unused destination "
             "columns are not written. Unmapped source columns stay on Map "
             "as remap-or-omit. Nothing is silently dropped."
         ),
@@ -291,7 +333,10 @@ def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if cells:
                 prose.append(sum(len(v) for v in cells) / len(cells))
         median_len = sorted(prose)[len(prose) // 2] if prose else 0
-        if has_src + has_dest + has_lookup == 0 and median_len >= 40:
+        has_named = sum(1 for row in items if str(row.get("rule_name") or "").strip())
+        if has_named >= max(1, int(n * 0.6)) and has_src == 0:
+            kind = "catalog"
+        elif has_src + has_dest + has_lookup == 0 and median_len >= 40:
             kind = "notes"
         elif has_lookup >= max(2, int(n * 0.6)) and has_src == 0:
             kind = "lookups"
@@ -334,6 +379,82 @@ def _is_pair_only(raw: dict[str, Any]) -> bool:
         and raw.get("lookup_to")
         and not str(raw.get("rule") or "").strip()
     )
+
+
+def _collect_named_catalog(rows: list[dict[str, Any]]) -> tuple[dict[str, str], list[str]]:
+    """Informatica mapplet / dbt macro catalog: name → closed-form expression.
+
+    A mapping row that also names the rule is both a definition and an
+    application. Conflicting definitions stay in review — last-wins would
+    silently remap every caller.
+    """
+    catalog: dict[str, str] = {}
+    fold_to_name: dict[str, str] = {}
+    conflicts: list[str] = []
+    for raw in rows:
+        name = str(raw.get("rule_name") or "").strip()
+        expr = str(raw.get("rule") or "").strip()
+        if not name or not expr:
+            continue
+        self_ref = named_rule_ref(expr)
+        if self_ref and fold(self_ref) == fold(name):
+            conflicts.append(
+                f"Named rule “{name}” refers to itself — it was not catalogued."
+            )
+            continue
+        key = fold(name)
+        existing_name = fold_to_name.get(key)
+        if existing_name and fold(catalog[existing_name]) != fold(expr):
+            conflicts.append(
+                f"Named rule “{name}” is defined more than once with different "
+                "expressions. The first definition was kept — confirm which to use."
+            )
+            continue
+        if existing_name:
+            continue
+        fold_to_name[key] = name
+        catalog[name] = expr
+    return catalog, conflicts
+
+
+def _is_catalog_def(raw: dict[str, Any]) -> bool:
+    return bool(
+        str(raw.get("rule_name") or "").strip()
+        and str(raw.get("rule") or "").strip()
+        and not str(raw.get("source_column") or "").strip()
+    )
+
+
+def _expand_named_rule(
+    text: str,
+    catalog: dict[str, str],
+    stack: tuple[str, ...] = (),
+) -> tuple[str, str, str]:
+    """dbt-style expand-before-compile. Return (expression, catalog_name, missing)."""
+    ref = named_rule_ref(text)
+    if not ref:
+        return text, "", ""
+    want = fold(ref)
+    found_name = ""
+    found_expr = ""
+    for name, expr in catalog.items():
+        if fold(name) == want:
+            found_name, found_expr = name, expr
+            break
+    if not found_name:
+        return text, "", ref
+    if want in stack:
+        return text, found_name, f"{found_name} (cycle)"
+    if len(stack) >= _MAX_MACRO_DEPTH:
+        return text, found_name, f"{found_name} (too deep)"
+    inner, _inner_name, missing = _expand_named_rule(
+        found_expr,
+        catalog,
+        stack + (want,),
+    )
+    if missing:
+        return text, found_name, missing
+    return inner, found_name, ""
 
 
 def _lookup_coverage(pairs: dict[tuple[str, str], dict[str, str]]) -> list[dict[str, Any]]:
@@ -486,12 +607,15 @@ def _compile_row(
     source_table: str,
     dest_table: str,
     lookup_pairs: dict[tuple[str, str], dict[str, str]] | None = None,
+    named_catalog: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     spoken_src = str(raw.get("source_column") or "").strip()
     spoken_dst = str(raw.get("dest_column") or "").strip()
     table_from_cell, spoken_src_col = split_qualified(spoken_src)
     spoken_src = spoken_src_col or spoken_src
-    rule_text = str(raw.get("rule") or "").strip()
+    spoken_rule = str(raw.get("rule") or "").strip()
+    expanded, catalog_name, missing_name = _expand_named_rule(spoken_rule, named_catalog or {})
+    rule_text = expanded
     classified = classify_rule(rule_text)
     kind = str(classified.get("kind") or "unknown")
 
@@ -534,6 +658,15 @@ def _compile_row(
             "Source date format was not named. Confirm MM/DD vs DD/MM — "
             "a swapped day is silent loss."
         )
+    if missing_name:
+        issues.append(
+            f"Named rule “{missing_name}” is not in the catalog — it was not applied."
+        )
+    policy = unknown_code_policy(spoken_rule)
+    if policy["action"] == "refuse":
+        policy = unknown_code_policy(rule_text)
+    if classified.get("unmapped"):
+        policy = {"action": "default", "value": str(classified.get("unmapped") or "")}
 
     methods = dict(raw.get("_role_methods") or {})
     weak_bind = False
@@ -574,6 +707,12 @@ def _compile_row(
         pairs = dict((lookup_pairs or {}).get((source_column, dest_column)) or {})
     if classified.get("mapping"):
         pairs = {**pairs, **classified["mapping"]}
+    blocked_keys = {"unmapped", "unknown", "unmatched", "else", "*"}
+    pairs = {
+        key: value
+        for key, value in pairs.items()
+        if fold(str(key)) not in blocked_keys and str(key).strip() != "*"
+    }
 
     if kind == "date" and classified.get("format") and source_column and status == "executable":
         shape_step = {
@@ -864,13 +1003,25 @@ def _compile_row(
         if status == "needs_confirmation" and not bind_fail and not weak_bind:
             status = "executable"
 
+    if (kind == "lookup" or pairs) and policy["action"] != "refuse":
+        issues.append(
+            f"Unknown-code policy is {policy['action']}"
+            + (f" → {policy['value']}" if policy["value"] else "")
+            + ". G20 still refuses unmapped population codes — never silent identity."
+        )
+
     return {
         "source_table": str(raw.get("source_table") or table_from_cell or source_table or ""),
         "source_column": source_column or spoken_src,
         "map_source": map_source or source_column or spoken_src,
         "dest_table": str(raw.get("dest_table") or dest_table or ""),
         "dest_column": dest_column or spoken_dst,
-        "rule_text": rule_text,
+        "rule_text": spoken_rule if catalog_name else rule_text,
+        "named_rule": catalog_name or "",
+        "resolved_rule": rule_text if catalog_name else "",
+        "unknown_code_policy": (
+            policy if (kind == "lookup" or pairs) else {"action": "refuse", "value": ""}
+        ),
         "kind": kind,
         "kind_label": _KIND_LABEL.get(kind, kind),
         "plane": "review" if status != "executable" else classified.get("plane") or "map",

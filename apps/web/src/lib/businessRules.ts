@@ -29,6 +29,9 @@ export interface CompiledRule {
   bind_method?: string;
   bind_score?: number;
   date_format?: string;
+  named_rule?: string;
+  resolved_rule?: string;
+  unknown_code_policy?: { action: string; value?: string };
   provenance?: { sheet?: string; row?: number };
 }
 
@@ -58,6 +61,7 @@ export interface RuleCompileReport {
   sheet_kinds?: Array<{ sheet: string; kind: string; rows: number }>;
   bind_methods?: Record<string, number>;
   lookup_coverage?: Array<{ source: string; dest: string; pairs: number }>;
+  named_rules?: string[];
   matcher?: string;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
@@ -75,10 +79,13 @@ function asTransform(value: string | undefined): MappingTransform {
 }
 
 export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
+  const expanded = rule.named_rule && rule.resolved_rule
+    ? `${rule.rule_text} → ${rule.resolved_rule}`
+    : rule.rule_text;
   return {
     kind: rule.kind,
     kindLabel: rule.kind_label,
-    text: rule.rule_text,
+    text: expanded,
     status: rule.status,
     confidence: rule.confidence,
     sheet: rule.provenance?.sheet,
@@ -211,9 +218,12 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const inferred = (report.header_roles || []).some((item) => item.method !== "alias")
     ? " · headers inferred from file + schema"
     : "";
+  const named = report.named_rules?.length
+    ? ` · ${report.named_rules.length} named rule(s)`
+    : "";
   return (
     `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}`
+    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}${named}`
   );
 }
 

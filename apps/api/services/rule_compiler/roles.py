@@ -23,6 +23,7 @@ ROLES = (
     "dest_table",
     "dest_column",
     "rule",
+    "rule_name",
     "join_from",
     "join_on",
     "join_type",
@@ -50,6 +51,7 @@ _HINTS: dict[str, frozenset[str]] = {
     "join_type": frozenset({"jointype"}),
     "lookup_from": frozenset({"old", "fromcode", "inbound", "legacycode"}),
     "lookup_to": frozenset({"new", "tocode", "outbound"}),
+    "rule_name": frozenset({"rulename", "namedrule", "ruleid", "mapplet", "macroname", "reusablerule"}),
 }
 
 # Single-token priors that collide across roles ("to", "from").
@@ -177,6 +179,23 @@ def infer_header_roles(
                 "schema",
                 d,
                 f"“{header}” values match the selected destination schema ({int(d * 100)}%).",
+            )
+
+    unused = [h for h in clean if h not in used]
+    if "rule_name" not in assigned and "rule" in assigned:
+        named = [
+            header for header in unused
+            if ident_scores.get(header, 0.0) >= 0.7
+            and content.get("source_column", {}).get(header, 0.0) < 0.4
+            and content.get("dest_column", {}).get(header, 0.0) < 0.4
+        ]
+        if len(named) == 1:
+            take(
+                "rule_name",
+                named[0],
+                "schema",
+                ident_scores.get(named[0], 0.7),
+                f"“{named[0]}” looks like reusable rule names next to an expression column.",
             )
 
     unused = [h for h in clean if h not in used]

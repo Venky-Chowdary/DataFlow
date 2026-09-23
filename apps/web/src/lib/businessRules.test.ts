@@ -7,6 +7,7 @@ import {
   mergeBusinessRules,
   mergeCompiledShapeSteps,
   ruleReportSummary,
+  ruleToEvidence,
   type RuleCompileReport,
 } from "./businessRules";
 import type { EditableMapping } from "./mapping";
@@ -134,6 +135,52 @@ describe("mergeBusinessRules", () => {
     const fnameRows = next.filter((m) => m.source === "fname");
     assert.equal(fnameRows.length, 2);
     assert.deepEqual(fnameRows.map((m) => m.target).sort(), ["display_name", "first_name"]);
+  });
+
+  it("shows named-rule expansion and never writes an unknown-code default", () => {
+    const named: RuleCompileReport = {
+      ...report,
+      named_rules: ["EmailClean"],
+      rules: [
+        {
+          source_column: "email",
+          dest_column: "email",
+          rule_text: "%EmailClean%",
+          named_rule: "EmailClean",
+          resolved_rule: "lowercase + validate email",
+          kind: "email",
+          kind_label: "Normalize email",
+          plane: "map",
+          confidence: 0.96,
+          transform: "email",
+          status: "executable",
+        },
+        {
+          source_column: "status",
+          dest_column: "status",
+          rule_text: "A → ACTIVE, unmapped → OTHER",
+          kind: "lookup",
+          kind_label: "Code crosswalk",
+          plane: "map",
+          confidence: 0.98,
+          transform: "none",
+          code_crosswalk: { A: "ACTIVE" },
+          unknown_code_policy: { action: "default", value: "OTHER" },
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules([
+      { source: "email", target: "", confidence: 0.4, approved: false, transform: "none" },
+      { source: "status", target: "status", confidence: 0.8, approved: false, transform: "none" },
+    ], named);
+    const email = next.find((m) => m.source === "email")!;
+    assert.match(ruleToEvidence(named.rules[0]).text, /EmailClean/);
+    assert.match(email.businessRule?.text || "", /lowercase/);
+    const status = next.find((m) => m.source === "status")!;
+    assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE" });
+    assert.equal(Object.prototype.hasOwnProperty.call(status.codeCrosswalk || {}, "OTHER"), false);
+    assert.match(ruleReportSummary(named), /1 named rule/);
   });
 
   it("merges compiled shape steps without dropping operator steps", () => {

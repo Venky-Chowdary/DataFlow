@@ -45,6 +45,9 @@ export function BusinessRuleLedger({
           {report.lookup_coverage?.length
             ? ` · ${report.lookup_coverage.reduce((sum, item) => sum + item.pairs, 0)} lookup pair(s)`
             : ""}
+          {report.named_rules?.length
+            ? ` · ${report.named_rules.length} named rule(s)`
+            : ""}
         </p>
       ) : null}
       {report.header_roles?.length ? (
@@ -70,13 +73,22 @@ export function BusinessRuleLedger({
               <span aria-hidden> → </span>
               {rule.dest_column || "—"}
             </span>
-            <span className="df2-rule-line-text" title={rule.rule_text}>
-              {rule.rule_text || "(direct)"}
+            <span className="df2-rule-line-text" title={rule.resolved_rule || rule.rule_text}>
+              {rule.named_rule
+                ? `${rule.rule_text || rule.named_rule} → ${rule.resolved_rule || rule.named_rule}`
+                : (rule.rule_text || "(direct)")}
             </span>
             <span className={`df2-badge df2-badge-xs df2-rule-chip ${lineClass(rule.status)}`}>
               {rule.kind_label}
             </span>
             <span className="df2-rule-line-status">{ruleStatusLabel(rule.status)}</span>
+            {rule.unknown_code_policy?.action && rule.unknown_code_policy.action !== "refuse" ? (
+              <span className="df2-rule-line-issue">
+                unknown codes {rule.unknown_code_policy.action}
+                {rule.unknown_code_policy.value ? ` → ${rule.unknown_code_policy.value}` : ""}
+                {" "}(G20 still refuses)
+              </span>
+            ) : null}
             {rule.issues?.length ? (
               <span className="df2-rule-line-issue">{rule.issues.join(" · ")}</span>
             ) : null}

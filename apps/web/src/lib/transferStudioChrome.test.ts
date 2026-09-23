@@ -238,6 +238,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(ledger, /sheet_kinds/);
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);
+    assert.match(ledger, /named_rules/);
+    assert.match(ledger, /resolved_rule/);
+    assert.match(ledger, /unknown_code_policy/);
+    assert.match(ledger, /G20 still refuses/);
     assert.match(step, /Retry preview/);
     assert.match(step, /disabled=\{!continueState\.enabled\}/);
     // A hung preview of an empty recipe must not lock Continue — only a recipe
