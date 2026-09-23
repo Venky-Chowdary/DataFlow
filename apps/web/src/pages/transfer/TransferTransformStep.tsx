@@ -171,6 +171,9 @@ export function TransferTransformStep({
         destColumns: Object.keys(targetSchema || {}),
         sourceTable,
         destTable,
+        sourceTypes: sourceSchema,
+        destTypes: targetSchema,
+        syncMode,
       });
       onApplyRules(report);
     } catch (err) {
@@ -179,7 +182,7 @@ export function TransferTransformStep({
       setRuleBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
-  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceTable, destTable]);
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, syncMode]);
 
   const toggleGuide = useCallback(() => {
     setShowGuide((open) => {

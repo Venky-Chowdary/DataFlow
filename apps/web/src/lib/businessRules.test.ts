@@ -183,6 +183,33 @@ describe("mergeBusinessRules", () => {
     assert.match(ruleReportSummary(named), /1 named rule/);
   });
 
+  it("applies a named IANA zone instead of a zoneless assume_timezone", () => {
+    const zoned: RuleCompileReport = {
+      ...report,
+      rules: [
+        {
+          source_column: "created_at",
+          dest_column: "created_at",
+          rule_text: "assume timezone America/New_York",
+          kind: "timezone",
+          kind_label: "Timezone (review)",
+          plane: "map",
+          confidence: 0.96,
+          transform: "assume_timezone",
+          engine_transform: "assume_timezone:America/New_York",
+          timezone: "America/New_York",
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules(
+      [{ source: "created_at", target: "created_at", confidence: 0.8, approved: false, transform: "none" }],
+      zoned,
+    );
+    assert.equal(next[0].transform, "assume_timezone");
+    assert.equal(next[0].engineTransform, "assume_timezone:America/New_York");
+  });
+
   it("merges compiled shape steps without dropping operator steps", () => {
     const existing = [{ op: "trim", column: "email", enabled: true }];
     const compiled = [

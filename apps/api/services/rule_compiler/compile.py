@@ -12,6 +12,7 @@ artifacts the same way an operator would have typed them.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
 
@@ -69,9 +70,12 @@ _KIND_TO_TRANSFORM = {
     "divert": "none",
     "join": "none",
     "contract": "none",
-    "timezone": "none",
+    "timezone": "assume_timezone",
     "hash_identity": "none",
     "unnest": "none",
+    "flatten": "none",
+    "keep_columns": "none",
+    "drop_column": "omit",
 }
 
 _KIND_LABEL = {
@@ -116,14 +120,137 @@ _KIND_LABEL = {
     "divert": "Quarantine rows",
     "join": "Join (review)",
     "contract": "Validate contract",
-    "timezone": "Timezone (review)",
+    "timezone": "Assume timezone",
     "hash_identity": "Hash identity",
     "unnest": "Unnest JSON",
+    "flatten": "Flatten JSON",
+    "keep_columns": "Keep columns",
+    "drop_column": "Drop column",
     "unknown": "Needs review",
 }
 
-_NO_SOURCE_OK = frozenset({"omit", "constant", "join", "filter", "divert", "contract", "hash_identity"})
-_NO_DEST_OK = frozenset({"omit", "join", "filter", "divert"})
+_NO_SOURCE_OK = frozenset({
+    "omit", "constant", "join", "filter", "divert", "contract",
+    "hash_identity", "keep_columns", "drop_column",
+})
+_NO_DEST_OK = frozenset({
+    "omit", "join", "filter", "divert", "keep_columns", "drop_column",
+})
+_PRELOAD_REFUSED_SYNCS = frozenset({"cdc", "scd2", "full_refresh_mirror", "mirror"})
+_KIND_FAMILY = {
+    "date": "temporal",
+    "time": "temporal",
+    "timezone": "temporal",
+    "cast_integer": "numeric",
+    "cast_number": "numeric",
+    "currency": "numeric",
+    "percentage": "numeric",
+    "round": "numeric",
+    "truncate": "numeric",
+    "absolute": "numeric",
+    "clamp": "numeric",
+    "cast_boolean": "boolean",
+    "json": "json",
+    "unnest": "json",
+    "flatten": "json",
+    "binary": "binary",
+}
+_INCOMPATIBLE_FAMILIES = frozenset({
+    ("temporal", "numeric"),
+    ("temporal", "boolean"),
+    ("numeric", "temporal"),
+    ("boolean", "temporal"),
+    ("json", "numeric"),
+    ("json", "temporal"),
+    ("binary", "temporal"),
+    ("binary", "numeric"),
+})
+_PRECISION = re.compile(
+    r"(?P<base>decimal|numeric|number|varchar|character\s+varying|nvarchar|char)"
+    r"\s*\(\s*(?P<p>\d+)(?:\s*,\s*(?P<s>\d+))?\s*\)",
+    re.I,
+)
+
+
+def _type_family(db_type: str) -> str:
+    token = (db_type or "").strip().lower()
+    if not token:
+        return ""
+    if any(part in token for part in ("bool", "bit")):
+        return "boolean"
+    if any(part in token for part in ("timestamp", "datetime", "date", "time")):
+        return "temporal"
+    if any(part in token for part in ("int", "decimal", "numeric", "float", "double", "money", "number")):
+        return "numeric"
+    if "json" in token:
+        return "json"
+    if any(part in token for part in ("binary", "bytea", "blob", "varbinary")):
+        return "binary"
+    return "text"
+
+
+def _type_conflict(kind: str, dest_type: str, source_type: str, dest_name: str) -> str:
+    """COMA / iMAP constraint: refuse a typed assignment that would lose meaning."""
+    dest_fam = _type_family(dest_type)
+    rule_fam = _KIND_FAMILY.get(kind, "")
+    if rule_fam and dest_fam and (rule_fam, dest_fam) in _INCOMPATIBLE_FAMILIES:
+        return (
+            f"Rule is {rule_fam} but destination “{dest_name}” is {dest_type}. "
+            "Confirm a cast — a guessed coercion is silent loss."
+        )
+    src_fam = _type_family(source_type)
+    if kind in {"direct", "lookup"} and src_fam and dest_fam and (src_fam, dest_fam) in _INCOMPATIBLE_FAMILIES:
+        return (
+            f"Source is {source_type} and destination “{dest_name}” is {dest_type}. "
+            "Direct/lookup will not invent a cast."
+        )
+    return ""
+
+
+def _parse_precision(db_type: str) -> dict[str, Any] | None:
+    """Cupid/COMA constraint matcher: DECIMAL(p,s) / VARCHAR(n)."""
+    match = _PRECISION.search(db_type or "")
+    if not match:
+        return None
+    base = re.sub(r"\s+", " ", match.group("base").lower())
+    family = "text" if base in {"varchar", "character varying", "nvarchar", "char"} else "numeric"
+    scale = match.group("s")
+    return {
+        "family": family,
+        "p": int(match.group("p")),
+        "s": int(scale) if scale is not None else None,
+    }
+
+
+def _precision_conflict(kind: str, dest_type: str, source_type: str, dest_name: str) -> str:
+    """Overflow / truncation named on the dest type is review, not a guessed clip."""
+    dest = _parse_precision(dest_type)
+    src = _parse_precision(source_type)
+    if dest and src and dest["family"] == src["family"] == "numeric":
+        dest_s = dest["s"] if dest["s"] is not None else 0
+        src_s = src["s"] if src["s"] is not None else 0
+        dest_int = dest["p"] - dest_s
+        src_int = src["p"] - src_s
+        if dest_int < src_int or dest_s < src_s:
+            return (
+                f"Destination “{dest_name}” is {dest_type} and source is {source_type}. "
+                "A narrower precision/scale would clip digits — confirm a round or this is silent loss."
+            )
+    if dest and src and dest["family"] == src["family"] == "text" and dest["p"] < src["p"]:
+        return (
+            f"Destination “{dest_name}” is {dest_type} and source is {source_type}. "
+            "A shorter VARCHAR truncates — confirm length or this is silent loss."
+        )
+    if dest and dest["family"] == "text" and dest["p"] < 64 and kind in {"concat", "prefix", "suffix"}:
+        return (
+            f"Concat/prefix into “{dest_name}” ({dest_type}) may overflow the named length. "
+            "Confirm width — a clipped string is silent loss."
+        )
+    return ""
+
+
+def _preload_refused(sync_mode: str) -> bool:
+    return (sync_mode or "").strip().lower() in _PRELOAD_REFUSED_SYNCS
 
 
 def compile_rule_workbook(
@@ -134,12 +261,18 @@ def compile_rule_workbook(
     dest_columns: list[str] | None = None,
     source_table: str = "",
     dest_table: str = "",
+    source_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None = None,
+    sync_mode: str = "",
 ) -> dict[str, Any]:
     """Ingest + classify + bind. The report is the only public artifact."""
     ingested = ingest_rule_workbook(filename, payload)
     rows = ingested.rows
     src_cols = [c for c in (source_columns or []) if c]
     dst_cols = [c for c in (dest_columns or []) if c]
+    src_types = {str(k): str(v) for k, v in (source_types or {}).items() if k}
+    dst_types = {str(k): str(v) for k, v in (dest_types or {}).items() if k}
+    sync = (sync_mode or "").strip()
     header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
     sheet_kinds = _classify_sheets(rows)
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
@@ -205,7 +338,10 @@ def compile_rule_workbook(
                 dest_table=dest_table,
                 lookup_pairs=lookup_pairs,
                 named_catalog=named_catalog,
+                source_types=src_types,
+                dest_types=dst_types,
             )
+            _refuse_preload_on_history(item, sync)
             _mark_edge_conflicts(item, seen_edges, seen_dest)
             compiled.append(item)
             for step in _item_shape_steps(item):
@@ -248,7 +384,10 @@ def compile_rule_workbook(
             source_table=source_table,
             dest_table=dest_table,
             lookup_pairs=lookup_pairs,
+            source_types=src_types,
+            dest_types=dst_types,
         )
+        _refuse_preload_on_history(synthetic, sync)
         compiled.append(synthetic)
 
     overflow_steps: list[dict[str, Any]] = []
@@ -295,7 +434,8 @@ def compile_rule_workbook(
         "bind_methods": _bind_method_counts(compiled),
         "lookup_coverage": _lookup_coverage(lookup_pairs),
         "named_rules": sorted(named_catalog),
-        "matcher": "cupid-linguistic+instance",
+        "matcher": "cupid-linguistic+instance+type+constraint",
+        "sync_mode": sync,
         "honesty": (
             "Headers are inferred from the uploaded file and the selected "
             "schemas — they are not a fixed column list. Spoken column names "
@@ -312,6 +452,13 @@ def compile_rule_workbook(
             "correspondences (A, I, P → ACTIVE) expand every source code. "
             "Blank/empty is default_if_null, never a G20 code. "
             "hash identity is Gate-8 alignment, not PII hash. "
+            "COMA type constraints refuse temporal↔numeric assignments. "
+            "Cupid constraint matching refuses DECIMAL/VARCHAR overflow. "
+            "Row predicates compile only when every AND/OR atom is closed; "
+            "a leftover tail stays in review. Named IANA zones become "
+            "assume_timezone; unnamed zones stay in review. "
+            "CDC / SCD2 / mirror refuse pre-load shape — history was not "
+            "written by this recipe. Map-plane pairs still compile. "
             "Unknown-code policy is "
             "recorded only — G20 still refuses unmapped codes, never "
             "silent identity. Unused destination "
@@ -585,6 +732,26 @@ def _item_shape_steps(item: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+def _refuse_preload_on_history(item: dict[str, Any], sync_mode: str) -> None:
+    """CDC / SCD2 / mirror: dest history was not written by this recipe."""
+    if not _preload_refused(sync_mode):
+        return
+    if not item.get("shape_step") and not item.get("shape_steps"):
+        return
+    item["status"] = "needs_confirmation"
+    item["shape_step"] = None
+    item["shape_steps"] = []
+    item["plane"] = "review"
+    item["issues"] = [
+        *(item.get("issues") or []),
+        (
+            f"Transform (pre-load) is not applied on the {sync_mode} route: "
+            "it merges each row against history already stored on the destination, "
+            "which was not written by this recipe."
+        ),
+    ]
+
+
 def _review_notice(text: str, issue: str, source_table: str, dest_table: str) -> dict[str, Any]:
     return {
         "source_table": source_table,
@@ -616,6 +783,8 @@ def _compile_row(
     dest_table: str,
     lookup_pairs: dict[tuple[str, str], dict[str, str]] | None = None,
     named_catalog: dict[str, str] | None = None,
+    source_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     spoken_src = str(raw.get("source_column") or "").strip()
     spoken_dst = str(raw.get("dest_column") or "").strip()
@@ -670,6 +839,14 @@ def _compile_row(
         issues.append(
             f"Named rule “{missing_name}” is not in the catalog — it was not applied."
         )
+    dest_type = (dest_types or {}).get(dest_column or spoken_dst, "")
+    source_type = (source_types or {}).get(source_column or spoken_src, "")
+    type_issue = _type_conflict(kind, dest_type, source_type, dest_column or spoken_dst)
+    if type_issue:
+        issues.append(type_issue)
+    prec_issue = _precision_conflict(kind, dest_type, source_type, dest_column or spoken_dst)
+    if prec_issue:
+        issues.append(prec_issue)
     policy = unknown_code_policy(spoken_rule)
     if policy["action"] == "refuse":
         policy = unknown_code_policy(rule_text)
@@ -690,7 +867,7 @@ def _compile_row(
                 "match — confirm the binding."
             )
 
-    review_kinds = {"unknown", "join", "contract", "timezone"}
+    review_kinds = {"unknown", "join", "contract"}
     bind_fail = any(
         i.startswith("Source column")
         or i.startswith("Destination column")
@@ -702,8 +879,9 @@ def _compile_row(
     low_confidence_reason = bool(
         classified.get("reason") and float(classified.get("confidence") or 0) < 0.9
     )
+    unnamed_zone = kind == "timezone" and not classified.get("zone")
     status = "executable"
-    if kind in review_kinds or bind_fail or low_confidence_reason:
+    if kind in review_kinds or bind_fail or low_confidence_reason or type_issue or prec_issue or unnamed_zone:
         status = "needs_confirmation"
 
     transform = _KIND_TO_TRANSFORM.get(kind, "none")
@@ -1011,6 +1189,56 @@ def _compile_row(
         )
         if dest_column:
             map_source = dest_column
+    elif kind == "flatten" and source_column and status == "executable":
+        shape_step = {
+            "op": "flatten_json",
+            "column": source_column,
+            "enabled": True,
+            "on_error": "refuse",
+            "label": f"{source_column} flatten",
+            "options": {"depth": "top"},
+        }
+    elif kind == "keep_columns" and status == "executable":
+        columns = [str(c) for c in (classified.get("columns") or []) if c]
+        bound = []
+        for name in columns:
+            resolved = resolve_name(name, src_cols) if src_cols else name
+            if src_cols and not resolved:
+                issues.append(f"Keep column “{name}” is not on the selected source.")
+                status = "needs_confirmation"
+                continue
+            if resolved and resolved not in bound:
+                bound.append(resolved)
+        if not bound:
+            if status == "executable":
+                issues.append("Keep columns needs at least one named source column.")
+                status = "needs_confirmation"
+        else:
+            shape_step = {
+                "op": "keep_columns",
+                "column": "",
+                "enabled": True,
+                "on_error": "refuse",
+                "label": "keep columns",
+                "options": {"columns": bound},
+            }
+    elif kind == "drop_column" and status == "executable":
+        spoken = str(classified.get("column") or source_column or spoken_src)
+        resolved = resolve_name(spoken, src_cols) if src_cols and spoken else spoken
+        if src_cols and spoken and not resolved:
+            issues.append(f"Drop column “{spoken}” is not on the selected source.")
+            status = "needs_confirmation"
+        elif resolved:
+            shape_step = {
+                "op": "drop_column",
+                "column": resolved,
+                "enabled": True,
+                "on_error": "refuse",
+                "label": f"drop {resolved}",
+                "options": {},
+            }
+            if dest_column or resolved:
+                transform = "omit"
 
     if status == "executable" and source_column:
         for extra in classified.get("extras") or []:
@@ -1059,7 +1287,14 @@ def _compile_row(
         kind = "lookup"
         transform = "none"
         issues = [item for item in issues if "lookup named" not in item]
-        if status == "needs_confirmation" and not bind_fail and not weak_bind:
+        if (
+            status == "needs_confirmation"
+            and not bind_fail
+            and not weak_bind
+            and not type_issue
+            and not prec_issue
+            and not classified.get("case_insensitive")
+        ):
             status = "executable"
 
     if (kind == "lookup" or pairs) and policy["action"] != "refuse":
@@ -1086,6 +1321,12 @@ def _compile_row(
         "plane": "review" if status != "executable" else classified.get("plane") or "map",
         "confidence": float(classified.get("confidence") or 0),
         "transform": transform,
+        "engine_transform": (
+            f"assume_timezone:{classified.get('zone')}"
+            if kind == "timezone" and classified.get("zone")
+            else ""
+        ),
+        "timezone": classified.get("zone") or "",
         "code_crosswalk": pairs or None,
         "date_format": classified.get("format") or "",
         "shape_step": shape_step if status == "executable" else None,

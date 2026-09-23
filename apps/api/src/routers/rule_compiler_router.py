@@ -12,6 +12,19 @@ from services.rule_compiler import RuleIngestError, compile_rule_workbook
 router = APIRouter(prefix="/transfer/rules", tags=["Transfer rules"])
 
 
+def _json_object(raw: str) -> dict[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items() if str(k).strip()}
+    return {}
+
+
 def _json_list(raw: str) -> list[str]:
     text = (raw or "").strip()
     if not text:
@@ -32,6 +45,9 @@ async def import_rule_workbook(
     dest_columns: str = Form(""),
     source_table: str = Form(""),
     dest_table: str = Form(""),
+    source_types: str = Form(""),
+    dest_types: str = Form(""),
+    sync_mode: str = Form(""),
 ) -> dict[str, Any]:
     """Read Excel / CSV / JSON rules. Does not write a destination."""
     payload = await file.read()
@@ -44,6 +60,9 @@ async def import_rule_workbook(
             dest_columns=_json_list(dest_columns),
             source_table=source_table,
             dest_table=dest_table,
+            source_types=_json_object(source_types),
+            dest_types=_json_object(dest_types),
+            sync_mode=sync_mode,
         )
     except RuleIngestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -231,6 +231,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(step, /isTransportTimeout/);
     assert.match(step, /Upload rules/);
     assert.match(step, /importBusinessRules/);
+    assert.match(step, /destTypes/);
+    assert.match(step, /syncMode/);
     assert.match(step, /Headers are\s+inferred from the file/);
     const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
     assert.match(ledger, /header_roles/);

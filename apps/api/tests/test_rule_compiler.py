@@ -548,7 +548,7 @@ def test_linguistic_and_sql_compile_onto_engines():
     assert by_src["status"]["shape_step"]["op"] == "default_if_null"
     assert by_src["first_name"]["transform"] == "upper"
     assert any(s["op"] == "trim" for s in report["shape_steps"])
-    assert report["matcher"] == "cupid-linguistic+instance"
+    assert report["matcher"] == "cupid-linguistic+instance+type+constraint"
     assert report["bind_methods"].get("linguistic", 0) >= 1
 
 
@@ -964,7 +964,7 @@ def test_informatica_iif_nvl2_and_update_strategy():
 def test_in_between_filters_and_regex_and_hash_identity():
     keep_in = classify_rule("keep if status in (A, I, P)")
     assert keep_in["kind"] == "filter"
-    assert "status = \"A\"" in keep_in["condition"] or "status = A" in keep_in["condition"]
+    assert 'status = "A"' in keep_in["condition"]
     assert keep_in["keep"] is True
     exclude_in = classify_rule("exclude rows where status in (X, Y)")
     assert exclude_in["kind"] == "filter"
@@ -1013,3 +1013,180 @@ def test_in_between_filters_and_regex_and_hash_identity():
     assert any("expanded image" in issue for issue in unnest["issues"])
     replace = next(r for r in report["rules"] if r["kind"] == "replace")
     assert replace["shape_step"]["options"].get("regex") is True
+
+
+def test_like_is_null_not_in_and_keep_drop_columns():
+    like = classify_rule("keep if name like 'Acme%'")
+    assert like["kind"] == "filter"
+    assert 'starts_with(name, "Acme")' in like["condition"]
+    contains = classify_rule("keep if email like '%@corp.com'")
+    assert "ends_with(email" in contains["condition"]
+    mid = classify_rule("keep if note like '%urgent%'")
+    assert "contains(note" in mid["condition"]
+    wild = classify_rule("keep if code like 'A_B'")
+    assert wild["kind"] == "unknown"
+    nulls = classify_rule("keep if status is null")
+    assert nulls["condition"] == "is_null(status)"
+    present = classify_rule("exclude rows where email is not null")
+    assert present["kind"] == "filter"
+    assert present["keep"] is False
+    assert "is_not_null(email)" in present["condition"]
+    not_in = classify_rule("keep if status not in (X, Y)")
+    assert not_in["kind"] == "filter"
+    assert not_in["condition"].startswith("not ")
+    keep = classify_rule("keep only columns fname, lname, email")
+    assert keep["kind"] == "keep_columns"
+    assert keep["columns"] == ["fname", "lname", "email"]
+    drop = classify_rule("drop column notes")
+    assert drop["kind"] == "drop_column"
+    assert classify_rule("omit")["kind"] == "omit"
+    assert classify_rule("flatten json")["kind"] == "flatten"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "name,name,\"keep if name like 'Acme%'\"\n"
+        "status,status,keep if status is not null\n"
+        ",,keep only columns fname, lname\n"
+        "notes,notes,drop column notes\n"
+        "payload,payload,flatten json\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "sql-pred.csv",
+        csv,
+        source_columns=["name", "status", "fname", "lname", "notes", "payload"],
+        dest_columns=["name", "status", "notes", "payload"],
+    )
+    ops = {s["op"] for s in report["shape_steps"]}
+    assert "filter_rows" in ops
+    assert "keep_columns" in ops
+    assert "drop_column" in ops
+    assert "flatten_json" in ops
+    flatten = next(s for s in report["shape_steps"] if s["op"] == "flatten_json")
+    assert flatten["options"]["depth"] == "top"
+    notes = next(r for r in report["rules"] if r.get("source_column") == "notes")
+    assert notes["transform"] == "omit"
+
+
+def test_coma_type_constraint_and_cdc_refuse_preload():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "dob,age,MM/DD/YYYY → YYYY-MM-DD\n"
+        "fname,first_name,Direct\n"
+        "salary,annual,salary × 12\n"
+        "status,status,\"A → ACTIVE, I → INACTIVE, case insensitive\"\n"
+    ).encode()
+    typed = compile_rule_workbook(
+        "types.csv",
+        csv,
+        source_columns=["dob", "fname", "salary", "status"],
+        dest_columns=["age", "first_name", "annual", "status"],
+        dest_types={"age": "INTEGER", "first_name": "TEXT", "annual": "NUMERIC", "status": "TEXT"},
+        source_types={"dob": "DATE", "fname": "TEXT", "salary": "NUMERIC", "status": "TEXT"},
+    )
+    by = {r["source_column"]: r for r in typed["rules"] if r.get("source_column")}
+    assert by["dob"]["status"] == "needs_confirmation"
+    assert any("temporal" in issue for issue in by["dob"]["issues"])
+    assert by["fname"]["status"] == "executable"
+    assert by["salary"]["status"] == "executable"
+    assert by["status"]["status"] == "needs_confirmation"
+    assert any("case-insensitive" in issue.lower() or "exactly" in issue.lower() for issue in by["status"]["issues"])
+    assert by["status"]["code_crosswalk"] == {"A": "ACTIVE", "I": "INACTIVE"}
+
+    cdc = compile_rule_workbook(
+        "cdc.csv",
+        (
+            "Source Column,Destination Column,Rule\n"
+            "salary,annual,salary × 12\n"
+            "fname,first_name,Direct\n"
+        ).encode(),
+        source_columns=["salary", "fname"],
+        dest_columns=["annual", "first_name"],
+        sync_mode="cdc",
+    )
+    by = {r["source_column"]: r for r in cdc["rules"] if r.get("source_column")}
+    assert by["salary"]["status"] == "needs_confirmation"
+    assert by["salary"]["shape_step"] is None
+    assert any("cdc" in issue.lower() for issue in by["salary"]["issues"])
+    assert by["fname"]["status"] == "executable"
+    assert cdc["shape_steps"] == []
+    assert cdc["sync_mode"] == "cdc"
+    assert cdc["matcher"] == "cupid-linguistic+instance+type+constraint"
+
+
+def test_compound_predicate_is_fail_closed_not_a_half_filter():
+    both = classify_rule("keep if status = A and amount > 0")
+    assert both["kind"] == "filter"
+    assert "status = \"A\"" in both["condition"]
+    assert "amount > 0" in both["condition"]
+    assert "and" in both["condition"]
+    leftover = classify_rule("keep if status in (A, I) and use the legacy flag")
+    assert leftover["kind"] == "unknown"
+    assert leftover["plane"] == "review"
+    mixed = classify_rule("keep if status = A and amount > 0 or flag = 1")
+    assert mixed["kind"] == "unknown"
+    grouped = classify_rule("keep if (status = A or status = I) and amount > 0")
+    assert grouped["kind"] == "filter"
+    assert "or" in grouped["condition"]
+    assert "amount > 0" in grouped["condition"]
+    starts = classify_rule("keep if name starts with Acme")
+    assert starts["kind"] == "filter"
+    assert 'starts_with(name, "Acme")' in starts["condition"]
+    contains = classify_rule("exclude rows where email contains test")
+    assert contains["kind"] == "filter"
+    assert contains["keep"] is False
+    assert "contains(email" in contains["condition"]
+    empty = classify_rule("keep if notes is empty")
+    assert empty["condition"] == "is_null(notes)"
+    ilike = classify_rule("keep if name ilike 'Acme%'")
+    assert 'starts_with(lower(name), "acme")' in ilike["condition"]
+    unquoted = classify_rule("keep if name like Acme%")
+    assert 'starts_with(name, "Acme")' in unquoted["condition"]
+    assert classify_rule("keep distinct rows")["kind"] == "unknown"
+    assert classify_rule("pivot country into columns")["kind"] == "unknown"
+    assert classify_rule("Y/N flag")["kind"] == "unknown"
+    blank = classify_rule("treat empty as null")
+    assert blank["kind"] == "null_if"
+    assert blank["values"] == [""]
+    coal = classify_rule("COALESCE(status, flag, 'UNK')")
+    assert coal["kind"] == "derive"
+    assert "coalesce(" in coal["expression"]
+    assert '"UNK"' in coal["expression"]
+    two = classify_rule("NVL(status, 'X')")
+    assert two["kind"] == "default"
+    assert two["value"] == "X"
+    zone = classify_rule("assume timezone America/New_York")
+    assert zone["kind"] == "timezone"
+    assert zone["zone"] == "America/New_York"
+    assert classify_rule("assume timezone")["plane"] == "review"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"keep if status = A and amount > 0\"\n"
+        "created_at,created_at,assume timezone America/New_York\n"
+        "code,code,COALESCE(code, alt_code, 'UNK')\n"
+        "notes,notes,treat empty as null\n"
+        "pay,pay,Direct\n"
+        "name,name,concat first last\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "pred-constraint.csv",
+        csv,
+        source_columns=["status", "amount", "created_at", "code", "alt_code", "notes", "pay", "name"],
+        dest_columns=["status", "created_at", "code", "notes", "pay", "name"],
+        source_types={"pay": "DECIMAL(18,6)", "name": "VARCHAR(80)"},
+        dest_types={"pay": "DECIMAL(10,2)", "name": "VARCHAR(12)", "created_at": "TIMESTAMP"},
+    )
+    by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    filt = next(s for s in report["shape_steps"] if s["op"] == "filter_rows")
+    assert "status = \"A\"" in filt["options"]["condition"]
+    assert "amount > 0" in filt["options"]["condition"]
+    assert by["created_at"]["status"] == "executable"
+    assert by["created_at"]["transform"] == "assume_timezone"
+    assert by["created_at"]["timezone"] == "America/New_York"
+    assert by["created_at"]["engine_transform"] == "assume_timezone:America/New_York"
+    assert by["code"]["kind"] == "derive"
+    assert by["notes"]["kind"] == "null_if"
+    assert by["pay"]["status"] == "needs_confirmation"
+    assert any("precision" in issue.lower() or "scale" in issue.lower() for issue in by["pay"]["issues"])
+    assert by["name"]["status"] == "needs_confirmation"
+    assert any("varchar" in issue.lower() or "length" in issue.lower() for issue in by["name"]["issues"])

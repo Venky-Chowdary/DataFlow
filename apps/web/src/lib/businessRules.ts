@@ -7,7 +7,7 @@
  */
 
 import type { EditableMapping, MappingBusinessRule, MappingTransform } from "./mapping";
-import { applyTransformChange } from "./mapping";
+import { applyDeclaredSourceZone, applyTransformChange } from "./mapping";
 import type { ShapeStepWire } from "./shape";
 
 export interface CompiledRule {
@@ -22,6 +22,8 @@ export interface CompiledRule {
   plane: string;
   confidence: number;
   transform?: string;
+  engine_transform?: string;
+  timezone?: string;
   code_crosswalk?: Record<string, string> | null;
   shape_step?: ShapeStepWire | null;
   status: string;
@@ -63,6 +65,7 @@ export interface RuleCompileReport {
   lookup_coverage?: Array<{ source: string; dest: string; pairs: number }>;
   named_rules?: string[];
   matcher?: string;
+  sync_mode?: string;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -125,7 +128,13 @@ function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping
   if (rule.status === "executable" && rule.code_crosswalk) {
     next = { ...next, codeCrosswalk: { ...rule.code_crosswalk } };
   }
-  if (rule.status === "executable" && transform && transform !== "none") {
+  const namedZone = (rule.timezone || "").trim()
+    || ((rule.engine_transform || "").toLowerCase().startsWith("assume_timezone:")
+      ? String(rule.engine_transform).slice("assume_timezone:".length).trim()
+      : "");
+  if (rule.status === "executable" && namedZone) {
+    next = applyDeclaredSourceZone(next, namedZone);
+  } else if (rule.status === "executable" && transform && transform !== "none") {
     next = applyTransformChange(next, transform);
   }
   if (rule.status === "executable" && rule.confidence >= 0.9 && next.target) {

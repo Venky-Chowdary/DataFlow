@@ -21,7 +21,7 @@ _DIRECT = re.compile(
 )
 _OMIT = re.compile(
     r"\b(?:omit|do\s+not\s+(?:map|load|transfer|send)|"
-    r"(?:skip|drop|exclude|ignore)(?!\s+rows?\b))\b",
+    r"(?:skip|drop|exclude|ignore)(?!\s+(?:rows?|columns?|fields?)\b))\b",
     re.I,
 )
 _LOWER = re.compile(r"\b(?:lower(?:case)?|lcase|tolower)\b", re.I)
@@ -292,6 +292,46 @@ _EXCLUDE_BETWEEN = re.compile(
     r"(?P<col>[A-Za-z_][\w.]*)\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)",
     re.I,
 )
+_LIKE = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?like\s+['\"](?P<pat>.+?)['\"]",
+    re.I,
+)
+_EXCLUDE_LIKE = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?like\s+['\"](?P<pat>.+?)['\"]",
+    re.I,
+)
+_ISNULL_FILTER = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+is\s+(?P<not>not\s+)?null\b",
+    re.I,
+)
+_EXCLUDE_NULL = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+is\s+(?P<not>not\s+)?null\b",
+    re.I,
+)
+_NOT_IN = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+not\s+in\s*\((?P<vals>.+?)\)",
+    re.I,
+)
+_EXCLUDE_NOT_IN = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+not\s+in\s*\((?P<vals>.+?)\)",
+    re.I,
+)
+_KEEP_COLS = re.compile(
+    r"\bkeep\s+(?:only\s+)?(?:columns?|fields?)\s+(?P<cols>.+)$",
+    re.I,
+)
+_DROP_COL = re.compile(
+    r"\b(?:drop|remove)\s+(?:column|field)s?\s+(?P<col>[A-Za-z_][\w.]*)",
+    re.I,
+)
+_FLATTEN = re.compile(r"\bflatten\s+json\b", re.I)
+_CASE_INSENSITIVE = re.compile(r"\bcase[\s-]?insensitive\b", re.I)
 _IIF = re.compile(r"^=?\s*iif\s*\(", re.I)
 _NVL2 = re.compile(
     r"^=?\s*nvl2\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<present>.+?)\s*,\s*(?P<missing>.+?)\s*\)\s*$",
@@ -367,7 +407,7 @@ def unknown_code_policy(text: str) -> dict[str, str]:
     return {"action": "refuse", "value": ""}
 
 
-def _split_sql_args(text: str) -> list[str]:
+def _split_sql_args(text: str, *, strip_quotes: bool = True) -> list[str]:
     parts: list[str] = []
     buf: list[str] = []
     quote = ""
@@ -391,17 +431,29 @@ def _split_sql_args(text: str) -> list[str]:
             buf.append(ch)
             continue
         if ch == "," and depth == 0:
-            parts.append("".join(buf).strip().strip("\"'"))
+            token = "".join(buf).strip()
+            parts.append(token.strip("\"'") if strip_quotes else token)
             buf = []
             continue
         buf.append(ch)
     if buf:
-        parts.append("".join(buf).strip().strip("\"'"))
+        token = "".join(buf).strip()
+        parts.append(token.strip("\"'") if strip_quotes else token)
     return [part for part in parts if part]
 
 
+def _is_column_token(value: str) -> bool:
+    text = (value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z_][\w.]*", text or ""))
+
+
 def _case_atom(value: str) -> str:
-    text = (value or "").strip().strip("\"'")
+    raw = (value or "").strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {"'", '"'}:
+        return json_escape(raw[1:-1])
+    text = raw.strip("\"'")
     if re.fullmatch(r"-?[\d.]+", text) or re.fullmatch(r"[A-Za-z_][\w.]*", text or ""):
         return text
     return json_escape(text)
@@ -518,8 +570,7 @@ def parse_lookup_spec(text: str) -> tuple[dict[str, str], str]:
     clauses: list[tuple[str, str]] = []
     if matches:
         clauses = [(m.group("keys"), m.group("val")) for m in matches]
-    else:
-        clauses = list(_LOOKUP_PAIR.findall(raw))
+    clauses.extend(_LOOKUP_PAIR.findall(raw))
     for keys_raw, value_raw in clauses:
         value = value_raw.strip().rstrip(",")
         for key in _split_lookup_keys(keys_raw):
@@ -575,11 +626,432 @@ def _rewrite_informatica_pred(text: str) -> str:
     return out
 
 
+def _like_condition(
+    col: str,
+    pattern: str,
+    *,
+    negated: bool = False,
+    insensitive: bool = False,
+) -> str:
+    """SQL LIKE with a single ``%`` prefix/suffix → starts_with / ends_with / contains.
+
+    ``_`` or multiple ``%`` stay unbound — a guessed regex is silent loss.
+    ILIKE is ``lower(col)`` against a lowercased literal — shape compare is
+    otherwise case-sensitive (G20 / COMA honesty).
+    """
+    pat = (pattern or "").strip()
+    if not col or not pat or "_" in pat:
+        return ""
+    if pat.count("%") > 2:
+        return ""
+    subject = f"lower({col})" if insensitive else col
+    needle = pat.lower() if insensitive else pat
+    if needle.startswith("%") and needle.endswith("%") and "%" not in needle[1:-1]:
+        pred = f"contains({subject}, {json_escape(needle[1:-1])})"
+    elif needle.endswith("%") and "%" not in needle[:-1]:
+        pred = f"starts_with({subject}, {json_escape(needle[:-1])})"
+    elif needle.startswith("%") and "%" not in needle[1:]:
+        pred = f"ends_with({subject}, {json_escape(needle[1:])})"
+    elif "%" not in needle:
+        pred = f"{subject} = {json_escape(needle)}"
+    else:
+        return ""
+    return f"not {pred}" if negated else pred
+
+
 def _in_condition(col: str, values: str) -> str:
-    atoms = [_case_atom(part) for part in _split_sql_args(values) if part.strip()]
+    atoms = []
+    for part in _split_sql_args(values):
+        token = part.strip()
+        if not token:
+            continue
+        atoms.append(token if re.fullmatch(r"-?[\d.]+", token) else json_escape(token))
     if not atoms:
         return ""
     return "(" + " or ".join(f"{col} = {atom}" for atom in atoms) + ")"
+
+
+def _like_pattern_token(raw: str) -> str:
+    """Quoted LIKE pattern, or a single unquoted token. ``_`` stays unbound."""
+    text = (raw or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    if re.fullmatch(r"[A-Za-z0-9.%@+\-]+", text or ""):
+        return text
+    return ""
+
+
+_ROW_HEAD = re.compile(
+    r"^(?P<head>"
+    r"(?:divert|quarantine)(?:\s+rows?)?|"
+    r"(?:exclude|drop|omit)\s+rows?|"
+    r"(?:keep|only|filter)(?:\s+rows?)?|"
+    r"where"
+    r")\s+(?:(?:if|where)\s+)?(?P<pred>.+)$",
+    re.I,
+)
+_KEEP_COLS_GUARD = re.compile(r"\bkeep\s+(?:only\s+)?(?:columns?|fields?)\b", re.I)
+_DROP_COL_GUARD = re.compile(r"\b(?:drop|remove)\s+(?:column|field)s?\b", re.I)
+_BETWEEN_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)$",
+    re.I,
+)
+_IN_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?in\s*\((?P<vals>.+)\)$",
+    re.I,
+)
+_LIKE_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?(?P<op>i?like)\s+(?P<pat>.+)$",
+    re.I,
+)
+_IS_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+is\s+(?P<not>not\s+)?(?P<kind>null|empty|blank|missing)$",
+    re.I,
+)
+_ENGLISH_STR = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>does\s+not\s+|not\s+)?"
+    r"(?P<op>contains?|starts?\s+with|ends?\s+with)\s+(?P<val>.+)$",
+    re.I,
+)
+_ENGLISH_CMP = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s+"
+    r"(?P<op>equals?|equal\s+to|is\s+equal\s+to|not\s+equal(?:\s+to)?|"
+    r"does\s+not\s+equal|greater\s+than(?:\s+or\s+equal(?:\s+to)?)?|"
+    r"less\s+than(?:\s+or\s+equal(?:\s+to)?)?|at\s+least|at\s+most)\s+(?P<val>.+)$",
+    re.I,
+)
+_SYM_ATOM = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    re.I,
+)
+_SET_OP = re.compile(
+    r"\b(?:group\s+by|select\s+distinct|distinct\s+rows|keep\s+distinct|"
+    r"pivot\b|unpivot\b|order\s+by|union(?:\s+all)?\s+select|"
+    r"over\s*\(|merge\s+into|partition\s+by|window\s+function|"
+    r"deduplicate|dedupe\b)\b",
+    re.I,
+)
+_EMPTY_NULL = re.compile(
+    r"\b(?:treat\s+(?:empty|blank)(?:\s+strings?)?\s+as\s+null|"
+    r"null\s+if\s+(?:empty|blank)|(?:empty|blank)\s+(?:string\s+)?(?:is|as)\s+null|"
+    r"blank\s+is\s+null)\b",
+    re.I,
+)
+_NAMED_ZONE = re.compile(
+    r"\b(?:assume\s+(?:time\s*)?zone|time\s*zone|at\s+time\s+zone|tz)\s+"
+    r"['\"]?(?P<zone>UTC|GMT|[A-Za-z]+(?:/[A-Za-z0-9_+\-]+)+)['\"]?",
+    re.I,
+)
+_YN_FLAG = re.compile(
+    r"^(?:y\s*/\s*n|yes\s*/\s*no|t\s*/\s*f)(?:\s*(?:flag|boolean|bool))?$",
+    re.I,
+)
+_COALESCE_FN = re.compile(r"^=?\s*(?P<fn>coalesce|ifnull|nvl)\s*\(", re.I)
+
+
+def _split_bool_expr(text: str) -> tuple[list[str], list[str]] | None:
+    """Split ``and`` / ``or`` at depth 0. BETWEEN's AND is not a connector."""
+    parts: list[str] = []
+    ops: list[str] = []
+    buf: list[str] = []
+    i = 0
+    depth = 0
+    quote = ""
+    raw = text or ""
+    n = len(raw)
+    while i < n:
+        ch = raw[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+            i += 1
+            continue
+        if depth == 0:
+            rest = raw[i:]
+            between_pending = bool(re.search(r"\bbetween\s+\S+\s*$", "".join(buf), re.I))
+            if rest.startswith("&&"):
+                part = "".join(buf).strip()
+                if not part:
+                    return None
+                parts.append(part)
+                ops.append("and")
+                buf = []
+                i += 2
+                continue
+            if rest.startswith("||"):
+                part = "".join(buf).strip()
+                if not part:
+                    return None
+                parts.append(part)
+                ops.append("or")
+                buf = []
+                i += 2
+                continue
+            and_m = re.match(r"\band\b", rest, re.I)
+            or_m = re.match(r"\bor\b", rest, re.I)
+            if and_m and not between_pending:
+                part = "".join(buf).strip()
+                if not part:
+                    return None
+                parts.append(part)
+                ops.append("and")
+                buf = []
+                i += and_m.end()
+                continue
+            if or_m:
+                part = "".join(buf).strip()
+                if not part:
+                    return None
+                parts.append(part)
+                ops.append("or")
+                buf = []
+                i += or_m.end()
+                continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    if not parts:
+        return None
+    return parts, ops
+
+
+def _wrapped_parens(text: str) -> bool:
+    raw = (text or "").strip()
+    if not (raw.startswith("(") and raw.endswith(")")):
+        return False
+    depth = 0
+    quote = ""
+    for i, ch in enumerate(raw):
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i == len(raw) - 1
+            if depth < 0:
+                return False
+    return False
+
+
+def _english_cmp_op(token: str) -> str:
+    key = re.sub(r"\s+", " ", (token or "").strip().lower())
+    return {
+        "equal": "=",
+        "equals": "=",
+        "equal to": "=",
+        "is equal to": "=",
+        "not equal": "<>",
+        "not equal to": "<>",
+        "does not equal": "<>",
+        "greater than": ">",
+        "less than": "<",
+        "greater than or equal": ">=",
+        "greater than or equal to": ">=",
+        "less than or equal": "<=",
+        "less than or equal to": "<=",
+        "at least": ">=",
+        "at most": "<=",
+    }.get(key, "")
+
+
+def parse_predicate(text: str) -> str:
+    """Compile a row predicate. Leftover or mixed and/or without parens → ``""``."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if _wrapped_parens(raw):
+        return parse_predicate(raw[1:-1].strip())
+    split = _split_bool_expr(raw)
+    if not split:
+        return ""
+    parts, ops = split
+    if ops and len(set(ops)) > 1:
+        return ""
+    compiled: list[str] = []
+    for part in parts:
+        chunk = part.strip()
+        if _wrapped_parens(chunk):
+            atom = parse_predicate(chunk[1:-1].strip())
+        elif ops:
+            atom = parse_predicate_atom(chunk)
+        else:
+            atom = parse_predicate_atom(chunk)
+        if not atom:
+            return ""
+        compiled.append(atom)
+    if not compiled:
+        return ""
+    if not ops:
+        return compiled[0]
+    joiner = f" {ops[0]} "
+    if len(compiled) == 1:
+        return compiled[0]
+    return "(" + joiner.join(compiled) + ")"
+
+
+def parse_predicate_atom(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    between = _BETWEEN_ATOM.match(raw)
+    if between:
+        return (
+            f"{between.group('col')} >= {_case_atom(between.group('lo'))} and "
+            f"{between.group('col')} <= {_case_atom(between.group('hi'))}"
+        )
+    in_m = _IN_ATOM.match(raw)
+    if in_m:
+        cond = _in_condition(in_m.group("col"), in_m.group("vals"))
+        if not cond:
+            return ""
+        return f"not {cond}" if in_m.group("not") else cond
+    like = _LIKE_ATOM.match(raw)
+    if like:
+        pat = _like_pattern_token(like.group("pat"))
+        cond = _like_condition(
+            like.group("col"),
+            pat,
+            negated=bool(like.group("not")),
+            insensitive=like.group("op").lower() == "ilike",
+        )
+        return cond
+    is_m = _IS_ATOM.match(raw)
+    if is_m:
+        fn = "is_not_null" if is_m.group("not") else "is_null"
+        return f"{fn}({is_m.group('col')})"
+    english = _ENGLISH_STR.match(raw)
+    if english:
+        val = english.group("val").strip()
+        if not val:
+            return ""
+        op = re.sub(r"\s+", " ", english.group("op").lower())
+        if op.startswith("start"):
+            pred = f"starts_with({english.group('col')}, {_quote_lit(val)})"
+        elif op.startswith("end"):
+            pred = f"ends_with({english.group('col')}, {_quote_lit(val)})"
+        else:
+            pred = f"contains({english.group('col')}, {_quote_lit(val)})"
+        return f"not {pred}" if english.group("not") else pred
+    cmp_m = _ENGLISH_CMP.match(raw)
+    if cmp_m:
+        oper = _english_cmp_op(cmp_m.group("op"))
+        if not oper:
+            return ""
+        return _condition(cmp_m.group("col"), oper, cmp_m.group("val"))
+    sym = _SYM_ATOM.match(raw)
+    if sym:
+        return _condition(sym.group("col"), sym.group("op"), sym.group("val"))
+    return ""
+
+
+def parse_row_policy(text: str) -> dict[str, Any] | None:
+    """keep / exclude / divert + a fully-consumed predicate.
+
+    iMAP complex matches: every atom must compile. A leftover ``and …`` is
+    review, not a silent half-filter (that is how rows vanish).
+    """
+    raw = (text or "").strip()
+    if not raw or _KEEP_COLS_GUARD.search(raw) or _DROP_COL_GUARD.search(raw):
+        return None
+    head = _ROW_HEAD.match(raw)
+    if not head:
+        return None
+    pred = parse_predicate(head.group("pred"))
+    kind_word = re.sub(r"\s+", " ", head.group("head").strip().lower())
+    if kind_word.startswith("divert") or kind_word.startswith("quarantine"):
+        kind = "divert"
+        keep = True
+    elif kind_word.startswith("exclude") or kind_word.startswith("drop") or kind_word.startswith("omit"):
+        kind = "filter"
+        keep = False
+    else:
+        kind = "filter"
+        keep = True
+    if not pred:
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Row predicate is not a closed form (mixed and/or without "
+                "parentheses, LIKE _ / multiple %, or leftover text). "
+                "It was not applied — a guessed filter is silent loss."
+            ),
+        }
+    if kind == "divert":
+        return {"kind": "divert", "plane": "shape", "confidence": 0.9, "condition": pred}
+    return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": pred, "keep": keep}
+
+
+def parse_coalesce(text: str) -> dict[str, Any] | None:
+    """COALESCE/NVL/IFNULL. Two-arg literal → default; otherwise shape coalesce()."""
+    raw = (text or "").strip()
+    match = _COALESCE_FN.match(raw)
+    if not match:
+        return None
+    start = raw.find("(", match.start())
+    if start < 0:
+        return None
+    depth = 0
+    quote = ""
+    end = -1
+    for i, ch in enumerate(raw[start:], start):
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0:
+        return None
+    leftover = raw[end + 1:].strip().rstrip(";").strip()
+    if leftover:
+        return None
+    args = _split_sql_args(raw[start + 1:end], strip_quotes=False)
+    if len(args) < 2:
+        return None
+    if len(args) == 2 and not _is_column_token(args[1]):
+        return {
+            "kind": "default",
+            "plane": "shape",
+            "confidence": 0.93,
+            "value": args[1].strip().strip("\"'"),
+        }
+    expr = "coalesce(" + ", ".join(_case_atom(arg) for arg in args) + ")"
+    return {"kind": "derive", "plane": "shape", "confidence": 0.93, "expression": expr}
 
 
 def parse_iif(text: str) -> dict[str, Any] | None:
@@ -783,14 +1255,9 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
         if casted:
             return _cast_kind(casted.group("type"))
     if fn in {"COALESCE", "IFNULL", "NVL"}:
-        coal = _COALESCE.search(f"{fn}({inner})")
+        coal = parse_coalesce(f"{fn}({inner})")
         if coal:
-            return {
-                "kind": "default",
-                "plane": "shape",
-                "confidence": 0.93,
-                "value": coal.group("value").strip().strip("\"'"),
-            }
+            return coal
     if fn in {"NULLIF"}:
         nf = _NULLIF_FN.search(f"nullif({inner})")
         if nf:
@@ -919,15 +1386,10 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         got = _cast_kind(casted.group("type"))
         got.update(flags)
         return got
-    coal = _COALESCE.search(raw)
+    coal = parse_coalesce(raw)
     if coal:
-        return {
-            "kind": "default",
-            "plane": "shape",
-            "confidence": 0.93,
-            "value": coal.group("value").strip().strip("\"'"),
-            **flags,
-        }
+        coal.update(flags)
+        return coal
     nf = _NULLIF_FN.search(raw)
     if nf:
         return {
@@ -1013,71 +1475,10 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
-    divert = _DIVERT.search(raw)
-    if divert:
-        return {
-            "kind": "divert",
-            "plane": "shape",
-            "confidence": 0.9,
-            "condition": _condition(divert.group("col"), divert.group("op"), divert.group("val")),
-            **flags,
-        }
-    exclude = _EXCLUDE_ROWS.search(raw)
-    if exclude:
-        return {
-            "kind": "filter",
-            "plane": "shape",
-            "confidence": 0.9,
-            "condition": _condition(exclude.group("col"), exclude.group("op"), exclude.group("val")),
-            "keep": False,
-            **flags,
-        }
-    filtered = _FILTER.search(raw)
-    if filtered:
-        return {
-            "kind": "filter",
-            "plane": "shape",
-            "confidence": 0.9,
-            "condition": _condition(filtered.group("col"), filtered.group("op"), filtered.group("val")),
-            "keep": True,
-            **flags,
-        }
-    exclude_in = _EXCLUDE_IN.search(raw)
-    if exclude_in:
-        cond = _in_condition(exclude_in.group("col"), exclude_in.group("vals"))
-        if cond:
-            return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": cond, "keep": False, **flags}
-    keep_in = _IN_FILTER.search(raw)
-    if keep_in:
-        cond = _in_condition(keep_in.group("col"), keep_in.group("vals"))
-        if cond:
-            return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": cond, "keep": True, **flags}
-    exclude_between = _EXCLUDE_BETWEEN.search(raw)
-    if exclude_between:
-        return {
-            "kind": "filter",
-            "plane": "shape",
-            "confidence": 0.9,
-            "condition": (
-                f"{exclude_between.group('col')} >= {_case_atom(exclude_between.group('lo'))} and "
-                f"{exclude_between.group('col')} <= {_case_atom(exclude_between.group('hi'))}"
-            ),
-            "keep": False,
-            **flags,
-        }
-    keep_between = _BETWEEN.search(raw)
-    if keep_between:
-        return {
-            "kind": "filter",
-            "plane": "shape",
-            "confidence": 0.9,
-            "condition": (
-                f"{keep_between.group('col')} >= {_case_atom(keep_between.group('lo'))} and "
-                f"{keep_between.group('col')} <= {_case_atom(keep_between.group('hi'))}"
-            ),
-            "keep": True,
-            **flags,
-        }
+    policy = parse_row_policy(raw)
+    if policy:
+        policy.update(flags)
+        return policy
 
     pairs, blank = parse_lookup_spec(raw)
     lookup = parse_lookup(raw)
@@ -1092,6 +1493,13 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         }
         if blank:
             out["blank_default"] = blank
+        if _CASE_INSENSITIVE.search(raw):
+            out["case_insensitive"] = True
+            out["confidence"] = 0.5
+            out["reason"] = (
+                "Lookup is marked case-insensitive. G20 matches codes exactly — "
+                "confirm both casings or this is silent remap."
+            )
         return out
     if blank and not lookup:
         return {
@@ -1120,6 +1528,32 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
                 "Joins sheet or write the projection as Source → query; "
                 "this compiler will not invent a grain."
             ),
+            **flags,
+        }
+
+    keep_cols = _KEEP_COLS.search(raw)
+    if keep_cols:
+        columns = [
+            part.strip().strip("\"'")
+            for part in re.split(r"\s*(?:,|\band\b)\s*", keep_cols.group("cols") or "")
+            if re.fullmatch(r"[A-Za-z_][\w.]*", part.strip().strip("\"'") or "")
+            and part.strip().lower() not in {"columns", "fields", "only", "keep"}
+        ]
+        return {
+            "kind": "keep_columns",
+            "plane": "shape",
+            "confidence": 0.92 if columns else 0.5,
+            "columns": columns,
+            **({} if columns else {"reason": "keep columns named but none were identified"}),
+            **flags,
+        }
+    drop_col = _DROP_COL.search(raw)
+    if drop_col:
+        return {
+            "kind": "drop_column",
+            "plane": "shape",
+            "confidence": 0.92,
+            "column": drop_col.group("col"),
             **flags,
         }
 
@@ -1270,6 +1704,15 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
+    if _EMPTY_NULL.search(raw):
+        return {
+            "kind": "null_if",
+            "plane": "shape",
+            "confidence": 0.93,
+            "values": [""],
+            **flags,
+        }
+
     null_if = _NULL_IF.search(raw)
     if null_if:
         values = [
@@ -1358,6 +1801,18 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
+    if _SET_OP.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "GROUP BY / DISTINCT / PIVOT / UNION / OVER / MERGE is not "
+                "row-local. Confirm on Operations Transforms — this compiler "
+                "will not invent a grain."
+            ),
+            **flags,
+        }
     hashed_id = _HASH_ID.search(raw)
     if hashed_id:
         stop = frozenset({"of", "on", "from", "over", "columns", "fields", "and", "the", "hash", "identity"})
@@ -1377,6 +1832,8 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         }
     if _UNNEST.search(raw):
         return {"kind": "unnest", "plane": "shape", "confidence": 0.9, **flags}
+    if _FLATTEN.search(raw):
+        return {"kind": "flatten", "plane": "shape", "confidence": 0.9, **flags}
     if _HASH.search(raw):
         return {"kind": "hash", "plane": "map", "confidence": 0.95, "extras": _compound_extras(raw, "hash"), **flags}
     if _EMAIL.search(raw):
@@ -1405,12 +1862,32 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return {"kind": "json", "plane": "map", "confidence": 0.93, **flags}
     if _BINARY.search(raw):
         return {"kind": "binary", "plane": "map", "confidence": 0.93, **flags}
+    named_zone = _NAMED_ZONE.search(raw)
+    if named_zone:
+        return {
+            "kind": "timezone",
+            "plane": "map",
+            "confidence": 0.96,
+            "zone": named_zone.group("zone"),
+            **flags,
+        }
     if _ZONE.search(raw):
         return {
             "kind": "timezone",
             "plane": "review",
             "confidence": 0.5,
             "reason": "A source timezone must be named (IANA). This compiler will not assume UTC.",
+            **flags,
+        }
+    if _YN_FLAG.match(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "parse_boolean refuses informal Y/N / yes/no. Write "
+                "Y → true, N → false — a guessed flag is silent remap."
+            ),
             **flags,
         }
     if _UNICODE.search(raw):

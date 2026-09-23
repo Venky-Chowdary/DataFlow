@@ -625,6 +625,9 @@ export async function importBusinessRules(payload: {
   destColumns?: string[];
   sourceTable?: string;
   destTable?: string;
+  sourceTypes?: Record<string, string>;
+  destTypes?: Record<string, string>;
+  syncMode?: string;
 }): Promise<RuleCompileReport> {
   const form = new FormData();
   form.append("file", payload.file);
@@ -632,6 +635,9 @@ export async function importBusinessRules(payload: {
   form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
   form.append("source_table", payload.sourceTable ?? "");
   form.append("dest_table", payload.destTable ?? "");
+  form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
+  form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
+  form.append("sync_mode", payload.syncMode ?? "");
   const res = await apiFetch(`${API_BASE}/transfer/rules/import`, {
     method: "POST",
     body: form,
