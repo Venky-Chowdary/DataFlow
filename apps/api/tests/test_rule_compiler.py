@@ -374,6 +374,24 @@ def test_prose_still_fails_closed():
     assert classify_rule("maybe use the other id")["kind"] == "unknown"
 
 
+def test_title_row_does_not_steal_unusual_headers():
+    csv = (
+        "Customer mapping spec\n"
+        "Orig Field,Target Name,How to convert\n"
+        "fname,first_name,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "titled-unusual.csv",
+        csv,
+        source_columns=["fname"],
+        dest_columns=["first_name"],
+    )
+    roles = {item["header"]: item["role"] for item in report["header_roles"]}
+    assert roles["Orig Field"] == "source_column"
+    assert report["rules"][0]["source_column"] == "fname"
+    assert report["rules"][0]["status"] == "executable"
+
+
 def test_unusual_headers_are_inferred_from_schema_not_aliases():
     """A customer sheet does not have to say 'Source Column'."""
     assert canonical_header("Orig Field") == ""

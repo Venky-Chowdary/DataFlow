@@ -122,10 +122,21 @@ def _project(headers: list[str], values: list[Any], sheet: str, row_number: int)
 
 
 def _header_score(headers: list[str]) -> int:
+    """How likely this row is a mapping-spec header, not a title or a data row.
+
+    A single known alias used to win the scan and then lose to the next data
+    row (``Target Name`` + ``Orig Field`` scored 1, ``fname,first_name,Direct``
+    scored 3). Mixed custom headers must keep their filled-cell weight.
+    """
     aliases = sum(1 for header in headers if canonical_header(str(header or "")))
+    filled = sum(1 for header in headers if str(header or "").strip())
+    if aliases >= 2:
+        return aliases
+    if aliases == 1 and filled >= 2:
+        return filled
     if aliases:
         return aliases
-    return sum(1 for header in headers if str(header or "").strip())
+    return filled
 
 
 def _take_header(rows: list[list[Any]]) -> tuple[list[str], list[tuple[int, list[Any]]]]:
