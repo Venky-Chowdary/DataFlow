@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+/**
+ * Run: npx --yes tsx --test apps/web/src/lib/businessRules.test.ts
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
 import {
   mergeBusinessRules,
   mergeCompiledShapeSteps,
@@ -66,30 +70,30 @@ describe("mergeBusinessRules", () => {
   it("binds executable rules and leaves unknown ones for review", () => {
     const next = mergeBusinessRules(seed, report);
     const fname = next.find((m) => m.source === "fname")!;
-    expect(fname.target).toBe("first_name");
-    expect(fname.approved).toBe(true);
-    expect(fname.businessRule?.kind).toBe("direct");
-    expect(fname.businessRule?.row).toBe(2);
+    assert.equal(fname.target, "first_name");
+    assert.equal(fname.approved, true);
+    assert.equal(fname.businessRule?.kind, "direct");
+    assert.equal(fname.businessRule?.row, 2);
 
     const status = next.find((m) => m.source === "status")!;
-    expect(status.codeCrosswalk).toEqual({ A: "ACTIVE", I: "INACTIVE" });
-    expect(status.approved).toBe(true);
+    assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE", I: "INACTIVE" });
+    assert.equal(status.approved, true);
 
     const mystery = next.find((m) => m.source === "mystery")!;
-    expect(mystery.approved).toBe(false);
-    expect(mystery.requiresReview).toBe(true);
-    expect(mystery.businessRule?.status).toBe("needs_confirmation");
-    expect(mystery.target).toBe("");
+    assert.equal(mystery.approved, false);
+    assert.equal(mystery.requiresReview, true);
+    assert.equal(mystery.businessRule?.status, "needs_confirmation");
+    assert.equal(mystery.target, "");
   });
 
   it("does not invent a dest column for unused dests", () => {
     const next = mergeBusinessRules(seed, report);
-    expect(next.some((m) => m.target === "unused_flag")).toBe(false);
+    assert.equal(next.some((m) => m.target === "unused_flag"), false);
   });
 
   it("summarises unused dest columns as not written", () => {
-    expect(ruleReportSummary(report)).toContain("2 executable");
-    expect(ruleReportSummary(report)).toContain("1 dest column(s) unused");
+    assert.match(ruleReportSummary(report), /2 executable/);
+    assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
   });
 
   it("does not overwrite an operator-locked dest", () => {
@@ -97,9 +101,9 @@ describe("mergeBusinessRules", () => {
       { source: "fname", target: "given_name", confidence: 0.9, approved: true, transform: "none" },
     ];
     const next = mergeBusinessRules(locked, report);
-    expect(next[0].target).toBe("given_name");
-    expect(next[0].businessRule?.status).toBe("conflict");
-    expect(next[0].requiresReview).toBe(true);
+    assert.equal(next[0].target, "given_name");
+    assert.equal(next[0].businessRule?.status, "conflict");
+    assert.equal(next[0].requiresReview, true);
   });
 
   it("merges compiled shape steps without dropping operator steps", () => {
@@ -109,7 +113,7 @@ describe("mergeBusinessRules", () => {
       { op: "derive_column", options: { to: "annual_salary", expression: "salary * 12" }, enabled: true },
     ];
     const next = mergeCompiledShapeSteps(existing, compiled);
-    expect(next).toHaveLength(2);
-    expect(next[1].op).toBe("derive_column");
+    assert.equal(next.length, 2);
+    assert.equal(next[1].op, "derive_column");
   });
 });

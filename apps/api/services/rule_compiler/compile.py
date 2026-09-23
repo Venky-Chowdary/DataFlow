@@ -110,7 +110,7 @@ def compile_rule_workbook(
         if edge[0] and edge[1] and edge in seen_edges and item["status"] == "executable":
             item["status"] = "conflict"
             item["issues"] = [
-                *item.get("issues") or [],
+                *(item.get("issues") or []),
                 f"Duplicate mapping for {edge[0]} → {edge[1]} "
                 f"(also row {seen_edges[edge]}).",
             ]
@@ -161,12 +161,10 @@ def compile_rule_workbook(
         "needs_confirmation": sum(1 for r in compiled if r["status"] == "needs_confirmation"),
         "conflict": sum(1 for r in compiled if r["status"] == "conflict"),
     }
-    mapped_dest = {
-        r["dest_column"]
-        for r in compiled
-        if r.get("dest_column") and r["status"] == "executable" and r.get("kind") != "omit"
-    }
-    unused_dest = [c for c in dst_cols if c not in mapped_dest]
+    # Named by the workbook — including omit and review — is accounted for.
+    # Unused means the dest column never appeared on a rule row.
+    named_dest = {r["dest_column"] for r in compiled if r.get("dest_column")}
+    unused_dest = [c for c in dst_cols if c not in named_dest]
     return {
         "filename": filename,
         "rule_count": len(compiled),

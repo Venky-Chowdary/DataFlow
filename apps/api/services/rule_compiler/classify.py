@@ -75,12 +75,22 @@ _HASH = re.compile(
     r"\b(?:hash(?:\s+pii)?|mask|anonymi[sz]e|redact|one[\s-]?way)\b",
     re.I,
 )
-_INT = re.compile(r"\b(?:integer|int(?:eger)?|cast\s+int(?:eger)?)\b", re.I)
+_INT = re.compile(
+    r"\b(?:cast|parse|convert)\s+(?:to\s+)?int(?:eger)?\b|\binteger\b",
+    re.I,
+)
 _NUM = re.compile(
-    r"\b(?:decimal|numeric|number|float|cast\s+(?:number|decimal|numeric))\b",
+    r"\b(?:cast|parse|convert)\s+(?:to\s+)?(?:decimal|numeric|number|float)\b"
+    r"|\b(?:decimal|numeric|float)\b",
     re.I,
 )
 _BOOL = re.compile(r"\b(?:boolean|bool|true\s*/\s*false)\b", re.I)
+_NOT_COLUMN = frozenset({
+    "lowercase", "uppercase", "lower", "upper", "validate", "trim", "strip",
+    "parse", "cast", "direct", "omit", "email", "phone", "hash", "replace",
+    "default", "null", "concat", "concatenate", "combine", "and", "or",
+    "convert", "normalize", "format",
+})
 _CURRENCY = re.compile(r"\b(?:currency|money|dollar|gbp|eur)\b", re.I)
 _PERCENT = re.compile(r"\bpercent(?:age)?\b", re.I)
 # Table-level joins / VLOOKUP — not a pre-load shape op.
@@ -203,8 +213,17 @@ def classify_rule(text: str) -> dict[str, Any]:
     if _OMIT.search(raw):
         return {"kind": "omit", "plane": "map", "confidence": 0.97}
 
-    if _CONCAT_HINT.search(raw) or _CONCAT_EXPR.search(raw):
+    concat_expr = _CONCAT_EXPR.search(raw)
+    concat_hint = bool(_CONCAT_HINT.search(raw))
+    concat_tokens_ok = False
+    if concat_expr:
+        left, right = concat_expr.group(1), concat_expr.group(2)
+        concat_tokens_ok = (
+            left.lower() not in _NOT_COLUMN and right.lower() not in _NOT_COLUMN
+        )
+    if concat_hint or concat_tokens_ok:
         columns, separator = _concat_columns(raw)
+        columns = [c for c in columns if c.lower() not in _NOT_COLUMN]
         return {
             "kind": "concat",
             "plane": "shape",

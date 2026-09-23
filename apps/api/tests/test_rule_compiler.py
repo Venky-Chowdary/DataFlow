@@ -36,6 +36,8 @@ def test_unknown_prose_is_review_not_a_guess():
     got = classify_rule("for legacy customers use the old number unless migrated")
     assert got["kind"] == "unknown"
     assert got["plane"] == "review"
+    assert classify_rule("Lowercase + validate email")["kind"] == "email"
+    assert classify_rule("cast number")["kind"] == "cast_number"
 
 
 def test_spoken_headers_fold_onto_compiler_columns():
