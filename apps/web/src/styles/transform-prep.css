@@ -1070,7 +1070,135 @@
   }
 }
 
+/* Business-rule workbook import — lives on Transform because both schemas exist. */
+.df2-xform .df2-rule-import {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: 10px;
+  background: var(--df-surface-muted, #f8fafc);
+}
+
+.df2-xform .df2-rule-import-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.df2-xform .df2-rule-import-copy strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform .df2-rule-import-copy p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform .df2-rule-import-summary {
+  color: var(--df-brand, #0f766e) !important;
+  font-weight: 600;
+}
+
+.df2-xform .df2-rule-import-error {
+  color: var(--df-danger, #b91c1c) !important;
+}
+
+.df2-xform .df2-rule-import-actions {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.df2-rule-ledger {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: 10px;
+  background: var(--df-surface, #ffffff);
+  padding: 8px 12px 10px;
+}
+
+.df2-rule-ledger > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-rule-ledger > summary::-webkit-details-marker { display: none; }
+
+.df2-rule-ledger > summary span {
+  color: var(--df-text-secondary, #475569);
+  font-size: 12px;
+}
+
+.df2-rule-ledger-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.df2-rule-line {
+  display: grid;
+  grid-template-columns: 110px minmax(120px, 1fr) minmax(140px, 1.4fr) auto auto;
+  gap: 6px 10px;
+  align-items: start;
+  padding: 7px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--df-border, #e4e8ee);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.df2-rule-line.is-applied { border-color: #99f6e4; background: #f0fdfa; }
+.df2-rule-line.is-review { border-color: #fcd34d; background: #fffbeb; }
+.df2-rule-line.is-conflict { border-color: #fca5a5; background: #fef2f2; }
+
+.df2-rule-line-meta {
+  color: var(--df-text-secondary, #475569);
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-rule-line-edge { font-weight: 600; color: var(--df-text-primary, #0f172a); word-break: break-word; }
+.df2-rule-line-text { color: var(--df-text-secondary, #475569); word-break: break-word; }
+.df2-rule-line-status { font-weight: 600; }
+.df2-rule-line-issue {
+  grid-column: 1 / -1;
+  color: var(--df-danger, #b91c1c);
+}
+
+.df2-rule-ledger-unused {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-badge.df2-rule-chip.is-applied { background: #ccfbf1; color: #115e59; }
+.df2-badge.df2-rule-chip.is-review { background: #fef3c7; color: #92400e; }
+.df2-badge.df2-rule-chip.is-conflict { background: #fee2e2; color: #991b1b; }
+
 @media (max-width: 860px) {
+  .df2-rule-line {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-xform .df2-rule-import {
+    flex-direction: column;
+  }
+
   .df2-transfer-main-panel > .df2-xform,
   .df2-transfer-step-viewport > .df2-xform { padding: 12px; }
 

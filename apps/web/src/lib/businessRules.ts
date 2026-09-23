@@ -1,0 +1,187 @@
+/**
+ * Apply a compiled rule workbook onto studio mappings.
+ *
+ * The server already classified and bound names. This module only merges
+ * those artifacts onto EditableMapping the way an operator would have typed
+ * them — never inventing a dest column, never dropping an unused dest.
+ */
+
+import type { EditableMapping, MappingBusinessRule, MappingTransform } from "./mapping";
+import { applyTransformChange } from "./mapping";
+import type { ShapeStepWire } from "./shape";
+
+export interface CompiledRule {
+  source_table?: string;
+  source_column: string;
+  map_source?: string;
+  dest_table?: string;
+  dest_column: string;
+  rule_text: string;
+  kind: string;
+  kind_label: string;
+  plane: string;
+  confidence: number;
+  transform?: string;
+  code_crosswalk?: Record<string, string> | null;
+  shape_step?: ShapeStepWire | null;
+  status: string;
+  issues?: string[];
+  provenance?: { sheet?: string; row?: number };
+}
+
+export interface RuleCompileReport {
+  filename: string;
+  rule_count: number;
+  buckets: {
+    executable: number;
+    needs_confirmation: number;
+    conflict: number;
+  };
+  unused_dest_columns: string[];
+  unused_dest_count: number;
+  shape_steps: ShapeStepWire[];
+  rules: CompiledRule[];
+  honesty: string;
+}
+
+function asTransform(value: string | undefined): MappingTransform {
+  const known: MappingTransform[] = [
+    "none", "trim", "upper", "lower", "date_iso", "time_iso", "hash_pii",
+    "cast_number", "cast_integer", "cast_boolean", "parse_json", "binary",
+    "phone", "email", "currency", "percentage", "strip_controls",
+    "identity_specialty", "assume_timezone", "omit",
+  ];
+  return (known as string[]).includes(value || "") ? (value as MappingTransform) : "none";
+}
+
+export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
+  return {
+    kind: rule.kind,
+    kindLabel: rule.kind_label,
+    text: rule.rule_text,
+    status: rule.status,
+    confidence: rule.confidence,
+    sheet: rule.provenance?.sheet,
+    row: rule.provenance?.row,
+    issues: rule.issues,
+  };
+}
+
+function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping {
+  const evidence = ruleToEvidence(rule);
+  const transform = asTransform(rule.transform);
+  const lockedDest = Boolean(
+    mapping.approved
+    && mapping.target
+    && rule.dest_column
+    && mapping.target.toLowerCase() !== rule.dest_column.toLowerCase(),
+  );
+  if (lockedDest) {
+    return {
+      ...mapping,
+      businessRule: { ...evidence, status: "conflict" },
+      requiresReview: true,
+      reason: `Workbook dest “${rule.dest_column}” conflicts with locked “${mapping.target}”.`,
+    };
+  }
+  let next: EditableMapping = {
+    ...mapping,
+    target: rule.status === "executable" && rule.dest_column
+      ? rule.dest_column
+      : mapping.target,
+    businessRule: evidence,
+    reason: rule.rule_text
+      ? `${rule.kind_label}: ${rule.rule_text}`
+      : rule.kind_label,
+    requiresReview: rule.status !== "executable" || mapping.requiresReview,
+  };
+  if (rule.status === "executable" && rule.code_crosswalk) {
+    next = { ...next, codeCrosswalk: { ...rule.code_crosswalk } };
+  }
+  if (rule.status === "executable" && transform && transform !== "none") {
+    next = applyTransformChange(next, transform);
+  }
+  if (rule.status === "executable" && rule.confidence >= 0.9 && next.target) {
+    next = { ...next, approved: true, requiresReview: false };
+  }
+  return next;
+}
+
+export function mergeBusinessRules(
+  mappings: EditableMapping[],
+  report: RuleCompileReport | null,
+): EditableMapping[] {
+  if (!report?.rules?.length) return mappings;
+  const next = mappings.map((m) => ({ ...m }));
+  const indexBySource = new Map<string, number>();
+  next.forEach((m, i) => {
+    if (m.source) indexBySource.set(m.source.toLowerCase(), i);
+  });
+
+  for (const rule of report.rules) {
+    const source = (rule.map_source || rule.source_column || "").trim();
+    if (!source) continue;
+    const idx = indexBySource.get(source.toLowerCase());
+    if (idx === undefined) {
+      if (rule.status !== "executable") continue;
+      const created: EditableMapping = applyOne(
+        {
+          source,
+          target: rule.dest_column || "",
+          confidence: rule.confidence,
+          approved: false,
+          reason: rule.kind_label,
+          transform: "none",
+        },
+        rule,
+      );
+      next.push(created);
+      indexBySource.set(source.toLowerCase(), next.length - 1);
+      continue;
+    }
+    next[idx] = applyOne(next[idx], rule);
+  }
+  return next;
+}
+
+export function ruleReportSummary(report: RuleCompileReport): string {
+  const { executable, needs_confirmation, conflict } = report.buckets;
+  const unused = report.unused_dest_count
+    ? ` · ${report.unused_dest_count} dest column(s) unused (not written)`
+    : "";
+  return (
+    `${report.rule_count} rule(s) · ${executable} executable · `
+    + `${needs_confirmation} need review · ${conflict} conflict${unused}`
+  );
+}
+
+const MAX_COMPILED_SHAPE_STEPS = 100;
+
+function shapeStepKey(step: ShapeStepWire): string {
+  const to = step.options && typeof step.options === "object"
+    ? String((step.options as { to?: unknown }).to ?? "")
+    : "";
+  return `${step.op}|${step.column || ""}|${to}`;
+}
+
+/** Append compiled shape steps without wiping operator-authored ones. */
+export function mergeCompiledShapeSteps(
+  existing: ShapeStepWire[],
+  compiled: ShapeStepWire[],
+): ShapeStepWire[] {
+  const seen = new Set(existing.map(shapeStepKey));
+  const extra: ShapeStepWire[] = [];
+  for (const step of compiled) {
+    const key = shapeStepKey(step);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extra.push(step);
+  }
+  return [...existing, ...extra].slice(0, MAX_COMPILED_SHAPE_STEPS);
+}
+
+export function ruleStatusLabel(status: string): string {
+  if (status === "executable") return "Applied";
+  if (status === "conflict") return "Conflict";
+  return "Needs review";
+}

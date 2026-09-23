@@ -9009,6 +9009,64 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 12px;
   color: var(--df-text-secondary);
 }
+
+.df2-rule-map-banner {
+  margin: 0.75rem 1.25rem 0;
+  padding: 10px 12px;
+  border: 1px solid #99f6e4;
+  border-radius: 8px;
+  background: #f0fdfa;
+  font-size: 13px;
+}
+
+.df2-rule-map-banner > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-rule-map-banner > summary::-webkit-details-marker { display: none; }
+
+.df2-rule-map-banner > summary span {
+  color: var(--df-text-secondary, #475569);
+  font-size: 12px;
+}
+
+.df2-rule-map-banner > p {
+  margin: 8px 0 0;
+  color: var(--df-text-secondary, #475569);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.df2-rule-map-banner .df2-rule-ledger {
+  margin-top: 8px;
+  background: var(--df-surface, #ffffff);
+}
+
+.df2-column-rule-why {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-column-rule-kind {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--df-brand, #0f766e);
+}
+
+.df2-column-rule-prov {
+  font-size: 11px;
+  color: var(--df-text-secondary, #475569);
+}
 /* One-line blocker bar: the mapping grid stays on screen no matter how many
    columns are held. Detail is opt-in and height-bounded. */
 .df2-map-blocker-bar {

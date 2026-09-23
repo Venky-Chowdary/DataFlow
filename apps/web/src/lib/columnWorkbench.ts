@@ -13,7 +13,8 @@ export type ColumnFilter =
   | "warn"
   | "pii"
   | "new"
-  | "ready";
+  | "ready"
+  | "rules";
 
 export type ColumnSort = "confidence-asc" | "confidence-desc" | "name-asc" | "name-desc";
 
@@ -97,6 +98,7 @@ export function countByFilter(
     pii: 0,
     new: 0,
     ready: 0,
+    rules: 0,
   };
 
   for (const m of mappings) {
@@ -107,6 +109,7 @@ export function countByFilter(
     if (m.isPii) counts.pii += 1;
     if (isCreateNewColumn(m)) counts.new += 1;
     if (isMappingReady(m, threshold)) counts.ready += 1;
+    if (m.businessRule) counts.rules += 1;
   }
 
   return counts;
@@ -121,6 +124,8 @@ function matchesSearch(m: EditableMapping, query: string): boolean {
     || (m.inferredType ?? "").toLowerCase().includes(q)
     || (m.reason ?? "").toLowerCase().includes(q)
     || (m.sample ?? "").toLowerCase().includes(q)
+    || (m.businessRule?.text ?? "").toLowerCase().includes(q)
+    || (m.businessRule?.kindLabel ?? "").toLowerCase().includes(q)
   );
 }
 
@@ -136,6 +141,7 @@ function matchesFilter(
   if (filter === "pii") return Boolean(m.isPii);
   if (filter === "new") return isCreateNewColumn(m);
   if (filter === "ready") return isMappingReady(m, threshold);
+  if (filter === "rules") return Boolean(m.businessRule);
   return true;
 }
 

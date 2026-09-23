@@ -11,6 +11,9 @@ import { ProgressRing } from "../../components/ui/ProgressRing";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import type { RuleCompileReport } from "../../lib/businessRules";
+import { ruleReportSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
@@ -79,6 +82,8 @@ interface TransferMapStepProps {
   destShapeHeadline?: string;
   /** Re-probe the destination catalog and re-map — the only exit from an unread dest schema. */
   onReloadDestSchema?: () => void | Promise<void>;
+  /** Compiled workbook — shown as evidence on each mapped column. */
+  ruleReport?: RuleCompileReport | null;
 }
 
 
@@ -133,6 +138,7 @@ export function TransferMapStep({
   extraSourceColumns = [],
   destShapeHeadline = "",
   onReloadDestSchema,
+  ruleReport = null,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -300,6 +306,21 @@ export function TransferMapStep({
             {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
             These columns are not dropped. Use Remap dest or mark omit.
           </p>
+        </details>
+      )}
+
+      {ruleReport && (
+        <details
+          className="df2-rule-map-banner"
+          open={ruleReport.buckets.needs_confirmation > 0 || ruleReport.buckets.conflict > 0}
+        >
+          <summary>
+            <DtIcon name="book" size={16} />
+            <strong>Business rules applied on this map</strong>
+            <span> · {ruleReportSummary(ruleReport)}</span>
+          </summary>
+          <p>{ruleReport.honesty}</p>
+          <BusinessRuleLedger report={ruleReport} defaultOpen />
         </details>
       )}
 

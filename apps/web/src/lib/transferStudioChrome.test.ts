@@ -202,7 +202,7 @@ describe("Transfer Studio chrome contracts", () => {
     // Every class the step used was previously undefined, so the panel laid out
     // in default flow. The stylesheet must be reachable from the one entrypoint.
     assert.match(entry, /@import "\.\/transform-prep\.css";/);
-    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll"]) {
+    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll", ".df2-xform .df2-rule-import"]) {
       assert.ok(css.includes(rule), `${rule} has no rule`);
     }
     assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
@@ -229,6 +229,8 @@ describe("Transfer Studio chrome contracts", () => {
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(studio, /df2-xform-step/);
     assert.match(step, /isTransportTimeout/);
+    assert.match(step, /Upload rules/);
+    assert.match(step, /importBusinessRules/);
     assert.match(step, /Retry preview/);
     assert.match(step, /disabled=\{!continueState\.enabled\}/);
     // A hung preview of an empty recipe must not lock Continue — only a recipe

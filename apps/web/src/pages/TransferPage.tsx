@@ -254,6 +254,12 @@ import {
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
+import {
+  mergeBusinessRules,
+  mergeCompiledShapeSteps,
+  ruleReportSummary,
+  type RuleCompileReport,
+} from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
@@ -319,6 +325,9 @@ export function TransferPage({
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
   const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
+  const [businessRuleReport, setBusinessRuleReport] = useState<RuleCompileReport | null>(null);
+  const businessRuleReportRef = useRef<RuleCompileReport | null>(null);
+  businessRuleReportRef.current = businessRuleReport;
   /**
    * Read inside `applyPipelineMappings` without making the transformed image a
    * dependency of it: Map must ask about the transformed image, but re-running
@@ -3445,6 +3454,17 @@ export function TransferPage({
         }
       }
 
+      if (businessRuleReportRef.current) {
+        setColumnMappings((prev) => mergeBusinessRules(prev, businessRuleReportRef.current));
+        setStreamMappings((prev) => {
+          const next: Record<string, EditableMapping[]> = {};
+          for (const [name, rows] of Object.entries(prev || {})) {
+            next[name] = mergeBusinessRules(rows, businessRuleReportRef.current);
+          }
+          return next;
+        });
+      }
+
       bump(100, "Mapping ready");
       await new Promise((r) => window.setTimeout(r, 220));
       if (!mapped.length) {
@@ -6038,6 +6058,7 @@ export function TransferPage({
           columnMappings={columnMappings}
           analysis={analysis}
           destColumns={destColumns}
+          ruleReport={businessRuleReport}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destCatalogExists(destKindMode, destTableExists)}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
@@ -7344,6 +7365,21 @@ export function TransferPage({
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
+          ruleReport={businessRuleReport}
+          sourceTable={sourceTable}
+          destTable={targetCollection}
+          onApplyRules={(report) => {
+            setBusinessRuleReport(report);
+            if (report.shape_steps.length) {
+              setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps));
+            }
+            setColumnMappings((prev) => mergeBusinessRules(prev, report));
+            toast({
+              title: "Business rules compiled",
+              message: ruleReportSummary(report),
+              tone: report.buckets.needs_confirmation || report.buckets.conflict ? "warning" : "success",
+            });
+          }}
         />
         </div>
       )}

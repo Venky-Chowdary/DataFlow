@@ -143,6 +143,7 @@ const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "pii", label: "PII" },
   { id: "new", label: "New" },
   { id: "ready", label: "Ready" },
+  { id: "rules", label: "Rules" },
 ];
 
 export function ColumnReviewPanel({
@@ -465,10 +466,12 @@ export function ColumnReviewPanel({
   const showHead = !hideTitle && !isDialog;
   const showPreview = !isDialog && !compact && Boolean(sampleRows && sampleRows.length > 0);
 
-  const filterTabItems = FILTER_TABS.map((tab) => ({
-    ...tab,
-    count: compact && !isDialog ? undefined : filterCounts[tab.id],
-  }));
+  const filterTabItems = FILTER_TABS
+    .filter((tab) => tab.id !== "rules" || filterCounts.rules > 0 || filter === "rules")
+    .map((tab) => ({
+      ...tab,
+      count: compact && !isDialog ? undefined : filterCounts[tab.id],
+    }));
 
   return (
     <div
@@ -842,6 +845,26 @@ export function ColumnReviewPanel({
                   <td className="df2-column-source-cell">
                     <div className="df2-column-cell-content">
                       <span className="df2-column-source">{m.source}</span>
+                      {m.businessRule && (
+                        <span
+                          className={`df2-badge df2-badge-xs df2-rule-chip ${
+                            m.businessRule.status === "executable"
+                              ? "is-applied"
+                              : m.businessRule.status === "conflict"
+                                ? "is-conflict"
+                                : "is-review"
+                          }`}
+                          title={
+                            `${m.businessRule.kindLabel}: ${m.businessRule.text || "direct"}`
+                            + (m.businessRule.row
+                              ? ` · ${m.businessRule.sheet || "sheet"} row ${m.businessRule.row}`
+                              : "")
+                            + (m.businessRule.issues?.length ? ` — ${m.businessRule.issues[0]}` : "")
+                          }
+                        >
+                          {m.businessRule.kindLabel}
+                        </span>
+                      )}
                       {omitted && (
                         <span className="df2-badge df2-badge-muted df2-badge-xs" title="Excluded from write — intentional Map policy">
                           omit
@@ -1309,8 +1332,21 @@ export function ColumnReviewPanel({
                       </div>
                     </td>
                   )}
-                  <td className="df2-column-reason" title={m.reason}>
-                    {m.reason || "Semantic match"}
+                  <td className="df2-column-reason" title={m.businessRule?.text || m.reason}>
+                    {m.businessRule ? (
+                      <div className="df2-column-rule-why">
+                        <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>
+                        <span>{m.businessRule.text || m.reason || "Direct"}</span>
+                        {m.businessRule.row != null ? (
+                          <span className="df2-column-rule-prov">
+                            {m.businessRule.sheet ? `${m.businessRule.sheet} · ` : ""}
+                            row {m.businessRule.row}
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : (
+                      m.reason || "Semantic match"
+                    )}
                   </td>
                   <td className="df2-column-confidence">
                     <span className={`df2-column-conf ${tier}`}>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</span>
