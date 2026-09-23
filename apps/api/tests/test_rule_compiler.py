@@ -1190,3 +1190,63 @@ def test_compound_predicate_is_fail_closed_not_a_half_filter():
     assert any("precision" in issue.lower() or "scale" in issue.lower() for issue in by["pay"]["issues"])
     assert by["name"]["status"] == "needs_confirmation"
     assert any("varchar" in issue.lower() or "length" in issue.lower() for issue in by["name"]["issues"])
+
+
+def test_volatile_identity_wrappers_and_lookup_payload():
+    today = classify_rule("default to today")
+    assert today["kind"] == "unknown"
+    assert today["plane"] == "review"
+    assert classify_rule("constant: GETDATE()")["kind"] == "unknown"
+    assert classify_rule("NOW()")["kind"] == "unknown"
+    assert classify_rule("skip deleted rows")["kind"] == "unknown"
+    assert classify_rule("omit")["kind"] == "omit"
+    assert classify_rule("# do not apply this note")["kind"] == "unknown"
+    assert classify_rule("excel serial date")["kind"] == "unknown"
+
+    wrapped = classify_rule("keep if trim(status) = A")
+    assert wrapped["kind"] == "filter"
+    assert wrapped["condition"] == 'trim(status) = "A"'
+    nested = classify_rule("keep if upper(trim(status)) = ACTIVE")
+    assert "upper(trim(status))" in nested["condition"]
+    distinct = classify_rule("keep if status is distinct from flag")
+    assert distinct["kind"] == "filter"
+    assert "is_null(status)" in distinct["condition"]
+    extrema = classify_rule("GREATEST(a, b, 0)")
+    assert extrema["kind"] == "derive"
+    assert extrema["expression"].startswith("greatest(")
+    part = classify_rule("split_part(name, ' ', 1)")
+    assert part["kind"] == "derive"
+    assert "split_part(name" in part["expression"]
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"keep if trim(status) = A\"\n"
+        "id,id,Direct\n"
+        "code,amount,\"A → ACTIVE, I → INACTIVE\"\n"
+        "pad,qty,\"01 → 1, 02 → 2\"\n"
+        "low,high,GREATEST(low, high)\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "imap-integrity.csv",
+        csv,
+        source_columns=["status", "id", "code", "pad", "low", "high"],
+        dest_columns=["status", "id", "amount", "qty", "high"],
+        dest_types={
+            "id": "INTEGER GENERATED ALWAYS AS IDENTITY",
+            "amount": "INTEGER",
+            "qty": "NUMERIC",
+            "status": "TEXT",
+            "high": "NUMERIC",
+        },
+    )
+    by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    filt = next(s for s in report["shape_steps"] if s["op"] == "filter_rows")
+    assert "trim(status)" in filt["options"]["condition"]
+    assert by["id"]["status"] == "needs_confirmation"
+    assert any("identity" in issue.lower() or "generated" in issue.lower() for issue in by["id"]["issues"])
+    assert by["code"]["status"] == "needs_confirmation"
+    assert any("numeric" in issue.lower() for issue in by["code"]["issues"])
+    assert by["pad"]["status"] == "needs_confirmation"
+    assert any("leading zero" in issue.lower() for issue in by["pad"]["issues"])
+    assert by["low"]["kind"] == "derive"
+    assert by["low"]["status"] == "executable"

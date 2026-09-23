@@ -692,36 +692,77 @@ _ROW_HEAD = re.compile(
 )
 _KEEP_COLS_GUARD = re.compile(r"\bkeep\s+(?:only\s+)?(?:columns?|fields?)\b", re.I)
 _DROP_COL_GUARD = re.compile(r"\b(?:drop|remove)\s+(?:column|field)s?\b", re.I)
+_SUBJ = (
+    r"(?:(?:trim|ltrim|rtrim|upper|lower|length|len)\s*\(\s*"
+    r"(?:(?:trim|ltrim|rtrim|upper|lower|length|len)\s*\(\s*[A-Za-z_][\w.]*\s*\)|[A-Za-z_][\w.]*)"
+    r"\s*\)|[A-Za-z_][\w.]*)"
+)
 _BETWEEN_ATOM = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)$",
+    rf"^(?P<col>{_SUBJ})\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)$",
     re.I,
 )
 _IN_ATOM = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?in\s*\((?P<vals>.+)\)$",
+    rf"^(?P<col>{_SUBJ})\s+(?P<not>not\s+)?in\s*\((?P<vals>.+)\)$",
     re.I,
 )
 _LIKE_ATOM = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>not\s+)?(?P<op>i?like)\s+(?P<pat>.+)$",
+    rf"^(?P<col>{_SUBJ})\s+(?P<not>not\s+)?(?P<op>i?like)\s+(?P<pat>.+)$",
     re.I,
 )
 _IS_ATOM = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+is\s+(?P<not>not\s+)?(?P<kind>null|empty|blank|missing)$",
+    rf"^(?P<col>{_SUBJ})\s+is\s+(?P<not>not\s+)?(?P<kind>null|empty|blank|missing)$",
     re.I,
 )
 _ENGLISH_STR = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+(?P<not>does\s+not\s+|not\s+)?"
+    rf"^(?P<col>{_SUBJ})\s+(?P<not>does\s+not\s+|not\s+)?"
     r"(?P<op>contains?|starts?\s+with|ends?\s+with)\s+(?P<val>.+)$",
     re.I,
 )
 _ENGLISH_CMP = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s+"
+    rf"^(?P<col>{_SUBJ})\s+"
     r"(?P<op>equals?|equal\s+to|is\s+equal\s+to|not\s+equal(?:\s+to)?|"
     r"does\s+not\s+equal|greater\s+than(?:\s+or\s+equal(?:\s+to)?)?|"
     r"less\s+than(?:\s+or\s+equal(?:\s+to)?)?|at\s+least|at\s+most)\s+(?P<val>.+)$",
     re.I,
 )
 _SYM_ATOM = re.compile(
-    r"^(?P<col>[A-Za-z_][\w.]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    rf"^(?P<col>{_SUBJ})\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    re.I,
+)
+_DISTINCT_ATOM = re.compile(
+    rf"^(?P<left>{_SUBJ})\s+is\s+(?P<not>not\s+)?distinct\s+from\s+(?P<right>{_SUBJ}|.+)$",
+    re.I,
+)
+_VOLATILE_VALUE = re.compile(
+    r"^(?:now(?:\s*\(\s*\))?|today(?:\s*\(\s*\))?|tomorrow|yesterday|"
+    r"getdate(?:\s*\(\s*\))?|getutcdate(?:\s*\(\s*\))?|sysdate|"
+    r"current[_ ](?:timestamp|date|time)|"
+    r"newid(?:\s*\(\s*\))?|newsequentialid(?:\s*\(\s*\))?|"
+    r"uuid(?:\s*\(\s*\))?|gen_random_uuid(?:\s*\(\s*\))?|"
+    r"rand(?:om)?(?:\s*\(\s*\))?)$",
+    re.I,
+)
+_VOLATILE_EXPR = re.compile(
+    r"\b(?:now\s*\(|getdate\s*\(|getutcdate\s*\(|sysdatetime\s*\(|"
+    r"sysutcdatetime\s*\(|sysdate\b|current[_ ](?:timestamp|date|time)\b|"
+    r"today\s*\(|newid\s*\(|newsequentialid\s*\(|gen_random_uuid\s*\(|"
+    r"uuid(?:_generate|_v4)?\s*\(|random\s*\(|rand\s*\()",
+    re.I,
+)
+_EXCEL_SERIAL = re.compile(
+    r"\b(?:excel\s+serial|ole\s+(?:automation\s+)?date|serial\s+date)\b",
+    re.I,
+)
+_COMMENT_CELL = re.compile(r"^(?:#|//|--|note:|comment:|todo:)\s*", re.I)
+_SKIP_DELETED = re.compile(
+    r"\b(?:skip|exclude|omit|drop)\s+(?:deleted|inactive)\s+rows?\b|"
+    r"\b(?:active|undeleted)\s+only\b|"
+    r"\bsoft[\s-]?deletes?\b",
+    re.I,
+)
+_EXTREMA_FN = re.compile(r"^=?\s*(?P<fn>greatest|least)\s*\(", re.I)
+_SPLIT_PART = re.compile(
+    r"\bsplit_part\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*['\"](?P<sep>.*)['\"]\s*,\s*(?P<n>\d+)\s*\)",
     re.I,
 )
 _SET_OP = re.compile(
@@ -914,27 +955,126 @@ def parse_predicate(text: str) -> str:
     return "(" + joiner.join(compiled) + ")"
 
 
+def compile_subject(text: str) -> str:
+    """iMAP wrapper: trim/upper/lower/length around a named column."""
+    raw = (text or "").strip()
+    if re.fullmatch(r"[A-Za-z_][\w.]*", raw or ""):
+        return raw
+    match = re.match(
+        r"^(?P<fn>trim|ltrim|rtrim|upper|lower|length|len)\s*\(\s*(?P<inner>.+)\s*\)\s*$",
+        raw,
+        re.I,
+    )
+    if not match:
+        return ""
+    inner = compile_subject(match.group("inner"))
+    if not inner:
+        return ""
+    fn = match.group("fn").lower()
+    if fn in {"ltrim", "rtrim"}:
+        fn = "trim"
+    if fn == "len":
+        fn = "length"
+    return f"{fn}({inner})"
+
+
+def volatile_reason(text: str, value: str = "") -> str:
+    """dbt / shape contract: clock and random are not deterministic."""
+    token = (value or "").strip().strip("\"'")
+    if token and _VOLATILE_VALUE.match(token):
+        return (
+            "NOW / TODAY / UUID / RAND is not deterministic. "
+            "Shape will not invent a clock or a random — it was not applied."
+        )
+    if _VOLATILE_EXPR.search(text or ""):
+        return (
+            "NOW / TODAY / UUID / RAND is not deterministic. "
+            "Shape will not invent a clock or a random — it was not applied."
+        )
+    return ""
+
+
+def parse_extrema(text: str) -> dict[str, Any] | None:
+    """SQL GREATEST / LEAST → shape greatest() / least()."""
+    raw = (text or "").strip()
+    match = _EXTREMA_FN.match(raw)
+    if not match:
+        return None
+    start = raw.find("(", match.start())
+    if start < 0:
+        return None
+    depth = 0
+    quote = ""
+    end = -1
+    for i, ch in enumerate(raw[start:], start):
+        if quote:
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in "'\"":
+            quote = ch
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end < 0 or raw[end + 1:].strip().rstrip(";").strip():
+        return None
+    args = _split_sql_args(raw[start + 1:end], strip_quotes=False)
+    if len(args) < 2:
+        return None
+    fn = match.group("fn").lower()
+    return {
+        "kind": "derive",
+        "plane": "shape",
+        "confidence": 0.93,
+        "expression": f"{fn}(" + ", ".join(_case_atom(arg) for arg in args) + ")",
+    }
+
+
 def parse_predicate_atom(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
         return ""
+    if volatile_reason(raw):
+        return ""
+    distinct = _DISTINCT_ATOM.match(raw)
+    if distinct:
+        left = compile_subject(distinct.group("left"))
+        right = compile_subject(distinct.group("right")) or _case_atom(distinct.group("right"))
+        if not left or not right:
+            return ""
+        if distinct.group("not"):
+            return f"((is_null({left}) and is_null({right})) or ({left} = {right}))"
+        return (
+            f"((is_null({left}) and is_not_null({right})) or "
+            f"(is_not_null({left}) and is_null({right})) or ({left} <> {right}))"
+        )
     between = _BETWEEN_ATOM.match(raw)
     if between:
+        col = compile_subject(between.group("col"))
+        if not col:
+            return ""
         return (
-            f"{between.group('col')} >= {_case_atom(between.group('lo'))} and "
-            f"{between.group('col')} <= {_case_atom(between.group('hi'))}"
+            f"{col} >= {_case_atom(between.group('lo'))} and "
+            f"{col} <= {_case_atom(between.group('hi'))}"
         )
     in_m = _IN_ATOM.match(raw)
     if in_m:
-        cond = _in_condition(in_m.group("col"), in_m.group("vals"))
+        col = compile_subject(in_m.group("col"))
+        cond = _in_condition(col, in_m.group("vals")) if col else ""
         if not cond:
             return ""
         return f"not {cond}" if in_m.group("not") else cond
     like = _LIKE_ATOM.match(raw)
     if like:
+        col = compile_subject(like.group("col"))
         pat = _like_pattern_token(like.group("pat"))
         cond = _like_condition(
-            like.group("col"),
+            col,
             pat,
             negated=bool(like.group("not")),
             insensitive=like.group("op").lower() == "ilike",
@@ -942,30 +1082,38 @@ def parse_predicate_atom(text: str) -> str:
         return cond
     is_m = _IS_ATOM.match(raw)
     if is_m:
+        col = compile_subject(is_m.group("col"))
+        if not col:
+            return ""
         fn = "is_not_null" if is_m.group("not") else "is_null"
-        return f"{fn}({is_m.group('col')})"
+        return f"{fn}({col})"
     english = _ENGLISH_STR.match(raw)
     if english:
+        col = compile_subject(english.group("col"))
         val = english.group("val").strip()
-        if not val:
+        if not col or not val:
             return ""
         op = re.sub(r"\s+", " ", english.group("op").lower())
         if op.startswith("start"):
-            pred = f"starts_with({english.group('col')}, {_quote_lit(val)})"
+            pred = f"starts_with({col}, {_quote_lit(val)})"
         elif op.startswith("end"):
-            pred = f"ends_with({english.group('col')}, {_quote_lit(val)})"
+            pred = f"ends_with({col}, {_quote_lit(val)})"
         else:
-            pred = f"contains({english.group('col')}, {_quote_lit(val)})"
+            pred = f"contains({col}, {_quote_lit(val)})"
         return f"not {pred}" if english.group("not") else pred
     cmp_m = _ENGLISH_CMP.match(raw)
     if cmp_m:
+        col = compile_subject(cmp_m.group("col"))
         oper = _english_cmp_op(cmp_m.group("op"))
-        if not oper:
+        if not col or not oper:
             return ""
-        return _condition(cmp_m.group("col"), oper, cmp_m.group("val"))
+        return _condition(col, oper, cmp_m.group("val"))
     sym = _SYM_ATOM.match(raw)
     if sym:
-        return _condition(sym.group("col"), sym.group("op"), sym.group("val"))
+        col = compile_subject(sym.group("col"))
+        if not col:
+            return ""
+        return _condition(col, sym.group("op"), sym.group("val"))
     return ""
 
 
@@ -1364,6 +1512,15 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if _UNIQUE.search(raw):
         flags["unique"] = True
 
+    if _COMMENT_CELL.match(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.0,
+            "reason": "Commentary cell — it was not applied.",
+            **flags,
+        }
+
     if raw.startswith("=") or _EXCEL_FN.match(raw):
         excel = _excel_formula(raw)
         if excel:
@@ -1378,6 +1535,10 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             excel.update(flags)
             return excel
 
+    clock = volatile_reason(raw)
+    if clock:
+        return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": clock, **flags}
+
     if _DIRECT.match(raw):
         return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
 
@@ -1390,6 +1551,10 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if coal:
         coal.update(flags)
         return coal
+    extrema = parse_extrema(raw)
+    if extrema:
+        extrema.update(flags)
+        return extrema
     nf = _NULLIF_FN.search(raw)
     if nf:
         return {
@@ -1472,6 +1637,18 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             "search": replaced.group("pat"),
             "replacement": replaced.group("repl"),
             "regex": True,
+            **flags,
+        }
+    split_part = _SPLIT_PART.search(raw)
+    if split_part:
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": (
+                f"split_part({split_part.group('col')}, "
+                f"{json_escape(split_part.group('sep'))}, {split_part.group('n')})"
+            ),
             **flags,
         }
 
@@ -1557,6 +1734,17 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
+    if _SKIP_DELETED.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Skip-deleted / active-only needs a named column "
+                "(deleted, is_deleted, active). This compiler will not invent it."
+            ),
+            **flags,
+        }
     if _OMIT.search(raw):
         return {"kind": "omit", "plane": "map", "confidence": 0.97, **flags}
 
@@ -1696,11 +1884,15 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
 
     default = _DEFAULT.search(raw) or _DEFAULT_BARE.search(raw)
     if default:
+        value = default.group("value").strip().strip("\"'")
+        reason = volatile_reason(raw, value)
+        if reason:
+            return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": reason, **flags}
         return {
             "kind": "default",
             "plane": "shape",
             "confidence": 0.93,
-            "value": default.group("value").strip().strip("\"'"),
+            "value": value,
             **flags,
         }
 
@@ -1730,11 +1922,15 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
 
     constant = _CONSTANT.search(raw)
     if constant:
+        value = constant.group("value").strip().strip("\"'")
+        reason = volatile_reason(raw, value)
+        if reason:
+            return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": reason, **flags}
         return {
             "kind": "constant",
             "plane": "shape",
             "confidence": 0.93,
-            "value": constant.group("value").strip().strip("\"'"),
+            "value": value,
             **flags,
         }
 
@@ -1844,6 +2040,17 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if date_spec:
         date_spec.update(flags)
         return date_spec
+    if _EXCEL_SERIAL.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Excel serial / OLE date needs a named epoch. "
+                "1900 leap-bug vs 1899-12-30 is silent day shift — it was not applied."
+            ),
+            **flags,
+        }
     if _DATE.search(raw):
         return {"kind": "date", "plane": "map", "confidence": 0.96, **flags}
     if _TIME.search(raw) and not _DATE.search(raw):
@@ -1919,6 +2126,9 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
 
     if not raw:
         return {"kind": "direct", "plane": "map", "confidence": 0.99}
+    reason = volatile_reason(raw)
+    if reason:
+        return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": reason, **flags}
     return {
         "kind": "unknown",
         "plane": "review",

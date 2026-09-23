@@ -222,6 +222,56 @@ def _parse_precision(db_type: str) -> dict[str, Any] | None:
     }
 
 
+_IDENTITY_TYPE = re.compile(
+    r"\b(?:serial|bigserial|smallserial|identity|auto[_ ]?increment|"
+    r"generated\s+always)\b",
+    re.I,
+)
+_BOOL_LOOKUP = frozenset({"true", "false", "t", "f", "0", "1"})
+
+
+def _identity_dest_conflict(kind: str, dest_type: str, dest_name: str) -> str:
+    """Warehouse identity/generated columns are dest-owned. Do not write them."""
+    if kind in {"omit", "drop_column", "keep_columns", "filter", "divert"}:
+        return ""
+    if dest_name and _IDENTITY_TYPE.search(dest_type or ""):
+        return (
+            f"Destination “{dest_name}” is {dest_type} (identity/generated). "
+            "This compiler will not write it — the destination owns the sequence."
+        )
+    return ""
+
+
+def _lookup_payload_conflict(pairs: dict[str, str], dest_type: str, dest_name: str) -> str:
+    """G20 / COMA: lookup payloads must inhabit the dest type family."""
+    if not pairs or not dest_name:
+        return ""
+    dest_fam = _type_family(dest_type)
+    values = [str(value).strip() for value in pairs.values()]
+    keys = [str(key).strip() for key in pairs]
+    if dest_fam == "numeric" and any(not re.fullmatch(r"-?[\d.]+", value or "") for value in values):
+        return (
+            f"Lookup values are not numeric but destination “{dest_name}” is {dest_type}. "
+            "G20 will not invent a cast."
+        )
+    if dest_fam == "boolean" and any(value.lower() not in _BOOL_LOOKUP for value in values):
+        return (
+            f"Lookup values are not boolean tokens but destination “{dest_name}” is {dest_type}. "
+            "Write true/false — informal yes/Y is silent remap."
+        )
+    if dest_fam == "temporal":
+        return (
+            f"Lookup onto temporal destination “{dest_name}” needs a named date mask. "
+            "Codes are not dates."
+        )
+    if dest_fam == "numeric" and any(re.fullmatch(r"0\d+", key) for key in keys):
+        return (
+            f"Lookup keys have leading zeros but destination “{dest_name}” is {dest_type}. "
+            "G20 matches codes exactly — a number dest drops the zero."
+        )
+    return ""
+
+
 def _precision_conflict(kind: str, dest_type: str, source_type: str, dest_name: str) -> str:
     """Overflow / truncation named on the dest type is review, not a guessed clip."""
     dest = _parse_precision(dest_type)
@@ -453,7 +503,11 @@ def compile_rule_workbook(
             "Blank/empty is default_if_null, never a G20 code. "
             "hash identity is Gate-8 alignment, not PII hash. "
             "COMA type constraints refuse temporal↔numeric assignments. "
-            "Cupid constraint matching refuses DECIMAL/VARCHAR overflow. "
+            "Cupid constraint matching refuses DECIMAL/VARCHAR overflow "
+            "and identity/generated dest writes. Lookup payloads must match "
+            "the dest type family; leading-zero codes onto a number dest stay "
+            "in review. NOW/TODAY/UUID/RAND are not deterministic. "
+            "Skip-deleted without a named column stays in review. "
             "Row predicates compile only when every AND/OR atom is closed; "
             "a leftover tail stays in review. Named IANA zones become "
             "assume_timezone; unnamed zones stay in review. "
@@ -847,6 +901,9 @@ def _compile_row(
     prec_issue = _precision_conflict(kind, dest_type, source_type, dest_column or spoken_dst)
     if prec_issue:
         issues.append(prec_issue)
+    ident_issue = _identity_dest_conflict(kind, dest_type, dest_column or spoken_dst)
+    if ident_issue:
+        issues.append(ident_issue)
     policy = unknown_code_policy(spoken_rule)
     if policy["action"] == "refuse":
         policy = unknown_code_policy(rule_text)
@@ -881,7 +938,7 @@ def _compile_row(
     )
     unnamed_zone = kind == "timezone" and not classified.get("zone")
     status = "executable"
-    if kind in review_kinds or bind_fail or low_confidence_reason or type_issue or prec_issue or unnamed_zone:
+    if kind in review_kinds or bind_fail or low_confidence_reason or type_issue or prec_issue or ident_issue or unnamed_zone:
         status = "needs_confirmation"
 
     transform = _KIND_TO_TRANSFORM.get(kind, "none")
@@ -1293,9 +1350,21 @@ def _compile_row(
             and not weak_bind
             and not type_issue
             and not prec_issue
+            and not ident_issue
             and not classified.get("case_insensitive")
         ):
             status = "executable"
+
+    lookup_issue = (
+        _lookup_payload_conflict(pairs, dest_type, dest_column or spoken_dst)
+        if (kind == "lookup" or pairs)
+        else ""
+    )
+    if lookup_issue:
+        issues.append(lookup_issue)
+        status = "needs_confirmation"
+        shape_step = None
+        extra_steps = []
 
     if (kind == "lookup" or pairs) and policy["action"] != "refuse":
         issues.append(
