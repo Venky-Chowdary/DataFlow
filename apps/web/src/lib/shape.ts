@@ -18,6 +18,9 @@ export interface ShapeStepWire {
   enabled?: boolean;
   on_error?: string;
   label?: string;
+  /** Compiler stamp — a customers step is not applied to orders. */
+  source_table?: string;
+  dest_table?: string;
 }
 
 export interface ShapeRecipeWire {

@@ -510,6 +510,7 @@ def compile_rule_workbook(
         "dest_tables": selected_dest_tables,
         "dest_catalog_tables": list(dest_cat.keys()),
         "projection": _named_projection(compiled),
+        "shape_steps_by_table": _shape_steps_by_table(shape_steps),
         "bind_methods": _bind_method_counts(compiled),
         "lookup_coverage": _lookup_coverage(lookup_pairs),
         "named_rules": sorted(named_catalog),
@@ -559,6 +560,10 @@ def compile_rule_workbook(
             "This compiler will not invent a join grain. "
             "Named executable columns are the projection — nothing else "
             "is written. "
+            "Shape steps carry the source table they belong to; a "
+            "customers date parse is not applied to orders. "
+            "apply_compiled_projection runs that projection on live rows "
+            "through ShapeEngine + apply_transform + apply_code_crosswalk. "
             "CDC / SCD2 / mirror refuse pre-load shape — history was not "
             "written by this recipe. Map-plane pairs still compile. "
             "Unknown-code policy is "
@@ -852,14 +857,48 @@ def _named_projection(compiled: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{"source_table": table, "columns": cols} for table, cols in by_table.items()]
 
 
+def _stamp_shape_step(
+    step: dict[str, Any],
+    source_table: str,
+    dest_table: str,
+) -> dict[str, Any]:
+    """Copy a step and pin the table it belongs to. ShapeEngine ignores extras."""
+    stamped = dict(step)
+    if source_table and not stamped.get("source_table"):
+        stamped["source_table"] = source_table
+    if dest_table and not stamped.get("dest_table"):
+        stamped["dest_table"] = dest_table
+    return stamped
+
+
 def _item_shape_steps(item: dict[str, Any]) -> list[dict[str, Any]]:
     if item["status"] != "executable":
         return []
-    steps = []
+    table = str(item.get("source_table") or "")
+    dest = str(item.get("dest_table") or "")
+    steps: list[dict[str, Any]] = []
     if item.get("shape_step"):
         steps.append(item["shape_step"])
     steps.extend(item.get("shape_steps") or [])
-    return steps
+    tagged = [_stamp_shape_step(step, table, dest) for step in steps if isinstance(step, dict)]
+    if item.get("shape_step") and isinstance(item["shape_step"], dict):
+        item["shape_step"] = _stamp_shape_step(item["shape_step"], table, dest)
+    if item.get("shape_steps"):
+        item["shape_steps"] = [
+            _stamp_shape_step(step, table, dest)
+            for step in item["shape_steps"]
+            if isinstance(step, dict)
+        ]
+    return tagged
+
+
+def _shape_steps_by_table(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group stamped steps so each selected table has its own recipe."""
+    by_table: dict[str, list[dict[str, Any]]] = {}
+    for step in steps:
+        table = str(step.get("source_table") or "(unnamed)")
+        by_table.setdefault(table, []).append(step)
+    return [{"source_table": table, "steps": group} for table, group in by_table.items()]
 
 
 def _refuse_preload_on_history(item: dict[str, Any], sync_mode: str) -> None:

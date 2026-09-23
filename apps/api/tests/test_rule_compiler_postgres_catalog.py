@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from services.rule_compiler.apply import apply_selected_tables
 from services.rule_compiler.compile import compile_rule_workbook
 
 
@@ -217,6 +218,131 @@ def test_live_postgres_dest_catalog_identity_and_precision():
         assert any("precision" in i.lower() or "scale" in i.lower() for i in pay["issues"])
         assert by[(orders, "amount", fact)]["status"] == "executable"
         assert {item["source_table"] for item in report["projection"]} >= {customers, orders}
+    finally:
+        _psql(
+            f"DROP TABLE IF EXISTS {fact}; DROP TABLE IF EXISTS {dim}; "
+            f"DROP TABLE IF EXISTS {orders}; DROP TABLE IF EXISTS {customers};"
+        )
+
+
+def _rows(table: str, columns: list[str]) -> list[dict[str, str]]:
+    listed = ", ".join(columns)
+    out = _psql(f"COPY (SELECT {listed} FROM {table} ORDER BY 1) TO STDOUT WITH CSV HEADER")
+    assert out.returncode == 0, out.stderr
+    lines = [line for line in out.stdout.splitlines() if line]
+    assert lines, f"no rows from {table}"
+    headers = lines[0].split(",")
+    rows: list[dict[str, str]] = []
+    for line in lines[1:]:
+        values = line.split(",")
+        rows.append({headers[i]: values[i] for i in range(len(headers))})
+    return rows
+
+
+def test_live_postgres_apply_named_projection_per_table():
+    """Compile + apply on real tables. Customer rules do not rewrite orders."""
+    suffix = uuid.uuid4().hex[:8]
+    customers = f"df_rule_apply_cust_{suffix}"
+    orders = f"df_rule_apply_ord_{suffix}"
+    dim = f"df_rule_apply_dim_{suffix}"
+    fact = f"df_rule_apply_fact_{suffix}"
+    try:
+        created = _psql(
+            f"""
+            CREATE TABLE {customers} (
+                id integer PRIMARY KEY,
+                email text NOT NULL,
+                signed_on text NOT NULL,
+                status text NOT NULL
+            );
+            CREATE TABLE {orders} (
+                id integer PRIMARY KEY,
+                amount numeric(12,2) NOT NULL,
+                status text NOT NULL
+            );
+            CREATE TABLE {dim} (
+                customer_id integer PRIMARY KEY,
+                email text,
+                birth_date date,
+                status text
+            );
+            CREATE TABLE {fact} (
+                order_id integer PRIMARY KEY,
+                amount numeric(12,2),
+                status text
+            );
+            INSERT INTO {customers}(id, email, signed_on, status) VALUES
+                (1, 'Ada@Example.COM', '03/15/2020', 'A'),
+                (2, 'bad@example.com', 'not-a-date', 'A'),
+                (3, 'c@example.com', '04/01/2021', 'Z');
+            INSERT INTO {orders}(id, amount, status) VALUES
+                (10, 19.50, 'A'),
+                (11, 4.00, 'Z');
+            """
+        )
+        assert created.returncode == 0, created.stderr
+        src_cat, src_types = _catalog_and_types([customers, orders])
+        dst_cat, dst_types = _catalog_and_types([dim, fact])
+
+        csv = (
+            "Source,Source Column,Destination,Destination Column,Rule\n"
+            f"{customers},id,{dim},customer_id,Direct\n"
+            f"{customers},email,{dim},email,lowercase\n"
+            f"{customers},signed_on,{dim},birth_date,MM/DD/YYYY\n"
+            f"{customers},status,{dim},status,A → ACTIVE, I → INACTIVE\n"
+            f"{orders},id,{fact},order_id,Direct\n"
+            f"{orders},amount,{fact},amount,Direct\n"
+            f"{orders},status,{fact},status,A → OPEN, I → CLOSED\n"
+            f",id,{dim},mystery_id,Direct\n"
+        ).encode()
+        report = compile_rule_workbook(
+            "live-apply.csv",
+            csv,
+            source_tables=[customers, orders],
+            source_catalog=src_cat,
+            dest_tables=[dim, fact],
+            dest_catalog=dst_cat,
+            source_types=src_types,
+            dest_types=dst_types,
+        )
+        date_steps = [s for s in report["shape_steps"] if s.get("op") == "parse_date"]
+        assert date_steps
+        assert all(s.get("source_table") == customers for s in date_steps)
+        mystery = next(r for r in report["rules"] if r.get("dest_column") == "mystery_id")
+        assert mystery["status"] == "needs_confirmation"
+
+        live_customers = _rows(customers, ["id", "email", "signed_on", "status"])
+        live_orders = _rows(orders, ["id", "amount", "status"])
+        assert len(live_customers) == 3
+        assert len(live_orders) == 2
+        assert live_customers[0]["email"] == "Ada@Example.COM"
+        assert live_orders[0]["status"] == "A"
+
+        applied = apply_selected_tables(
+            report,
+            {customers: live_customers, orders: live_orders},
+        )
+        by_src = {item["source_table"]: item for item in applied["tables"]}
+        cust_dest = by_src[customers]["destinations"][0]
+        assert cust_dest["dest_table"] == dim
+        assert cust_dest["written"] == 1
+        image = cust_dest["rows"][0]
+        assert image["customer_id"] == "1"
+        assert image["email"] == "ada@example.com"
+        assert image["birth_date"] == "2020-03-15"
+        assert image["status"] == "ACTIVE"
+        assert "mystery_id" not in image
+        assert cust_dest["refused"] >= 2
+
+        ord_dest = by_src[orders]["destinations"][0]
+        assert ord_dest["dest_table"] == fact
+        assert ord_dest["written"] == 1
+        assert ord_dest["rows"][0]["order_id"] == "10"
+        assert ord_dest["rows"][0]["status"] == "OPEN"
+        assert "email" not in ord_dest["rows"][0]
+        assert "birth_date" not in ord_dest["rows"][0]
+        assert any("unmapped" in (q.get("error") or "") for q in ord_dest["quarantine"])
+        assert applied["missing_populations"] == []
     finally:
         _psql(
             f"DROP TABLE IF EXISTS {fact}; DROP TABLE IF EXISTS {dim}; "

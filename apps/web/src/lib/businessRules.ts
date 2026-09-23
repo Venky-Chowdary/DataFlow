@@ -74,6 +74,7 @@ export interface RuleCompileReport {
     source_table: string;
     columns: Array<{ source_column: string; dest_column: string; dest_table?: string }>;
   }>;
+  shape_steps_by_table?: Array<{ source_table: string; steps: ShapeStepWire[] }>;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -259,17 +260,27 @@ function shapeStepKey(step: ShapeStepWire): string {
   const to = step.options && typeof step.options === "object"
     ? String((step.options as { to?: unknown }).to ?? "")
     : "";
-  return `${step.op}|${step.column || ""}|${to}`;
+  return `${step.source_table || ""}|${step.op}|${step.column || ""}|${to}`;
 }
 
-/** Append compiled shape steps without wiping operator-authored ones. */
+/** Append compiled shape steps without wiping operator-authored ones.
+
+A named source table keeps the other selected tables' steps out of this
+recipe. Untagged (operator) steps always merge.
+*/
 export function mergeCompiledShapeSteps(
   existing: ShapeStepWire[],
   compiled: ShapeStepWire[],
+  options?: { sourceTable?: string },
 ): ShapeStepWire[] {
+  const tableFold = (options?.sourceTable || "").trim().toLowerCase();
   const seen = new Set(existing.map(shapeStepKey));
   const extra: ShapeStepWire[] = [];
   for (const step of compiled) {
+    if (tableFold) {
+      const stepTable = (step.source_table || "").trim().toLowerCase();
+      if (stepTable && stepTable !== tableFold) continue;
+    }
     const key = shapeStepKey(step);
     if (seen.has(key)) continue;
     seen.add(key);
