@@ -70,6 +70,8 @@ _KIND_TO_TRANSFORM = {
     "join": "none",
     "contract": "none",
     "timezone": "none",
+    "hash_identity": "none",
+    "unnest": "none",
 }
 
 _KIND_LABEL = {
@@ -115,10 +117,12 @@ _KIND_LABEL = {
     "join": "Join (review)",
     "contract": "Validate contract",
     "timezone": "Timezone (review)",
+    "hash_identity": "Hash identity",
+    "unnest": "Unnest JSON",
     "unknown": "Needs review",
 }
 
-_NO_SOURCE_OK = frozenset({"omit", "constant", "join", "filter", "divert", "contract"})
+_NO_SOURCE_OK = frozenset({"omit", "constant", "join", "filter", "divert", "contract", "hash_identity"})
 _NO_DEST_OK = frozenset({"omit", "join", "filter", "divert"})
 
 
@@ -304,7 +308,11 @@ def compile_rule_workbook(
             "are not executed. Named rules expand like Informatica "
             "mapplets / dbt macros (cycle and missing stay in review). "
             "Oracle DECODE and equality CASE compile to code_crosswalk; "
-            "complex CASE becomes if(). Unknown-code policy is "
+            "complex CASE and Informatica IIF become if(). Clio set-valued "
+            "correspondences (A, I, P → ACTIVE) expand every source code. "
+            "Blank/empty is default_if_null, never a G20 code. "
+            "hash identity is Gate-8 alignment, not PII hash. "
+            "Unknown-code policy is "
             "recorded only — G20 still refuses unmapped codes, never "
             "silent identity. Unused destination "
             "columns are not written. Unmapped source columns stay on Map "
@@ -827,6 +835,7 @@ def _compile_row(
             "options": {
                 "search": classified.get("search") or "",
                 "replacement": classified.get("replacement") or "",
+                **({"regex": True} if classified.get("regex") else {}),
             },
         }
     elif kind == "null_if" and source_column and status == "executable":
@@ -961,6 +970,47 @@ def _compile_row(
                 "reason": rule_text[:80] or "workbook divert",
             },
         }
+    elif kind == "hash_identity" and dest_column and status == "executable":
+        columns = [str(c) for c in (classified.get("columns") or []) if c]
+        bound = []
+        for name in columns:
+            resolved = resolve_name(name, src_cols) if src_cols else name
+            if src_cols and not resolved:
+                issues.append(f"Hash identity column “{name}” is not on the selected source.")
+                status = "needs_confirmation"
+                continue
+            if resolved and resolved not in bound:
+                bound.append(resolved)
+        if source_column and source_column not in bound:
+            bound.insert(0, source_column)
+        if not bound:
+            if status == "executable":
+                issues.append("Hash identity needs at least one named source column.")
+                status = "needs_confirmation"
+        else:
+            shape_step = {
+                "op": "hash_identity",
+                "column": "",
+                "enabled": True,
+                "on_error": "refuse",
+                "label": f"hash identity → {dest_column}",
+                "options": {"to": dest_column, "columns": bound},
+            }
+            map_source = dest_column
+    elif kind == "unnest" and source_column and status == "executable":
+        shape_step = {
+            "op": "unnest_json",
+            "column": source_column,
+            "enabled": True,
+            "on_error": "refuse",
+            "label": f"{source_column} unnest",
+            "options": {"to": dest_column or source_column},
+        }
+        issues.append(
+            "UNNEST expands row count. Dest COUNT is the expanded image, not a surplus."
+        )
+        if dest_column:
+            map_source = dest_column
 
     if status == "executable" and source_column:
         for extra in classified.get("extras") or []:
@@ -992,6 +1042,15 @@ def _compile_row(
                     "label": f"{source_column} {extra.get('mode') or 'lower'}",
                     "options": {"mode": extra.get("mode") or "lower"},
                 })
+    if status == "executable" and source_column and classified.get("blank_default"):
+        extra_steps.append({
+            "op": "default_if_null",
+            "column": source_column,
+            "enabled": True,
+            "on_error": "refuse",
+            "label": f"{source_column} blank default",
+            "options": {"value": classified.get("blank_default") or ""},
+        })
 
     if pairs and (
         kind in {"direct", "lookup", ""}

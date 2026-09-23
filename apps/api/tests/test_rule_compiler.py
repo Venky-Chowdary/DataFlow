@@ -15,6 +15,7 @@ from services.rule_compiler.classify import (
     parse_date_spec,
     parse_decode,
     parse_lookup,
+    parse_lookup_spec,
     parse_sql_case,
     unknown_code_policy,
 )
@@ -36,6 +37,12 @@ def test_lookup_accepts_a_single_code_pair():
     pairs = parse_lookup("A → ACTIVE, I → INACTIVE, P → PENDING")
     assert pairs == {"A": "ACTIVE", "I": "INACTIVE", "P": "PENDING"}
     assert classify_rule("A=ACTIVE; I=INACTIVE")["kind"] == "lookup"
+    # Clio set-valued: many source codes, one target. Not just the last token.
+    assert parse_lookup("A, I, P → ACTIVE") == {"A": "ACTIVE", "I": "ACTIVE", "P": "ACTIVE"}
+    assert parse_lookup("A|I → ACTIVE") == {"A": "ACTIVE", "I": "ACTIVE"}
+    pairs, blank = parse_lookup_spec("A → ACTIVE, blank → N/A")
+    assert pairs == {"A": "ACTIVE"}
+    assert blank == "N/A"
 
 
 def test_derive_salary_times_twelve():
@@ -915,3 +922,94 @@ def test_quoted_csv_keeps_decode_commas_inside_the_rule_cell():
     assert by_src["status"]["code_crosswalk"] == {"A": "ACTIVE", "I": "INACTIVE"}
     assert by_src["flag"]["code_crosswalk"] == {"Y": "YES", "N": "NO"}
     assert by_src["flag"]["unknown_code_policy"]["value"] == "OTHER"
+
+
+def test_clio_many_to_one_and_blank_are_not_silent():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"A, I, P → ACTIVE, blank → UNKNOWN\"\n"
+        "state,state,A|I → OPEN\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "clio.csv",
+        csv,
+        source_columns=["status", "state"],
+        dest_columns=["status", "state"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    assert by_src["status"]["code_crosswalk"] == {"A": "ACTIVE", "I": "ACTIVE", "P": "ACTIVE"}
+    assert "" not in by_src["status"]["code_crosswalk"]
+    assert "UNKNOWN" not in by_src["status"]["code_crosswalk"]
+    assert any(s["op"] == "default_if_null" for s in report["shape_steps"])
+    assert by_src["state"]["code_crosswalk"] == {"A": "OPEN", "I": "OPEN"}
+
+
+def test_informatica_iif_nvl2_and_update_strategy():
+    iif = classify_rule("IIF(amount > 0, amount, 0)")
+    assert iif["kind"] == "derive"
+    assert "if(amount > 0" in iif["expression"]
+    nulls = classify_rule("IIF(ISNULL(status), N/A, status)")
+    assert "is_null(status)" in nulls["expression"]
+    nvl2 = classify_rule("NVL2(email, email, unknown)")
+    assert nvl2["kind"] == "derive"
+    assert "is_not_null(email)" in nvl2["expression"]
+    reject = classify_rule("IIF(ISNULL(ITEM_NAME), DD_REJECT, DD_INSERT)")
+    assert reject["kind"] == "unknown"
+    assert reject["plane"] == "review"
+    ternary = classify_rule("status = A ? ACTIVE : INACTIVE")
+    assert ternary["kind"] == "derive"
+    assert "if(" in ternary["expression"]
+
+
+def test_in_between_filters_and_regex_and_hash_identity():
+    keep_in = classify_rule("keep if status in (A, I, P)")
+    assert keep_in["kind"] == "filter"
+    assert "status = \"A\"" in keep_in["condition"] or "status = A" in keep_in["condition"]
+    assert keep_in["keep"] is True
+    exclude_in = classify_rule("exclude rows where status in (X, Y)")
+    assert exclude_in["kind"] == "filter"
+    assert exclude_in["keep"] is False
+    between = classify_rule("keep if amount between 0 and 100")
+    assert between["kind"] == "filter"
+    assert "amount >= 0" in between["condition"]
+    extracted = classify_rule("REG_EXTRACT(name, '([A-Za-z]+)', 1)")
+    assert extracted["kind"] == "derive"
+    assert "regex_extract" in extracted["expression"]
+    replaced = classify_rule("REG_REPLACE(code, '[^0-9]', '')")
+    assert replaced["kind"] == "replace"
+    assert replaced.get("regex") is True
+    hashed = classify_rule("hash identity of customer_id and email")
+    assert hashed["kind"] == "hash_identity"
+    assert hashed["columns"] == ["customer_id", "email"]
+    assert classify_rule("hash PII")["kind"] == "hash"
+    assert classify_rule("fill down account_id")["kind"] == "unknown"
+    assert classify_rule("unnest json")["kind"] == "unnest"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"keep if status in (A, I)\"\n"
+        "amount,amount,keep if amount between 0 and 100\n"
+        "name,first_token,\"REG_EXTRACT(name, '([A-Za-z]+)', 1)\"\n"
+        "customer_id,row_key,hash identity of customer_id and email\n"
+        "payload,item,unnest json\n"
+        "code,code,\"REG_REPLACE(code, '[^0-9]', '')\"\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "imap.csv",
+        csv,
+        source_columns=["status", "amount", "name", "customer_id", "email", "payload", "code"],
+        dest_columns=["status", "amount", "first_token", "row_key", "item", "code"],
+    )
+    ops = {s["op"] for s in report["shape_steps"]}
+    assert "filter_rows" in ops
+    assert "hash_identity" in ops
+    assert "unnest_json" in ops
+    assert "replace" in ops
+    hash_step = next(s for s in report["shape_steps"] if s["op"] == "hash_identity")
+    assert set(hash_step["options"]["columns"]) >= {"customer_id", "email"}
+    assert hash_step["options"]["to"] == "row_key"
+    unnest = next(r for r in report["rules"] if r["kind"] == "unnest")
+    assert unnest["status"] == "executable"
+    assert any("expanded image" in issue for issue in unnest["issues"])
+    replace = next(r for r in report["rules"] if r["kind"] == "replace")
+    assert replace["shape_step"]["options"].get("regex") is True

@@ -164,6 +164,17 @@ _UNIQUE = re.compile(r"\b(?:unique|primary\s+key|\bpk\b)\b", re.I)
 _LOOKUP_PAIR = re.compile(
     r"([A-Za-z0-9_.-]+)\s*(?:→|->|=>|=|:)\s*([A-Za-z0-9_./ -]+)",
 )
+_LOOKUP_CORR = re.compile(
+    r"(?:^|[,;]\s*)"
+    r"(?P<keys>blank|empty|null|missing|"
+    r"(?:[A-Za-z0-9_.-]+(?:\s*(?:[,|/]|or|and)\s*[A-Za-z0-9_.-]+)*))"
+    r"\s*(?:→|->|=>|=|:)\s*"
+    r"(?P<val>[A-Za-z0-9_./ -]+?)"
+    r"(?=\s*[,;]\s*(?:blank|empty|null|missing|"
+    r"[A-Za-z0-9_.-]+(?:\s*(?:[,|/]|or|and)\s*[A-Za-z0-9_.-]+)*)"
+    r"\s*(?:→|->|=>|=|:)|$)",
+    re.I,
+)
 _LOOKUP_HINT = re.compile(
     r"\b(?:lookup|crosswalk|decode|code\s+map|map(?:ping)?\s+to)\b",
     re.I,
@@ -261,6 +272,59 @@ _EQ_ATOM = re.compile(
     r"^(?P<col>[A-Za-z_][\w.]*)\s*=\s*(?P<val>.+)$",
     re.I,
 )
+_IN_FILTER = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+in\s*\((?P<vals>.+?)\)",
+    re.I,
+)
+_EXCLUDE_IN = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+in\s*\((?P<vals>.+?)\)",
+    re.I,
+)
+_BETWEEN = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)",
+    re.I,
+)
+_EXCLUDE_BETWEEN = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s+between\s+(?P<lo>\S+)\s+and\s+(?P<hi>\S+)",
+    re.I,
+)
+_IIF = re.compile(r"^=?\s*iif\s*\(", re.I)
+_NVL2 = re.compile(
+    r"^=?\s*nvl2\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<present>.+?)\s*,\s*(?P<missing>.+?)\s*\)\s*$",
+    re.I | re.S,
+)
+_REG_EXTRACT = re.compile(
+    r"\b(?:reg(?:ex)?_extract|regexp_substr|regexp_extract)\s*\(\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s*,\s*['\"](?P<pat>.+?)['\"]"
+    r"(?:\s*,\s*(?P<grp>\d+))?",
+    re.I,
+)
+_REG_REPLACE = re.compile(
+    r"\b(?:reg(?:ex)?_replace|regexp_replace)\s*\(\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s*,\s*['\"](?P<pat>.+?)['\"]"
+    r"\s*,\s*['\"](?P<repl>.*)['\"]",
+    re.I,
+)
+_HASH_ID = re.compile(
+    r"\bhash\s+identity\b(?:\s+(?:of|on|from|over))?\s+(?P<cols>.+)$",
+    re.I,
+)
+_UNNEST = re.compile(r"\b(?:unnest|explode)\s+json\b", re.I)
+_FILL_DOWN = re.compile(
+    r"\b(?:fill[\s-]?down|previous\s+row|lag\s*\(|variable\s+port)\b",
+    re.I,
+)
+_TERNARY = re.compile(
+    r"^(?P<cond>.+?)\s*\?\s*(?P<then>.+?)\s*:\s*(?P<else>.+)$",
+)
+_SKIP_LOOKUP_KEYS = frozenset({
+    "if", "when", "default", "unmapped", "unknown", "unmatched", "else", "*",
+})
+_BLANK_LOOKUP_KEYS = frozenset({"blank", "empty", "null", "missing"})
 
 
 def named_rule_ref(text: str) -> str:
@@ -440,20 +504,48 @@ def parse_sql_case(text: str) -> dict[str, Any] | None:
     }
 
 
+def _split_lookup_keys(raw: str) -> list[str]:
+    parts = re.split(r"\s*(?:[,|/]|or|and)\s*", raw or "", flags=re.I)
+    return [part.strip().strip("\"'") for part in parts if part.strip()]
+
+
+def parse_lookup_spec(text: str) -> tuple[dict[str, str], str]:
+    """Clio correspondences: one or many source codes → one target, plus blank."""
+    pairs: dict[str, str] = {}
+    blank = ""
+    raw = text or ""
+    matches = list(_LOOKUP_CORR.finditer(raw))
+    clauses: list[tuple[str, str]] = []
+    if matches:
+        clauses = [(m.group("keys"), m.group("val")) for m in matches]
+    else:
+        clauses = list(_LOOKUP_PAIR.findall(raw))
+    for keys_raw, value_raw in clauses:
+        value = value_raw.strip().rstrip(",")
+        for key in _split_lookup_keys(keys_raw):
+            folded = key.lower()
+            if folded in _SKIP_LOOKUP_KEYS:
+                continue
+            if folded in _BLANK_LOOKUP_KEYS:
+                if value:
+                    blank = value
+                continue
+            if _DATE_TOKEN.fullmatch(key):
+                continue
+            if key and value:
+                pairs[key] = value
+    return pairs, blank
+
+
 def parse_lookup(text: str) -> dict[str, str]:
     """Closed code table from a cell.
 
     Two or more pairs always win. A single pair is accepted only when it looks
     like a code (``A → ACTIVE``) — never a date format (``YYYY → YYYY-MM-DD``).
+    Clio set-valued correspondences (``A, I, P → ACTIVE``) expand to one
+    pair per source code. Blank/empty/null is not a G20 code.
     """
-    pairs: dict[str, str] = {}
-    for key, value in _LOOKUP_PAIR.findall(text or ""):
-        k = key.strip()
-        v = value.strip().rstrip(",")
-        if k and v and k.lower() not in {
-            "if", "when", "default", "unmapped", "unknown", "unmatched", "else", "*",
-        }:
-            pairs[k] = v
+    pairs, _blank = parse_lookup_spec(text)
     if len(pairs) >= 2:
         return pairs
     if len(pairs) == 1:
@@ -474,6 +566,50 @@ def _looks_like_code(token: str) -> bool:
     if _DATE_TOKEN.fullmatch(text):
         return False
     return True
+
+
+def _rewrite_informatica_pred(text: str) -> str:
+    """ISNULL / IS_NULL → shape ``is_null`` so IIF can execute."""
+    out = re.sub(r"\bis_?null\s*\(", "is_null(", text or "", flags=re.I)
+    out = re.sub(r"\bis_?not_?null\s*\(", "is_not_null(", out, flags=re.I)
+    return out
+
+
+def _in_condition(col: str, values: str) -> str:
+    atoms = [_case_atom(part) for part in _split_sql_args(values) if part.strip()]
+    if not atoms:
+        return ""
+    return "(" + " or ".join(f"{col} = {atom}" for atom in atoms) + ")"
+
+
+def parse_iif(text: str) -> dict[str, Any] | None:
+    """Informatica / SQL Server IIF(cond, then [, else]) → shape ``if()``."""
+    raw = (text or "").strip()
+    if re.search(r"\bdd_(?:reject|insert|update|delete)\b", raw, re.I):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "IIF update strategy (DD_REJECT / DD_INSERT) is not a pre-load "
+                "rule. Confirm on Map write mode — this compiler will not invent it."
+            ),
+        }
+    if not _IIF.match(raw):
+        return None
+    inner = raw[raw.find("(") + 1: raw.rfind(")")] if "(" in raw else ""
+    args = _split_sql_args(inner)
+    if len(args) < 2:
+        return None
+    cond = _rewrite_informatica_pred(args[0])
+    then = args[1]
+    else_ = args[2] if len(args) > 2 else "null"
+    return {
+        "kind": "derive",
+        "plane": "shape",
+        "confidence": 0.92,
+        "expression": f"if({cond}, {_case_atom(then)}, {_case_atom(else_)})",
+    }
 
 
 def _concat_columns(text: str) -> tuple[list[str], str]:
@@ -823,6 +959,59 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if cased:
         cased.update(flags)
         return cased
+    iif = parse_iif(raw)
+    if iif:
+        iif.update(flags)
+        return iif
+    ternary_early = _TERNARY.match(raw)
+    if ternary_early and "?" in raw and ":" in raw and not _DATE_MASK.search(raw):
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.9,
+            "expression": (
+                f"if({_rewrite_informatica_pred(ternary_early.group('cond'))}, "
+                f"{_case_atom(ternary_early.group('then'))}, {_case_atom(ternary_early.group('else'))})"
+            ),
+            **flags,
+        }
+    nvl2 = _NVL2.match(raw)
+    if nvl2:
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": (
+                f"if(is_not_null({nvl2.group('col')}), "
+                f"{_case_atom(nvl2.group('present'))}, "
+                f"{_case_atom(nvl2.group('missing'))})"
+            ),
+            **flags,
+        }
+    extracted = _REG_EXTRACT.search(raw)
+    if extracted:
+        group = extracted.group("grp") or "0"
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": (
+                f"regex_extract({extracted.group('col')}, "
+                f"{json_escape(extracted.group('pat'))}, {group})"
+            ),
+            **flags,
+        }
+    replaced = _REG_REPLACE.search(raw)
+    if replaced:
+        return {
+            "kind": "replace",
+            "plane": "shape",
+            "confidence": 0.92,
+            "search": replaced.group("pat"),
+            "replacement": replaced.group("repl"),
+            "regex": True,
+            **flags,
+        }
 
     divert = _DIVERT.search(raw)
     if divert:
@@ -853,15 +1042,63 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             "keep": True,
             **flags,
         }
+    exclude_in = _EXCLUDE_IN.search(raw)
+    if exclude_in:
+        cond = _in_condition(exclude_in.group("col"), exclude_in.group("vals"))
+        if cond:
+            return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": cond, "keep": False, **flags}
+    keep_in = _IN_FILTER.search(raw)
+    if keep_in:
+        cond = _in_condition(keep_in.group("col"), keep_in.group("vals"))
+        if cond:
+            return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": cond, "keep": True, **flags}
+    exclude_between = _EXCLUDE_BETWEEN.search(raw)
+    if exclude_between:
+        return {
+            "kind": "filter",
+            "plane": "shape",
+            "confidence": 0.9,
+            "condition": (
+                f"{exclude_between.group('col')} >= {_case_atom(exclude_between.group('lo'))} and "
+                f"{exclude_between.group('col')} <= {_case_atom(exclude_between.group('hi'))}"
+            ),
+            "keep": False,
+            **flags,
+        }
+    keep_between = _BETWEEN.search(raw)
+    if keep_between:
+        return {
+            "kind": "filter",
+            "plane": "shape",
+            "confidence": 0.9,
+            "condition": (
+                f"{keep_between.group('col')} >= {_case_atom(keep_between.group('lo'))} and "
+                f"{keep_between.group('col')} <= {_case_atom(keep_between.group('hi'))}"
+            ),
+            "keep": True,
+            **flags,
+        }
 
+    pairs, blank = parse_lookup_spec(raw)
     lookup = parse_lookup(raw)
     if lookup:
-        return {
+        out = {
             "kind": "lookup",
             "plane": "map",
             "confidence": 0.98,
             "mapping": lookup,
             "extras": _compound_extras(raw, "lookup"),
+            **flags,
+        }
+        if blank:
+            out["blank_default"] = blank
+        return out
+    if blank and not lookup:
+        return {
+            "kind": "default",
+            "plane": "shape",
+            "confidence": 0.9,
+            "value": blank,
             **flags,
         }
     if _LOOKUP_HINT.search(raw) and not lookup:
@@ -918,16 +1155,33 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
-    closed_if = _IF_FN.search(raw)
+    closed_if = re.search(
+        r"(?<![A-Za-z_])if\s*\(\s*(?P<cond>.+?)\s*,\s*(?P<then>.+?)\s*(?:,\s*(?P<else>.+?))?\s*\)\s*$",
+        raw,
+        re.I,
+    )
     if closed_if:
         return {
             "kind": "derive",
             "plane": "shape",
             "confidence": 0.9,
             "expression": (
-                f"if({closed_if.group('cond')}, {closed_if.group('then')}"
+                f"if({_rewrite_informatica_pred(closed_if.group('cond'))}, "
+                f"{closed_if.group('then')}"
                 + (f", {closed_if.group('else')}" if closed_if.group("else") else "")
                 + ")"
+            ),
+            **flags,
+        }
+    ternary = _TERNARY.match(raw)
+    if ternary and "?" in raw and ":" in raw and not _DATE_MASK.search(raw):
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.9,
+            "expression": (
+                f"if({_rewrite_informatica_pred(ternary.group('cond'))}, "
+                f"{_case_atom(ternary.group('then'))}, {_case_atom(ternary.group('else'))})"
             ),
             **flags,
         }
@@ -1093,6 +1347,36 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if _ABS.search(raw):
         return {"kind": "absolute", "plane": "shape", "confidence": 0.93, **flags}
 
+    if _FILL_DOWN.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Fill-down / previous-row / Informatica variable port is not "
+                "row-local. This compiler will not invent a window."
+            ),
+            **flags,
+        }
+    hashed_id = _HASH_ID.search(raw)
+    if hashed_id:
+        stop = frozenset({"of", "on", "from", "over", "columns", "fields", "and", "the", "hash", "identity"})
+        columns = [
+            part.strip().strip("\"'")
+            for part in re.split(r"\s*(?:,|\band\b)\s*", hashed_id.group("cols") or "")
+            if re.fullmatch(r"[A-Za-z_][\w.]*", part.strip().strip("\"'") or "")
+            and part.strip().lower() not in stop
+        ]
+        return {
+            "kind": "hash_identity",
+            "plane": "shape",
+            "confidence": 0.93 if columns else 0.5,
+            "columns": columns,
+            **({} if columns else {"reason": "hash identity named but no columns were identified"}),
+            **flags,
+        }
+    if _UNNEST.search(raw):
+        return {"kind": "unnest", "plane": "shape", "confidence": 0.9, **flags}
     if _HASH.search(raw):
         return {"kind": "hash", "plane": "map", "confidence": 0.95, "extras": _compound_extras(raw, "hash"), **flags}
     if _EMAIL.search(raw):
