@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 
 _SPLIT = re.compile(r"[^a-z0-9]+")
-_QUALIFIED = re.compile(r"^(?P<table>[A-Za-z_][\w]*)\.(?P<column>[A-Za-z_][\w]*)$")
+_QUALIFIED = re.compile(
+    r"^(?P<table>[A-Za-z_][\w]*)\.(?P<column>[A-Za-z_][\w]*(?:\s+[A-Za-z_][\w]*)*)$"
+)
 
 # Keys are *folded* (case / punctuation stripped) because ``canonical_header``
 # looks up ``fold(spoken)``. ``source_column`` and ``Source Column`` both
@@ -111,31 +113,40 @@ def split_qualified(value: str) -> tuple[str, str]:
 
 
 def resolve_name(needle: str, candidates: list[str]) -> str:
-    """The one candidate this cell names, or '' when none or several match.
+    """The one candidate this cell names, or '' when none or several match."""
+    name, _method, _score = resolve_name_ex(needle, candidates)
+    return name
 
-    Exact (folded) wins. A unique startswith / contained match is accepted only
-    when no other candidate also matches — ``id`` must not bind ``customer_id``
-    and ``order_id`` at once. ``Table.col`` binds ``col``.
+
+def resolve_name_ex(needle: str, candidates: list[str]) -> tuple[str, str, float]:
+    """Bind a spoken name. Method is exact | prefix | contained | linguistic.
+
+    Cupid-style linguistic matching is last and fail-closed: unique winner,
+    threshold, and a score gap. Short tokens (``id``) never bind.
     """
     table, column = split_qualified(needle)
-    want = fold(column or needle)
+    spoken = column or needle
+    want = fold(spoken)
     if not want or not candidates:
-        return ""
+        return "", "", 0.0
     exact = [c for c in candidates if fold(c) == want or fold(split_qualified(c)[1]) == want]
     if len(exact) == 1:
-        return exact[0]
+        return exact[0], "exact", 1.0
     if len(exact) > 1 or len(want) < 4:
-        # Short tokens (`id`, `no`) match too many warehouse names. Fail closed.
-        return ""
+        return "", "", 0.0
     loose = [
         c for c in candidates
         if fold(c).startswith(want) or want.startswith(fold(c))
     ]
     if len(loose) == 1:
-        return loose[0]
+        return loose[0], "prefix", 0.9
     if len(want) >= 5:
         contained = [c for c in candidates if want in fold(c) or fold(c) in want]
         if len(contained) == 1:
-            return contained[0]
-    _ = table  # table is provenance; bind is on the column name only
-    return ""
+            return contained[0], "contained", 0.84
+    from .match import unique_linguistic_match
+    winner, score = unique_linguistic_match(spoken, candidates)
+    if winner:
+        return winner, "linguistic", score
+    _ = table
+    return "", "", 0.0

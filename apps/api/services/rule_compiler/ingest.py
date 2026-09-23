@@ -139,16 +139,31 @@ def _header_score(headers: list[str]) -> int:
     return filled
 
 
+def _unique_headers(headers: list[str]) -> list[str]:
+    """Duplicate titles become col, col_2 so later cells are not overwritten."""
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for header in headers:
+        name = str(header or "").strip()
+        if not name:
+            out.append("")
+            continue
+        count = seen.get(name, 0) + 1
+        seen[name] = count
+        out.append(name if count == 1 else f"{name}_{count}")
+    return out
+
+
 def _take_header(rows: list[list[Any]]) -> tuple[list[str], list[tuple[int, list[Any]]]]:
     """The first row with two compiler headers; earlier rows are titles."""
     for index, raw in enumerate(rows[:HEADER_SCAN]):
-        headers = ["" if cell is None else str(cell) for cell in raw]
+        headers = _unique_headers(["" if cell is None else str(cell) for cell in raw])
         if _header_score(headers) >= 2:
             data_start = index + 2
             numbered = [(data_start + offset, row) for offset, row in enumerate(rows[index + 1:])]
             return headers, numbered
     if rows:
-        headers = ["" if cell is None else str(cell) for cell in rows[0]]
+        headers = _unique_headers(["" if cell is None else str(cell) for cell in rows[0]])
         numbered = [(2 + offset, row) for offset, row in enumerate(rows[1:])]
         return headers, numbered
     return [], []

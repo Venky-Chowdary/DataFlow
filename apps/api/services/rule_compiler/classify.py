@@ -172,9 +172,33 @@ _DATE_TOKEN = re.compile(r"^(?:Y{2,4}|M{1,2}|D{1,2}|H{1,2}|S{1,2})$", re.I)
 _EXCEL_FN = re.compile(
     r"^=?\s*(?P<fn>UPPER|LOWER|TRIM|PROPER|CONCATENATE|CONCAT|TEXTJOIN|"
     r"SUBSTITUTE|REPLACE|LEFT|RIGHT|MID|ABS|ROUND|IF|IFERROR|VLOOKUP|XLOOKUP|"
-    r"LEN|VALUE|TEXT|DATEVALUE)\s*\(",
+    r"LEN|LENGTH|VALUE|TEXT|DATEVALUE|TO_DATE|TO_NUMBER|TO_CHAR|"
+    r"CAST|COALESCE|IFNULL|NVL|NULLIF)\s*\(",
     re.I,
 )
+_CAST_SQL = re.compile(
+    r"\bcast\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s+as\s+"
+    r"(?P<type>int(?:eger)?|decimal|numeric|number|float|bool(?:ean)?|"
+    r"date|timestamp|text|varchar)\s*\)",
+    re.I,
+)
+_PG_CAST = re.compile(
+    r"\b(?P<col>[A-Za-z_][\w.]*)\s*::\s*"
+    r"(?P<type>int(?:eger)?|decimal|numeric|number|float|bool(?:ean)?|date|timestamp|text|varchar)\b",
+    re.I,
+)
+_COALESCE = re.compile(
+    r"\b(?:coalesce|ifnull|nvl)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<value>.+?)\s*\)",
+    re.I,
+)
+_NULLIF_FN = re.compile(
+    r"\bnullif\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<value>.+?)\s*\)",
+    re.I,
+)
+_LEN = re.compile(r"\b(?:len|length)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*\)", re.I)
+_TO_DATE = re.compile(r"\bto_date\b", re.I)
+_TO_NUMBER = re.compile(r"\bto_number\b", re.I)
+_TO_CHAR = re.compile(r"\bto_char\b", re.I)
 
 
 def parse_lookup(text: str) -> dict[str, str]:
@@ -269,11 +293,19 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
         return None
     fn = match.group("fn").upper()
     inner = text[text.find("(") + 1: text.rfind(")")] if "(" in text else ""
+    inner_u = inner.upper()
+    nested_extras: list[dict[str, Any]] = []
+    if "TRIM(" in inner_u:
+        nested_extras.append({"kind": "trim", "op": "trim"})
     if fn in {"UPPER"}:
-        return {"kind": "case_upper", "plane": "map", "confidence": 0.97}
+        return {"kind": "case_upper", "plane": "map", "confidence": 0.97, "extras": nested_extras}
     if fn in {"LOWER"}:
-        return {"kind": "case_lower", "plane": "map", "confidence": 0.97}
+        return {"kind": "case_lower", "plane": "map", "confidence": 0.97, "extras": nested_extras}
     if fn in {"TRIM"}:
+        if "UPPER(" in inner_u:
+            return {"kind": "case_upper", "plane": "map", "confidence": 0.96, "extras": [{"kind": "trim", "op": "trim"}]}
+        if "LOWER(" in inner_u:
+            return {"kind": "case_lower", "plane": "map", "confidence": 0.96, "extras": [{"kind": "trim", "op": "trim"}]}
         return {"kind": "trim", "plane": "map", "confidence": 0.97}
     if fn in {"PROPER"}:
         return {"kind": "title", "plane": "shape", "confidence": 0.93}
@@ -357,11 +389,52 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
                     + ")"
                 ),
             }
-    if fn in {"VALUE"}:
+    if fn in {"VALUE", "TO_NUMBER"}:
         return {"kind": "cast_number", "plane": "map", "confidence": 0.94}
-    if fn in {"DATEVALUE", "TEXT"}:
+    if fn in {"DATEVALUE", "TEXT", "TO_DATE", "TO_CHAR"}:
         return {"kind": "date", "plane": "map", "confidence": 0.94}
+    if fn in {"LEN", "LENGTH"}:
+        col = inner.split(",")[0].strip() or "value"
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": f"length({col})",
+        }
+    if fn in {"CAST"}:
+        casted = _CAST_SQL.search(f"cast({inner})")
+        if casted:
+            return _cast_kind(casted.group("type"))
+    if fn in {"COALESCE", "IFNULL", "NVL"}:
+        coal = _COALESCE.search(f"{fn}({inner})")
+        if coal:
+            return {
+                "kind": "default",
+                "plane": "shape",
+                "confidence": 0.93,
+                "value": coal.group("value").strip().strip("\"'"),
+            }
+    if fn in {"NULLIF"}:
+        nf = _NULLIF_FN.search(f"nullif({inner})")
+        if nf:
+            return {
+                "kind": "null_if",
+                "plane": "shape",
+                "confidence": 0.92,
+                "values": [nf.group("value").strip().strip("\"'")],
+            }
     return None
+
+
+def _cast_kind(type_name: str) -> dict[str, Any]:
+    token = (type_name or "").strip().lower()
+    if token.startswith("int"):
+        return {"kind": "cast_integer", "plane": "map", "confidence": 0.95}
+    if token.startswith("bool"):
+        return {"kind": "cast_boolean", "plane": "map", "confidence": 0.95}
+    if token in {"date", "timestamp"}:
+        return {"kind": "date", "plane": "map", "confidence": 0.94}
+    return {"kind": "cast_number", "plane": "map", "confidence": 0.95}
 
 
 def _compound_extras(raw: str, kind: str) -> list[dict[str, Any]]:
@@ -389,12 +462,56 @@ def classify_rule(text: str) -> dict[str, Any]:
     if raw.startswith("=") or _EXCEL_FN.match(raw):
         excel = _excel_formula(raw)
         if excel:
-            excel["extras"] = _compound_extras(raw, excel["kind"])
+            extras = list(excel.get("extras") or [])
+            seen = {(item.get("op") or item.get("kind")) for item in extras}
+            for extra in _compound_extras(raw, excel["kind"]):
+                key = extra.get("op") or extra.get("kind")
+                if key not in seen:
+                    extras.append(extra)
+                    seen.add(key)
+            excel["extras"] = extras
             excel.update(flags)
             return excel
 
     if _DIRECT.match(raw):
         return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
+
+    casted = _CAST_SQL.search(raw) or _PG_CAST.search(raw)
+    if casted:
+        got = _cast_kind(casted.group("type"))
+        got.update(flags)
+        return got
+    coal = _COALESCE.search(raw)
+    if coal:
+        return {
+            "kind": "default",
+            "plane": "shape",
+            "confidence": 0.93,
+            "value": coal.group("value").strip().strip("\"'"),
+            **flags,
+        }
+    nf = _NULLIF_FN.search(raw)
+    if nf:
+        return {
+            "kind": "null_if",
+            "plane": "shape",
+            "confidence": 0.92,
+            "values": [nf.group("value").strip().strip("\"'")],
+            **flags,
+        }
+    length = _LEN.search(raw)
+    if length:
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": f"length({length.group('col')})",
+            **flags,
+        }
+    if _TO_DATE.search(raw) or _TO_CHAR.search(raw):
+        return {"kind": "date", "plane": "map", "confidence": 0.94, **flags}
+    if _TO_NUMBER.search(raw):
+        return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
 
     divert = _DIVERT.search(raw)
     if divert:

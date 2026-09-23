@@ -17,7 +17,7 @@ from typing import Any
 
 from .classify import classify_rule
 from .ingest import RuleIngestError, ingest_rule_workbook
-from .normalize import fold, resolve_name, split_qualified
+from .normalize import fold, resolve_name, resolve_name_ex, split_qualified
 from .roles import GROUNDED_METHODS, ground_workbook_rows
 
 _MAX_SHAPE_STEPS = 100
@@ -130,6 +130,8 @@ def compile_rule_workbook(
     src_cols = [c for c in (source_columns or []) if c]
     dst_cols = [c for c in (dest_columns or []) if c]
     header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
+    sheet_kinds = _classify_sheets(rows)
+    notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
     lookup_pairs = _collect_lookup_pairs(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
@@ -137,7 +139,19 @@ def compile_rule_workbook(
     seen_dest: dict[str, tuple[str, int]] = {}
     seen_joins: set[tuple[str, str, str]] = set()
 
+    for sheet in sorted(notes_sheets):
+        n = next((item["rows"] for item in sheet_kinds if item["sheet"] == sheet), 0)
+        compiled.append(_review_notice(
+            f"Sheet “{sheet}” looks like commentary, not a mapping spec",
+            f"{n} row(s) were not applied. Mapping instructions belong on a "
+            "rules or lookup sheet — commentary is never executed.",
+            source_table,
+            dest_table,
+        ))
+
     for raw in rows:
+        if str(raw.get("_sheet") or "") in notes_sheets:
+            continue
         if _is_pair_only(raw):
             continue
         item = _compile_row(
@@ -233,16 +247,63 @@ def compile_rule_workbook(
         "shape_steps": shape_steps,
         "rules": compiled,
         "header_roles": header_roles,
+        "sheet_kinds": sheet_kinds,
+        "bind_methods": _bind_method_counts(compiled),
+        "matcher": "cupid-linguistic+instance",
         "honesty": (
             "Headers are inferred from the uploaded file and the selected "
-            "schemas — they are not a fixed column list. Accepted rules "
-            "execute deterministically on Transform + Map. Unrecognised, "
-            "unbound, or weakly inferred rules stay in the review queue — "
-            "they are never applied to a row. Unused destination columns "
-            "are not written. Unmapped source columns stay on Map as "
-            "remap-or-omit. Nothing is silently dropped."
+            "schemas — they are not a fixed column list. Spoken column names "
+            "bind with Cupid-style linguistic matching (unique winner, "
+            "threshold, gap). Accepted rules execute deterministically on "
+            "Transform + Map. Unrecognised, unbound, or weakly inferred "
+            "rules stay in the review queue — they are never applied to a "
+            "row. Commentary sheets are not executed. Unused destination "
+            "columns are not written. Unmapped source columns stay on Map "
+            "as remap-or-omit. Nothing is silently dropped."
         ),
     }
+
+
+def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """COMA-style instance classification: rules vs lookups vs commentary."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("_sheet") or ""), []).append(row)
+    out: list[dict[str, Any]] = []
+    for sheet, items in groups.items():
+        n = len(items)
+        has_src = sum(1 for row in items if str(row.get("source_column") or "").strip())
+        has_dest = sum(1 for row in items if str(row.get("dest_column") or "").strip())
+        has_lookup = sum(
+            1 for row in items
+            if str(row.get("lookup_from") or "").strip() and str(row.get("lookup_to") or "").strip()
+        )
+        prose = []
+        for row in items:
+            cells = [str(v) for v in (row.get("_cells") or {}).values() if str(v).strip()]
+            if cells:
+                prose.append(sum(len(v) for v in cells) / len(cells))
+        median_len = sorted(prose)[len(prose) // 2] if prose else 0
+        if has_src + has_dest + has_lookup == 0 and median_len >= 40:
+            kind = "notes"
+        elif has_lookup >= max(2, int(n * 0.6)) and has_src == 0:
+            kind = "lookups"
+        elif has_src or has_dest:
+            kind = "rules"
+        else:
+            kind = "unknown"
+        out.append({"sheet": sheet, "kind": kind, "rows": n})
+    return out
+
+
+def _bind_method_counts(compiled: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in compiled:
+        method = str(item.get("bind_method") or "")
+        if not method:
+            continue
+        counts[method] = counts.get(method, 0) + 1
+    return counts
 
 
 def _collect_lookup_pairs(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, str]]:
@@ -354,8 +415,20 @@ def _compile_row(
     classified = classify_rule(rule_text)
     kind = str(classified.get("kind") or "unknown")
 
-    source_column = resolve_name(spoken_src, src_cols) if src_cols else spoken_src
-    dest_column = resolve_name(spoken_dst, dst_cols) if dst_cols else spoken_dst
+    src_method = dst_method = ""
+    src_score = dst_score = 0.0
+    if src_cols:
+        source_column, src_method, src_score = resolve_name_ex(spoken_src, src_cols)
+    else:
+        source_column = spoken_src
+        src_method = "spoken" if spoken_src else ""
+        src_score = 1.0 if spoken_src else 0.0
+    if dst_cols:
+        dest_column, dst_method, dst_score = resolve_name_ex(spoken_dst, dst_cols)
+    else:
+        dest_column = spoken_dst
+        dst_method = "spoken" if spoken_dst else ""
+        dst_score = 1.0 if spoken_dst else 0.0
     if not dest_column and spoken_dst and not dst_cols:
         dest_column = spoken_dst
     if not source_column and spoken_src and not src_cols:
@@ -697,6 +770,8 @@ def _compile_row(
         "issues": issues,
         "required": bool(classified.get("required")),
         "unique": bool(classified.get("unique")),
+        "bind_method": src_method or dst_method or "",
+        "bind_score": round(min(src_score or 1.0, dst_score or 1.0) if (src_method or dst_method) else 0.0, 3),
         "provenance": {
             "sheet": raw.get("_sheet") or "",
             "row": int(raw.get("_row") or 0),

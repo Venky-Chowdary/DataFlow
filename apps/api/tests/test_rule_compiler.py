@@ -10,7 +10,8 @@ import pytest
 from services.rule_compiler.classify import classify_rule, parse_lookup
 from services.rule_compiler.compile import compile_rule_workbook
 from services.rule_compiler.ingest import RuleIngestError, ingest_rule_file
-from services.rule_compiler.normalize import canonical_header, resolve_name
+from services.rule_compiler.match import name_similarity, unique_linguistic_match
+from services.rule_compiler.normalize import canonical_header, resolve_name, resolve_name_ex
 from services.rule_compiler.roles import infer_header_roles
 
 
@@ -474,3 +475,105 @@ def test_infer_header_roles_prefers_schema_over_name_hints():
     methods = {item["header"]: item["method"] for item in inferred.evidence}
     assert methods["Legacy attr"] == "schema"
     assert methods["Outbound name"] == "schema"
+
+
+def test_linguistic_bind_is_cupid_unique_winner():
+    cols = ["customer_id", "order_id", "first_name"]
+    assert resolve_name("cust_id", cols) == "customer_id"
+    name, method, score = resolve_name_ex("cust_id", cols)
+    assert name == "customer_id"
+    assert method == "linguistic"
+    assert score >= 0.72
+    # Ambiguous and short names stay unbound — Similarity Flooding honesty.
+    assert resolve_name("customer", ["customer_id", "customer_name"]) == ""
+    assert resolve_name("id", cols) == ""
+    assert resolve_name("name", ["first_name", "last_name"]) == ""
+    assert unique_linguistic_match("fname", ["first_name", "last_name"])[0] == ""
+    assert name_similarity("customer_id", "customer_id") == 1.0
+
+
+def test_structural_sql_and_nested_excel_are_closed_forms():
+    assert classify_rule("CAST(amount AS INTEGER)")["kind"] == "cast_integer"
+    assert classify_rule("amount::numeric")["kind"] == "cast_number"
+    assert classify_rule("COALESCE(status, N/A)")["kind"] == "default"
+    assert classify_rule("NULLIF(code, '')")["kind"] == "null_if"
+    assert classify_rule("LEN(code)")["kind"] == "derive"
+    assert classify_rule("to_date(dob)")["kind"] == "date"
+    nested = classify_rule("=TRIM(UPPER(A2))")
+    assert nested["kind"] == "case_upper"
+    assert any(extra.get("op") == "trim" for extra in nested.get("extras") or [])
+    outer = classify_rule("=UPPER(TRIM(A2))")
+    assert outer["kind"] == "case_upper"
+    assert any(extra.get("op") == "trim" for extra in outer.get("extras") or [])
+
+
+def test_linguistic_and_sql_compile_onto_engines():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "cust_id,customer_id,Direct\n"
+        "amount,amount,CAST(amount AS INTEGER)\n"
+        "status,status,COALESCE(status, N/A)\n"
+        "Customer.First Name,first_name,=TRIM(UPPER(A2))\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "linguistic.csv",
+        csv,
+        source_columns=["customer_id", "amount", "status", "first_name"],
+        dest_columns=["customer_id", "amount", "status", "first_name"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    assert by_src["customer_id"]["status"] == "executable"
+    assert by_src["customer_id"]["bind_method"] == "linguistic"
+    assert by_src["amount"]["transform"] == "cast_integer"
+    assert by_src["status"]["shape_step"]["op"] == "default_if_null"
+    assert by_src["first_name"]["transform"] == "upper"
+    assert any(s["op"] == "trim" for s in report["shape_steps"])
+    assert report["matcher"] == "cupid-linguistic+instance"
+    assert report["bind_methods"].get("linguistic", 0) >= 1
+
+
+def test_duplicate_headers_and_notes_sheet_are_not_silent():
+    csv = (
+        "Col,Col,Rule\n"
+        "fname,first_name,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "dup.csv",
+        csv,
+        source_columns=["fname"],
+        dest_columns=["first_name"],
+    )
+    roles = {item["header"]: item["role"] for item in report["header_roles"]}
+    assert "Col" in roles and "Col_2" in roles
+    assert report["buckets"]["executable"] == 1
+
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    notes = wb.active
+    notes.title = "Instructions"
+    notes.append(["Read this first"])
+    notes.append([
+        "Please map customer fields using the Rules tab. "
+        "Contact the data team for exceptions that are not listed here. "
+        "Historical codes stay in the archive until legal signs off."
+    ])
+    rules = wb.create_sheet("Rules")
+    rules.append(["Source Column", "Destination Column", "Rule"])
+    rules.append(["fname", "first_name", "Direct"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    report = compile_rule_workbook(
+        "mixed.xlsx",
+        buf.getvalue(),
+        source_columns=["fname"],
+        dest_columns=["first_name"],
+    )
+    kinds = {item["sheet"]: item["kind"] for item in report["sheet_kinds"]}
+    assert kinds.get("Instructions") == "notes"
+    assert kinds.get("Rules") == "rules"
+    executable = [r for r in report["rules"] if r["status"] == "executable"]
+    assert len(executable) == 1
+    assert executable[0]["source_column"] == "fname"
+    assert any("commentary" in (r.get("rule_text") or "").lower() for r in report["rules"])

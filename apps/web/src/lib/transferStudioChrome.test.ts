@@ -235,6 +235,8 @@ describe("Transfer Studio chrome contracts", () => {
     const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
     assert.match(ledger, /header_roles/);
     assert.match(ledger, /How this file was read/);
+    assert.match(ledger, /sheet_kinds/);
+    assert.match(ledger, /matcher/);
     assert.match(step, /Retry preview/);
     assert.match(step, /disabled=\{!continueState\.enabled\}/);
     // A hung preview of an empty recipe must not lock Continue — only a recipe

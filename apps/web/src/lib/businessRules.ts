@@ -26,6 +26,8 @@ export interface CompiledRule {
   shape_step?: ShapeStepWire | null;
   status: string;
   issues?: string[];
+  bind_method?: string;
+  bind_score?: number;
   provenance?: { sheet?: string; row?: number };
 }
 
@@ -52,6 +54,9 @@ export interface RuleCompileReport {
   unmapped_source_count?: number;
   truncated_rows?: number;
   header_roles?: HeaderRoleEvidence[];
+  sheet_kinds?: Array<{ sheet: string; kind: string; rows: number }>;
+  bind_methods?: Record<string, number>;
+  matcher?: string;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;

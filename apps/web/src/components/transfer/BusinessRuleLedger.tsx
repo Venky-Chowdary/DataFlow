@@ -38,6 +38,12 @@ export function BusinessRuleLedger({
         <strong>Rules, line by line</strong>
         <span>{ruleReportSummary(report)}</span>
       </summary>
+      {report.sheet_kinds?.length ? (
+        <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
+          {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
+          {report.matcher ? ` · matcher ${report.matcher}` : ""}
+        </p>
+      ) : null}
       {report.header_roles?.length ? (
         <ul className="df2-rule-ledger-roles" aria-label="How this file was read">
           {report.header_roles.map((item) => (
