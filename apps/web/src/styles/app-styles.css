@@ -38,6 +38,8 @@
 @import "./responsive-shell-fixes.css";
 /* transfer-studio.css is exclusively namespaced; load before final layer. */
 @import "./transfer-studio.css";
+/* Searchable studio listbox (Transform step builder). */
+@import "./studio-picker.css";
 /* Transform (pre-load) step — sole authority for the .df2-xform namespace. */
 @import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */

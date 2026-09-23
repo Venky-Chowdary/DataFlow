@@ -11,11 +11,12 @@
 .df2-xform {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   padding: 16px;
   border: 1px solid var(--df-border, #e4e8ee);
   border-radius: var(--df-radius-lg, 12px);
-  background: var(--df-surface, #ffffff);
+  background:
+    linear-gradient(180deg, var(--df-brand-subtle, #f0fdfa) 0%, var(--df-surface, #ffffff) 72px);
 }
 
 /*
@@ -219,9 +220,10 @@
 
 .df2-xform-stats > div {
   border: 1px solid var(--df-border, #e4e8ee);
-  border-radius: var(--df-radius-md, 8px);
-  background: var(--df-surface-muted, #f8fafc);
-  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--df-surface, #ffffff);
+  padding: 12px 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .df2-xform-stats > div.is-attention {
@@ -503,10 +505,11 @@
   flex: 0 0 auto;
   gap: 10px;
   border: 1px solid var(--df-border, #e4e8ee);
-  border-radius: var(--df-radius-md, 8px);
+  border-radius: 14px;
   background: var(--df-surface, #ffffff);
-  padding: 12px 14px;
+  padding: 14px 16px;
   min-width: 0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 10px 28px rgba(15, 23, 42, 0.04);
 }
 
 .df2-xform .df2-xform-card-head,
@@ -759,9 +762,10 @@
 
 .df2-xform-steps > li {
   border: 1px solid var(--df-border, #e4e8ee);
-  border-radius: var(--df-radius-md, 8px);
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 12px 14px;
   background: var(--df-surface, #ffffff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
 .df2-xform-steps > li.is-disabled { opacity: 0.6; }
@@ -844,15 +848,37 @@
 .df2-xform-builder {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  border-top: 1px dashed var(--df-border, #e4e8ee);
-  padding-top: 12px;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 14px;
+  border: 1px solid var(--df-border-brand, #cce8e4);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, var(--df-brand-subtle, #f0fdfa) 0%, var(--df-surface, #ffffff) 56px);
+}
+
+.df2-xform-builder-intro { min-width: 0; }
+
+.df2-xform-builder-kicker {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--df-brand-strong, #115e59);
+}
+
+.df2-xform-builder-lead {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
 }
 
 .df2-xform-builder-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px 14px;
   align-items: start;
 }
 
@@ -891,13 +917,14 @@
 .df2-xform-builder .df2-field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
 }
 
 .df2-xform-builder .df2-label {
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.01em;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -931,6 +958,35 @@
   border-color: var(--df-danger, #b91c1c);
   background: #fff7f7;
 }
+
+.df2-xform-builder .df2-studio-field,
+.df2-xform-builder textarea.df2-input,
+.df2-xform-builder input.df2-input {
+  min-height: var(--df-btn-height, 36px);
+  border: 1px solid var(--df-border-strong, #d0d6de);
+  border-radius: 10px;
+  background: var(--df-surface, #ffffff);
+  box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.02);
+  padding: 8px 12px;
+}
+
+.df2-xform-builder textarea.df2-input {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.df2-xform-builder .df2-studio-field:focus,
+.df2-xform-builder .df2-studio-field:focus-visible,
+.df2-xform-builder textarea.df2-input:focus,
+.df2-xform-builder textarea.df2-input:focus-visible,
+.df2-xform-builder input.df2-input:focus,
+.df2-xform-builder input.df2-input:focus-visible {
+  outline: none;
+  border-color: var(--df-brand-strong, #115e59);
+  box-shadow: 0 0 0 3px var(--df-brand-ring, rgba(13, 148, 136, 0.28));
+}
+
 .df2-xform-multi { min-height: 84px; }
 .df2-xform-toggle { align-self: end; }
 
@@ -1076,10 +1132,11 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border: 1px solid var(--df-border, #e4e8ee);
-  border-radius: 10px;
-  background: var(--df-surface-muted, #f8fafc);
+  border-radius: 14px;
+  background: var(--df-surface, #ffffff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 .df2-xform .df2-rule-import-copy {
