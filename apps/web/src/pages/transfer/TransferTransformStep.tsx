@@ -388,9 +388,11 @@ export function TransferTransformStep({
         <div className="df2-rule-import-copy">
           <strong>Business rules</strong>
           <p>
-            Upload the mapping workbook (Excel, CSV, TSV or JSON). Closed-form
-            rows compile onto this recipe and Map. Anything we cannot execute
-            stays in review — unused destination columns are not written.
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Headers are
+            inferred from the file and the schemas you already selected — not a
+            fixed column list. Closed-form rows compile onto this recipe and
+            Map. Anything we cannot execute stays in review — unused
+            destination columns are not written.
           </p>
           {ruleReport ? <p className="df2-rule-import-summary">{ruleReportSummary(ruleReport)}</p> : null}
           {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}

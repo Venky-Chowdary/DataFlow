@@ -11,6 +11,7 @@ from services.rule_compiler.classify import classify_rule, parse_lookup
 from services.rule_compiler.compile import compile_rule_workbook
 from services.rule_compiler.ingest import RuleIngestError, ingest_rule_file
 from services.rule_compiler.normalize import canonical_header, resolve_name
+from services.rule_compiler.roles import infer_header_roles
 
 
 def test_direct_and_empty_are_the_same_closed_form():
@@ -371,3 +372,87 @@ def test_exclude_rows_is_not_omit():
 def test_prose_still_fails_closed():
     assert classify_rule("for legacy customers use the old number unless migrated")["kind"] == "unknown"
     assert classify_rule("maybe use the other id")["kind"] == "unknown"
+
+
+def test_unusual_headers_are_inferred_from_schema_not_aliases():
+    """A customer sheet does not have to say 'Source Column'."""
+    assert canonical_header("Orig Field") == ""
+    assert canonical_header("How to convert") == ""
+    csv = (
+        "Orig Field,Target Name,How to convert\n"
+        "fname,first_name,Direct\n"
+        "status,status,trim + lowercase\n"
+        "mystery,segment,use the legacy id unless migrated\n"
+    ).encode()
+    src = ["fname", "status", "mystery"]
+    dst = ["first_name", "status", "segment"]
+    report = compile_rule_workbook(
+        "unusual.csv",
+        csv,
+        source_columns=src,
+        dest_columns=dst,
+    )
+    roles = {item["header"]: item["role"] for item in report["header_roles"]}
+    assert roles["Orig Field"] == "source_column"
+    assert roles["Target Name"] == "dest_column"
+    assert roles["How to convert"] == "rule"
+    assert any(item["method"] in {"schema", "rule_pattern", "hint"} for item in report["header_roles"])
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    assert by_src["fname"]["status"] == "executable"
+    assert by_src["fname"]["dest_column"] == "first_name"
+    assert by_src["status"]["transform"] == "lower"
+    assert by_src["mystery"]["status"] == "needs_confirmation"
+    assert by_src["mystery"]["kind"] == "unknown"
+
+
+def test_opaque_headers_bind_from_cell_values_against_schema():
+    csv = (
+        "ColA,ColB,ColC\n"
+        "fname,first_name,Direct\n"
+        "lname,last_name,Direct\n"
+        "status,status,A → ACTIVE, I → INACTIVE\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "opaque.csv",
+        csv,
+        source_columns=["fname", "lname", "status"],
+        dest_columns=["first_name", "last_name", "status"],
+    )
+    roles = {item["header"]: (item["role"], item["method"]) for item in report["header_roles"]}
+    assert roles["ColA"][0] == "source_column"
+    assert roles["ColA"][1] == "schema"
+    assert roles["ColB"][0] == "dest_column"
+    assert roles["ColB"][1] == "schema"
+    assert roles["ColC"][0] == "rule"
+    assert report["buckets"]["executable"] == 3
+    status = next(r for r in report["rules"] if r["source_column"] == "status")
+    assert status["code_crosswalk"]["A"] == "ACTIVE"
+
+
+def test_hint_only_headers_without_schema_stay_in_review():
+    csv = (
+        "Orig Field,Landing col,Instruction\n"
+        "fname,first_name,Direct\n"
+    ).encode()
+    report = compile_rule_workbook("hints-only.csv", csv)
+    assert report["header_roles"]
+    assert report["rules"][0]["status"] == "needs_confirmation"
+    assert any("inferred" in issue.lower() for issue in report["rules"][0]["issues"])
+
+
+def test_infer_header_roles_prefers_schema_over_name_hints():
+    inferred = infer_header_roles(
+        ["Legacy attr", "Outbound name", "Instruction"],
+        [
+            {"Legacy attr": "fname", "Outbound name": "first_name", "Instruction": "Direct"},
+            {"Legacy attr": "lname", "Outbound name": "last_name", "Instruction": "trim"},
+        ],
+        source_columns=["fname", "lname"],
+        dest_columns=["first_name", "last_name"],
+    )
+    assert inferred.roles["Legacy attr"] == "source_column"
+    assert inferred.roles["Outbound name"] == "dest_column"
+    assert inferred.roles["Instruction"] == "rule"
+    methods = {item["header"]: item["method"] for item in inferred.evidence}
+    assert methods["Legacy attr"] == "schema"
+    assert methods["Outbound name"] == "schema"

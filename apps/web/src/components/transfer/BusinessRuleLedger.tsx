@@ -38,6 +38,17 @@ export function BusinessRuleLedger({
         <strong>Rules, line by line</strong>
         <span>{ruleReportSummary(report)}</span>
       </summary>
+      {report.header_roles?.length ? (
+        <ul className="df2-rule-ledger-roles" aria-label="How this file was read">
+          {report.header_roles.map((item) => (
+            <li key={`${item.sheet || ""}-${item.header}-${item.role}`}>
+              <strong>{item.header}</strong>
+              <span> → {item.role.replace(/_/g, " ")}</span>
+              {item.reason ? <span> · {item.reason}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <ol className="df2-rule-ledger-list">
         {report.rules.map((rule, index) => (
           <li

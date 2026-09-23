@@ -96,6 +96,17 @@ describe("mergeBusinessRules", () => {
     assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
   });
 
+  it("summarises inferred headers when the file did not use aliases", () => {
+    const inferred: RuleCompileReport = {
+      ...report,
+      header_roles: [
+        { header: "Orig Field", role: "source_column", method: "schema", confidence: 1, reason: "schema" },
+        { header: "How to convert", role: "rule", method: "rule_pattern", confidence: 1, reason: "rules" },
+      ],
+    };
+    assert.match(ruleReportSummary(inferred), /headers inferred from file \+ schema/);
+  });
+
   it("does not overwrite an operator-locked dest", () => {
     const locked: EditableMapping[] = [
       { source: "fname", target: "given_name", confidence: 0.9, approved: true, transform: "none" },

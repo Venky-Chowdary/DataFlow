@@ -29,6 +29,15 @@ export interface CompiledRule {
   provenance?: { sheet?: string; row?: number };
 }
 
+export interface HeaderRoleEvidence {
+  header: string;
+  role: string;
+  method: string;
+  confidence: number;
+  reason: string;
+  sheet?: string;
+}
+
 export interface RuleCompileReport {
   filename: string;
   rule_count: number;
@@ -42,6 +51,7 @@ export interface RuleCompileReport {
   unmapped_source_columns?: string[];
   unmapped_source_count?: number;
   truncated_rows?: number;
+  header_roles?: HeaderRoleEvidence[];
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -191,9 +201,12 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const truncated = report.truncated_rows
     ? ` · ${report.truncated_rows} row(s) past ingest cap`
     : "";
+  const inferred = (report.header_roles || []).some((item) => item.method !== "alias")
+    ? " · headers inferred from file + schema"
+    : "";
   return (
     `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}`
+    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}`
   );
 }
 

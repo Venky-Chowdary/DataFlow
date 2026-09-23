@@ -18,6 +18,7 @@ from typing import Any
 from .classify import classify_rule
 from .ingest import RuleIngestError, ingest_rule_workbook
 from .normalize import fold, resolve_name, split_qualified
+from .roles import GROUNDED_METHODS, ground_workbook_rows
 
 _MAX_SHAPE_STEPS = 100
 
@@ -128,6 +129,7 @@ def compile_rule_workbook(
     rows = ingested.rows
     src_cols = [c for c in (source_columns or []) if c]
     dst_cols = [c for c in (dest_columns or []) if c]
+    header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
     lookup_pairs = _collect_lookup_pairs(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
@@ -230,12 +232,15 @@ def compile_rule_workbook(
         "truncated_rows": ingested.truncated,
         "shape_steps": shape_steps,
         "rules": compiled,
+        "header_roles": header_roles,
         "honesty": (
-            "Accepted rules execute deterministically on Transform + Map. "
-            "Unrecognised or unbound rules stay in the review queue — they "
-            "are never applied to a row. Unused destination columns are not "
-            "written. Unmapped source columns stay on Map as remap-or-omit. "
-            "Nothing is silently dropped."
+            "Headers are inferred from the uploaded file and the selected "
+            "schemas — they are not a fixed column list. Accepted rules "
+            "execute deterministically on Transform + Map. Unrecognised, "
+            "unbound, or weakly inferred rules stay in the review queue — "
+            "they are never applied to a row. Unused destination columns "
+            "are not written. Unmapped source columns stay on Map as "
+            "remap-or-omit. Nothing is silently dropped."
         ),
     }
 
@@ -372,6 +377,20 @@ def _compile_row(
     if classified.get("unique"):
         issues.append("Marked unique — Validate fail-closes duplicate keys. Confirm the identity column.")
 
+    methods = dict(raw.get("_role_methods") or {})
+    weak_bind = False
+    for key, label in (
+        ("source_column", "Source column"),
+        ("dest_column", "Destination column"),
+    ):
+        method = str(methods.get(key) or "")
+        if method and method not in GROUNDED_METHODS:
+            weak_bind = True
+            issues.append(
+                f"{label} header was inferred by {method} without a schema "
+                "match — confirm the binding."
+            )
+
     review_kinds = {"unknown", "join", "contract", "timezone"}
     bind_fail = any(
         i.startswith("Source column")
@@ -380,7 +399,7 @@ def _compile_row(
         or i.startswith("No destination")
         or i.startswith("Concat ")
         for i in issues
-    )
+    ) or weak_bind
     low_confidence_reason = bool(
         classified.get("reason") and float(classified.get("confidence") or 0) < 0.9
     )

@@ -63,8 +63,9 @@ def ingest_rule_workbook(filename: str, payload: bytes) -> IngestResult:
         rows = _from_json(payload)
     if not rows:
         raise RuleIngestError(
-            "No rule rows were found. The first row must name source, "
-            "destination and rule columns."
+            "No rule rows were found. The first data row must be a mapping "
+            "spec — headers can be any names; cells are inferred against "
+            "the selected source and destination."
         )
     truncated = max(0, len(rows) - MAX_ROWS)
     return IngestResult(rows=rows[:MAX_ROWS], truncated=truncated)
@@ -92,11 +93,15 @@ def _qualify_source(mapped: dict[str, Any]) -> None:
 
 def _project(headers: list[str], values: list[Any], sheet: str, row_number: int) -> dict[str, Any] | None:
     mapped: dict[str, Any] = {}
+    cells: dict[str, str] = {}
     for header, value in zip(headers, values):
-        key = canonical_header(str(header or ""))
+        name = str(header or "").strip()
+        text = _cell_text(value)
+        if name:
+            cells[name] = text
+        key = canonical_header(name)
         if not key:
             continue
-        text = _cell_text(value)
         if key == "rule":
             mapped[key] = (mapped.get(key) or "") or text
         elif text and not mapped.get(key):
@@ -104,16 +109,23 @@ def _project(headers: list[str], values: list[Any], sheet: str, row_number: int)
     first = _cell_text(values[0]) if values else ""
     if first.startswith("#"):
         return None
+    filled = sum(1 for text in cells.values() if text)
     if not any(mapped.get(k) for k in ("source_column", "dest_column", "rule", "lookup_from", "lookup_to")):
-        return None
+        if filled < 1:
+            return None
     _qualify_source(mapped)
+    mapped["_cells"] = cells
+    mapped["_headers"] = [str(h).strip() for h in headers if str(h or "").strip()]
     mapped["_sheet"] = sheet
     mapped["_row"] = row_number
     return mapped
 
 
 def _header_score(headers: list[str]) -> int:
-    return sum(1 for header in headers if canonical_header(str(header or "")))
+    aliases = sum(1 for header in headers if canonical_header(str(header or "")))
+    if aliases:
+        return aliases
+    return sum(1 for header in headers if str(header or "").strip())
 
 
 def _take_header(rows: list[list[Any]]) -> tuple[list[str], list[tuple[int, list[Any]]]]:
@@ -234,7 +246,7 @@ def _from_xlsx(payload: bytes) -> list[dict[str, Any]]:
         for sheet in wb.worksheets:
             raw_rows = [list(row) for row in sheet.iter_rows(values_only=True)]
             headers, numbered = _take_header(raw_rows)
-            if _header_score(headers) < 1:
+            if _header_score(headers) < 2:
                 continue
             for row_number, raw in numbered:
                 row = _project(headers, raw, sheet.title, row_number)

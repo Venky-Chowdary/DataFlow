@@ -1140,6 +1140,26 @@
   font-size: 12px;
 }
 
+.df2-rule-ledger-roles {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.df2-rule-ledger-roles li {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-rule-ledger-roles strong {
+  color: var(--df-text-primary, #0f172a);
+  font-weight: 600;
+}
+
 .df2-rule-ledger-list {
   margin: 10px 0 0;
   padding: 0;

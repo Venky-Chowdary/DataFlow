@@ -6,5 +6,6 @@ the existing engines already run; everything else is a review item.
 
 from .compile import compile_rule_workbook
 from .ingest import RuleIngestError, SUPPORTED
+from .roles import infer_header_roles
 
-__all__ = ["compile_rule_workbook", "RuleIngestError", "SUPPORTED"]
+__all__ = ["compile_rule_workbook", "RuleIngestError", "SUPPORTED", "infer_header_roles"]
