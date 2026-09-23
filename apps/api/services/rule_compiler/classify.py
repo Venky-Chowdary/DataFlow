@@ -39,7 +39,11 @@ _DATE = re.compile(
     r"parse\s+date|convert.{0,20}date)\b",
     re.I,
 )
-_TIME = re.compile(r"\b(?:time(?:[\s-]?of[\s-]?day)?|hh:mm(?::ss)?)\b", re.I)
+_TIME = re.compile(
+    r"\b(?:time[\s-]?of[\s-]?day|hh:mm(?::ss)?)\b|"
+    r"\btime\b(?!\s+zone)",
+    re.I,
+)
 _EMAIL = re.compile(r"\bemail\b", re.I)
 _PHONE = re.compile(r"\bphone\b", re.I)
 _DEFAULT = re.compile(
@@ -197,7 +201,8 @@ _IF_FN = re.compile(
     r"\bif\s*\(\s*(?P<cond>.+?)\s*,\s*(?P<then>.+?)\s*(?:,\s*(?P<else>.+?))?\s*\)\s*$",
     re.I,
 )
-_REQUIRED = re.compile(r"\b(?:required|mandatory|not\s+null|non[\s-]?null)\b", re.I)
+_REQUIRED = re.compile(r"\b(?:required|mandatory|non[\s-]?null)\b", re.I)
+_STANDALONE_NOT_NULL = re.compile(r"^(?:not\s+null)$", re.I)
 _UNIQUE = re.compile(r"\b(?:unique|primary\s+key|\bpk\b)\b", re.I)
 _LOOKUP_PAIR = re.compile(
     r"([A-Za-z0-9_.-]+)\s*(?:→|->|=>|=|:)\s*([A-Za-z0-9_./ -]+)",
@@ -214,7 +219,7 @@ _LOOKUP_CORR = re.compile(
     re.I,
 )
 _LOOKUP_HINT = re.compile(
-    r"\b(?:lookup|crosswalk|decode|code\s+map|map(?:ping)?\s+to)\b",
+    r"\b(?:lookup|crosswalk|code\s+map|map(?:ping)?\s+to)\b",
     re.I,
 )
 _DATE_TOKEN = re.compile(r"^(?:Y{2,4}|M{1,2}|D{1,2}|H{1,2}|S{1,2})$", re.I)
@@ -747,6 +752,13 @@ _LIKE_ATOM = re.compile(
     rf"^(?P<col>{_SUBJ})\s+(?P<not>not\s+)?(?P<op>i?like)\s+(?P<pat>.+)$",
     re.I,
 )
+_REGEX_ATOM = re.compile(
+    rf"^(?:(?P<not1>not\s+)?regex_matches\s*\(\s*(?P<fncol>{_SUBJ})\s*,\s*"
+    rf"['\"](?P<fnpat>(?:\\.|[^'\\\"])+)['\"]\s*\)|"
+    rf"(?P<col>{_SUBJ})\s+(?P<not2>not\s+)?(?:regexp|rlike|~[*]?|similar\s+to)\s+"
+    rf"['\"](?P<pat>(?:\\.|[^'\\\"])+)['\"])$",
+    re.I,
+)
 _IS_ATOM = re.compile(
     rf"^(?P<col>{_SUBJ})\s+is\s+(?P<not>not\s+)?(?P<kind>null|empty|blank|missing)$",
     re.I,
@@ -817,8 +829,54 @@ _EMPTY_NULL = re.compile(
     re.I,
 )
 _NAMED_ZONE = re.compile(
+    r"(?:"
     r"\b(?:assume\s+(?:time\s*)?zone|time\s*zone|at\s+time\s+zone|tz)\s+"
-    r"['\"]?(?P<zone>UTC|GMT|[A-Za-z]+(?:/[A-Za-z0-9_+\-]+)+)['\"]?",
+    r"|from_tz\s*\(\s*[^,]+,\s*"
+    r")['\"]?(?P<zone>UTC|GMT|[A-Za-z]+(?:/[A-Za-z0-9_+\-]+)+)",
+    re.I,
+)
+_ZONE_NAME = re.compile(r"\b(?:UTC|GMT|[A-Za-z]+/[A-Za-z0-9_+\-]+)\b")
+_ZONE_CONVERT = re.compile(
+    r"\b(?:new_time\s*\(|convert\s+(?:time\s*)?zone|from\s+\w+\s+to\s+\w+\s+zone)\b",
+    re.I,
+)
+_SCD_LABEL = re.compile(
+    r"^(?:effective|end|start|as[\s-]?of|valid(?:[_ ](?:from|to|until))?|"
+    r"load|process|business)\s+dates?$|"
+    r"^is[_ ]current$|"
+    r"^scd\s*(?:type\s*)?[12]$|"
+    r"^slowly\s+changing(?:\s+dimension)?(?:\s+type\s*[12])?$|"
+    r"^when\s+matched\b|"
+    r"^history\s+track(?:ing)?$",
+    re.I,
+)
+_SCD_HINT = re.compile(
+    r"\b(?:scd\s*(?:type\s*)?2|slowly\s+changing\s+dimension|"
+    r"when\s+matched\s+then|track\s+history)\b",
+    re.I,
+)
+_AMBIGUOUS_ISNULL = re.compile(
+    r"^[A-Za-z_][\w.]*(?:\s*\(\s*[A-Za-z_][\w.]*\s*\))?\s+"
+    r"is\s+(?:not\s+)?(?:null|empty|blank|missing)\s*$",
+    re.I,
+)
+_JSON_PATH = re.compile(
+    r"\b(?:json_value|json_query|json_extract(?:_path)?|get_json_object|"
+    r"jsonb_extract_path|xpath)\s*\(",
+    re.I,
+)
+_WINDOW_FN = re.compile(
+    r"\b(?:row_number|dense_rank|rank|ntile|first_value|last_value|"
+    r"nth_value|lead|lag)\s*\(",
+    re.I,
+)
+_AGG_FN = re.compile(
+    r"\b(?:string_agg|listagg|group_concat|wm_concat|collect_set|"
+    r"collect_list|array_agg|count|sum|avg)\s*\(",
+    re.I,
+)
+_SEQUENCE = re.compile(
+    r"\b(?:nextval|currval|rownum\b|rowid\b|identity_insert|sequence\.\w+)\b",
     re.I,
 )
 _YN_FLAG = re.compile(
@@ -1193,6 +1251,16 @@ def parse_predicate_atom(text: str) -> str:
             insensitive=like.group("op").lower() == "ilike",
         )
         return cond
+    regex = _REGEX_ATOM.match(raw)
+    if regex:
+        col = compile_subject(regex.group("fncol") or regex.group("col") or "")
+        pat = regex.group("fnpat") or regex.group("pat") or ""
+        if not col or not pat:
+            return ""
+        pred = f"regex_matches({col}, {_quote_lit(pat)})"
+        if regex.group("not1") or regex.group("not2"):
+            return f"not {pred}"
+        return pred
     is_m = _IS_ATOM.match(raw)
     if is_m:
         col = compile_subject(is_m.group("col"))
@@ -1633,7 +1701,7 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     """
     raw = (text or "").strip()
     flags: dict[str, Any] = {}
-    if _REQUIRED.search(raw):
+    if _REQUIRED.search(raw) or _STANDALONE_NOT_NULL.match(raw):
         flags["required"] = True
     if _UNIQUE.search(raw):
         flags["unique"] = True
@@ -1842,6 +1910,18 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if policy:
         policy.update(flags)
         return policy
+    if _AMBIGUOUS_ISNULL.match(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Column IS [NOT] NULL without keep/exclude/required is "
+                "ambiguous (row filter vs dest contract). Name keep if … "
+                "or required — it was not applied."
+            ),
+            **flags,
+        }
 
     pairs, blank = parse_lookup_spec(raw)
     lookup = parse_lookup(raw)
@@ -2197,6 +2277,42 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
+    if _WINDOW_FN.search(raw) or _AGG_FN.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Window / aggregate (ROW_NUMBER, LEAD, LISTAGG, STRING_AGG) "
+                "is not row-local. Confirm on Operations Transforms — this "
+                "compiler will not invent a grain."
+            ),
+            **flags,
+        }
+    if _SEQUENCE.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "ROWNUM / ROWID / NEXTVAL / IDENTITY_INSERT is not a "
+                "deterministic row value. Name a source column — it was "
+                "not applied."
+            ),
+            **flags,
+        }
+    if _SCD_LABEL.match(raw) or _SCD_HINT.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "SCD2 / effective-date / WHEN MATCHED is destination history, "
+                "not parse_date. Confirm sync mode on Run — this compiler "
+                "will not invent valid_from / is_current."
+            ),
+            **flags,
+        }
     hashed_id = _HASH_ID.search(raw)
     if hashed_id:
         stop = frozenset({"of", "on", "from", "over", "columns", "fields", "and", "the", "hash", "identity"})
@@ -2239,6 +2355,28 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
+    zones = {token.lower() for token in _ZONE_NAME.findall(raw)}
+    if len(zones) >= 2 or _ZONE_CONVERT.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Zone conversion (UTC → America/New_York, NEW_TIME, AT "
+                "LOCAL) is not assume_timezone. Name one source IANA zone "
+                "— a convert was not applied."
+            ),
+            **flags,
+        }
+    named_zone = _NAMED_ZONE.search(raw)
+    if named_zone:
+        return {
+            "kind": "timezone",
+            "plane": "map",
+            "confidence": 0.96,
+            "zone": named_zone.group("zone"),
+            **flags,
+        }
     if _DATE.search(raw):
         return {"kind": "date", "plane": "map", "confidence": 0.96, **flags}
     if _TIME.search(raw) and not _DATE.search(raw):
@@ -2253,19 +2391,22 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
     if _BOOL.search(raw):
         return {"kind": "cast_boolean", "plane": "map", "confidence": 0.95, **flags}
+    if _JSON_PATH.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "JSON path extract (JSON_VALUE / JSON_EXTRACT / XPath) is "
+                "not parse_json of the blob. Name flatten keys or a derive "
+                "— a path was not applied."
+            ),
+            **flags,
+        }
     if _JSON.search(raw):
         return {"kind": "json", "plane": "map", "confidence": 0.93, **flags}
     if _BINARY.search(raw):
         return {"kind": "binary", "plane": "map", "confidence": 0.93, **flags}
-    named_zone = _NAMED_ZONE.search(raw)
-    if named_zone:
-        return {
-            "kind": "timezone",
-            "plane": "map",
-            "confidence": 0.96,
-            "zone": named_zone.group("zone"),
-            **flags,
-        }
     if _ZONE.search(raw):
         return {
             "kind": "timezone",

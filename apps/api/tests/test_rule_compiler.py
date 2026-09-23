@@ -238,6 +238,8 @@ def test_closed_form_matrix():
         "hh:mm:ss": "time",
         "parse json": "json",
         "base64": "binary",
+        "base64 decode": "binary",
+        "NOT NULL": "contract",
         "absolute value": "absolute",
         "round to 2": "round",
         "truncate to 4": "truncate",
@@ -1307,3 +1309,98 @@ def test_to_char_crypto_lpad_and_extract_are_not_silent():
     assert by["dob"]["status"] == "needs_confirmation"
     assert by["dob"]["kind"] != "date" or by["dob"]["status"] == "needs_confirmation"
     assert any("extract" in issue.lower() or "dateadd" in issue.lower() for issue in by["dob"]["issues"])
+
+
+def test_scd_timezone_isnull_jsonpath_and_regex_are_not_silent():
+    """Spark AutoCDC / DataCoolie SCD2 + Oracle AT TIME ZONE / FROM_TZ.
+
+    Effective-date labels are history columns, not parse_date. A bare
+    ``col is not null`` is filter-vs-contract, not a Validate write.
+    JSON_VALUE is a path extract, not parse_json of the blob.
+    """
+    for text in (
+        "effective date",
+        "end date",
+        "is_current",
+        "scd type 2",
+        "when matched then update",
+        "slowly changing dimension",
+    ):
+        got = classify_rule(text)
+        assert got["kind"] == "unknown", text
+        assert got["plane"] == "review", text
+        assert "scd" in got["reason"].lower() or "history" in got["reason"].lower(), text
+
+    at_zone = classify_rule("AT TIME ZONE 'UTC'")
+    assert at_zone["kind"] == "timezone"
+    assert at_zone["zone"] == "UTC"
+    from_tz = classify_rule("FROM_TZ(ts, 'UTC')")
+    assert from_tz["kind"] == "timezone"
+    assert from_tz["zone"] == "UTC"
+    convert = classify_rule("convert timezone UTC to America/New_York")
+    assert convert["kind"] == "unknown"
+    assert convert["plane"] == "review"
+    assert classify_rule("NEW_TIME(ts, 'EST', 'PST')")["kind"] == "unknown"
+    assert classify_rule("time of day")["kind"] == "time"
+
+    bare = classify_rule("deleted_at is not null")
+    assert bare["kind"] == "unknown"
+    assert bare["plane"] == "review"
+    assert "ambiguous" in bare["reason"].lower()
+    keep = classify_rule("keep if deleted_at is not null")
+    assert keep["kind"] == "filter"
+    assert keep["condition"] == "is_not_null(deleted_at)"
+    assert classify_rule("NOT NULL")["kind"] == "contract"
+    assert classify_rule("required")["kind"] == "contract"
+
+    path = classify_rule("JSON_VALUE(payload, '$.city')")
+    assert path["kind"] == "unknown"
+    assert "json path" in path["reason"].lower() or "json_value" in path["reason"].lower()
+    assert classify_rule("parse JSON")["kind"] == "json"
+    assert classify_rule("xpath(xml, '//city')")["kind"] == "unknown"
+
+    regex = classify_rule("keep if regex_matches(code, '^[A-Z]')")
+    assert regex["kind"] == "filter"
+    assert regex["condition"] == 'regex_matches(code, "^[A-Z]")'
+    rlike = classify_rule("keep if code rlike 'A.*'")
+    assert rlike["kind"] == "filter"
+    assert "regex_matches(code" in rlike["condition"]
+    tilde = classify_rule("keep if code ~ '^[A-Z]'")
+    assert tilde["kind"] == "filter"
+
+    assert classify_rule("row_number()")["kind"] == "unknown"
+    assert classify_rule("lead(amount)")["kind"] == "unknown"
+    assert classify_rule("listagg(name, ',')")["kind"] == "unknown"
+    assert classify_rule("sequence.nextval")["kind"] == "unknown"
+    assert classify_rule("base64 decode")["kind"] == "binary"
+    assert classify_rule("DECODE(status, 'A', 'ACTIVE', 'I', 'INACTIVE')")["kind"] == "lookup"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "created_at,created_at,AT TIME ZONE 'UTC'\n"
+        "valid_from,valid_from,effective date\n"
+        "deleted_at,deleted_at,deleted_at is not null\n"
+        "payload,city,\"JSON_VALUE(payload, '$.city')\"\n"
+        "code,code,\"keep if code ~ '^[A-Z]'\"\n"
+        "blob,blob,base64 decode\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "scd-timezone-regex.csv",
+        csv,
+        source_columns=["created_at", "valid_from", "deleted_at", "payload", "code", "blob"],
+        dest_columns=["created_at", "valid_from", "deleted_at", "city", "code", "blob"],
+    )
+    by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    assert by["created_at"]["transform"] == "assume_timezone"
+    assert by["created_at"]["timezone"] == "UTC"
+    assert by["created_at"]["status"] == "executable"
+    assert by["valid_from"]["status"] == "needs_confirmation"
+    assert by["valid_from"]["kind"] != "date"
+    assert by["deleted_at"]["status"] == "needs_confirmation"
+    assert by["deleted_at"]["kind"] != "contract"
+    assert by["payload"]["status"] == "needs_confirmation"
+    assert by["payload"]["kind"] != "json"
+    assert by["blob"]["kind"] == "binary"
+    assert by["blob"]["status"] == "executable"
+    filt = next(s for s in report["shape_steps"] if s["op"] == "filter_rows")
+    assert "regex_matches(code" in filt["options"]["condition"]
