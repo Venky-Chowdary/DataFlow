@@ -1746,6 +1746,54 @@ def parse_date_spec(text: str) -> dict[str, Any] | None:
     }
 
 
+# Longer tokens first so YYYY is not read as YY + YY.
+_MASK_TO_STRPTIME = (
+    ("YYYY", "%Y"),
+    ("YY", "%y"),
+    ("MONTH", "%B"),
+    ("MON", "%b"),
+    ("HH24", "%H"),
+    ("HH12", "%I"),
+    ("HH", "%H"),
+    ("MI", "%M"),
+    ("SS", "%S"),
+    ("MM", "%m"),
+    ("DD", "%d"),
+    ("AM", "%p"),
+    ("PM", "%p"),
+    ("FF", "%f"),
+)
+
+
+def workbook_mask_to_strptime(mask: str) -> str:
+    """Informatica / Excel mask → ``datetime.strptime`` pattern ShapeEngine uses.
+
+    ``to_date`` / ``format_date`` call ``strptime`` / ``strftime`` with the
+    option as-is. Emitting ``MM/DD/YYYY`` is a silent no-op: the recipe looks
+    compiled and every live row refuses. The spoken mask stays on ``date_format``.
+    """
+    text = (mask or "").strip()
+    if not text:
+        return text
+    if "%" in text:
+        return text
+    out: list[str] = []
+    upper = text.upper()
+    i = 0
+    while i < len(text):
+        matched = False
+        for token, repl in _MASK_TO_STRPTIME:
+            if upper.startswith(token, i):
+                out.append(repl)
+                i += len(token)
+                matched = True
+                break
+        if not matched:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def _classify_chain(raw: str, flags: dict[str, Any]) -> dict[str, Any] | None:
     """iMAP / Informatica expression chain: trim then lowercase then email."""
     parts = [part.strip() for part in _CHAIN_SPLIT.split(raw) if part.strip()]
