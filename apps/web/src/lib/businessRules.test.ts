@@ -210,6 +210,49 @@ describe("mergeBusinessRules", () => {
     assert.equal(next[0].engineTransform, "assume_timezone:America/New_York");
   });
 
+  it("scopes merge to one selected source table so id does not cross streams", () => {
+    const twoTables: RuleCompileReport = {
+      ...report,
+      source_tables: ["customers", "orders"],
+      rules: [
+        {
+          source_table: "customers",
+          source_column: "id",
+          dest_column: "customer_id",
+          rule_text: "Direct",
+          kind: "direct",
+          kind_label: "Direct",
+          plane: "map",
+          confidence: 0.99,
+          status: "executable",
+        },
+        {
+          source_table: "orders",
+          source_column: "id",
+          dest_column: "order_id",
+          rule_text: "Direct",
+          kind: "direct",
+          kind_label: "Direct",
+          plane: "map",
+          confidence: 0.99,
+          status: "executable",
+        },
+      ],
+    };
+    const customers = mergeBusinessRules(
+      [{ source: "id", target: "", confidence: 0.5, approved: false, transform: "none" }],
+      twoTables,
+      { sourceTable: "customers" },
+    );
+    assert.equal(customers[0].target, "customer_id");
+    const orders = mergeBusinessRules(
+      [{ source: "id", target: "", confidence: 0.5, approved: false, transform: "none" }],
+      twoTables,
+      { sourceTable: "orders" },
+    );
+    assert.equal(orders[0].target, "order_id");
+  });
+
   it("merges compiled shape steps without dropping operator steps", () => {
     const existing = [{ op: "trim", column: "email", enabled: true }];
     const compiled = [

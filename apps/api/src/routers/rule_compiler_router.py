@@ -25,6 +25,28 @@ def _json_object(raw: str) -> dict[str, str]:
     return {}
 
 
+def _json_catalog(raw: str) -> dict[str, list[str]]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for key, value in data.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        if isinstance(value, list):
+            out[name] = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, str) and value.strip():
+            out[name] = [part.strip() for part in value.split(",") if part.strip()]
+    return out
+
+
 def _json_list(raw: str) -> list[str]:
     text = (raw or "").strip()
     if not text:
@@ -45,6 +67,8 @@ async def import_rule_workbook(
     dest_columns: str = Form(""),
     source_table: str = Form(""),
     dest_table: str = Form(""),
+    source_tables: str = Form(""),
+    source_catalog: str = Form(""),
     source_types: str = Form(""),
     dest_types: str = Form(""),
     sync_mode: str = Form(""),
@@ -60,6 +84,8 @@ async def import_rule_workbook(
             dest_columns=_json_list(dest_columns),
             source_table=source_table,
             dest_table=dest_table,
+            source_tables=_json_list(source_tables),
+            source_catalog=_json_catalog(source_catalog),
             source_types=_json_object(source_types),
             dest_types=_json_object(dest_types),
             sync_mode=sync_mode,

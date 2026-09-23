@@ -66,6 +66,8 @@ interface TransferTransformStepProps {
   ruleReport?: RuleCompileReport | null;
   sourceTable?: string;
   destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
 }
 
 const PREVIEW_ROWS = 12;
@@ -120,6 +122,8 @@ export function TransferTransformStep({
   ruleReport,
   sourceTable = "",
   destTable = "",
+  sourceTables = [],
+  sourceCatalog = {},
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -171,6 +175,8 @@ export function TransferTransformStep({
         destColumns: Object.keys(targetSchema || {}),
         sourceTable,
         destTable,
+        sourceTables,
+        sourceCatalog,
         sourceTypes: sourceSchema,
         destTypes: targetSchema,
         syncMode,
@@ -182,7 +188,7 @@ export function TransferTransformStep({
       setRuleBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
-  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, syncMode]);
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, syncMode]);
 
   const toggleGuide = useCallback(() => {
     setShowGuide((open) => {
@@ -394,8 +400,11 @@ export function TransferTransformStep({
             Upload the mapping workbook (Excel, CSV, TSV or JSON). Headers are
             inferred from the file and the schemas you already selected — not a
             fixed column list. Closed-form rows compile onto this recipe and
-            Map. Anything we cannot execute stays in review — unused
+            Map. Anything we cannot execute stays in review —             unused
             destination columns are not written.
+            {sourceTables.length > 1
+              ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
+              : ""}
           </p>
           {ruleReport ? <p className="df2-rule-import-summary">{ruleReportSummary(ruleReport)}</p> : null}
           {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}

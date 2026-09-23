@@ -24,6 +24,11 @@ from .classify import (
 )
 from .ingest import RuleIngestError, ingest_rule_workbook
 from .match import name_similarity, unique_linguistic_match
+from .catalog import (
+    bind_columns_for_table,
+    resolve_source_table,
+    split_selected_tables,
+)
 from .normalize import fold, resolve_name, resolve_name_ex, split_qualified
 from .roles import GROUNDED_METHODS, ground_workbook_rows
 
@@ -311,6 +316,8 @@ def compile_rule_workbook(
     dest_columns: list[str] | None = None,
     source_table: str = "",
     dest_table: str = "",
+    source_tables: list[str] | None = None,
+    source_catalog: dict[str, list[str]] | None = None,
     source_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     sync_mode: str = "",
@@ -322,6 +329,12 @@ def compile_rule_workbook(
     dst_cols = [c for c in (dest_columns or []) if c]
     src_types = {str(k): str(v) for k, v in (source_types or {}).items() if k}
     dst_types = {str(k): str(v) for k, v in (dest_types or {}).items() if k}
+    selected_tables = split_selected_tables(source_table, source_tables)
+    catalog = {
+        str(table): [str(col) for col in cols if str(col).strip()]
+        for table, cols in (source_catalog or {}).items()
+        if str(table).strip()
+    }
     sync = (sync_mode or "").strip()
     header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
     sheet_kinds = _classify_sheets(rows)
@@ -386,6 +399,8 @@ def compile_rule_workbook(
                 dst_cols=dst_cols,
                 source_table=source_table,
                 dest_table=dest_table,
+                source_tables=selected_tables,
+                source_catalog=catalog,
                 lookup_pairs=lookup_pairs,
                 named_catalog=named_catalog,
                 source_types=src_types,
@@ -433,6 +448,8 @@ def compile_rule_workbook(
             dst_cols=dst_cols,
             source_table=source_table,
             dest_table=dest_table,
+            source_tables=selected_tables,
+            source_catalog=catalog,
             lookup_pairs=lookup_pairs,
             source_types=src_types,
             dest_types=dst_types,
@@ -481,6 +498,8 @@ def compile_rule_workbook(
         "rules": compiled,
         "header_roles": header_roles,
         "sheet_kinds": sheet_kinds,
+        "source_tables": selected_tables,
+        "source_catalog_tables": list(catalog.keys()),
         "bind_methods": _bind_method_counts(compiled),
         "lookup_coverage": _lookup_coverage(lookup_pairs),
         "named_rules": sorted(named_catalog),
@@ -523,6 +542,9 @@ def compile_rule_workbook(
             "N/A is not Direct. utf-8 is not utf minus 8. Leftover text "
             "after NVL/IIF stays in review. TO_NUMBER format masks and "
             "TRY_CAST / SAFE_CAST stay in review. "
+            "Several selected tables bind only against the named table "
+            "catalog. Unqualified homonyms (id on customers and orders) "
+            "stay in review. This compiler will not invent a join grain. "
             "CDC / SCD2 / mirror refuse pre-load shape — history was not "
             "written by this recipe. Map-plane pairs still compile. "
             "Unknown-code policy is "
@@ -847,6 +869,8 @@ def _compile_row(
     dst_cols: list[str],
     source_table: str,
     dest_table: str,
+    source_tables: list[str] | None = None,
+    source_catalog: dict[str, list[str]] | None = None,
     lookup_pairs: dict[tuple[str, str], dict[str, str]] | None = None,
     named_catalog: dict[str, str] | None = None,
     source_types: dict[str, str] | None = None,
@@ -862,9 +886,27 @@ def _compile_row(
     classified = classify_rule(rule_text)
     kind = str(classified.get("kind") or "unknown")
 
+    catalog = source_catalog or {}
+    selected = list(source_tables or [])
+    effective_table, table_issue = resolve_source_table(
+        cell_table=str(raw.get("source_table") or ""),
+        qualified_table=table_from_cell,
+        spoken_column=spoken_src,
+        selected=selected,
+        catalog=catalog,
+        form_default=source_table,
+    )
+    bind_src_cols = bind_columns_for_table(effective_table, catalog, src_cols)
+
     src_method = dst_method = ""
     src_score = dst_score = 0.0
-    if src_cols:
+    if bind_src_cols:
+        source_column, src_method, src_score = resolve_name_ex(spoken_src, bind_src_cols)
+    elif spoken_src and (catalog or selected):
+        source_column = ""
+        src_method = ""
+        src_score = 0.0
+    elif src_cols:
         source_column, src_method, src_score = resolve_name_ex(spoken_src, src_cols)
     else:
         source_column = spoken_src
@@ -882,8 +924,15 @@ def _compile_row(
         source_column = spoken_src
 
     issues: list[str] = []
-    if spoken_src and src_cols and not source_column:
-        issues.append(f"Source column “{spoken_src}” is not on the selected source.")
+    if table_issue:
+        issues.append(table_issue)
+    if spoken_src and (bind_src_cols or src_cols or catalog or selected) and not source_column:
+        if not table_issue:
+            issues.append(
+                f"Source column “{spoken_src}” is not on the selected source"
+                + (f" table {effective_table}" if effective_table else "")
+                + "."
+            )
     if spoken_dst and dst_cols and not dest_column:
         issues.append(f"Destination column “{spoken_dst}” is not on the selected destination.")
     if not spoken_src and kind not in _NO_SOURCE_OK:
@@ -944,7 +993,7 @@ def _compile_row(
         or i.startswith("No destination")
         or i.startswith("Concat ")
         for i in issues
-    ) or weak_bind
+    ) or weak_bind or bool(table_issue)
     low_confidence_reason = bool(
         classified.get("reason") and float(classified.get("confidence") or 0) < 0.9
     )
@@ -1386,7 +1435,7 @@ def _compile_row(
         )
 
     return {
-        "source_table": str(raw.get("source_table") or table_from_cell or source_table or ""),
+        "source_table": effective_table or str(raw.get("source_table") or table_from_cell or source_table or ""),
         "source_column": source_column or spoken_src,
         "map_source": map_source or source_column or spoken_src,
         "dest_table": str(raw.get("dest_table") or dest_table or ""),

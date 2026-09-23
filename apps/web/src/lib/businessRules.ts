@@ -66,6 +66,8 @@ export interface RuleCompileReport {
   named_rules?: string[];
   matcher?: string;
   sync_mode?: string;
+  source_tables?: string[];
+  source_catalog_tables?: string[];
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -146,8 +148,10 @@ function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping
 export function mergeBusinessRules(
   mappings: EditableMapping[],
   report: RuleCompileReport | null,
+  options?: { sourceTable?: string },
 ): EditableMapping[] {
   if (!report?.rules?.length) return mappings;
+  const tableFold = (options?.sourceTable || "").trim().toLowerCase();
   const next = mappings.map((m) => ({ ...m }));
   const indexBySource = new Map<string, number>();
   next.forEach((m, i) => {
@@ -155,6 +159,10 @@ export function mergeBusinessRules(
   });
 
   for (const rule of report.rules) {
+    if (tableFold) {
+      const ruleTable = (rule.source_table || "").trim().toLowerCase();
+      if (ruleTable && ruleTable !== tableFold) continue;
+    }
     const source = (rule.map_source || rule.source_column || "").trim();
     if (!source) continue;
     const idx = indexBySource.get(source.toLowerCase());

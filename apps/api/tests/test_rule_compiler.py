@@ -1485,3 +1485,58 @@ def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
     assert by["flag"]["kind"] == "derive"
     assert by["flag"]["status"] == "executable"
     assert by["qty"]["status"] == "needs_confirmation"
+
+
+def test_multi_table_catalog_bind_is_fail_closed_on_homonyms():
+    """Clio object+attribute: id on two tables is not a unique winner."""
+    csv = (
+        "Source,Source Column,Destination,Destination Column,Rule\n"
+        "customers,id,dw,customer_id,Direct\n"
+        "orders,id,dw,order_id,Direct\n"
+        ",id,dw,mystery_id,Direct\n"
+        "ghost,name,dw,name,Direct\n"
+        "customers,email,dw,email,Direct\n"
+    ).encode()
+    catalog = {
+        "customers": ["id", "email", "name"],
+        "orders": ["id", "amount", "customer_id"],
+    }
+    report = compile_rule_workbook(
+        "multi-table.csv",
+        csv,
+        source_columns=["id", "email", "name", "amount", "customer_id"],
+        dest_columns=["customer_id", "order_id", "mystery_id", "name", "email"],
+        source_tables=["customers", "orders"],
+        source_catalog=catalog,
+        dest_table="dw",
+    )
+    by = {(r.get("source_table"), r.get("source_column")): r for r in report["rules"]}
+    assert by[("customers", "id")]["status"] == "executable"
+    assert by[("customers", "id")]["dest_column"] == "customer_id"
+    assert by[("orders", "id")]["status"] == "executable"
+    assert by[("orders", "id")]["dest_column"] == "order_id"
+    mystery = next(r for r in report["rules"] if r.get("dest_column") == "mystery_id" or "mystery" in (r.get("rule_text") or "").lower() or (not r.get("source_table") and r.get("source_column") == "id"))
+    assert mystery["status"] == "needs_confirmation"
+    assert any("customers" in i and "orders" in i for i in mystery["issues"])
+    ghost = next(r for r in report["rules"] if r.get("source_table") == "ghost")
+    assert ghost["status"] == "needs_confirmation"
+    assert by[("customers", "email")]["status"] == "executable"
+    assert report["source_tables"] == ["customers", "orders"]
+
+
+def test_comma_source_table_is_parsed_as_selected_tables():
+    csv = (
+        "Source,Source Column,Destination Column,Rule\n"
+        ",email,email,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "comma-tables.csv",
+        csv,
+        source_columns=["id", "email"],
+        dest_columns=["email"],
+        source_table="customers, orders",
+        source_catalog={"customers": ["id", "email"], "orders": ["id", "amount"]},
+    )
+    email = next(r for r in report["rules"] if r.get("source_column") == "email")
+    assert email["source_table"] == "customers"
+    assert email["status"] == "executable"

@@ -625,6 +625,8 @@ export async function importBusinessRules(payload: {
   destColumns?: string[];
   sourceTable?: string;
   destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
   sourceTypes?: Record<string, string>;
   destTypes?: Record<string, string>;
   syncMode?: string;
@@ -635,6 +637,8 @@ export async function importBusinessRules(payload: {
   form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
   form.append("source_table", payload.sourceTable ?? "");
   form.append("dest_table", payload.destTable ?? "");
+  form.append("source_tables", JSON.stringify(payload.sourceTables ?? []));
+  form.append("source_catalog", JSON.stringify(payload.sourceCatalog ?? {}));
   form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
   form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
   form.append("sync_mode", payload.syncMode ?? "");

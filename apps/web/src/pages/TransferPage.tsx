@@ -3455,11 +3455,13 @@ export function TransferPage({
       }
 
       if (businessRuleReportRef.current) {
-        setColumnMappings((prev) => mergeBusinessRules(prev, businessRuleReportRef.current));
+        setColumnMappings((prev) => mergeBusinessRules(prev, businessRuleReportRef.current, {
+          sourceTable: primarySourceStream || undefined,
+        }));
         setStreamMappings((prev) => {
           const next: Record<string, EditableMapping[]> = {};
           for (const [name, rows] of Object.entries(prev || {})) {
-            next[name] = mergeBusinessRules(rows, businessRuleReportRef.current);
+            next[name] = mergeBusinessRules(rows, businessRuleReportRef.current, { sourceTable: name });
           }
           return next;
         });
@@ -7366,14 +7368,24 @@ export function TransferPage({
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
           ruleReport={businessRuleReport}
-          sourceTable={sourceTable}
+          sourceTable={primarySourceStream || sourceTable}
           destTable={targetCollection}
+          sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
+          sourceCatalog={Object.keys(sourceColumnsByStream).length ? sourceColumnsByStream : undefined}
           onApplyRules={(report) => {
             setBusinessRuleReport(report);
             if (report.shape_steps.length) {
               setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps));
             }
-            setColumnMappings((prev) => mergeBusinessRules(prev, report));
+            const primary = primarySourceStream || undefined;
+            setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
+            setStreamMappings((prev) => {
+              const next = { ...prev };
+              for (const name of multiStreamNames) {
+                next[name] = mergeBusinessRules(next[name] || [], report, { sourceTable: name });
+              }
+              return next;
+            });
             toast({
               title: "Business rules compiled",
               message: ruleReportSummary(report),
