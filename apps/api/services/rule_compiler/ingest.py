@@ -106,6 +106,20 @@ def _project(headers: list[str], values: list[Any], sheet: str, row_number: int)
             mapped[key] = (mapped.get(key) or "") or text
         elif text and not mapped.get(key):
             mapped[key] = text
+    extras = [_cell_text(value) for value in values[len(headers):]]
+    extras = [text for text in extras if text]
+    if extras:
+        last = next((str(h).strip() for h in reversed(headers) if str(h or "").strip()), "")
+        if last:
+            prior = cells.get(last) or ""
+            cells[last] = ", ".join([prior, *extras] if prior else extras)
+            key = canonical_header(last)
+            if key == "rule" or mapped.get("rule"):
+                mapped["rule"] = cells[last]
+            elif key and not mapped.get(key):
+                mapped[key] = cells[last]
+        elif mapped.get("rule"):
+            mapped["rule"] = ", ".join([mapped["rule"], *extras])
     first = _cell_text(values[0]) if values else ""
     if first.startswith("#"):
         return None
@@ -178,6 +192,24 @@ def _decode_text(payload: bytes) -> str:
     return payload.decode("utf-8", errors="replace")
 
 
+def _delimited_dialect(delimiter: str) -> csv.Dialect:
+    """Excel-style quoting. Never sniff quotechar from cell text.
+
+    Oracle DECODE / ANSI CASE cells are full of single quotes. csv.Sniffer
+    treating ``'`` as quotechar is how ``A → ACTIVE, I → INACTIVE`` silently
+    becomes only the first pair.
+    """
+
+    class _Dialect(csv.excel):
+        pass
+
+    _Dialect.delimiter = delimiter
+    _Dialect.quotechar = '"'
+    _Dialect.doublequote = True
+    _Dialect.skipinitialspace = True
+    return _Dialect()
+
+
 def _dialect_for(text: str, ext: str) -> csv.Dialect:
     if ext == ".tsv":
         return csv.excel_tab
@@ -185,15 +217,20 @@ def _dialect_for(text: str, ext: str) -> csv.Dialect:
     tabs = sample.count("\t")
     semis = sample.count(";")
     commas = sample.count(",")
+    pipes = sample.count("|")
     if tabs > commas and tabs > semis:
         return csv.excel_tab
     if semis > commas and semis > tabs:
-        class _Semicolon(csv.excel):
-            delimiter = ";"
-        return _Semicolon()
+        return _delimited_dialect(";")
+    if pipes > max(commas, semis, tabs) and pipes >= 2:
+        return _delimited_dialect("|")
+    if commas >= semis and commas >= tabs:
+        return _delimited_dialect(",")
     try:
         sniffed = csv.Sniffer().sniff(sample, delimiters=",;\t|")
         if sniffed.delimiter in {",", ";", "\t", "|"}:
+            sniffed.quotechar = '"'
+            sniffed.doublequote = True
             return sniffed
     except csv.Error:
         pass

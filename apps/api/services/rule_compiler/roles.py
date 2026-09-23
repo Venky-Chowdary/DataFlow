@@ -142,14 +142,48 @@ def infer_header_roles(
         ("source_column", "schema", "values match the selected source schema"),
         ("dest_column", "schema", "values match the selected destination schema"),
         ("rule", "rule_pattern", "values look like closed-form mapping instructions"),
-        ("lookup_from", "schema", "values look like short inbound codes"),
-        ("lookup_to", "schema", "values look like short outbound codes"),
     ):
         if role not in content:
             continue
         winner, score = _unique_winner(content[role], used)
         if winner:
             take(role, winner, method, score, f"“{winner}” {reason_for} ({int(score * 100)}% of filled cells).")
+
+    unused = [h for h in clean if h not in used]
+    if "rule_name" not in assigned and "rule" in assigned:
+        named = [
+            header for header in unused
+            if ident_scores.get(header, 0.0) >= 0.7
+            and content.get("source_column", {}).get(header, 0.0) < 0.4
+            and content.get("dest_column", {}).get(header, 0.0) < 0.4
+        ]
+        if len(named) == 1:
+            take(
+                "rule_name",
+                named[0],
+                "schema",
+                ident_scores.get(named[0], 0.7),
+                f"“{named[0]}” looks like reusable rule names next to an expression column.",
+            )
+
+    unused = [h for h in clean if h not in used]
+    short_unused = [
+        header for header in unused
+        if max(
+            content.get("lookup_from", {}).get(header, 0.0),
+            content.get("lookup_to", {}).get(header, 0.0),
+        ) >= 0.55
+    ]
+    if len(short_unused) >= 2:
+        for role, reason_for in (
+            ("lookup_from", "values look like short inbound codes"),
+            ("lookup_to", "values look like short outbound codes"),
+        ):
+            if role not in content:
+                continue
+            winner, score = _unique_winner(content[role], used)
+            if winner:
+                take(role, winner, "schema", score, f"“{winner}” {reason_for} ({int(score * 100)}% of filled cells).")
 
     unused = [h for h in clean if h not in used]
     if "source_column" not in assigned or "dest_column" not in assigned:
@@ -179,23 +213,6 @@ def infer_header_roles(
                 "schema",
                 d,
                 f"“{header}” values match the selected destination schema ({int(d * 100)}%).",
-            )
-
-    unused = [h for h in clean if h not in used]
-    if "rule_name" not in assigned and "rule" in assigned:
-        named = [
-            header for header in unused
-            if ident_scores.get(header, 0.0) >= 0.7
-            and content.get("source_column", {}).get(header, 0.0) < 0.4
-            and content.get("dest_column", {}).get(header, 0.0) < 0.4
-        ]
-        if len(named) == 1:
-            take(
-                "rule_name",
-                named[0],
-                "schema",
-                ident_scores.get(named[0], 0.7),
-                f"“{named[0]}” looks like reusable rule names next to an expression column.",
             )
 
     unused = [h for h in clean if h not in used]

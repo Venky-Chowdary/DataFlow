@@ -458,6 +458,7 @@ def test_opaque_headers_bind_from_cell_values_against_schema():
     assert report["buckets"]["executable"] == 3
     status = next(r for r in report["rules"] if r["source_column"] == "status")
     assert status["code_crosswalk"]["A"] == "ACTIVE"
+    assert status["code_crosswalk"]["I"] == "INACTIVE"
 
 
 def test_hint_only_headers_without_schema_stay_in_review():
@@ -895,3 +896,22 @@ def test_name_expression_catalog_headers_are_inferred():
 def test_mapplet_header_alias():
     assert canonical_header("Mapplet") == "rule_name"
     assert canonical_header("Macro Name") == "rule_name"
+
+
+def test_quoted_csv_keeps_decode_commas_inside_the_rule_cell():
+    """csv.Sniffer must not steal quotechar from Oracle single quotes."""
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "status,status,\"A → ACTIVE, I → INACTIVE, unmapped → OTHER\"\n"
+        "flag,flag,\"DECODE(flag, 'Y', 'YES', 'N', 'NO', 'OTHER')\"\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "quoted.csv",
+        csv,
+        source_columns=["status", "flag"],
+        dest_columns=["status", "flag"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    assert by_src["status"]["code_crosswalk"] == {"A": "ACTIVE", "I": "INACTIVE"}
+    assert by_src["flag"]["code_crosswalk"] == {"Y": "YES", "N": "NO"}
+    assert by_src["flag"]["unknown_code_policy"]["value"] == "OTHER"
