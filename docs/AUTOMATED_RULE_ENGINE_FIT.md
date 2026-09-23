@@ -405,4 +405,5 @@ No new execution engine is required for slice 1.
 | 100%? | 100% of accepted compiled rules: yes. 100% of arbitrary Excel or guessed joins: no. An LLM does not raise that number. |
 | 50 source → 500 dest? | Yes. Excel names the 50 edges. The other 450 stay unused. Map already works that way. |
 | 10 tables → 50 cols → one dest? | Yes if the Excel names join keys. That compiles to `source_query` or post-load SQL, not to multi-stream (which is table-to-table). |
+| Several source tables, whatever columns they want? | Named executable projection per table. `apply_compiled_projection` runs ShapeEngine + Map transform + G20 on live rows of that table only. Unnamed catalog columns, review, and joins are not written. One shared recipe is not applied across streams. |
 | Must we have an LLM? | No. Structured cells compile without one. LLM is optional for leftover prose, always `requires_review`. |

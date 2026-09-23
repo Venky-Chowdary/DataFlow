@@ -1584,3 +1584,108 @@ def test_dest_catalog_and_table_scoped_edges_are_not_silent():
     assert ghost["status"] == "needs_confirmation"
     tables = {item["source_table"] for item in report["projection"]}
     assert "customers" in tables and "orders" in tables
+
+
+def test_shape_steps_are_stamped_with_source_table():
+    csv = (
+        "Source,Source Column,Destination Column,Rule\n"
+        "customers,signed_on,birth_date,MM/DD/YYYY\n"
+        "customers,email,email,lowercase\n"
+        "orders,amount,amount,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "shape-scope.csv",
+        csv,
+        source_tables=["customers", "orders"],
+        source_catalog={
+            "customers": ["id", "email", "signed_on"],
+            "orders": ["id", "amount"],
+        },
+        dest_columns=["birth_date", "email", "amount"],
+    )
+    date_step = next(s for s in report["shape_steps"] if s["op"] == "parse_date")
+    assert date_step["source_table"] == "customers"
+    assert date_step["column"] == "signed_on"
+    by_src = {r["source_column"]: r for r in report["rules"] if r.get("source_table") == "customers"}
+    assert by_src["signed_on"]["shape_step"]["source_table"] == "customers"
+    grouped = {item["source_table"]: item["steps"] for item in report["shape_steps_by_table"]}
+    assert "customers" in grouped
+    assert all(s.get("source_table") == "customers" for s in grouped["customers"])
+    assert "orders" not in grouped or not any(
+        s.get("op") == "parse_date" for s in grouped.get("orders", [])
+    )
+
+
+def test_apply_projection_is_table_scoped_and_fail_closed():
+    from services.rule_compiler.apply import apply_compiled_projection, apply_selected_tables
+
+    csv = (
+        "Source,Source Column,Destination,Destination Column,Rule\n"
+        "customers,id,dim_customer,customer_id,Direct\n"
+        "customers,email,dim_customer,email,lowercase\n"
+        "customers,signed_on,dim_customer,birth_date,MM/DD/YYYY\n"
+        "customers,status,dim_customer,status,A → ACTIVE, I → INACTIVE\n"
+        "orders,id,fact_order,order_id,Direct\n"
+        "orders,amount,fact_order,amount,Direct\n"
+        "orders,status,fact_order,status,A → OPEN, I → CLOSED\n"
+        ",id,dw,mystery_id,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "apply-scope.csv",
+        csv,
+        source_tables=["customers", "orders"],
+        source_catalog={
+            "customers": ["id", "email", "signed_on", "status"],
+            "orders": ["id", "amount", "status"],
+        },
+        dest_tables=["dim_customer", "fact_order"],
+        dest_catalog={
+            "dim_customer": ["customer_id", "email", "birth_date", "status"],
+            "fact_order": ["order_id", "amount", "status"],
+        },
+    )
+    mystery = next(r for r in report["rules"] if r.get("dest_column") == "mystery_id")
+    assert mystery["status"] == "needs_confirmation"
+
+    customers = [
+        {"id": 1, "email": "Ada@Example.COM", "signed_on": "03/15/2020", "status": "A"},
+        {"id": 2, "email": "bad@example.com", "signed_on": "not-a-date", "status": "A"},
+        {"id": 3, "email": "c@example.com", "signed_on": "04/01/2021", "status": "Z"},
+    ]
+    orders = [
+        {"id": 10, "amount": "19.50", "status": "A"},
+        {"id": 11, "amount": "4.00", "status": "Z"},
+    ]
+    applied = apply_selected_tables(
+        report,
+        {"customers": customers, "orders": orders},
+    )
+    assert applied["missing_populations"] == []
+    by_src = {item["source_table"]: item for item in applied["tables"]}
+
+    cust_dest = by_src["customers"]["destinations"][0]
+    assert cust_dest["dest_table"] == "dim_customer"
+    assert len(cust_dest["rows"]) == 1
+    row = cust_dest["rows"][0]
+    assert row["customer_id"] == 1
+    assert row["email"] == "ada@example.com"
+    assert row["birth_date"] == "2020-03-15"
+    assert row["status"] == "ACTIVE"
+    assert "mystery_id" not in row
+    assert cust_dest["refused"] >= 2
+    assert any("not-a-date" in (q.get("error") or "") or q.get("column") == "birth_date" for q in cust_dest["quarantine"])
+    assert any(q.get("column") == "status" and "unmapped" in (q.get("error") or "") for q in cust_dest["quarantine"])
+
+    ord_dest = by_src["orders"]["destinations"][0]
+    assert ord_dest["dest_table"] == "fact_order"
+    assert len(ord_dest["rows"]) == 1
+    assert ord_dest["rows"][0]["order_id"] == 10
+    assert ord_dest["rows"][0]["status"] == "OPEN"
+    assert "email" not in ord_dest["rows"][0]
+    assert "birth_date" not in ord_dest["rows"][0]
+    assert any(q.get("column") == "status" for q in ord_dest["quarantine"])
+
+    leaked = apply_compiled_projection(report, source_table="orders", rows=customers)
+    leaked_row = leaked["destinations"][0]["rows"][0] if leaked["destinations"][0]["rows"] else {}
+    assert "email" not in leaked_row
+    assert "birth_date" not in leaked_row

@@ -263,4 +263,16 @@ describe("mergeBusinessRules", () => {
     assert.equal(next.length, 2);
     assert.equal(next[1].op, "derive_column");
   });
+
+  it("does not merge another table's compiled shape steps onto this stream", () => {
+    const existing = [{ op: "trim", column: "note", enabled: true }];
+    const compiled = [
+      { op: "parse_date", column: "signed_on", source_table: "customers", options: { format: "MM/DD/YYYY" }, enabled: true },
+      { op: "trim", column: "sku", source_table: "orders", enabled: true },
+    ];
+    const next = mergeCompiledShapeSteps(existing, compiled, { sourceTable: "customers" });
+    assert.equal(next.length, 2);
+    assert.equal(next[1].op, "parse_date");
+    assert.equal(next.some((step) => step.column === "sku"), false);
+  });
 });

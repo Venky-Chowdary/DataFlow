@@ -7380,10 +7380,12 @@ export function TransferPage({
           }
           onApplyRules={(report) => {
             setBusinessRuleReport(report);
+            const primary = primarySourceStream || sourceTable || undefined;
             if (report.shape_steps.length) {
-              setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps));
+              setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
+                sourceTable: primary,
+              }));
             }
-            const primary = primarySourceStream || undefined;
             setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
             setStreamMappings((prev) => {
               const next = { ...prev };
