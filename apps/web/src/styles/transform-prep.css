@@ -585,9 +585,10 @@
 
 .df2-xform-suggestions > li {
   border: 1px solid var(--df-border, #e4e8ee);
-  border-radius: var(--df-radius-md, 8px);
-  padding: 10px 12px;
+  border-radius: 12px;
+  padding: 12px 14px;
   background: var(--df-surface, #ffffff);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
 }
 
 .df2-xform-suggestion-head {
@@ -762,6 +763,7 @@
 
 .df2-xform-steps > li {
   border: 1px solid var(--df-border, #e4e8ee);
+  border-left: 3px solid var(--df-brand, #0f766e);
   border-radius: 12px;
   padding: 12px 14px;
   background: var(--df-surface, #ffffff);
@@ -815,9 +817,13 @@
 }
 
 .df2-xform-step-controls {
-  display: flex;
-  gap: 6px;
+  display: inline-flex;
+  gap: 2px;
   flex-wrap: wrap;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--df-surface-muted, #f8fafc);
+  border: 1px solid var(--df-border, #e4e8ee);
 }
 
 .df2-xform-step-controls .is-danger { color: var(--df-danger, #b91c1c); }

@@ -524,7 +524,7 @@ export function suggestionRank(severity: string): number {
   return 2;
 }
 
-const FAMILY_ORDER = ["nested", "rows", "structural", "cleanse"] as const;
+const FAMILY_ORDER = ["cleanse", "structural", "rows", "nested"] as const;
 const FAMILY_LABEL: Record<string, string> = {
   nested: "Nested JSON",
   rows: "Row count",

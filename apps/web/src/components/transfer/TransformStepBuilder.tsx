@@ -315,7 +315,7 @@ export function TransformStepBuilder({
                 ) : (
                   <input
                     id={id}
-                    className="df2-input df2-studio-field"
+                    className={`df2-input df2-studio-field${field.name === "format" || field.name === "output_format" || field.name === "characters" ? " df2-xform-code" : ""}`}
                     inputMode={field.kind === "number" ? "numeric" : undefined}
                     value={value === undefined || value === null ? "" : String(value)}
                     disabled={!canPlan}

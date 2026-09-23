@@ -320,7 +320,7 @@ test("recipe identity compares the program, so an approval survives a re-render"
   assert.ok(sameRecipe(null, { steps: [] }));
 });
 
-test("the operation picker groups nested JSON ahead of row-count and value work", () => {
+test("the operation picker leads with value work, then columns, rows, nested JSON", () => {
   const grouped = operationsByFamily([
     { ...TRIM, family: "cleanse" },
     { ...FILTER, family: "rows" },
@@ -336,8 +336,8 @@ test("the operation picker groups nested JSON ahead of row-count and value work"
       expression_option: null,
     },
   ]);
-  assert.deepEqual(grouped.map((g) => g.family), ["nested", "rows", "cleanse"]);
-  assert.equal(grouped[0].label, "Nested JSON");
+  assert.deepEqual(grouped.map((g) => g.family), ["cleanse", "rows", "nested"]);
+  assert.equal(grouped[0].label, "Values");
 });
 
 test("a blocking suggestion outranks a decision, and a decision outranks hygiene", () => {

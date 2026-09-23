@@ -131,6 +131,7 @@ export function StudioPicker({
   const controlRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -159,9 +160,11 @@ export function StudioPicker({
   }, [query, open]);
 
   useEffect(() => {
-    if (open && searchable) {
-      window.requestAnimationFrame(() => searchRef.current?.focus());
-    }
+    if (!open) return;
+    window.requestAnimationFrame(() => {
+      if (searchable) searchRef.current?.focus();
+      if (listRef.current) listRef.current.scrollTop = 0;
+    });
   }, [open, searchable]);
 
   const pick = (next: string) => {
@@ -221,7 +224,7 @@ export function StudioPicker({
               />
             </div>
           )}
-          <div className="df2-studio-picker-list">
+          <div ref={listRef} className="df2-studio-picker-list">
             {filtered.length === 0 ? (
               <p className="df2-studio-picker-empty">{emptyHint}</p>
             ) : grouped.map((bucket) => (
