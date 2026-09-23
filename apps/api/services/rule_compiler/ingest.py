@@ -273,7 +273,14 @@ def _from_xlsx(payload: bytes) -> list[dict[str, Any]]:
             raw_rows = [list(row) for row in sheet.iter_rows(values_only=True)]
             headers, numbered = _take_header(raw_rows)
             if _header_score(headers) < 2:
-                continue
+                nonempty = sum(
+                    1 for row in raw_rows
+                    if any(_cell_text(cell) for cell in row)
+                )
+                # Chart/empty tabs stay out. Commentary still reaches compile
+                # so it can be classified as notes instead of vanishing.
+                if nonempty < 2:
+                    continue
             for row_number, raw in numbered:
                 row = _project(headers, raw, sheet.title, row_number)
                 if row:

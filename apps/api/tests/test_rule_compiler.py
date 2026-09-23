@@ -512,7 +512,7 @@ def test_linguistic_and_sql_compile_onto_engines():
         "Source Column,Destination Column,Rule\n"
         "cust_id,customer_id,Direct\n"
         "amount,amount,CAST(amount AS INTEGER)\n"
-        "status,status,COALESCE(status, N/A)\n"
+        "status,status,\"COALESCE(status, N/A)\"\n"
         "Customer.First Name,first_name,=TRIM(UPPER(A2))\n"
     ).encode()
     report = compile_rule_workbook(
