@@ -21,6 +21,7 @@ from .classify import (
     named_rule_ref,
     named_rule_targets,
     unknown_code_policy,
+    workbook_mask_to_strptime,
 )
 from .ingest import RuleIngestError, ingest_rule_workbook
 from .match import name_similarity, unique_linguistic_match
@@ -1136,8 +1137,10 @@ def _compile_row(
             "on_error": "refuse",
             "label": f"{source_column} parse {classified.get('format')}",
             "options": {
-                "format": classified.get("format"),
-                "output_format": classified.get("output_format") or "YYYY-MM-DD",
+                "format": workbook_mask_to_strptime(str(classified.get("format") or "")),
+                "output_format": workbook_mask_to_strptime(
+                    str(classified.get("output_format") or "YYYY-MM-DD")
+                ),
             },
         }
         transform = "none"

@@ -18,6 +18,7 @@ from services.rule_compiler.classify import (
     parse_lookup_spec,
     parse_sql_case,
     unknown_code_policy,
+    workbook_mask_to_strptime,
 )
 from services.rule_compiler.compile import compile_rule_workbook
 from services.rule_compiler.ingest import RuleIngestError, ingest_rule_file
@@ -105,7 +106,8 @@ def test_csv_compiles_customer_fixture():
     assert by_src["email"]["transform"] == "email"
     assert by_src["notes"]["transform"] == "omit"
     assert by_src["dob"]["shape_step"]["op"] == "parse_date"
-    assert by_src["dob"]["shape_step"]["options"]["format"] == "MM/DD/YYYY"
+    assert by_src["dob"]["shape_step"]["options"]["format"] == "%m/%d/%Y"
+    assert by_src["dob"]["shape_step"]["options"]["output_format"] == "%Y-%m-%d"
     assert by_src["dob"]["date_format"] == "MM/DD/YYYY"
     salary = [r for r in report["rules"] if r["kind"] == "derive"][0]
     assert salary["shape_step"]["op"] == "derive_column"
@@ -601,6 +603,14 @@ def test_duplicate_headers_and_notes_sheet_are_not_silent():
     assert any("commentary" in (r.get("rule_text") or "").lower() for r in report["rules"])
 
 
+def test_workbook_date_mask_becomes_engine_strptime():
+    assert workbook_mask_to_strptime("MM/DD/YYYY") == "%m/%d/%Y"
+    assert workbook_mask_to_strptime("DD/MM/YYYY") == "%d/%m/%Y"
+    assert workbook_mask_to_strptime("YYYY-MM-DD") == "%Y-%m-%d"
+    assert workbook_mask_to_strptime("%m/%d/%Y") == "%m/%d/%Y"
+    assert workbook_mask_to_strptime("HH24:MI:SS") == "%H:%M:%S"
+
+
 def test_date_mask_names_mm_dd_versus_dd_mm():
     md = parse_date_spec("MM/DD/YYYY → YYYY-MM-DD")
     assert md and md["format"] == "MM/DD/YYYY"
@@ -628,7 +638,8 @@ def test_date_mask_names_mm_dd_versus_dd_mm():
     hired = next(r for r in report["rules"] if r["source_column"] == "hired")
     assert dob["status"] == "executable"
     assert dob["shape_step"]["op"] == "parse_date"
-    assert dob["shape_step"]["options"]["format"] == "MM/DD/YYYY"
+    assert dob["shape_step"]["options"]["format"] == "%m/%d/%Y"
+    assert dob["shape_step"]["options"]["output_format"] == "%Y-%m-%d"
     assert hired["transform"] == "date_iso"
     assert any("MM/DD vs DD/MM" in issue for issue in hired["issues"])
 
