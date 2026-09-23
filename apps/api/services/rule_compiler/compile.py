@@ -17,6 +17,7 @@ from typing import Any
 
 from .classify import classify_rule
 from .ingest import RuleIngestError, ingest_rule_workbook
+from .match import name_similarity, unique_linguistic_match
 from .normalize import fold, resolve_name, resolve_name_ex, split_qualified
 from .roles import GROUNDED_METHODS, ground_workbook_rows
 
@@ -133,6 +134,7 @@ def compile_rule_workbook(
     sheet_kinds = _classify_sheets(rows)
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
     lookup_pairs = _collect_lookup_pairs(rows)
+    orphan_notices = _attach_orphan_enumerations(rows, lookup_pairs, src_cols, dst_cols)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
     seen_edges: dict[tuple[str, str], int] = {}
@@ -148,6 +150,8 @@ def compile_rule_workbook(
             source_table,
             dest_table,
         ))
+    for notice in orphan_notices:
+        compiled.append(_review_notice(notice, notice, source_table, dest_table))
 
     for raw in rows:
         if str(raw.get("_sheet") or "") in notes_sheets:
@@ -249,6 +253,7 @@ def compile_rule_workbook(
         "header_roles": header_roles,
         "sheet_kinds": sheet_kinds,
         "bind_methods": _bind_method_counts(compiled),
+        "lookup_coverage": _lookup_coverage(lookup_pairs),
         "matcher": "cupid-linguistic+instance",
         "honesty": (
             "Headers are inferred from the uploaded file and the selected "
@@ -257,7 +262,9 @@ def compile_rule_workbook(
             "threshold, gap). Accepted rules execute deterministically on "
             "Transform + Map. Unrecognised, unbound, or weakly inferred "
             "rules stay in the review queue — they are never applied to a "
-            "row. Commentary sheets are not executed. Unused destination "
+            "row. Date masks must name MM/DD vs DD/MM. Orphan enumeration "
+            "sheets attach only when the edge is unique. Commentary sheets "
+            "are not executed. Unused destination "
             "columns are not written. Unmapped source columns stay on Map "
             "as remap-or-omit. Nothing is silently dropped."
         ),
@@ -321,12 +328,85 @@ def _collect_lookup_pairs(rows: list[dict[str, Any]]) -> dict[tuple[str, str], d
 
 
 def _is_pair_only(raw: dict[str, Any]) -> bool:
+    """Named or orphan enumeration rows are consumed via lookup_pairs."""
     return bool(
         raw.get("lookup_from")
         and raw.get("lookup_to")
         and not str(raw.get("rule") or "").strip()
-        and raw.get("source_column")
     )
+
+
+def _lookup_coverage(pairs: dict[tuple[str, str], dict[str, str]]) -> list[dict[str, Any]]:
+    return [
+        {"source": src, "dest": dst, "pairs": len(mapping)}
+        for (src, dst), mapping in pairs.items()
+        if src and mapping
+    ]
+
+
+def _attach_orphan_enumerations(
+    rows: list[dict[str, Any]],
+    lookup_pairs: dict[tuple[str, str], dict[str, str]],
+    src_cols: list[str],
+    dst_cols: list[str],
+) -> list[str]:
+    """Informatica Domains/Enumerations + Clio: compile a named edge, never invent one."""
+    orphans: dict[str, dict[str, str]] = defaultdict(dict)
+    for raw in rows:
+        frm = str(raw.get("lookup_from") or "").strip()
+        to = str(raw.get("lookup_to") or "").strip()
+        if frm and to and not str(raw.get("source_column") or "").strip():
+            orphans[str(raw.get("_sheet") or "")][frm] = to
+    notices: list[str] = []
+    for sheet, mapping in orphans.items():
+        if not mapping:
+            continue
+        candidates: list[tuple[str, str, str, str]] = []
+        for raw in rows:
+            if str(raw.get("lookup_from") or "").strip():
+                continue
+            spoken_src = str(raw.get("source_column") or "").strip()
+            spoken_dst = str(raw.get("dest_column") or "").strip()
+            if not spoken_src and not spoken_dst:
+                continue
+            classified = classify_rule(str(raw.get("rule") or ""))
+            src = resolve_name(spoken_src, src_cols) if src_cols and spoken_src else spoken_src
+            dst = resolve_name(spoken_dst, dst_cols) if dst_cols and spoken_dst else spoken_dst
+            hint = str(classified.get("reason") or "").startswith("lookup named")
+            name_hit = any(
+                label and name_similarity(sheet, label) >= 0.72
+                for label in (spoken_src, spoken_dst, src, dst)
+                if label
+            )
+            if not (hint or name_hit):
+                continue
+            edge_src = src or spoken_src
+            edge_dst = dst or spoken_dst or edge_src
+            if edge_src:
+                candidates.append((edge_src, edge_dst, spoken_src, spoken_dst))
+        unique = {(item[0], item[1]): item for item in candidates}
+        if len(unique) == 1:
+            src, dst, spoken_src, spoken_dst = next(iter(unique.values()))
+            lookup_pairs[(src, dst)].update(mapping)
+            if spoken_src:
+                lookup_pairs[(spoken_src, spoken_dst or spoken_src)].update(mapping)
+            continue
+        if not unique:
+            pool = [c for c in (dst_cols or src_cols) if c]
+            winner, _score = unique_linguistic_match(sheet, pool) if sheet and pool else ("", 0.0)
+            if winner:
+                lookup_pairs[(winner, winner)].update(mapping)
+                continue
+            notices.append(
+                f"{len(mapping)} code pair(s) on sheet “{sheet or 'Lookups'}” have "
+                "no named source column. Name the edge — they were not applied."
+            )
+            continue
+        notices.append(
+            f"Sheet “{sheet}” code table matches {len(unique)} columns. "
+            "Name the source — a guessed lookup edge is silent remap."
+        )
+    return notices
 
 
 def _mark_edge_conflicts(
@@ -449,6 +529,11 @@ def _compile_row(
         issues.append("Marked required — Validate fail-closes nulls on this dest.")
     if classified.get("unique"):
         issues.append("Marked unique — Validate fail-closes duplicate keys. Confirm the identity column.")
+    if kind == "date" and not classified.get("format"):
+        issues.append(
+            "Source date format was not named. Confirm MM/DD vs DD/MM — "
+            "a swapped day is silent loss."
+        )
 
     methods = dict(raw.get("_role_methods") or {})
     weak_bind = False
@@ -490,7 +575,20 @@ def _compile_row(
     if classified.get("mapping"):
         pairs = {**pairs, **classified["mapping"]}
 
-    if kind == "derive" and dest_column and status == "executable":
+    if kind == "date" and classified.get("format") and source_column and status == "executable":
+        shape_step = {
+            "op": "parse_date",
+            "column": source_column,
+            "enabled": True,
+            "on_error": "refuse",
+            "label": f"{source_column} parse {classified.get('format')}",
+            "options": {
+                "format": classified.get("format"),
+                "output_format": classified.get("output_format") or "YYYY-MM-DD",
+            },
+        }
+        transform = "none"
+    elif kind == "derive" and dest_column and status == "executable":
         expr = str(classified.get("expression") or "")
         shape_step = {
             "op": "derive_column",
@@ -746,10 +844,25 @@ def _compile_row(
                     "label": f"{source_column} collapse",
                     "options": {},
                 })
+            elif op == "case":
+                extra_steps.append({
+                    "op": "case",
+                    "column": source_column,
+                    "enabled": True,
+                    "on_error": "refuse",
+                    "label": f"{source_column} {extra.get('mode') or 'lower'}",
+                    "options": {"mode": extra.get("mode") or "lower"},
+                })
 
-    if pairs and kind in {"direct", "lookup", ""} and status == "executable":
+    if pairs and (
+        kind in {"direct", "lookup", ""}
+        or (kind == "unknown" and str(classified.get("reason") or "").startswith("lookup named"))
+    ):
         kind = "lookup"
         transform = "none"
+        issues = [item for item in issues if "lookup named" not in item]
+        if status == "needs_confirmation" and not bind_fail and not weak_bind:
+            status = "executable"
 
     return {
         "source_table": str(raw.get("source_table") or table_from_cell or source_table or ""),
@@ -764,6 +877,7 @@ def _compile_row(
         "confidence": float(classified.get("confidence") or 0),
         "transform": transform,
         "code_crosswalk": pairs or None,
+        "date_format": classified.get("format") or "",
         "shape_step": shape_step if status == "executable" else None,
         "shape_steps": extra_steps if status == "executable" else [],
         "status": status,

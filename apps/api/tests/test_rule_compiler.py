@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from services.rule_compiler.classify import classify_rule, parse_lookup
+from services.rule_compiler.classify import classify_rule, parse_date_spec, parse_lookup
 from services.rule_compiler.compile import compile_rule_workbook
 from services.rule_compiler.ingest import RuleIngestError, ingest_rule_file
 from services.rule_compiler.match import name_similarity, unique_linguistic_match
@@ -87,7 +87,9 @@ def test_csv_compiles_customer_fixture():
     assert by_src["status"]["code_crosswalk"]["A"] == "ACTIVE"
     assert by_src["email"]["transform"] == "email"
     assert by_src["notes"]["transform"] == "omit"
-    assert by_src["dob"]["transform"] == "date_iso"
+    assert by_src["dob"]["shape_step"]["op"] == "parse_date"
+    assert by_src["dob"]["shape_step"]["options"]["format"] == "MM/DD/YYYY"
+    assert by_src["dob"]["date_format"] == "MM/DD/YYYY"
     salary = [r for r in report["rules"] if r["kind"] == "derive"][0]
     assert salary["shape_step"]["op"] == "derive_column"
     assert salary["map_source"] == "annual_salary"
@@ -577,3 +579,106 @@ def test_duplicate_headers_and_notes_sheet_are_not_silent():
     assert len(executable) == 1
     assert executable[0]["source_column"] == "fname"
     assert any("commentary" in (r.get("rule_text") or "").lower() for r in report["rules"])
+
+
+def test_date_mask_names_mm_dd_versus_dd_mm():
+    md = parse_date_spec("MM/DD/YYYY → YYYY-MM-DD")
+    assert md and md["format"] == "MM/DD/YYYY"
+    dm = parse_date_spec("DD/MM/YYYY")
+    assert dm and dm["format"] == "DD/MM/YYYY"
+    ambiguous = classify_rule("MM/DD/YYYY or DD/MM/YYYY")
+    assert ambiguous["kind"] == "date"
+    assert ambiguous["plane"] == "review"
+    bare = classify_rule("convert to date")
+    assert bare["kind"] == "date"
+    assert not bare.get("format")
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "dob,birth_date,MM/DD/YYYY → YYYY-MM-DD\n"
+        "hired,hired_on,convert to date\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "dates.csv",
+        csv,
+        source_columns=["dob", "hired"],
+        dest_columns=["birth_date", "hired_on"],
+    )
+    dob = next(r for r in report["rules"] if r["source_column"] == "dob")
+    hired = next(r for r in report["rules"] if r["source_column"] == "hired")
+    assert dob["status"] == "executable"
+    assert dob["shape_step"]["op"] == "parse_date"
+    assert dob["shape_step"]["options"]["format"] == "MM/DD/YYYY"
+    assert hired["transform"] == "date_iso"
+    assert any("MM/DD vs DD/MM" in issue for issue in hired["issues"])
+
+
+def test_cleansing_chain_and_lookup_semicolon_are_different():
+    chained = classify_rule("trim then lowercase then email")
+    assert chained["kind"] == "email"
+    ops = {extra.get("op") for extra in chained.get("extras") or []}
+    assert "trim" in ops
+    assert "case" in ops
+    assert classify_rule("A=ACTIVE; I=INACTIVE")["kind"] == "lookup"
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "email,email,trim then lowercase then email\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "chain.csv",
+        csv,
+        source_columns=["email"],
+        dest_columns=["email"],
+    )
+    assert report["rules"][0]["status"] == "executable"
+    assert report["rules"][0]["transform"] == "email"
+    assert {s["op"] for s in report["shape_steps"]} >= {"trim", "case"}
+
+
+def test_orphan_enumeration_sheet_attaches_to_named_lookup():
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    rules = wb.active
+    rules.title = "Rules"
+    rules.append(["Source Column", "Destination Column", "Rule"])
+    rules.append(["status", "status", "lookup"])
+    codes = wb.create_sheet("Status")
+    codes.append(["From Code", "To Value"])
+    codes.append(["A", "ACTIVE"])
+    codes.append(["I", "INACTIVE"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    report = compile_rule_workbook(
+        "enums.xlsx",
+        buf.getvalue(),
+        source_columns=["status"],
+        dest_columns=["status"],
+    )
+    lookup = next(r for r in report["rules"] if r.get("code_crosswalk"))
+    assert lookup["status"] == "executable"
+    assert lookup["code_crosswalk"]["A"] == "ACTIVE"
+    assert lookup["code_crosswalk"]["I"] == "INACTIVE"
+    assert any(item["pairs"] >= 2 for item in report["lookup_coverage"])
+
+    collide = Workbook()
+    ws = collide.active
+    ws.title = "Rules"
+    ws.append(["Source Column", "Destination Column", "Rule"])
+    ws.append(["status", "status", "lookup"])
+    ws.append(["state", "state", "lookup"])
+    codes = collide.create_sheet("Codes")
+    codes.append(["From Code", "To Value"])
+    codes.append(["A", "ACTIVE"])
+    buf = io.BytesIO()
+    collide.save(buf)
+    report = compile_rule_workbook(
+        "ambiguous-enums.xlsx",
+        buf.getvalue(),
+        source_columns=["status", "state"],
+        dest_columns=["status", "state"],
+    )
+    assert any("matches 2 columns" in (r.get("rule_text") or "") for r in report["rules"])
+    assert not any(r.get("code_crosswalk") and r["status"] == "executable" for r in report["rules"])

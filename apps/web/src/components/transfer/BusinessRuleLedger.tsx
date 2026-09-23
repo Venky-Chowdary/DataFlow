@@ -42,6 +42,9 @@ export function BusinessRuleLedger({
         <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
           {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
           {report.matcher ? ` · matcher ${report.matcher}` : ""}
+          {report.lookup_coverage?.length
+            ? ` · ${report.lookup_coverage.reduce((sum, item) => sum + item.pairs, 0)} lookup pair(s)`
+            : ""}
         </p>
       ) : null}
       {report.header_roles?.length ? (

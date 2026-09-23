@@ -28,6 +28,7 @@ export interface CompiledRule {
   issues?: string[];
   bind_method?: string;
   bind_score?: number;
+  date_format?: string;
   provenance?: { sheet?: string; row?: number };
 }
 
@@ -56,6 +57,7 @@ export interface RuleCompileReport {
   header_roles?: HeaderRoleEvidence[];
   sheet_kinds?: Array<{ sheet: string; kind: string; rows: number }>;
   bind_methods?: Record<string, number>;
+  lookup_coverage?: Array<{ source: string; dest: string; pairs: number }>;
   matcher?: string;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];

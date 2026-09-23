@@ -199,6 +199,24 @@ _LEN = re.compile(r"\b(?:len|length)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*\)", re.I
 _TO_DATE = re.compile(r"\bto_date\b", re.I)
 _TO_NUMBER = re.compile(r"\bto_number\b", re.I)
 _TO_CHAR = re.compile(r"\bto_char\b", re.I)
+_CHAIN_SPLIT = re.compile(r"\s*(?:;|\bthen\b)\s*", re.I)
+_CLEANSE_KINDS = frozenset({
+    "trim", "case_lower", "case_upper", "title", "collapse", "strip_controls",
+    "email", "phone", "hash", "unicode",
+})
+_DATE_MASK = re.compile(
+    r"(?P<mask>Y{2,4}M{2}D{2}|D{2}M{2}Y{4}|M{2}D{2}Y{4}|"
+    r"(?:Y{2,4}|M{1,4}|D{1,2}|MON)(?:[-/.](?:Y{2,4}|M{1,4}|D{1,2}|MON)){1,2})",
+    re.I,
+)
+_AMBIGUOUS_DATE = re.compile(
+    r"\b(?:mm\s*/\s*dd|dd\s*/\s*mm)\b.+\b(?:dd\s*/\s*mm|mm\s*/\s*dd)\b",
+    re.I,
+)
+_DATE_WORDS = re.compile(
+    r"\b(?:date|datetime|timestamp|convert|parse|to|iso|iso-?8601|format)\b",
+    re.I,
+)
 
 
 def parse_lookup(text: str) -> dict[str, str]:
@@ -446,7 +464,68 @@ def _compound_extras(raw: str, kind: str) -> list[dict[str, Any]]:
     return extras
 
 
-def classify_rule(text: str) -> dict[str, Any]:
+def parse_date_spec(text: str) -> dict[str, Any] | None:
+    """Informatica-style date mask. MM/DD vs DD/MM must be named, not assumed."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if _AMBIGUOUS_DATE.search(raw):
+        return {
+            "kind": "date",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Date mask names both MM/DD and DD/MM. Pick one — "
+                "a swapped day is silent loss."
+            ),
+        }
+    parts = re.split(r"\s*(?:→|->|=>)\s*", raw, maxsplit=1)
+    source_match = _DATE_MASK.search(parts[0])
+    dest_match = _DATE_MASK.search(parts[1]) if len(parts) > 1 else None
+    if not source_match:
+        return None
+    leftover = _DATE_MASK.sub("", parts[0])
+    leftover = _DATE_WORDS.sub("", leftover)
+    leftover = re.sub(r"[^A-Za-z0-9]", "", leftover)
+    if leftover:
+        return None
+    return {
+        "kind": "date",
+        "plane": "shape",
+        "confidence": 0.96,
+        "format": source_match.group("mask").upper(),
+        "output_format": dest_match.group("mask").upper() if dest_match else "YYYY-MM-DD",
+    }
+
+
+def _classify_chain(raw: str, flags: dict[str, Any]) -> dict[str, Any] | None:
+    """iMAP / Informatica expression chain: trim then lowercase then email."""
+    parts = [part.strip() for part in _CHAIN_SPLIT.split(raw) if part.strip()]
+    if len(parts) < 2:
+        return None
+    atoms = [classify_rule(part, atomic=True) for part in parts]
+    if any(str(atom.get("kind") or "") not in _CLEANSE_KINDS for atom in atoms):
+        return None
+    primary = dict(atoms[-1])
+    extras = list(primary.get("extras") or [])
+    for atom in atoms[:-1]:
+        kind = str(atom.get("kind") or "")
+        if kind == "trim":
+            extras.append({"kind": "trim", "op": "trim"})
+        elif kind == "collapse":
+            extras.append({"kind": "collapse", "op": "collapse_whitespace"})
+        elif kind == "case_lower":
+            extras.append({"kind": "case_lower", "op": "case", "mode": "lower"})
+        elif kind == "case_upper":
+            extras.append({"kind": "case_upper", "op": "case", "mode": "upper"})
+        elif kind == "title":
+            extras.append({"kind": "title", "op": "case", "mode": "title"})
+    primary["extras"] = extras
+    primary.update(flags)
+    return primary
+
+
+def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     """One rule cell → kind, plane hint, and any structured payload.
 
     Order is specific-to-general: a lookup that also says "map" is a lookup,
@@ -577,6 +656,11 @@ def classify_rule(text: str) -> dict[str, Any]:
 
     if _OMIT.search(raw):
         return {"kind": "omit", "plane": "map", "confidence": 0.97, **flags}
+
+    if not atomic:
+        chained = _classify_chain(raw, flags)
+        if chained:
+            return chained
 
     concat_expr = _CONCAT_EXPR.search(raw)
     concat_hint = bool(_CONCAT_HINT.search(raw))
@@ -783,6 +867,10 @@ def classify_rule(text: str) -> dict[str, Any]:
         return {"kind": "email", "plane": "map", "confidence": 0.96, "extras": _compound_extras(raw, "email"), **flags}
     if _PHONE.search(raw):
         return {"kind": "phone", "plane": "map", "confidence": 0.96, "extras": _compound_extras(raw, "phone"), **flags}
+    date_spec = parse_date_spec(raw)
+    if date_spec:
+        date_spec.update(flags)
+        return date_spec
     if _DATE.search(raw):
         return {"kind": "date", "plane": "map", "confidence": 0.96, **flags}
     if _TIME.search(raw) and not _DATE.search(raw):
