@@ -504,7 +504,10 @@ def compile_rule_workbook(
             "hash identity is Gate-8 alignment, not PII hash. "
             "COMA type constraints refuse temporal↔numeric assignments. "
             "Cupid constraint matching refuses DECIMAL/VARCHAR overflow "
-            "and identity/generated dest writes. Lookup payloads must match "
+            "and identity/generated dest writes. LPAD/RPAD use a named fill "
+            "(space unless written). MD5/SHA is hash_pii, not email/phone. "
+            "TO_CHAR number masks and EXTRACT/DATEADD stay in review. "
+            "Lookup payloads must match "
             "the dest type family; leading-zero codes onto a number dest stay "
             "in review. NOW/TODAY/UUID/RAND are not deterministic. "
             "Skip-deleted without a named column stays in review. "
@@ -1102,7 +1105,7 @@ def _compile_row(
             "options": {
                 "width": classified.get("width") or 0,
                 "side": classified.get("side") or "left",
-                "fill": "0",
+                "fill": classified.get("fill") if classified.get("fill") not in (None, "") else " ",
             },
         }
     elif kind == "split" and source_column and dest_column and status == "executable":

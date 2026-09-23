@@ -75,9 +75,47 @@ _CONSTANT = re.compile(
     re.I,
 )
 _PAD = re.compile(
-    r"\bpad(?:\s+(?P<side>left|right))?\s+(?:to\s+)?(?P<width>\d+)",
+    r"\bpad(?:\s+(?P<side>left|right))?\s+(?:to\s+)?(?P<width>\d+)"
+    r"(?:\s+(?:with|fill)\s+['\"]?(?P<fill>.+?)['\"]?)?",
     re.I,
 )
+_LPAD_FN = re.compile(
+    r"\b(?P<fn>lpad|rpad)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<width>\d+)"
+    r"(?:\s*,\s*['\"](?P<fill>.*)['\"])?\s*\)",
+    re.I,
+)
+_LPAD_EN = re.compile(
+    r"\b(?P<fn>lpad|rpad)\s+(?:(?P<col>[A-Za-z_][\w.]*)\s+)?to\s+(?P<width>\d+)"
+    r"(?:\s+with\s+['\"]?(?P<fill>.+?)['\"]?)?",
+    re.I,
+)
+_CRYPTO_HASH = re.compile(
+    r"\b(?:md5|sha-?1|sha-?256|sha-?512|sha-?3|crc32|blake2b?)\s*\(",
+    re.I,
+)
+_DATE_ARITH = re.compile(
+    r"\b(?:extract|datepart|date_part|datediff|dateadd|date_add|date_sub|"
+    r"add_months|adddate|timestampdiff|timestampadd|year\s*\(|month\s*\(|"
+    r"day\s*\(|date_trunc)\b",
+    re.I,
+)
+_PHONETIC = re.compile(r"\b(?:soundex|metaphone|double\s+metaphone)\b", re.I)
+_NUM_LOCALE = re.compile(
+    r"\b(?:european|eu|de|fr|us|american)\s+number|"
+    r"parse\s+(?:eu|us|de|fr|european)\s+number|"
+    r"thousands\s+(?:comma|dot|space|period)|"
+    r"comma\s+decimal|decimal\s+comma\b",
+    re.I,
+)
+_COLLATION = re.compile(
+    r"\b(?:collate|ci_as|cs_as|case[\s-]?insensitive\s+collation)\b",
+    re.I,
+)
+_TO_CHAR_FN = re.compile(
+    r"\bto_char\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*(?:,\s*['\"](?P<fmt>.+?)['\"])?\s*\)",
+    re.I,
+)
+_NUM_MASK = re.compile(r"[90#]")
 _SPLIT = re.compile(
     r"\bsplit\b.*?(?:on|by|at)\s+['\"]?(?P<sep>[^'\"]+?)['\"]?(?:\s|$)",
     re.I,
@@ -994,6 +1032,81 @@ def volatile_reason(text: str, value: str = "") -> str:
     return ""
 
 
+def parse_to_char(text: str) -> dict[str, Any] | None:
+    """TO_CHAR is date only when the mask is a date. Number masks stay review."""
+    match = _TO_CHAR_FN.search(text or "")
+    if not match:
+        if _TO_CHAR.search(text or ""):
+            return {
+                "kind": "unknown",
+                "plane": "review",
+                "confidence": 0.4,
+                "reason": (
+                    "TO_CHAR needs a named format mask. This compiler will not "
+                    "assume a date — a number format parsed as a date is silent loss."
+                ),
+            }
+        return None
+    fmt = (match.group("fmt") or "").strip()
+    if not fmt:
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "TO_CHAR has no format mask. Name YYYY-MM-DD or a number pattern — "
+                "it was not applied."
+            ),
+        }
+    if _DATE_MASK.search(fmt) or re.search(r"Y{2,4}|MON|HH|MI|SS", fmt, re.I):
+        return {
+            "kind": "date",
+            "plane": "shape",
+            "confidence": 0.94,
+            "format": fmt.upper(),
+            "output_format": fmt.upper(),
+        }
+    if _NUM_MASK.search(fmt):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "TO_CHAR number mask is not parse_date. Confirm dest formatting — "
+                "a date parse of 999,999.00 is silent loss."
+            ),
+        }
+    return {
+        "kind": "unknown",
+        "plane": "review",
+        "confidence": 0.4,
+        "reason": "TO_CHAR mask is not a closed date or number form. It was not applied.",
+    }
+
+
+def parse_lpad(text: str) -> dict[str, Any] | None:
+    """Informatica / Oracle LPAD/RPAD — width is a literal (Informatica rule)."""
+    match = _LPAD_FN.search(text or "") or _LPAD_EN.search(text or "")
+    if not match:
+        return None
+    side = "left" if match.group("fn").lower() == "lpad" else "right"
+    fill = match.group("fill")
+    if fill is None:
+        fill = " "
+    out = {
+        "kind": "pad",
+        "plane": "shape",
+        "confidence": 0.93,
+        "width": int(match.group("width")),
+        "side": side,
+        "fill": fill,
+    }
+    col = match.groupdict().get("col")
+    if col:
+        out["column"] = col
+    return out
+
+
 def parse_extrema(text: str) -> dict[str, Any] | None:
     """SQL GREATEST / LEAST → shape greatest() / least()."""
     raw = (text or "").strip()
@@ -1388,8 +1501,21 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
             }
     if fn in {"VALUE", "TO_NUMBER"}:
         return {"kind": "cast_number", "plane": "map", "confidence": 0.94}
-    if fn in {"DATEVALUE", "TEXT", "TO_DATE", "TO_CHAR"}:
+    if fn in {"DATEVALUE", "TO_DATE"}:
         return {"kind": "date", "plane": "map", "confidence": 0.94}
+    if fn in {"TEXT", "TO_CHAR"}:
+        parsed = parse_to_char(f"{fn}({inner})")
+        if parsed:
+            return parsed
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "TO_CHAR / TEXT needs a named date or number mask. "
+                "A guessed parse_date is silent loss."
+            ),
+        }
     if fn in {"LEN", "LENGTH"}:
         col = inner.split(",")[0].strip() or "value"
         return {
@@ -1573,8 +1699,68 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             "expression": f"length({length.group('col')})",
             **flags,
         }
-    if _TO_DATE.search(raw) or _TO_CHAR.search(raw):
+    if _TO_DATE.search(raw):
         return {"kind": "date", "plane": "map", "confidence": 0.94, **flags}
+    to_char = parse_to_char(raw)
+    if to_char:
+        to_char.update(flags)
+        return to_char
+    padded = parse_lpad(raw)
+    if padded:
+        padded.update(flags)
+        return padded
+    if _DATE_ARITH.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "EXTRACT / DATEADD / DATEDIFF is not parse_date. Name a "
+                "row-local derive — a year extract stored as a date is silent loss."
+            ),
+            **flags,
+        }
+    if _CRYPTO_HASH.search(raw):
+        return {
+            "kind": "hash",
+            "plane": "map",
+            "confidence": 0.95,
+            "extras": _compound_extras(raw, "hash"),
+            **flags,
+        }
+    if _PHONETIC.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "SOUNDEX / METAPHONE is lossy. This compiler will not invent "
+                "a phonetic key — confirm hash_identity or a named derive."
+            ),
+            **flags,
+        }
+    if _NUM_LOCALE.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "EU vs US number locale must be named on Destination Advanced. "
+                "A guessed decimal comma is silent loss — parse_number was not applied."
+            ),
+            **flags,
+        }
+    if _COLLATION.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "COLLATE / CI_AS is case-insensitive. G20 matches codes exactly — "
+                "confirm both casings or this is silent remap."
+            ),
+            **flags,
+        }
     if _TO_NUMBER.search(raw):
         return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
 
@@ -1936,12 +2122,14 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
 
     pad = _PAD.search(raw)
     if pad:
+        fill = (pad.group("fill") or " ").strip()
         return {
             "kind": "pad",
             "plane": "shape",
             "confidence": 0.92,
             "width": int(pad.group("width")),
             "side": (pad.group("side") or "left").lower(),
+            "fill": fill or " ",
             **flags,
         }
 

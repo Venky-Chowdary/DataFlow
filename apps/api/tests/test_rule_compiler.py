@@ -1250,3 +1250,60 @@ def test_volatile_identity_wrappers_and_lookup_payload():
     assert any("leading zero" in issue.lower() for issue in by["pad"]["issues"])
     assert by["low"]["kind"] == "derive"
     assert by["low"]["status"] == "executable"
+
+
+def test_to_char_crypto_lpad_and_extract_are_not_silent():
+    assert classify_rule("md5(email)")["kind"] == "hash"
+    assert classify_rule("sha256(phone)")["kind"] == "hash"
+    assert classify_rule("crc32(email)")["kind"] == "hash"
+    assert classify_rule("Lowercase + validate email")["kind"] == "email"
+    assert classify_rule("TO_CHAR(amount, '999,999.00')")["kind"] == "unknown"
+    assert classify_rule("TO_CHAR(amount)")["kind"] == "unknown"
+    dated = classify_rule("TO_CHAR(dob, 'YYYY-MM-DD')")
+    assert dated["kind"] == "date"
+    assert "YYYY" in (dated.get("format") or "")
+    assert classify_rule("extract year from date")["kind"] == "unknown"
+    assert classify_rule("DATEADD(day, 1, dob)")["kind"] == "unknown"
+    assert classify_rule("soundex(name)")["kind"] == "unknown"
+    assert classify_rule("european number")["kind"] == "unknown"
+    assert classify_rule("COLLATE Latin1_General_CI_AS")["kind"] == "unknown"
+    lpad = classify_rule("LPAD(code, 5, '0')")
+    assert lpad["kind"] == "pad"
+    assert lpad["width"] == 5
+    assert lpad["side"] == "left"
+    assert lpad["fill"] == "0"
+    rpad = classify_rule("RPAD(name, 10)")
+    assert rpad["kind"] == "pad"
+    assert rpad["side"] == "right"
+    assert rpad["fill"] == " "
+    spoken = classify_rule("lpad code to 5 with 0")
+    assert spoken["kind"] == "pad"
+    assert spoken["fill"] == "0"
+    english = classify_rule("pad left to 5")
+    assert english["kind"] == "pad"
+    assert english.get("fill", " ") == " "
+
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "email,email_hash,md5(email)\n"
+        "code,code,\"LPAD(code, 5, '0')\"\n"
+        "amount,amount,\"TO_CHAR(amount, '999,999.00')\"\n"
+        "dob,birth_year,extract year from date\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "informatica-pad.csv",
+        csv,
+        source_columns=["email", "code", "amount", "dob"],
+        dest_columns=["email_hash", "code", "amount", "birth_year"],
+    )
+    by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
+    assert by["email"]["transform"] == "hash_pii"
+    assert by["email"]["status"] == "executable"
+    pad_step = next(s for s in report["shape_steps"] if s["op"] == "pad")
+    assert pad_step["options"]["fill"] == "0"
+    assert pad_step["options"]["width"] == 5
+    assert by["amount"]["status"] == "needs_confirmation"
+    assert any("number mask" in issue.lower() or "parse_date" in issue.lower() for issue in by["amount"]["issues"])
+    assert by["dob"]["status"] == "needs_confirmation"
+    assert by["dob"]["kind"] != "date" or by["dob"]["status"] == "needs_confirmation"
+    assert any("extract" in issue.lower() or "dateadd" in issue.lower() for issue in by["dob"]["issues"])
