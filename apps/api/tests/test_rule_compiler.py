@@ -206,3 +206,168 @@ def test_empty_file_is_refused():
 def test_legacy_xls_is_refused():
     with pytest.raises(RuleIngestError):
         ingest_rule_file("old.xls", b"not-empty")
+
+
+def test_closed_form_matrix():
+    cases = {
+        "trim + lowercase": "case_lower",
+        "title case": "title",
+        "collapse whitespace": "collapse",
+        "strip controls": "strip_controls",
+        "hh:mm:ss": "time",
+        "parse json": "json",
+        "base64": "binary",
+        "absolute value": "absolute",
+        "round to 2": "round",
+        "truncate to 4": "truncate",
+        "clamp 0 to 100": "clamp",
+        "left(code, 3)": "substr",
+        "prefix \"US-\"": "prefix",
+        "suffix \"-EUR\"": "suffix",
+        "default 0": "default",
+        "if null then N/A": "default",
+        "null if : n/a, NA": "null_if",
+        "keep if amount > 0": "filter",
+        "exclude rows where status = X": "filter",
+        "divert rows if amount < 0": "divert",
+        "required": "contract",
+        "must be unique": "contract",
+        "=UPPER(A2)": "case_upper",
+        "=TRIM(A2)": "trim",
+        "=VLOOKUP(A2,Sheet2!A:B,2,FALSE)": "join",
+        "if(status = \"A\", \"ACTIVE\", \"INACTIVE\")": "derive",
+        "assume timezone UTC": "timezone",
+    }
+    for text, kind in cases.items():
+        got = classify_rule(text)
+        assert got["kind"] == kind, f"{text!r} → {got['kind']} (want {kind})"
+
+
+def test_qualified_source_and_title_row_csv():
+    csv = (
+        "Customer mapping spec\n"
+        "Source Column,Destination Column,Rule\n"
+        "Customer.fname,first_name,Direct\n"
+        "# comment,ignored,ignored\n"
+        "status,status,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "titled.csv",
+        csv,
+        source_columns=["fname", "status"],
+        dest_columns=["first_name", "status"],
+    )
+    by_src = {r["source_column"]: r for r in report["rules"]}
+    assert by_src["fname"]["status"] == "executable"
+    assert by_src["fname"]["source_table"] == "Customer"
+
+
+def test_tsv_and_semicolon_and_ndjson():
+    tsv = b"Source Column\tDestination Column\tRule\nfname\tfirst_name\tDirect\n"
+    report = compile_rule_workbook("rules.tsv", tsv, source_columns=["fname"], dest_columns=["first_name"])
+    assert report["buckets"]["executable"] == 1
+
+    semi = "Source Column;Destination Column;Rule\nfname;first_name;Direct\n".encode()
+    report = compile_rule_workbook("rules.csv", semi, source_columns=["fname"], dest_columns=["first_name"])
+    assert report["buckets"]["executable"] == 1
+
+    ndjson = (
+        '{"source_column":"fname","dest_column":"first_name","rule":"Direct"}\n'
+        '{"source_column":"status","dest_column":"status","rule":"A → ACTIVE, I → INACTIVE"}\n'
+    ).encode()
+    report = compile_rule_workbook(
+        "rules.ndjson",
+        ndjson,
+        source_columns=["fname", "status"],
+        dest_columns=["first_name", "status"],
+    )
+    assert report["buckets"]["executable"] == 2
+
+
+def test_lookup_sheet_pairs_and_dest_collision():
+    csv = (
+        "Source Column,Destination Column,From Code,To Value\n"
+        "status,status,A,ACTIVE\n"
+        "status,status,I,INACTIVE\n"
+        "Source Column,Destination Column,Rule\n"
+    ).encode()
+    # The second header-looking row is data? From Code sheet only:
+    csv = (
+        "Source Column,From Code,To Value\n"
+        "status,A,ACTIVE\n"
+        "status,I,INACTIVE\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "codes.csv",
+        csv,
+        source_columns=["status"],
+        dest_columns=["status"],
+    )
+    lookup = next(r for r in report["rules"] if r.get("code_crosswalk"))
+    assert lookup["code_crosswalk"]["A"] == "ACTIVE"
+    assert lookup["code_crosswalk"]["I"] == "INACTIVE"
+
+    collide = (
+        "Source Column,Destination Column,Rule\n"
+        "fname,name,Direct\n"
+        "lname,name,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "collide.csv",
+        collide,
+        source_columns=["fname", "lname"],
+        dest_columns=["name"],
+    )
+    statuses = {r["source_column"]: r["status"] for r in report["rules"]}
+    assert statuses["fname"] == "executable"
+    assert statuses["lname"] == "conflict"
+
+
+def test_same_source_two_dests_and_unmapped_source():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "fname,first_name,Direct\n"
+        "fname,display_name,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "fanout.csv",
+        csv,
+        source_columns=["fname", "extra"],
+        dest_columns=["first_name", "display_name"],
+    )
+    dests = [r["dest_column"] for r in report["rules"] if r["status"] == "executable"]
+    assert set(dests) == {"first_name", "display_name"}
+    assert report["unmapped_source_count"] == 1
+    assert "extra" in report["unmapped_source_columns"]
+
+
+def test_filter_and_compound_trim_emit_shape_steps():
+    csv = (
+        "Source Column,Destination Column,Rule\n"
+        "amount,amount,keep if amount > 0\n"
+        "email,email,trim + lowercase\n"
+        "code,code_prefix,\"left(code, 3)\"\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "shape.csv",
+        csv,
+        source_columns=["amount", "email", "code"],
+        dest_columns=["amount", "email", "code_prefix"],
+    )
+    ops = [s["op"] for s in report["shape_steps"]]
+    assert "filter_rows" in ops
+    assert "trim" in ops
+    assert "derive_column" in ops
+    email = next(r for r in report["rules"] if r["source_column"] == "email")
+    assert email["transform"] == "lower"
+    assert email["status"] == "executable"
+
+
+def test_exclude_rows_is_not_omit():
+    assert classify_rule("exclude rows where status = X")["kind"] == "filter"
+    assert classify_rule("omit")["kind"] == "omit"
+
+
+def test_prose_still_fails_closed():
+    assert classify_rule("for legacy customers use the old number unless migrated")["kind"] == "unknown"
+    assert classify_rule("maybe use the other id")["kind"] == "unknown"

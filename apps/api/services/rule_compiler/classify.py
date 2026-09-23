@@ -20,27 +20,39 @@ _DIRECT = re.compile(
     re.I,
 )
 _OMIT = re.compile(
-    r"\b(?:omit|exclude|skip|ignore|drop|do\s+not\s+(?:map|load|transfer|send))\b",
+    r"\b(?:omit|do\s+not\s+(?:map|load|transfer|send)|"
+    r"(?:skip|drop|exclude|ignore)(?!\s+rows?\b))\b",
     re.I,
 )
 _LOWER = re.compile(r"\b(?:lower(?:case)?|lcase|tolower)\b", re.I)
 _UPPER = re.compile(r"\b(?:upper(?:case)?|ucase|toupper)\b", re.I)
-_TRIM = re.compile(r"\b(?:trim|strip(?:\s+space)?)\b", re.I)
+_TITLE = re.compile(r"\b(?:title[\s-]?case|proper(?:\s+case)?|initcap)\b", re.I)
+_TRIM = re.compile(r"\b(?:trim|strip(?:\s+space)?|ltrim|rtrim)\b", re.I)
+_COLLAPSE = re.compile(r"\b(?:collapse\s+whitespace|squeeze\s+spaces?|normalize\s+spaces?)\b", re.I)
+_STRIP_CTRL = re.compile(
+    r"\b(?:strip\s+controls?|non[\s-]?printable|zero[\s-]?width|control\s+char)\b",
+    re.I,
+)
 _DATE = re.compile(
     r"\b(?:date|datetime|timestamp|to\s+iso|iso-?8601|"
     r"mm\s*/\s*dd\s*/\s*yyyy|dd\s*/\s*mm\s*/\s*yyyy|yyyy-mm-dd|"
     r"parse\s+date|convert.{0,20}date)\b",
     re.I,
 )
+_TIME = re.compile(r"\b(?:time(?:[\s-]?of[\s-]?day)?|hh:mm(?::ss)?)\b", re.I)
 _EMAIL = re.compile(r"\bemail\b", re.I)
 _PHONE = re.compile(r"\bphone\b", re.I)
 _DEFAULT = re.compile(
-    r"\b(?:default(?:\s+to)?|if\s+null|nvl|coalesce)\b\s*[:\s]+(?P<value>.+)$",
+    r"\b(?:default(?:\s+to)?|if\s+null(?:\s+then)?|nvl|coalesce)\b\s*[:\s]+(?P<value>.+)$",
+    re.I,
+)
+_DEFAULT_BARE = re.compile(
+    r"\b(?:default(?:\s+to)?|if\s+null(?:\s+then)?)\s+(?P<value>\S+)$",
     re.I,
 )
 _DERIVE = re.compile(
-    r"(?P<expr>[A-Za-z_][\w.]*\s*[*+/x×]\s*[\d.]+"
-    r"|[\d.]+\s*[*+/x×]\s*[A-Za-z_][\w.]*)",
+    r"(?P<expr>[A-Za-z_][\w.]*\s*[*+/x×-]\s*[\d.]+"
+    r"|[\d.]+\s*[*+/x×-]\s*[A-Za-z_][\w.]*)",
     re.I,
 )
 _CONCAT_HINT = re.compile(
@@ -51,11 +63,11 @@ _CONCAT_EXPR = re.compile(
     r"([A-Za-z_][\w.]*)\s*(?:\+|\&|\|\|)\s*([A-Za-z_][\w.]*)",
 )
 _REPLACE = re.compile(
-    r"\breplace\s+['\"]?(?P<search>.+?)['\"]?\s+(?:with|by)\s+['\"]?(?P<repl>.*)$",
+    r"\b(?:replace|substitute)\s+['\"]?(?P<search>.+?)['\"]?\s+(?:with|by)\s+['\"]?(?P<repl>.*)$",
     re.I,
 )
 _NULL_IF = re.compile(
-    r"\b(?:null\s+if|treat\s+as\s+null|sentinel)\b\s*[:\s]+(?P<values>.+)$",
+    r"\b(?:null\s+if|treat\s+as\s+null|sentinel|nullif)\b\s*[:\s]+(?P<values>.+)$",
     re.I,
 )
 _CONSTANT = re.compile(
@@ -71,6 +83,32 @@ _SPLIT = re.compile(
     re.I,
 )
 _ROUND = re.compile(r"\bround(?:\s+to)?\s+(?P<places>\d+)", re.I)
+_TRUNCATE = re.compile(r"\btruncat(?:e|ion)\s+(?:to\s+)?(?P<places>\d+)", re.I)
+_ABS = re.compile(r"\b(?:abs\s*\(|absolute\s+value)\b", re.I)
+_CLAMP = re.compile(
+    r"\bclamp\b.*?(\d+(?:\.\d+)?)\s*(?:to|-|,)\s*(\d+(?:\.\d+)?)",
+    re.I,
+)
+_SUBSTR = re.compile(
+    r"\b(?:substr(?:ing)?|mid)\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<start>\d+)\s*(?:,\s*(?P<length>\d+))?\s*\)",
+    re.I,
+)
+_LEFT = re.compile(
+    r"\bleft\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<length>\d+)\s*\)",
+    re.I,
+)
+_RIGHT = re.compile(
+    r"\bright\s*\(\s*(?P<col>[A-Za-z_][\w.]*)\s*,\s*(?P<length>\d+)\s*\)",
+    re.I,
+)
+_PREFIX = re.compile(
+    r"\b(?:prefix|prepend)\s+['\"](?P<value>.+?)['\"]",
+    re.I,
+)
+_SUFFIX = re.compile(
+    r"\b(?:suffix|append)\s+['\"](?P<value>.+?)['\"]",
+    re.I,
+)
 _HASH = re.compile(
     r"\b(?:hash(?:\s+pii)?|mask|anonymi[sz]e|redact|one[\s-]?way)\b",
     re.I,
@@ -85,21 +123,44 @@ _NUM = re.compile(
     re.I,
 )
 _BOOL = re.compile(r"\b(?:boolean|bool|true\s*/\s*false)\b", re.I)
+_JSON = re.compile(r"\b(?:parse\s+json|json(?:b)?|struct)\b", re.I)
+_BINARY = re.compile(r"\b(?:binary|base64|bytes)\b", re.I)
+_UNICODE = re.compile(r"\b(?:unicode|nfc|nfd|normalize\s+unicode)\b", re.I)
+_ZONE = re.compile(r"\b(?:timezone|time\s+zone|iana|assume\s+zone)\b", re.I)
 _NOT_COLUMN = frozenset({
     "lowercase", "uppercase", "lower", "upper", "validate", "trim", "strip",
     "parse", "cast", "direct", "omit", "email", "phone", "hash", "replace",
     "default", "null", "concat", "concatenate", "combine", "and", "or",
-    "convert", "normalize", "format",
+    "convert", "normalize", "format", "title", "proper",
 })
-_CURRENCY = re.compile(r"\b(?:currency|money|dollar|gbp|eur)\b", re.I)
+_CURRENCY = re.compile(r"\b(?:currency|money|dollar)\b", re.I)
 _PERCENT = re.compile(r"\bpercent(?:age)?\b", re.I)
-# Table-level joins / VLOOKUP — not a pre-load shape op.
 _JOIN = re.compile(
     r"\b(?:left\s+join|inner\s+join|right\s+join|full\s+join|"
     r"vlookup|xlookup|lookup\s+from|join\s+(?:to|with|on))\b",
     re.I,
 )
-# A → ACTIVE  |  A=ACTIVE  |  A:ACTIVE
+_FILTER = re.compile(
+    r"\b(?:keep|only|where|filter)\s+(?:rows?\s+)?(?:if|where)?\s*"
+    r"(?P<col>[A-Za-z_][\w.]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    re.I,
+)
+_EXCLUDE_ROWS = re.compile(
+    r"\b(?:exclude|drop|omit)\s+rows?\s+(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    re.I,
+)
+_DIVERT = re.compile(
+    r"\b(?:divert|quarantine)\s+(?:rows?\s+)?(?:where|if)\s+"
+    r"(?P<col>[A-Za-z_][\w.]*)\s*(?P<op>=|!=|<>|>=|<=|>|<)\s*(?P<val>.+)$",
+    re.I,
+)
+_IF_FN = re.compile(
+    r"\bif\s*\(\s*(?P<cond>.+?)\s*,\s*(?P<then>.+?)\s*(?:,\s*(?P<else>.+?))?\s*\)\s*$",
+    re.I,
+)
+_REQUIRED = re.compile(r"\b(?:required|mandatory|not\s+null|non[\s-]?null)\b", re.I)
+_UNIQUE = re.compile(r"\b(?:unique|primary\s+key|\bpk\b)\b", re.I)
 _LOOKUP_PAIR = re.compile(
     r"([A-Za-z0-9_.-]+)\s*(?:→|->|=>|=|:)\s*([A-Za-z0-9_./ -]+)",
 )
@@ -108,6 +169,12 @@ _LOOKUP_HINT = re.compile(
     re.I,
 )
 _DATE_TOKEN = re.compile(r"^(?:Y{2,4}|M{1,2}|D{1,2}|H{1,2}|S{1,2})$", re.I)
+_EXCEL_FN = re.compile(
+    r"^=?\s*(?P<fn>UPPER|LOWER|TRIM|PROPER|CONCATENATE|CONCAT|TEXTJOIN|"
+    r"SUBSTITUTE|REPLACE|LEFT|RIGHT|MID|ABS|ROUND|IF|IFERROR|VLOOKUP|XLOOKUP|"
+    r"LEN|VALUE|TEXT|DATEVALUE)\s*\(",
+    re.I,
+)
 
 
 def parse_lookup(text: str) -> dict[str, str]:
@@ -153,13 +220,12 @@ def _concat_columns(text: str) -> tuple[list[str], str]:
             if name and name not in columns:
                 columns.append(name)
     if not columns:
-        # ``concat first_name and last_name`` / ``concatenate a, b, c``
-        tail = re.sub(r"^(?:concat(?:enate)?|combine)\s+", "", text or "", flags=re.I)
+        tail = re.sub(r"^(?:concat(?:enate)?|combine|textjoin)\s+", "", text or "", flags=re.I)
         tail = re.sub(r"\b(?:and|with|into)\b", ",", tail, flags=re.I)
         for part in re.split(r"[,\s]+", tail):
             name = part.strip(" \"'")
             if re.fullmatch(r"[A-Za-z_][\w.]*", name or "") and name.lower() not in {
-                "concat", "concatenate", "combine", "columns", "fields", "join",
+                "concat", "concatenate", "combine", "columns", "fields", "join", "textjoin",
             }:
                 if name not in columns:
                     columns.append(name)
@@ -167,9 +233,144 @@ def _concat_columns(text: str) -> tuple[list[str], str]:
     sep_match = re.search(r"(?:sep(?:arator)?|delimited?\s+by)\s+['\"](.+?)['\"]", text or "", re.I)
     if sep_match:
         separator = sep_match.group(1)
-    elif "space" in (text or "").lower() and "concat" in (text or "").lower():
+    elif "space" in (text or "").lower() and re.search(r"concat|textjoin", text or "", re.I):
         separator = " "
     return columns, separator
+
+
+def _quote_lit(value: str) -> str:
+    text = (value or "").strip().strip("\"'")
+    if re.fullmatch(r"-?[\d.]+", text):
+        return text
+    return json_escape(text)
+
+
+def json_escape(value: str) -> str:
+    return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _condition(col: str, op: str, val: str) -> str:
+    oper = "<>" if op == "!=" else op
+    return f"{col} {oper} {_quote_lit(val)}"
+
+
+def _excel_formula(raw: str) -> dict[str, Any] | None:
+    """Map a leading Excel formula onto a closed form when the function is known."""
+    text = (raw or "").strip()
+    if text.startswith("="):
+        text = text[1:].strip()
+    match = _EXCEL_FN.match("=" + text if not text.startswith("=") else text)
+    if not match:
+        # ``=A2*12`` / ``=salary*12``
+        derive = _DERIVE.search(text)
+        if derive and re.match(r"^[A-Za-z_]", text):
+            expr = derive.group("expr").replace("×", "*").replace("x", "*").replace("X", "*")
+            return {"kind": "derive", "plane": "shape", "confidence": 0.94, "expression": re.sub(r"\s+", " ", expr)}
+        return None
+    fn = match.group("fn").upper()
+    inner = text[text.find("(") + 1: text.rfind(")")] if "(" in text else ""
+    if fn in {"UPPER"}:
+        return {"kind": "case_upper", "plane": "map", "confidence": 0.97}
+    if fn in {"LOWER"}:
+        return {"kind": "case_lower", "plane": "map", "confidence": 0.97}
+    if fn in {"TRIM"}:
+        return {"kind": "trim", "plane": "map", "confidence": 0.97}
+    if fn in {"PROPER"}:
+        return {"kind": "title", "plane": "shape", "confidence": 0.93}
+    if fn in {"CONCATENATE", "CONCAT", "TEXTJOIN"}:
+        columns, separator = _concat_columns(inner.replace("&", "+"))
+        return {
+            "kind": "concat",
+            "plane": "shape",
+            "confidence": 0.93 if len(columns) >= 2 else 0.55,
+            "columns": columns,
+            "separator": separator,
+        }
+    if fn in {"SUBSTITUTE", "REPLACE"}:
+        parts = [p.strip().strip("\"'") for p in inner.split(",") if p.strip()]
+        if len(parts) >= 3:
+            return {
+                "kind": "replace",
+                "plane": "shape",
+                "confidence": 0.92,
+                "search": parts[1],
+                "replacement": parts[2],
+            }
+    if fn == "LEFT":
+        left = _LEFT.search(f"left({inner})")
+        if left:
+            return {
+                "kind": "substr",
+                "plane": "shape",
+                "confidence": 0.92,
+                "expression": f"substr({left.group('col')}, 1, {left.group('length')})",
+            }
+    if fn == "RIGHT":
+        right = _RIGHT.search(f"right({inner})")
+        if right:
+            return {
+                "kind": "substr",
+                "plane": "shape",
+                "confidence": 0.92,
+                "expression": (
+                    f"substr({right.group('col')}, "
+                    f"length({right.group('col')}) - {int(right.group('length')) - 1})"
+                ),
+            }
+    if fn == "MID":
+        mid = _SUBSTR.search(f"mid({inner})")
+        if mid:
+            length = mid.group("length") or "1"
+            return {
+                "kind": "substr",
+                "plane": "shape",
+                "confidence": 0.92,
+                "expression": f"substr({mid.group('col')}, {mid.group('start')}, {length})",
+            }
+    if fn == "ABS":
+        return {"kind": "absolute", "plane": "shape", "confidence": 0.93}
+    if fn == "ROUND":
+        rounded = _ROUND.search("round " + (inner.split(",")[-1] if "," in inner else "0"))
+        return {
+            "kind": "round",
+            "plane": "shape",
+            "confidence": 0.93,
+            "places": int(rounded.group("places")) if rounded else 0,
+        }
+    if fn in {"VLOOKUP", "XLOOKUP"}:
+        return {
+            "kind": "join",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": "Excel VLOOKUP/XLOOKUP is not a pre-load rule. Name join keys or write Source → query.",
+        }
+    if fn in {"IF", "IFERROR"}:
+        closed = _IF_FN.search(text)
+        if closed:
+            return {
+                "kind": "derive",
+                "plane": "shape",
+                "confidence": 0.9,
+                "expression": (
+                    f"if({closed.group('cond')}, {closed.group('then')}"
+                    + (f", {closed.group('else')}" if closed.group("else") else "")
+                    + ")"
+                ),
+            }
+    if fn in {"VALUE"}:
+        return {"kind": "cast_number", "plane": "map", "confidence": 0.94}
+    if fn in {"DATEVALUE", "TEXT"}:
+        return {"kind": "date", "plane": "map", "confidence": 0.94}
+    return None
+
+
+def _compound_extras(raw: str, kind: str) -> list[dict[str, Any]]:
+    extras: list[dict[str, Any]] = []
+    if kind not in {"trim"} and _TRIM.search(raw):
+        extras.append({"kind": "trim", "op": "trim"})
+    if kind not in {"collapse"} and _COLLAPSE.search(raw):
+        extras.append({"kind": "collapse", "op": "collapse_whitespace"})
+    return extras
 
 
 def classify_rule(text: str) -> dict[str, Any]:
@@ -179,8 +380,51 @@ def classify_rule(text: str) -> dict[str, Any]:
     not Direct. Unknown is a status, not a guess.
     """
     raw = (text or "").strip()
+    flags: dict[str, Any] = {}
+    if _REQUIRED.search(raw):
+        flags["required"] = True
+    if _UNIQUE.search(raw):
+        flags["unique"] = True
+
+    if raw.startswith("=") or _EXCEL_FN.match(raw):
+        excel = _excel_formula(raw)
+        if excel:
+            excel["extras"] = _compound_extras(raw, excel["kind"])
+            excel.update(flags)
+            return excel
+
     if _DIRECT.match(raw):
-        return {"kind": "direct", "plane": "map", "confidence": 0.99}
+        return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
+
+    divert = _DIVERT.search(raw)
+    if divert:
+        return {
+            "kind": "divert",
+            "plane": "shape",
+            "confidence": 0.9,
+            "condition": _condition(divert.group("col"), divert.group("op"), divert.group("val")),
+            **flags,
+        }
+    exclude = _EXCLUDE_ROWS.search(raw)
+    if exclude:
+        return {
+            "kind": "filter",
+            "plane": "shape",
+            "confidence": 0.9,
+            "condition": _condition(exclude.group("col"), exclude.group("op"), exclude.group("val")),
+            "keep": False,
+            **flags,
+        }
+    filtered = _FILTER.search(raw)
+    if filtered:
+        return {
+            "kind": "filter",
+            "plane": "shape",
+            "confidence": 0.9,
+            "condition": _condition(filtered.group("col"), filtered.group("op"), filtered.group("val")),
+            "keep": True,
+            **flags,
+        }
 
     lookup = parse_lookup(raw)
     if lookup:
@@ -189,6 +433,8 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "map",
             "confidence": 0.98,
             "mapping": lookup,
+            "extras": _compound_extras(raw, "lookup"),
+            **flags,
         }
     if _LOOKUP_HINT.search(raw) and not lookup:
         return {
@@ -196,6 +442,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "review",
             "confidence": 0.4,
             "reason": "lookup named but no A → B pairs were found",
+            **flags,
         }
 
     if _JOIN.search(raw):
@@ -208,10 +455,11 @@ def classify_rule(text: str) -> dict[str, Any]:
                 "Joins sheet or write the projection as Source → query; "
                 "this compiler will not invent a grain."
             ),
+            **flags,
         }
 
     if _OMIT.search(raw):
-        return {"kind": "omit", "plane": "map", "confidence": 0.97}
+        return {"kind": "omit", "plane": "map", "confidence": 0.97, **flags}
 
     concat_expr = _CONCAT_EXPR.search(raw)
     concat_hint = bool(_CONCAT_HINT.search(raw))
@@ -230,9 +478,76 @@ def classify_rule(text: str) -> dict[str, Any]:
             "confidence": 0.94 if len(columns) >= 2 else 0.55,
             "columns": columns,
             "separator": separator,
+            "extras": _compound_extras(raw, "concat"),
             **({} if len(columns) >= 2 else {
                 "reason": "concat named but fewer than two columns were identified",
             }),
+            **flags,
+        }
+
+    closed_if = _IF_FN.search(raw)
+    if closed_if:
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.9,
+            "expression": (
+                f"if({closed_if.group('cond')}, {closed_if.group('then')}"
+                + (f", {closed_if.group('else')}" if closed_if.group("else") else "")
+                + ")"
+            ),
+            **flags,
+        }
+
+    left = _LEFT.search(raw)
+    if left:
+        return {
+            "kind": "substr",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": f"substr({left.group('col')}, 1, {left.group('length')})",
+            **flags,
+        }
+    right = _RIGHT.search(raw)
+    if right:
+        return {
+            "kind": "substr",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": (
+                f"substr({right.group('col')}, "
+                f"length({right.group('col')}) - {int(right.group('length')) - 1})"
+            ),
+            **flags,
+        }
+    substr = _SUBSTR.search(raw)
+    if substr:
+        length = substr.group("length") or "1"
+        return {
+            "kind": "substr",
+            "plane": "shape",
+            "confidence": 0.92,
+            "expression": f"substr({substr.group('col')}, {substr.group('start')}, {length})",
+            **flags,
+        }
+
+    prefix = _PREFIX.search(raw)
+    if prefix:
+        return {
+            "kind": "prefix",
+            "plane": "shape",
+            "confidence": 0.91,
+            "value": prefix.group("value"),
+            **flags,
+        }
+    suffix = _SUFFIX.search(raw)
+    if suffix:
+        return {
+            "kind": "suffix",
+            "plane": "shape",
+            "confidence": 0.91,
+            "value": suffix.group("value"),
+            **flags,
         }
 
     derive = _DERIVE.search(raw)
@@ -244,6 +559,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.95,
             "expression": expr,
+            **flags,
         }
 
     replace = _REPLACE.search(raw)
@@ -254,15 +570,17 @@ def classify_rule(text: str) -> dict[str, Any]:
             "confidence": 0.93,
             "search": replace.group("search").strip().strip("\"'"),
             "replacement": (replace.group("repl") or "").strip().strip("\"'"),
+            **flags,
         }
 
-    default = _DEFAULT.search(raw)
+    default = _DEFAULT.search(raw) or _DEFAULT_BARE.search(raw)
     if default:
         return {
             "kind": "default",
             "plane": "shape",
             "confidence": 0.93,
             "value": default.group("value").strip().strip("\"'"),
+            **flags,
         }
 
     null_if = _NULL_IF.search(raw)
@@ -277,6 +595,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.92,
             "values": values,
+            **flags,
         }
 
     constant = _CONSTANT.search(raw)
@@ -286,6 +605,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.93,
             "value": constant.group("value").strip().strip("\"'"),
+            **flags,
         }
 
     pad = _PAD.search(raw)
@@ -296,6 +616,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "confidence": 0.92,
             "width": int(pad.group("width")),
             "side": (pad.group("side") or "left").lower(),
+            **flags,
         }
 
     split = _SPLIT.search(raw)
@@ -305,6 +626,7 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.9,
             "separator": split.group("sep").strip().strip("\"'"),
+            **flags,
         }
 
     rounded = _ROUND.search(raw)
@@ -314,32 +636,88 @@ def classify_rule(text: str) -> dict[str, Any]:
             "plane": "shape",
             "confidence": 0.93,
             "places": int(rounded.group("places")),
+            **flags,
         }
+    truncated = _TRUNCATE.search(raw)
+    if truncated:
+        return {
+            "kind": "truncate",
+            "plane": "shape",
+            "confidence": 0.92,
+            "places": int(truncated.group("places")),
+            **flags,
+        }
+    clamp = _CLAMP.search(raw)
+    if clamp:
+        return {
+            "kind": "clamp",
+            "plane": "shape",
+            "confidence": 0.91,
+            "min": clamp.group(1),
+            "max": clamp.group(2),
+            **flags,
+        }
+    if _ABS.search(raw):
+        return {"kind": "absolute", "plane": "shape", "confidence": 0.93, **flags}
 
     if _HASH.search(raw):
-        return {"kind": "hash", "plane": "map", "confidence": 0.95}
+        return {"kind": "hash", "plane": "map", "confidence": 0.95, "extras": _compound_extras(raw, "hash"), **flags}
     if _EMAIL.search(raw):
-        return {"kind": "email", "plane": "map", "confidence": 0.96}
+        return {"kind": "email", "plane": "map", "confidence": 0.96, "extras": _compound_extras(raw, "email"), **flags}
     if _PHONE.search(raw):
-        return {"kind": "phone", "plane": "map", "confidence": 0.96}
+        return {"kind": "phone", "plane": "map", "confidence": 0.96, "extras": _compound_extras(raw, "phone"), **flags}
     if _DATE.search(raw):
-        return {"kind": "date", "plane": "map", "confidence": 0.96}
+        return {"kind": "date", "plane": "map", "confidence": 0.96, **flags}
+    if _TIME.search(raw) and not _DATE.search(raw):
+        return {"kind": "time", "plane": "map", "confidence": 0.94, **flags}
     if _CURRENCY.search(raw):
-        return {"kind": "currency", "plane": "map", "confidence": 0.95}
+        return {"kind": "currency", "plane": "map", "confidence": 0.95, **flags}
     if _PERCENT.search(raw):
-        return {"kind": "percentage", "plane": "map", "confidence": 0.95}
+        return {"kind": "percentage", "plane": "map", "confidence": 0.95, **flags}
     if _INT.search(raw):
-        return {"kind": "cast_integer", "plane": "map", "confidence": 0.95}
+        return {"kind": "cast_integer", "plane": "map", "confidence": 0.95, **flags}
     if _NUM.search(raw):
-        return {"kind": "cast_number", "plane": "map", "confidence": 0.95}
+        return {"kind": "cast_number", "plane": "map", "confidence": 0.95, **flags}
     if _BOOL.search(raw):
-        return {"kind": "cast_boolean", "plane": "map", "confidence": 0.95}
+        return {"kind": "cast_boolean", "plane": "map", "confidence": 0.95, **flags}
+    if _JSON.search(raw):
+        return {"kind": "json", "plane": "map", "confidence": 0.93, **flags}
+    if _BINARY.search(raw):
+        return {"kind": "binary", "plane": "map", "confidence": 0.93, **flags}
+    if _ZONE.search(raw):
+        return {
+            "kind": "timezone",
+            "plane": "review",
+            "confidence": 0.5,
+            "reason": "A source timezone must be named (IANA). This compiler will not assume UTC.",
+            **flags,
+        }
+    if _UNICODE.search(raw):
+        return {"kind": "unicode", "plane": "shape", "confidence": 0.9, **flags}
+    if _STRIP_CTRL.search(raw):
+        return {"kind": "strip_controls", "plane": "map", "confidence": 0.95, **flags}
+    if _COLLAPSE.search(raw):
+        return {"kind": "collapse", "plane": "shape", "confidence": 0.94, **flags}
+    if _TITLE.search(raw):
+        return {"kind": "title", "plane": "shape", "confidence": 0.94, **flags}
     if _LOWER.search(raw):
-        return {"kind": "case_lower", "plane": "map", "confidence": 0.97}
+        return {"kind": "case_lower", "plane": "map", "confidence": 0.97, "extras": _compound_extras(raw, "case_lower"), **flags}
     if _UPPER.search(raw):
-        return {"kind": "case_upper", "plane": "map", "confidence": 0.97}
+        return {"kind": "case_upper", "plane": "map", "confidence": 0.97, "extras": _compound_extras(raw, "case_upper"), **flags}
     if _TRIM.search(raw):
-        return {"kind": "trim", "plane": "map", "confidence": 0.97}
+        return {"kind": "trim", "plane": "map", "confidence": 0.97, **flags}
+
+    if flags.get("required") or flags.get("unique"):
+        return {
+            "kind": "contract",
+            "plane": "review",
+            "confidence": 0.6,
+            "reason": (
+                "Required / unique is a Validate contract, not a write transform. "
+                "Confirm the dest column on Map; Validate already fail-closes nulls and duplicate keys."
+            ),
+            **flags,
+        }
 
     if not raw:
         return {"kind": "direct", "plane": "map", "confidence": 0.99}
@@ -348,4 +726,5 @@ def classify_rule(text: str) -> dict[str, Any]:
         "plane": "review",
         "confidence": 0.35,
         "reason": "rule text is not a closed form this compiler can execute",
+        **flags,
     }

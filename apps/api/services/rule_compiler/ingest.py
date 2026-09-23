@@ -1,26 +1,34 @@
-"""Read Excel / CSV / JSON into row dicts with sheet + line provenance."""
+"""Read Excel / CSV / TSV / JSON into row dicts with sheet + line provenance."""
 
 from __future__ import annotations
 
 import csv
 import io
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
-from .normalize import canonical_header
+from .normalize import canonical_header, split_qualified
 
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_ROWS = 5_000
-SUPPORTED = frozenset({".xlsx", ".xlsm", ".csv", ".json"})
+HEADER_SCAN = 12
+SUPPORTED = frozenset({".xlsx", ".xlsm", ".csv", ".tsv", ".txt", ".json", ".ndjson"})
 
 
 class RuleIngestError(ValueError):
     """The file is not a rule workbook we can read."""
 
 
+@dataclass
+class IngestResult:
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    truncated: int = 0
+
+
 def _ext(filename: str) -> str:
     name = (filename or "").strip().lower()
-    for suffix in (".xlsx", ".xlsm", ".xls", ".csv", ".json"):
+    for suffix in (".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".txt", ".json", ".ndjson"):
         if name.endswith(suffix):
             return suffix
     return ""
@@ -28,6 +36,10 @@ def _ext(filename: str) -> str:
 
 def ingest_rule_file(filename: str, payload: bytes) -> list[dict[str, Any]]:
     """Every data row from the workbook, with ``_sheet`` and ``_row`` set."""
+    return ingest_rule_workbook(filename, payload).rows
+
+
+def ingest_rule_workbook(filename: str, payload: bytes) -> IngestResult:
     if not payload:
         raise RuleIngestError("The file is empty.")
     if len(payload) > MAX_FILE_BYTES:
@@ -41,12 +53,12 @@ def ingest_rule_file(filename: str, payload: bytes) -> list[dict[str, Any]]:
         )
     if ext not in SUPPORTED:
         raise RuleIngestError(
-            "Upload an Excel workbook (.xlsx), a CSV, or a JSON array of rules."
+            "Upload an Excel workbook (.xlsx), a CSV/TSV, or a JSON array of rules."
         )
     if ext in {".xlsx", ".xlsm"}:
         rows = _from_xlsx(payload)
-    elif ext == ".csv":
-        rows = _from_csv(payload)
+    elif ext in {".csv", ".tsv", ".txt"}:
+        rows = _from_delimited(payload, ext)
     else:
         rows = _from_json(payload)
     if not rows:
@@ -54,7 +66,28 @@ def ingest_rule_file(filename: str, payload: bytes) -> list[dict[str, Any]]:
             "No rule rows were found. The first row must name source, "
             "destination and rule columns."
         )
-    return rows[:MAX_ROWS]
+    truncated = max(0, len(rows) - MAX_ROWS)
+    return IngestResult(rows=rows[:MAX_ROWS], truncated=truncated)
+
+
+def _cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def _qualify_source(mapped: dict[str, Any]) -> None:
+    """``Customer.fname`` in the source-column cell also names the table."""
+    spoken = str(mapped.get("source_column") or "")
+    table, column = split_qualified(spoken)
+    if table and column:
+        mapped["source_column"] = column
+        if not mapped.get("source_table"):
+            mapped["source_table"] = table
 
 
 def _project(headers: list[str], values: list[Any], sheet: str, row_number: int) -> dict[str, Any] | None:
@@ -63,40 +96,105 @@ def _project(headers: list[str], values: list[Any], sheet: str, row_number: int)
         key = canonical_header(str(header or ""))
         if not key:
             continue
-        text = "" if value is None else str(value).strip()
+        text = _cell_text(value)
         if key == "rule":
             mapped[key] = (mapped.get(key) or "") or text
         elif text and not mapped.get(key):
             mapped[key] = text
-    if not any(mapped.get(k) for k in ("source_column", "dest_column", "rule")):
+    first = _cell_text(values[0]) if values else ""
+    if first.startswith("#"):
         return None
+    if not any(mapped.get(k) for k in ("source_column", "dest_column", "rule", "lookup_from", "lookup_to")):
+        return None
+    _qualify_source(mapped)
     mapped["_sheet"] = sheet
     mapped["_row"] = row_number
     return mapped
 
 
-def _from_csv(payload: bytes) -> list[dict[str, Any]]:
-    text = payload.decode("utf-8-sig", errors="replace")
-    reader = csv.reader(io.StringIO(text))
+def _header_score(headers: list[str]) -> int:
+    return sum(1 for header in headers if canonical_header(str(header or "")))
+
+
+def _take_header(rows: list[list[Any]]) -> tuple[list[str], list[tuple[int, list[Any]]]]:
+    """The first row with two compiler headers; earlier rows are titles."""
+    for index, raw in enumerate(rows[:HEADER_SCAN]):
+        headers = ["" if cell is None else str(cell) for cell in raw]
+        if _header_score(headers) >= 2:
+            data_start = index + 2
+            numbered = [(data_start + offset, row) for offset, row in enumerate(rows[index + 1:])]
+            return headers, numbered
+    if rows:
+        headers = ["" if cell is None else str(cell) for cell in rows[0]]
+        numbered = [(2 + offset, row) for offset, row in enumerate(rows[1:])]
+        return headers, numbered
+    return [], []
+
+
+def _decode_text(payload: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _dialect_for(text: str, ext: str) -> csv.Dialect:
+    if ext == ".tsv":
+        return csv.excel_tab
+    sample = text[:4096]
+    tabs = sample.count("\t")
+    semis = sample.count(";")
+    commas = sample.count(",")
+    if tabs > commas and tabs > semis:
+        return csv.excel_tab
+    if semis > commas and semis > tabs:
+        class _Semicolon(csv.excel):
+            delimiter = ";"
+        return _Semicolon()
     try:
-        headers = next(reader)
-    except StopIteration:
+        sniffed = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        if sniffed.delimiter in {",", ";", "\t", "|"}:
+            return sniffed
+    except csv.Error:
+        pass
+    return csv.excel
+
+
+def _from_delimited(payload: bytes, ext: str) -> list[dict[str, Any]]:
+    text = _decode_text(payload)
+    if not text.strip():
         return []
+    dialect = _dialect_for(text, ext)
+    reader = csv.reader(io.StringIO(text), dialect)
+    raw_rows = [list(row) for row in reader]
+    headers, numbered = _take_header(raw_rows)
     out: list[dict[str, Any]] = []
-    for index, raw in enumerate(reader, start=2):
-        row = _project(headers, raw, "csv", index)
+    for row_number, raw in numbered:
+        row = _project(headers, raw, "csv" if ext != ".tsv" else "tsv", row_number)
         if row:
             out.append(row)
     return out
 
 
 def _from_json(payload: bytes) -> list[dict[str, Any]]:
+    text = _decode_text(payload).strip()
+    if not text:
+        return []
     try:
-        data = json.loads(payload.decode("utf-8-sig"))
-    except json.JSONDecodeError as exc:
-        raise RuleIngestError(f"JSON is not valid: {exc}") from exc
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = _ndjson(text)
     if isinstance(data, dict):
-        data = data.get("rules") or data.get("mappings") or data.get("rows") or []
+        data = (
+            data.get("rules")
+            or data.get("mappings")
+            or data.get("rows")
+            or data.get("columns")
+            or data.get("items")
+            or []
+        )
     if not isinstance(data, list):
         raise RuleIngestError("JSON must be an array of rule objects, or {\"rules\": [...]}.")
     out: list[dict[str, Any]] = []
@@ -111,26 +209,35 @@ def _from_json(payload: bytes) -> list[dict[str, Any]]:
     return out
 
 
+def _ndjson(text: str) -> list[Any]:
+    rows: list[Any] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise RuleIngestError(f"JSON is not valid: {exc}") from exc
+    return rows
+
+
 def _from_xlsx(payload: bytes) -> list[dict[str, Any]]:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:  # pragma: no cover
         raise RuleIngestError("openpyxl is required to read Excel workbooks.") from exc
-    wb = load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+    # data_only=False keeps ``=UPPER()`` rule formulas as text.
+    wb = load_workbook(io.BytesIO(payload), read_only=True, data_only=False)
     out: list[dict[str, Any]] = []
     try:
         for sheet in wb.worksheets:
-            rows_iter = sheet.iter_rows(values_only=True)
-            try:
-                header_row = next(rows_iter)
-            except StopIteration:
+            raw_rows = [list(row) for row in sheet.iter_rows(values_only=True)]
+            headers, numbered = _take_header(raw_rows)
+            if _header_score(headers) < 1:
                 continue
-            headers = ["" if cell is None else str(cell) for cell in header_row]
-            if not any(canonical_header(h) for h in headers):
-                continue
-            for index, raw in enumerate(rows_iter, start=2):
-                values = list(raw or ())
-                row = _project(headers, values, sheet.title, index)
+            for row_number, raw in numbered:
+                row = _project(headers, raw, sheet.title, row_number)
                 if row:
                     out.append(row)
     finally:

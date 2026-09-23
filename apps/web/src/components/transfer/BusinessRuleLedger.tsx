@@ -58,7 +58,7 @@ export function BusinessRuleLedger({
             </span>
             <span className="df2-rule-line-status">{ruleStatusLabel(rule.status)}</span>
             {rule.issues?.length ? (
-              <span className="df2-rule-line-issue">{rule.issues[0]}</span>
+              <span className="df2-rule-line-issue">{rule.issues.join(" · ")}</span>
             ) : null}
           </li>
         ))}
@@ -72,6 +72,15 @@ export function BusinessRuleLedger({
               report.unused_dest_count > 12 ? ` +${report.unused_dest_count - 12} more` : ""
             }`
             : "."}
+        </p>
+      ) : null}
+      {(report.unmapped_source_count ?? 0) > 0 ? (
+        <p className="df2-rule-ledger-unused">
+          {report.unmapped_source_count} source column
+          {report.unmapped_source_count === 1 ? "" : "s"} not named in the workbook
+          {report.unmapped_source_columns?.length
+            ? `: ${report.unmapped_source_columns.slice(0, 12).join(", ")} — remap or omit, never silent drop`
+            : " — remap or omit, never silent drop"}
         </p>
       ) : null}
     </details>

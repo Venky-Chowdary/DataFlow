@@ -39,6 +39,9 @@ export interface RuleCompileReport {
   };
   unused_dest_columns: string[];
   unused_dest_count: number;
+  unmapped_source_columns?: string[];
+  unmapped_source_count?: number;
+  truncated_rows?: number;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -139,7 +142,40 @@ export function mergeBusinessRules(
       indexBySource.set(source.toLowerCase(), next.length - 1);
       continue;
     }
-    next[idx] = applyOne(next[idx], rule);
+    const existing = next[idx];
+    const dest = (rule.dest_column || "").trim();
+    const operatorLocked = Boolean(
+      existing.approved
+      && existing.target
+      && dest
+      && existing.target.toLowerCase() !== dest.toLowerCase()
+      && !existing.businessRule,
+    );
+    if (operatorLocked) {
+      next[idx] = applyOne(existing, rule);
+      continue;
+    }
+    if (
+      rule.status === "executable"
+      && dest
+      && existing.target
+      && existing.target.toLowerCase() !== dest.toLowerCase()
+    ) {
+      const created = applyOne(
+        {
+          source,
+          target: "",
+          confidence: rule.confidence,
+          approved: false,
+          reason: rule.kind_label,
+          transform: "none",
+        },
+        rule,
+      );
+      next.push(created);
+      continue;
+    }
+    next[idx] = applyOne(existing, rule);
   }
   return next;
 }
@@ -149,9 +185,15 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const unused = report.unused_dest_count
     ? ` · ${report.unused_dest_count} dest column(s) unused (not written)`
     : "";
+  const unmapped = report.unmapped_source_count
+    ? ` · ${report.unmapped_source_count} source column(s) unmapped (remap or omit)`
+    : "";
+  const truncated = report.truncated_rows
+    ? ` · ${report.truncated_rows} row(s) past ingest cap`
+    : "";
   return (
     `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${unused}`
+    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}`
   );
 }
 

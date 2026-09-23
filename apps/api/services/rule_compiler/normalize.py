@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 _SPLIT = re.compile(r"[^a-z0-9]+")
+_QUALIFIED = re.compile(r"^(?P<table>[A-Za-z_][\w]*)\.(?P<column>[A-Za-z_][\w]*)$")
 
 # Keys are *folded* (case / punctuation stripped) because ``canonical_header``
 # looks up ``fold(spoken)``. ``source_column`` and ``Source Column`` both
@@ -22,6 +23,8 @@ HEADER_ALIASES: dict[str, str] = {
     "fromtable": "source_table",
     "from": "source_table",
     "table": "source_table",
+    "object": "source_table",
+    "sourceobject": "source_table",
     "sourcecolumn": "source_column",
     "sourcecol": "source_column",
     "srccolumn": "source_column",
@@ -30,8 +33,11 @@ HEADER_ALIASES: dict[str, str] = {
     "srcfield": "source_column",
     "fromcolumn": "source_column",
     "fromfield": "source_column",
+    "srcname": "source_column",
+    "sourcename": "source_column",
     "column": "source_column",
     "field": "source_column",
+    "attribute": "source_column",
     "destination": "dest_table",
     "dest": "dest_table",
     "desttable": "dest_table",
@@ -47,6 +53,9 @@ HEADER_ALIASES: dict[str, str] = {
     "targetfield": "dest_column",
     "tocolumn": "dest_column",
     "tofield": "dest_column",
+    "tgtname": "dest_column",
+    "destname": "dest_column",
+    "targetname": "dest_column",
     "to": "dest_column",
     "rule": "rule",
     "rules": "rule",
@@ -58,9 +67,27 @@ HEADER_ALIASES: dict[str, str] = {
     "formula": "rule",
     "businessrule": "rule",
     "notes": "rule",
+    "instruction": "rule",
+    "action": "rule",
+    "mapping": "rule",
+    "conversion": "rule",
     "joinfrom": "join_from",
     "joinon": "join_on",
     "jointype": "join_type",
+    "leftkey": "join_on",
+    "rightkey": "join_on",
+    "fromcode": "lookup_from",
+    "fromvalue": "lookup_from",
+    "sourcecode": "lookup_from",
+    "oldvalue": "lookup_from",
+    "oldcode": "lookup_from",
+    "inbound": "lookup_from",
+    "tocode": "lookup_to",
+    "tovalue": "lookup_to",
+    "destcode": "lookup_to",
+    "newvalue": "lookup_to",
+    "newcode": "lookup_to",
+    "outbound": "lookup_to",
 }
 
 
@@ -74,23 +101,41 @@ def canonical_header(value: str) -> str:
     return HEADER_ALIASES.get(fold(value), "")
 
 
+def split_qualified(value: str) -> tuple[str, str]:
+    """``Customer.fname`` → (Customer, fname). Unqualified → ('', name)."""
+    text = (value or "").strip().strip("[]`\"'")
+    match = _QUALIFIED.match(text)
+    if match:
+        return match.group("table"), match.group("column")
+    return "", text
+
+
 def resolve_name(needle: str, candidates: list[str]) -> str:
     """The one candidate this cell names, or '' when none or several match.
 
     Exact (folded) wins. A unique startswith / contained match is accepted only
     when no other candidate also matches — ``id`` must not bind ``customer_id``
-    and ``order_id`` at once.
+    and ``order_id`` at once. ``Table.col`` binds ``col``.
     """
-    want = fold(needle)
+    table, column = split_qualified(needle)
+    want = fold(column or needle)
     if not want or not candidates:
         return ""
-    exact = [c for c in candidates if fold(c) == want]
+    exact = [c for c in candidates if fold(c) == want or fold(split_qualified(c)[1]) == want]
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1 or len(want) < 4:
         # Short tokens (`id`, `no`) match too many warehouse names. Fail closed.
         return ""
-    loose = [c for c in candidates if fold(c).startswith(want) or want.startswith(fold(c))]
+    loose = [
+        c for c in candidates
+        if fold(c).startswith(want) or want.startswith(fold(c))
+    ]
     if len(loose) == 1:
         return loose[0]
+    if len(want) >= 5:
+        contained = [c for c in candidates if want in fold(c) or fold(c) in want]
+        if len(contained) == 1:
+            return contained[0]
+    _ = table  # table is provenance; bind is on the column name only
     return ""

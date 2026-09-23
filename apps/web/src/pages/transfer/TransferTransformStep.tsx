@@ -388,9 +388,9 @@ export function TransferTransformStep({
         <div className="df2-rule-import-copy">
           <strong>Business rules</strong>
           <p>
-            Upload the mapping workbook (Excel, CSV or JSON). Closed-form rows
-            compile onto this recipe and Map. Anything we cannot execute stays
-            in review — unused destination columns are not written.
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Closed-form
+            rows compile onto this recipe and Map. Anything we cannot execute
+            stays in review — unused destination columns are not written.
           </p>
           {ruleReport ? <p className="df2-rule-import-summary">{ruleReportSummary(ruleReport)}</p> : null}
           {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}
@@ -399,7 +399,7 @@ export function TransferTransformStep({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xlsm,.csv,.json,application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             hidden
             onChange={(event) => void onPickRules(event.target.files?.[0])}
           />

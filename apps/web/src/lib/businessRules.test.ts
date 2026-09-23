@@ -106,6 +106,25 @@ describe("mergeBusinessRules", () => {
     assert.equal(next[0].requiresReview, true);
   });
 
+  it("fans one source out to a second dest instead of overwriting", () => {
+    const twoDest: RuleCompileReport = {
+      ...report,
+      rules: [
+        report.rules[0],
+        {
+          ...report.rules[0],
+          dest_column: "display_name",
+          rule_text: "Direct",
+          provenance: { sheet: "Rules", row: 9 },
+        },
+      ],
+    };
+    const next = mergeBusinessRules(seed, twoDest);
+    const fnameRows = next.filter((m) => m.source === "fname");
+    assert.equal(fnameRows.length, 2);
+    assert.deepEqual(fnameRows.map((m) => m.target).sort(), ["display_name", "first_name"]);
+  });
+
   it("merges compiled shape steps without dropping operator steps", () => {
     const existing = [{ op: "trim", column: "email", enabled: true }];
     const compiled = [
