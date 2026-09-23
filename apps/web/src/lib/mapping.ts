@@ -2295,8 +2295,10 @@ export function buildPreflightMappings(
               kind_label: safe.businessRule.kindLabel,
               text: safe.businessRule.text,
               status: safe.businessRule.status,
+              confidence: safe.businessRule.confidence,
               sheet: safe.businessRule.sheet,
               row: safe.businessRule.row,
+              issues: safe.businessRule.issues,
             }
           : undefined,
       };
@@ -2433,6 +2435,7 @@ export function editableFromPipelineMappings(
       kind_label?: string;
       text?: string;
       status?: string;
+      confidence?: number;
       sheet?: string;
       row?: number;
       issues?: string[];
@@ -2619,6 +2622,10 @@ export function editableFromPipelineMappings(
             kindLabel: String(m.business_rule.kind_label || m.business_rule.kind || ""),
             text: String(m.business_rule.text || ""),
             status: String(m.business_rule.status || ""),
+            confidence: typeof m.business_rule.confidence === "number"
+              && Number.isFinite(m.business_rule.confidence)
+              ? m.business_rule.confidence
+              : 0,
             sheet: m.business_rule.sheet,
             row: m.business_rule.row,
             issues: m.business_rule.issues,

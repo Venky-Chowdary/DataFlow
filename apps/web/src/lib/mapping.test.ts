@@ -781,6 +781,45 @@ describe("destination schema honesty", () => {
     assert.notEqual(rows[0].confidence, rows[1].confidence);
   });
 
+  it("hydrates compiled business-rule confidence from the pipeline wire", () => {
+    const editable = editableFromPipelineMappings([
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.8,
+        transform: "none",
+        business_rule: {
+          kind: "lookup",
+          kind_label: "Lookup",
+          text: "A → ACTIVE",
+          status: "executable",
+          confidence: 0.98,
+          sheet: "Codes",
+          row: 4,
+        },
+      },
+      {
+        source: "notes",
+        target: "notes",
+        confidence: 0.4,
+        transform: "none",
+        business_rule: {
+          kind: "unknown",
+          kind_label: "Review",
+          text: "N/A",
+          status: "needs_confirmation",
+        },
+      },
+    ]);
+    assert.equal(editable[0].businessRule?.confidence, 0.98);
+    assert.equal(editable[0].businessRule?.kind, "lookup");
+    assert.equal(editable[1].businessRule?.confidence, 0);
+    assert.equal(editable[1].businessRule?.status, "needs_confirmation");
+    const wire = buildPreflightMappings([], editable);
+    assert.equal(wire[0].business_rule?.confidence, 0.98);
+    assert.equal(wire[1].business_rule?.confidence, 0);
+  });
+
   it("create-new Approve destType is the target_type Validate reads", () => {
     const pf = buildPreflightMappings([], [
       {
