@@ -68,6 +68,8 @@ interface TransferTransformStepProps {
   destTable?: string;
   sourceTables?: string[];
   sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
 }
 
 const PREVIEW_ROWS = 12;
@@ -124,6 +126,8 @@ export function TransferTransformStep({
   destTable = "",
   sourceTables = [],
   sourceCatalog = {},
+  destTables = [],
+  destCatalog = {},
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -177,6 +181,8 @@ export function TransferTransformStep({
         destTable,
         sourceTables,
         sourceCatalog,
+        destTables,
+        destCatalog,
         sourceTypes: sourceSchema,
         destTypes: targetSchema,
         syncMode,
@@ -188,7 +194,7 @@ export function TransferTransformStep({
       setRuleBusy(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
-  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, syncMode]);
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, destTables, destCatalog, syncMode]);
 
   const toggleGuide = useCallback(() => {
     setShowGuide((open) => {

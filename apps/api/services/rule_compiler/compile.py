@@ -26,6 +26,9 @@ from .ingest import RuleIngestError, ingest_rule_workbook
 from .match import name_similarity, unique_linguistic_match
 from .catalog import (
     bind_columns_for_table,
+    lookup_type,
+    normalize_catalog,
+    resolve_catalog_table,
     resolve_source_table,
     split_selected_tables,
 )
@@ -318,6 +321,8 @@ def compile_rule_workbook(
     dest_table: str = "",
     source_tables: list[str] | None = None,
     source_catalog: dict[str, list[str]] | None = None,
+    dest_tables: list[str] | None = None,
+    dest_catalog: dict[str, list[str]] | None = None,
     source_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     sync_mode: str = "",
@@ -330,11 +335,9 @@ def compile_rule_workbook(
     src_types = {str(k): str(v) for k, v in (source_types or {}).items() if k}
     dst_types = {str(k): str(v) for k, v in (dest_types or {}).items() if k}
     selected_tables = split_selected_tables(source_table, source_tables)
-    catalog = {
-        str(table): [str(col) for col in cols if str(col).strip()]
-        for table, cols in (source_catalog or {}).items()
-        if str(table).strip()
-    }
+    selected_dest_tables = split_selected_tables(dest_table, dest_tables)
+    catalog = normalize_catalog(source_catalog)
+    dest_cat = normalize_catalog(dest_catalog)
     sync = (sync_mode or "").strip()
     header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
     sheet_kinds = _classify_sheets(rows)
@@ -344,8 +347,8 @@ def compile_rule_workbook(
     named_catalog, catalog_conflicts = _collect_named_catalog(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
-    seen_edges: dict[tuple[str, str], int] = {}
-    seen_dest: dict[str, tuple[str, int]] = {}
+    seen_edges: dict[tuple[str, str, str, str], int] = {}
+    seen_dest: dict[tuple[str, str], tuple[str, int]] = {}
     seen_joins: set[tuple[str, str, str]] = set()
 
     for sheet in sorted(notes_sheets):
@@ -401,6 +404,8 @@ def compile_rule_workbook(
                 dest_table=dest_table,
                 source_tables=selected_tables,
                 source_catalog=catalog,
+                dest_tables=selected_dest_tables,
+                dest_catalog=dest_cat,
                 lookup_pairs=lookup_pairs,
                 named_catalog=named_catalog,
                 source_types=src_types,
@@ -450,6 +455,8 @@ def compile_rule_workbook(
             dest_table=dest_table,
             source_tables=selected_tables,
             source_catalog=catalog,
+            dest_tables=selected_dest_tables,
+            dest_catalog=dest_cat,
             lookup_pairs=lookup_pairs,
             source_types=src_types,
             dest_types=dst_types,
@@ -500,6 +507,9 @@ def compile_rule_workbook(
         "sheet_kinds": sheet_kinds,
         "source_tables": selected_tables,
         "source_catalog_tables": list(catalog.keys()),
+        "dest_tables": selected_dest_tables,
+        "dest_catalog_tables": list(dest_cat.keys()),
+        "projection": _named_projection(compiled),
         "bind_methods": _bind_method_counts(compiled),
         "lookup_coverage": _lookup_coverage(lookup_pairs),
         "named_rules": sorted(named_catalog),
@@ -544,7 +554,11 @@ def compile_rule_workbook(
             "TRY_CAST / SAFE_CAST stay in review. "
             "Several selected tables bind only against the named table "
             "catalog. Unqualified homonyms (id on customers and orders) "
-            "stay in review. This compiler will not invent a join grain. "
+            "stay in review. Destination catalog is the same contract. "
+            "Edges are (source_table, column, dest_table, dest). "
+            "This compiler will not invent a join grain. "
+            "Named executable columns are the projection — nothing else "
+            "is written. "
             "CDC / SCD2 / mirror refuse pre-load shape — history was not "
             "written by this recipe. Map-plane pairs still compile. "
             "Unknown-code policy is "
@@ -775,39 +789,67 @@ def _attach_orphan_enumerations(
 
 def _mark_edge_conflicts(
     item: dict[str, Any],
-    seen_edges: dict[tuple[str, str], int],
-    seen_dest: dict[str, tuple[str, int]],
+    seen_edges: dict[tuple[str, str, str, str], int],
+    seen_dest: dict[tuple[str, str], tuple[str, int]],
 ) -> None:
     if item["status"] != "executable":
         return
+    src_table = str(item.get("source_table") or "")
+    dst_table = str(item.get("dest_table") or "")
     src = item.get("source_column") or ""
     dst = item.get("dest_column") or ""
-    edge = (src, dst)
+    edge = (fold(src_table), fold(src), fold(dst_table), fold(dst))
     if src and dst and edge in seen_edges:
         item["status"] = "conflict"
         item["issues"] = [
             *(item.get("issues") or []),
-            f"Duplicate mapping for {src} → {dst} (also row {seen_edges[edge]}).",
+            f"Duplicate mapping for {src_table + '.' if src_table else ''}{src} → "
+            f"{dst_table + '.' if dst_table else ''}{dst} (also row {seen_edges[edge]}).",
         ]
         item["shape_step"] = None
         item["shape_steps"] = []
         return
     if src and dst:
         seen_edges[edge] = int(item["provenance"]["row"])
-        dest_key = fold(dst)
-        if dest_key and dest_key in seen_dest and seen_dest[dest_key][0] != src:
+        dest_key = (fold(dst_table), fold(dst))
+        qualified_src = f"{src_table}.{src}" if src_table else src
+        if dest_key[1] and dest_key in seen_dest and seen_dest[dest_key][0] != qualified_src:
             other_src, other_row = seen_dest[dest_key]
             item["status"] = "conflict"
             item["issues"] = [
                 *(item.get("issues") or []),
-                f"Destination “{dst}” is already mapped from “{other_src}” "
-                f"(row {other_row}). Two sources writing one dest is a grain conflict.",
+                f"Destination “{dst_table + '.' if dst_table else ''}{dst}” is already "
+                f"mapped from “{other_src}” (row {other_row}). Two sources writing "
+                "one dest is a grain conflict.",
             ]
             item["shape_step"] = None
             item["shape_steps"] = []
             return
-        if dest_key:
-            seen_dest[dest_key] = (src, int(item["provenance"]["row"]))
+        if dest_key[1]:
+            seen_dest[dest_key] = (qualified_src, int(item["provenance"]["row"]))
+
+
+def _named_projection(compiled: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Executable source columns the operator named — not the whole catalog."""
+    by_table: dict[str, list[dict[str, str]]] = {}
+    seen: set[tuple[str, str]] = set()
+    for item in compiled:
+        if item.get("status") != "executable" or item.get("kind") in {"omit", "join"}:
+            continue
+        table = str(item.get("source_table") or "")
+        col = str(item.get("source_column") or "")
+        if not col:
+            continue
+        key = (fold(table), fold(col))
+        if key in seen:
+            continue
+        seen.add(key)
+        by_table.setdefault(table or "(unnamed)", []).append({
+            "source_column": col,
+            "dest_column": str(item.get("dest_column") or ""),
+            "dest_table": str(item.get("dest_table") or ""),
+        })
+    return [{"source_table": table, "columns": cols} for table, cols in by_table.items()]
 
 
 def _item_shape_steps(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -871,6 +913,8 @@ def _compile_row(
     dest_table: str,
     source_tables: list[str] | None = None,
     source_catalog: dict[str, list[str]] | None = None,
+    dest_tables: list[str] | None = None,
+    dest_catalog: dict[str, list[str]] | None = None,
     lookup_pairs: dict[tuple[str, str], dict[str, str]] | None = None,
     named_catalog: dict[str, str] | None = None,
     source_types: dict[str, str] | None = None,
@@ -880,6 +924,8 @@ def _compile_row(
     spoken_dst = str(raw.get("dest_column") or "").strip()
     table_from_cell, spoken_src_col = split_qualified(spoken_src)
     spoken_src = spoken_src_col or spoken_src
+    dest_from_cell, spoken_dst_col = split_qualified(spoken_dst)
+    spoken_dst = spoken_dst_col or spoken_dst
     spoken_rule = str(raw.get("rule") or "").strip()
     expanded, catalog_name, missing_name = _expand_named_rule(spoken_rule, named_catalog or {})
     rule_text = expanded
@@ -897,6 +943,18 @@ def _compile_row(
         form_default=source_table,
     )
     bind_src_cols = bind_columns_for_table(effective_table, catalog, src_cols)
+    dest_cat = dest_catalog or {}
+    dest_selected = list(dest_tables or [])
+    effective_dest, dest_table_issue = resolve_catalog_table(
+        cell_table=str(raw.get("dest_table") or ""),
+        qualified_table=dest_from_cell,
+        spoken_column=spoken_dst,
+        selected=dest_selected,
+        catalog=dest_cat,
+        form_default=dest_table,
+        noun="destination",
+    )
+    bind_dst_cols = bind_columns_for_table(effective_dest, dest_cat, dst_cols)
 
     src_method = dst_method = ""
     src_score = dst_score = 0.0
@@ -912,13 +970,19 @@ def _compile_row(
         source_column = spoken_src
         src_method = "spoken" if spoken_src else ""
         src_score = 1.0 if spoken_src else 0.0
-    if dst_cols:
+    if bind_dst_cols:
+        dest_column, dst_method, dst_score = resolve_name_ex(spoken_dst, bind_dst_cols)
+    elif spoken_dst and (dest_cat or dest_selected):
+        dest_column = ""
+        dst_method = ""
+        dst_score = 0.0
+    elif dst_cols:
         dest_column, dst_method, dst_score = resolve_name_ex(spoken_dst, dst_cols)
     else:
         dest_column = spoken_dst
         dst_method = "spoken" if spoken_dst else ""
         dst_score = 1.0 if spoken_dst else 0.0
-    if not dest_column and spoken_dst and not dst_cols:
+    if not dest_column and spoken_dst and not bind_dst_cols and not dst_cols:
         dest_column = spoken_dst
     if not source_column and spoken_src and not src_cols:
         source_column = spoken_src
@@ -926,6 +990,8 @@ def _compile_row(
     issues: list[str] = []
     if table_issue:
         issues.append(table_issue)
+    if dest_table_issue:
+        issues.append(dest_table_issue)
     if spoken_src and (bind_src_cols or src_cols or catalog or selected) and not source_column:
         if not table_issue:
             issues.append(
@@ -933,8 +999,13 @@ def _compile_row(
                 + (f" table {effective_table}" if effective_table else "")
                 + "."
             )
-    if spoken_dst and dst_cols and not dest_column:
-        issues.append(f"Destination column “{spoken_dst}” is not on the selected destination.")
+    if spoken_dst and (bind_dst_cols or dst_cols or dest_cat or dest_selected) and not dest_column:
+        if not dest_table_issue:
+            issues.append(
+                f"Destination column “{spoken_dst}” is not on the selected destination"
+                + (f" table {effective_dest}" if effective_dest else "")
+                + "."
+            )
     if not spoken_src and kind not in _NO_SOURCE_OK:
         issues.append("No source column was named.")
     if not spoken_dst and kind not in _NO_DEST_OK:
@@ -954,8 +1025,8 @@ def _compile_row(
         issues.append(
             f"Named rule “{missing_name}” is not in the catalog — it was not applied."
         )
-    dest_type = (dest_types or {}).get(dest_column or spoken_dst, "")
-    source_type = (source_types or {}).get(source_column or spoken_src, "")
+    dest_type = lookup_type(dest_column or spoken_dst, effective_dest, dest_types)
+    source_type = lookup_type(source_column or spoken_src, effective_table, source_types)
     type_issue = _type_conflict(kind, dest_type, source_type, dest_column or spoken_dst)
     if type_issue:
         issues.append(type_issue)
@@ -993,7 +1064,7 @@ def _compile_row(
         or i.startswith("No destination")
         or i.startswith("Concat ")
         for i in issues
-    ) or weak_bind or bool(table_issue)
+    ) or weak_bind or bool(table_issue) or bool(dest_table_issue)
     low_confidence_reason = bool(
         classified.get("reason") and float(classified.get("confidence") or 0) < 0.9
     )
@@ -1438,7 +1509,7 @@ def _compile_row(
         "source_table": effective_table or str(raw.get("source_table") or table_from_cell or source_table or ""),
         "source_column": source_column or spoken_src,
         "map_source": map_source or source_column or spoken_src,
-        "dest_table": str(raw.get("dest_table") or dest_table or ""),
+        "dest_table": effective_dest or str(raw.get("dest_table") or dest_from_cell or dest_table or ""),
         "dest_column": dest_column or spoken_dst,
         "rule_text": spoken_rule if catalog_name else rule_text,
         "named_rule": catalog_name or "",

@@ -68,6 +68,12 @@ export interface RuleCompileReport {
   sync_mode?: string;
   source_tables?: string[];
   source_catalog_tables?: string[];
+  dest_tables?: string[];
+  dest_catalog_tables?: string[];
+  projection?: Array<{
+    source_table: string;
+    columns: Array<{ source_column: string; dest_column: string; dest_table?: string }>;
+  }>;
   shape_steps: ShapeStepWire[];
   rules: CompiledRule[];
   honesty: string;
@@ -238,9 +244,12 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const named = report.named_rules?.length
     ? ` · ${report.named_rules.length} named rule(s)`
     : "";
+  const projection = report.projection?.length
+    ? ` · ${report.projection.length} source table(s) projected`
+    : "";
   return (
     `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}${named}`
+    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}${named}${projection}`
   );
 }
 

@@ -60,7 +60,7 @@ def owners_of_column(column: str, catalog: dict[str, list[str]]) -> list[str]:
     return owners
 
 
-def resolve_source_table(
+def resolve_catalog_table(
     *,
     cell_table: str,
     qualified_table: str,
@@ -68,25 +68,27 @@ def resolve_source_table(
     selected: list[str],
     catalog: dict[str, list[str]],
     form_default: str,
+    noun: str = "source",
 ) -> tuple[str, str]:
-    """Effective source table + reason when bind must stay in review.
+    """Effective table + reason when bind must stay in review.
 
     Unique owner of an unqualified name is allowed (Cupid unique winner).
     Several owners, an unnamed table among many selected, or a table that
     is not selected, stay unbound.
     """
+    label = "Source table" if noun == "source" else "Destination table"
     named = (cell_table or qualified_table or "").strip()
     if named:
         if selected and not any(fold(named) == fold(item) for item in selected):
             return named, (
-                f"Source table “{named}” is not among the selected tables "
+                f"{label} “{named}” is not among the selected tables "
                 f"({', '.join(selected)}). It was not applied."
             )
         if catalog:
-            canon, cols = catalog_table(named, catalog)
+            canon, _cols = catalog_table(named, catalog)
             if not canon:
                 return named, (
-                    f"Source table “{named}” is not in the introspected catalog. "
+                    f"{label} “{named}” is not in the introspected catalog. "
                     "It was not applied."
                 )
             return canon, ""
@@ -109,10 +111,67 @@ def resolve_source_table(
 
     if len(selected) > 1:
         return "", (
-            "Several source tables are selected. Name the source table "
-            "(or Table.column) — a primary-stream guess is silent remap."
+            f"Several {noun} tables are selected. Name the {noun} table "
+            f"(or Table.column) — a primary-stream guess is silent remap."
         )
     return "", ""
+
+
+def resolve_source_table(
+    *,
+    cell_table: str,
+    qualified_table: str,
+    spoken_column: str,
+    selected: list[str],
+    catalog: dict[str, list[str]],
+    form_default: str,
+) -> tuple[str, str]:
+    return resolve_catalog_table(
+        cell_table=cell_table,
+        qualified_table=qualified_table,
+        spoken_column=spoken_column,
+        selected=selected,
+        catalog=catalog,
+        form_default=form_default,
+        noun="source",
+    )
+
+
+def lookup_type(column: str, table: str, types: dict[str, str] | None) -> str:
+    """Prefer ``table.column`` then an unambiguous column key."""
+    if not types or not column:
+        return ""
+    keys = [f"{table}.{column}"] if table else []
+    keys.append(column)
+    for key in keys:
+        if key in types:
+            return str(types[key])
+        want = fold(key)
+        for raw, value in types.items():
+            if fold(raw) == want:
+                return str(value)
+    want = fold(column)
+    hits = [
+        (raw, value)
+        for raw, value in types.items()
+        if fold(split_qualified(raw)[1] or raw) == want
+    ]
+    if len(hits) == 1:
+        return str(hits[0][1])
+    if table:
+        for raw, value in hits:
+            owner, _ = split_qualified(raw)
+            if owner and fold(owner) == fold(table):
+                return str(value)
+    return ""
+
+
+def normalize_catalog(raw: dict[str, list[str]] | None) -> dict[str, list[str]]:
+    return {
+        str(table): [str(col) for col in cols if str(col).strip()]
+        for table, cols in (raw or {}).items()
+        if str(table).strip()
+    }
 
 
 def bind_columns_for_table(

@@ -1540,3 +1540,47 @@ def test_comma_source_table_is_parsed_as_selected_tables():
     email = next(r for r in report["rules"] if r.get("source_column") == "email")
     assert email["source_table"] == "customers"
     assert email["status"] == "executable"
+
+
+def test_dest_catalog_and_table_scoped_edges_are_not_silent():
+    csv = (
+        "Source,Source Column,Destination,Destination Column,Rule\n"
+        "customers,id,dim_customer,id,Direct\n"
+        "orders,id,fact_order,id,Direct\n"
+        "customers,pay,dim_customer,amount,Direct\n"
+        ",ghost_col,dim_customer,missing,Direct\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "dest-catalog.csv",
+        csv,
+        source_tables=["customers", "orders"],
+        source_catalog={"customers": ["id", "pay"], "orders": ["id", "amount"]},
+        dest_tables=["dim_customer", "fact_order"],
+        dest_catalog={
+            "dim_customer": ["id", "email", "amount"],
+            "fact_order": ["id", "customer_id", "amount"],
+        },
+        dest_types={
+            "dim_customer.amount": "NUMERIC(10,2)",
+            "customers.pay": "NUMERIC(18,6)",
+        },
+        source_types={
+            "customers.pay": "NUMERIC(18,6)",
+            "dim_customer.amount": "NUMERIC(10,2)",
+        },
+    )
+    by = {
+        (r.get("source_table"), r.get("source_column"), r.get("dest_table")): r
+        for r in report["rules"]
+    }
+    assert by[("customers", "id", "dim_customer")]["status"] == "executable"
+    assert by[("orders", "id", "fact_order")]["status"] == "executable"
+    assert by[("customers", "id", "dim_customer")]["dest_column"] == "id"
+    assert by[("orders", "id", "fact_order")]["dest_column"] == "id"
+    pay = by[("customers", "pay", "dim_customer")]
+    assert pay["status"] == "needs_confirmation"
+    assert any("precision" in i.lower() or "scale" in i.lower() for i in pay["issues"])
+    ghost = next(r for r in report["rules"] if r.get("source_column") == "ghost_col")
+    assert ghost["status"] == "needs_confirmation"
+    tables = {item["source_table"] for item in report["projection"]}
+    assert "customers" in tables and "orders" in tables

@@ -7372,6 +7372,12 @@ export function TransferPage({
           destTable={targetCollection}
           sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
           sourceCatalog={Object.keys(sourceColumnsByStream).length ? sourceColumnsByStream : undefined}
+          destTables={targetCollection ? [targetCollection] : undefined}
+          destCatalog={
+            targetCollection && destSchemaMap && Object.keys(destSchemaMap).length
+              ? { [targetCollection]: Object.keys(destSchemaMap) }
+              : undefined
+          }
           onApplyRules={(report) => {
             setBusinessRuleReport(report);
             if (report.shape_steps.length) {
