@@ -227,6 +227,108 @@ Why dumping it only into Transform would be wrong:
 
 ---
 
+## Wide destination, many sources, fifty columns — the real customer shape
+
+This is the common enterprise case, not an edge case.
+
+### 50 source columns → 500 destination columns
+
+The Excel is the farm. It names the 50 dest columns that receive data. The other 450 stay **unmapped on purpose**.
+
+That is already how Map works:
+
+- A mapping pair is an explicit edge. Nothing is written to a dest column that is not on an accepted pair.
+- Extra dest columns are never silently filled or dropped. Unmapped dest fields stay null / default / existing value depending on write mode (append vs upsert vs overwrite).
+- Extra *source* columns must be remapped or marked omit (`intentional_omit`). Silent drop is forbidden.
+
+So “source is narrow, dest is wide, Excel says which 50 of 500” is **not a new engine**. The compiler emits 50 mapping pairs. Validate reports: 50 mapped, 450 dest columns unused, 0 silent drops.
+
+No LLM is required. The sheet already named both sides.
+
+### 10 SQL tables → pick 50 columns → one dest table with 150 columns
+
+This is a different problem from “many tables to many dest tables.”
+
+**What the engine does today**
+
+| Mode | What it is | What it is not |
+| --- | --- | --- |
+| **Multi-stream** (`stream_multi.py`) | 10 selected objects, **one at a time**, each to its own remapped dest, parents before children | Not a join. Not “50 columns from 10 tables into one customer row.” |
+| **`source_query`** (Transfer Source, query mode) | Operator SQL: `SELECT … FROM t1 JOIN t2 …` producing a 50-column result set, then Map those 50 onto 50 of 150 dest columns | Already the honest way to project many tables into one image |
+| **Post-load Transforms** | SQL/dbt models on the destination after load | Right home if the join must happen *after* land |
+
+So: many-sources → one-destination **row** is a **join/projection**, not a connector trick. Flexibility comes from compiling the Excel into one of those three planes — not from asking an LLM to invent the join at run time.
+
+**How the Excel has to look for this to be 100% executable**
+
+```
+source_table   source_column   dest_table   dest_column   rule          join_from   join_on
+orders         order_id        fact_order   order_key     Direct
+orders         order_dt        fact_order   order_date    parse_date
+customers      email           fact_order   email         lower
+customers      status          fact_order   status_code   A→ACTIVE
+addresses      state           fact_order   state_code    lookup
+```
+
+Plus a **Joins** sheet:
+
+```
+left_table   left_key      right_table   right_key     join_type
+orders       customer_id   customers     id            inner
+customers    id            addresses     customer_id   left
+```
+
+From that, the compiler can emit a deterministic `source_query` (or a post-load model) that selects exactly those 50 columns. Map then binds them to 50 of 150 dest columns. The unused 100 dest columns stay unused — same as the wide-dest case.
+
+If the Excel only says “take customer stuff from these ten tables” and does **not** name join keys, that is not a mapping problem. That is a missing rule. It goes to the review queue. An LLM guessing `customer_id` vs `cust_nbr` vs `legacy_id` is how you get a silently wrong grain (one order becomes three rows, or 2.4M customers become 1.1M). That is the opposite of 100%.
+
+### Multiple saved connectors → one destination
+
+Same compiler, one extra dimension: each Excel row names the **connector** (or system) as well as the table.
+
+- Same engine, several databases: one `source_query` per connector, then a post-load join on the dest — or land to staging tables (multi-stream) and join in Operations Transforms.
+- Different engines (SQL Server + Oracle + API): do **not** pretend the pre-load shape recipe can join them. Land each to staging, then one dest model. That is how Informatica and Glue do it too.
+
+### Do we need an LLM to reach 100%?
+
+**No. An LLM cannot give you 100%. It is the thing that makes 100% impossible to claim.**
+
+| Workbook content | Compiler | LLM? |
+| --- | --- | --- |
+| `Customer.fname → Customer.first_name` Direct | Parse cells → mapping pair | No |
+| `A → ACTIVE` | Parse lookup table → `code_crosswalk` | No |
+| `salary * 12` | Parse formula → `derive_column` | No |
+| 50 of 500 dest columns named | Emit 50 pairs; leave 450 unused | No |
+| 10 tables + join keys + 50 columns | Emit `source_query` or post-load SQL | No |
+| “for legacy customers use the old number unless migrated” | Review queue | Optional assist to *draft* a rule the operator accepts |
+| Ambiguous join (“customer stuff”) | Review queue | Optional suggestions, never auto-join |
+
+100% lives in **execution of accepted IR**, not in interpretation:
+
+1. Excel names the edges → IR has those edges.
+2. Operator accepts / edits the review queue.
+3. Shape + Map + SQL run deterministically.
+4. Validate + G20 + checksum prove the 50 dest columns, and prove we did not write the other 100/450.
+
+Adding an LLM to step 3 (row-by-row) destroys the proof. Adding an LLM to step 1 *only* for leftover prose, with `requires_review`, is the same policy we already have (`docs/AI_GATE_POLICY.md`).
+
+### Is this a big thing? Confidence
+
+| Slice | Size | Confidence we can do it well |
+| --- | --- | --- |
+| Structured Excel → 50 of 500 dest columns, one source table | Small. Map already does this. | **High.** This is compile + existing Map. |
+| Same + cleanses / date / `× 12` / code tables | Small–medium. Shape + G20 already exist. | **High** for structured rule text. |
+| 10 tables → 50 columns → one dest, **join keys present in Excel** | Medium. New work is SQL generation + grain proof (row count after join). | **Medium–high.** Deterministic if keys are named. Must prove grain, not only column names. |
+| 10 tables, **join keys missing** | Large, and should stay a review queue. | **No confidence** in auto-100%. Guessing a join is how migrations fail. |
+| Multiple engines → one dest | Medium–large. Staging + post-load join. | **Medium.** Pattern is known; proof is per-leg then combined. |
+| Freeform 50-page English, no columns named | Large. LLM assist + human. | **No confidence** in 100% interpretation. Ever. |
+
+I would bet the product on slice 1–3 with proof artifacts. I would not bet it on “the model will figure out the ten tables.”
+
+The grain check is the part people skip and then call 100%: after a 10-table join, `COUNT(*)` on the projected image must equal the business key count the Excel claims (e.g. one row per `order_id`). If the join fans out, we refuse — we do not load 3× orders and call it success.
+
+---
+
 ## Smallest honest first slice (not the 50-page dream)
 
 Do not start with PDF/Word/SQL archaeology. Start with one structured sheet the customer already has.
@@ -261,7 +363,7 @@ Proof for slice 1: a fixture workbook of the Customer table above, compiled, pre
 
 That is a measured floor, not a marketing 100%.
 
-**Later slices** (only after slice 1 has artifacts): multi-sheet lookups → G20 tables; join sheets → post-load draft; PDF/Word prose; Pilot “Analyze Migration Rules” briefing.
+**Later slices** (only after slice 1 has artifacts): 50-of-N dest unused-column report; Joins sheet → generated `source_query` with grain proof; multi-connector staging; PDF/Word prose; Pilot “Analyze Migration Rules” briefing.
 
 ---
 
@@ -300,4 +402,7 @@ No new execution engine is required for slice 1.
 | Do enterprises use this class of thing? | Yes — Informatica automapping/Copilot, PowerCenter Mapping Analyst for Excel, Glue DataBrew. |
 | Can enterprises use *ours*? | Yes, if we stay proof-oriented and human-in-the-loop. |
 | Does it live in the Transform step? | The **import and pre-load half** does. The rest must land on Map / Validate / Operations Transforms. |
-| 100%? | 100% of accepted compiled rules: yes. 100% of arbitrary Excel: no. |
+| 100%? | 100% of accepted compiled rules: yes. 100% of arbitrary Excel or guessed joins: no. An LLM does not raise that number. |
+| 50 source → 500 dest? | Yes. Excel names the 50 edges. The other 450 stay unused. Map already works that way. |
+| 10 tables → 50 cols → one dest? | Yes if the Excel names join keys. That compiles to `source_query` or post-load SQL, not to multi-stream (which is table-to-table). |
+| Must we have an LLM? | No. Structured cells compile without one. LLM is optional for leftover prose, always `requires_review`. |
