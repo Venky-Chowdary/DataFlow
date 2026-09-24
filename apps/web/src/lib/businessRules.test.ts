@@ -163,6 +163,62 @@ describe("mergeBusinessRules", () => {
     assert.equal(next[0].requiresReview, true);
   });
 
+  it("replaces create-new identity dests with compiled workbook names", () => {
+    const rematch: EditableMapping[] = [
+      { source: "customer_id", target: "customer_id", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "fname", target: "fname", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "email", target: "email", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "status", target: "status", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "monthly_salary", target: "monthly_salary", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "annual_salary", target: "annual_salary", confidence: 0.93, approved: true, transform: "none", createNew: true },
+    ];
+    const workbook: RuleCompileReport = {
+      ...report,
+      rule_count: 5,
+      buckets: { executable: 5, needs_confirmation: 0, conflict: 0 },
+      unused_dest_columns: [],
+      unused_dest_count: 0,
+      rules: [
+        { ...report.rules[0], source_column: "customer_id", dest_column: "customer_key", kind: "direct", kind_label: "Direct map" },
+        { ...report.rules[0], source_column: "fname", dest_column: "first_name" },
+        {
+          source_column: "email",
+          dest_column: "email_address",
+          rule_text: "Convert email to lowercase",
+          kind: "email",
+          kind_label: "Normalize email",
+          plane: "map",
+          confidence: 0.99,
+          transform: "email",
+          status: "executable",
+        },
+        { ...report.rules[1], dest_column: "customer_status" },
+        {
+          source_column: "monthly_salary",
+          map_source: "annual_salary",
+          dest_column: "annual_salary",
+          rule_text: "monthly_salary * 12",
+          kind: "derive",
+          kind_label: "Derived value",
+          plane: "shape",
+          confidence: 0.99,
+          transform: "none",
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules(rematch, workbook);
+    assert.equal(next.find((m) => m.source === "customer_id")?.target, "customer_key");
+    assert.equal(next.find((m) => m.source === "fname")?.target, "first_name");
+    const email = next.find((m) => m.source === "email")!;
+    assert.equal(email.target, "email_address");
+    assert.equal(email.transform, "email");
+    assert.equal(next.find((m) => m.source === "status")?.target, "customer_status");
+    assert.equal(next.find((m) => m.source === "monthly_salary")?.target, "monthly_salary");
+    assert.equal(next.find((m) => m.source === "annual_salary")?.target, "annual_salary");
+    assert.equal(next.filter((m) => m.source === "fname").length, 1);
+  });
+
   it("fans one source out to a second dest instead of overwriting", () => {
     const twoDest: RuleCompileReport = {
       ...report,

@@ -410,6 +410,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.equal(totalPages(8, 50), 1);
     assert.equal(totalPages(51, 50), 2);
     assert.equal(totalPages(100, 25), 4);
+
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(page, /businessRuleReportRef\.current/);
+    assert.match(page, /mergeBusinessRules\(prev, businessRuleReportRef\.current/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {

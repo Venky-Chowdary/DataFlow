@@ -4,6 +4,10 @@
  * The server already classified and bound names. This module only merges
  * those artifacts onto EditableMapping the way an operator would have typed
  * them — never inventing a dest column, never dropping an unused dest.
+ *
+ * Create-new rematch invents source-named dests (`fname → fname`) and auto-
+ * approves them. That is not an operator lock. Compiled dest names from the
+ * workbook (`fname → first_name`) replace those identity fallbacks.
  */
 
 import type { EditableMapping, MappingBusinessRule, MappingTransform } from "./mapping";
@@ -156,15 +160,24 @@ export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
   };
 }
 
+function isAutoIdentityDest(mapping: EditableMapping): boolean {
+  const target = (mapping.target || "").trim();
+  if (!target) return true;
+  return target.toLowerCase() === (mapping.source || "").trim().toLowerCase();
+}
+
+/** Operator (or dest-exists) chose a dest name. Auto identity is not a choice. */
+function destIsOperatorLocked(mapping: EditableMapping, dest: string): boolean {
+  if (!mapping.approved || !mapping.target || !dest) return false;
+  if (mapping.target.toLowerCase() === dest.toLowerCase()) return false;
+  if (isAutoIdentityDest(mapping)) return false;
+  return true;
+}
+
 function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping {
   const evidence = ruleToEvidence(rule);
   const transform = asTransform(rule.transform);
-  const lockedDest = Boolean(
-    mapping.approved
-    && mapping.target
-    && rule.dest_column
-    && mapping.target.toLowerCase() !== rule.dest_column.toLowerCase(),
-  );
+  const lockedDest = destIsOperatorLocked(mapping, rule.dest_column);
   if (lockedDest) {
     return {
       ...mapping,
@@ -243,13 +256,7 @@ export function mergeBusinessRules(
     }
     const existing = next[idx];
     const dest = (rule.dest_column || "").trim();
-    const operatorLocked = Boolean(
-      existing.approved
-      && existing.target
-      && dest
-      && existing.target.toLowerCase() !== dest.toLowerCase()
-      && !existing.businessRule,
-    );
+    const operatorLocked = destIsOperatorLocked(existing, dest) && !existing.businessRule;
     if (operatorLocked) {
       next[idx] = applyOne(existing, rule);
       continue;
@@ -259,6 +266,7 @@ export function mergeBusinessRules(
       && dest
       && existing.target
       && existing.target.toLowerCase() !== dest.toLowerCase()
+      && !isAutoIdentityDest(existing)
     ) {
       const created = applyOne(
         {
