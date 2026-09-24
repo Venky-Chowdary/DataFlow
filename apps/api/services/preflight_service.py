@@ -2313,6 +2313,7 @@ def run_file_preflight(
         and observed_codes is None
         and (population_seq is not None or population_rows is None),
         observed_codes=observed_codes,
+        row_count=row_count,
     )
     if scan_method:
         code_crosswalk["scan_method"] = scan_method
