@@ -20,6 +20,36 @@ _DIRECT = re.compile(
     r"same\s+as\s+source|copy\s+from\s+source|as\s+source|none|-)?$",
     re.I,
 )
+# Spoken identity that still names the columns: "Copy customer_id without
+# modification", "Map fname to first_name". A dest that is a type/transform
+# word (ISO, lowercase) is not Direct — those are other closed forms.
+_IDENTITY_SPEECH = re.compile(
+    r"^(?:"
+    r"copy(?:\s+[A-Za-z_][\w.]*)?(?:\s+without\s+(?:any\s+)?(?:modification|change|changes)|\s+as[\s-]?is|\s+unchanged)?"
+    r"|map(?:ped)?(?:\s+[A-Za-z_][\w.]*)?(?:\s+to\s+[A-Za-z_][\w.]*)?"
+    r"|rename(?:\s+[A-Za-z_][\w.]*)?(?:\s+to\s+[A-Za-z_][\w.]*)?"
+    r"|no(?:\s+transformation|\s+change|\s+transform)"
+    r"|leave(?:\s+[A-Za-z_][\w.]*)?\s+as[\s-]?is"
+    r"|use\s+as[\s-]?is"
+    r"|passthrough(?:\s+of\s+[A-Za-z_][\w.]*)?"
+    r")$",
+    re.I,
+)
+_IDENTITY_BLOCKED = frozenset({
+    "iso", "date", "datetime", "timestamp", "json", "integer", "decimal",
+    "boolean", "lowercase", "uppercase", "lower", "upper", "trim", "hash",
+    "phone", "binary", "uuid",
+})
+_STATE_NAME_TO_CODE = re.compile(
+    r"\b(?:full\s+)?(?:us\s+)?state\s+names?\b.+\b(?:2[\s-]?letter|state\s+code|codes?)\b"
+    r"|\bconvert\b.+\bstate\b.+\b(?:2[\s-]?letter|code)\b",
+    re.I,
+)
+_VALIDATE_CHECK = re.compile(
+    r"\b(?:must\s+contain|must\s+be\s+(?:greater|more|less|a\s+valid)|"
+    r"must\s+be\s+(?:one\s+of\s+)?[A-Za-z0-9])",
+    re.I,
+)
 _NA_CELL = re.compile(r"^(?:n/?a|na|n\.a\.|not\s+applicable)$", re.I)
 _OMIT = re.compile(
     r"\b(?:omit|do\s+not\s+(?:map|load|transfer|send)|"
@@ -206,7 +236,11 @@ _IF_FN = re.compile(
     r"\bif\s*\(\s*(?P<cond>.+?)\s*,\s*(?P<then>.+?)\s*(?:,\s*(?P<else>.+?))?\s*\)\s*$",
     re.I,
 )
-_REQUIRED = re.compile(r"\b(?:required|mandatory|non[\s-]?null)\b", re.I)
+_REQUIRED = re.compile(
+    r"\b(?:required|mandatory|non[\s-]?null|"
+    r"must\s+not\s+be\s+null|cannot\s+be\s+null|not\s+nullable)\b",
+    re.I,
+)
 _STANDALONE_NOT_NULL = re.compile(r"^(?:not\s+null)$", re.I)
 _UNIQUE = re.compile(r"\b(?:unique|primary\s+key|\bpk\b)\b", re.I)
 _LOOKUP_PAIR = re.compile(
@@ -430,6 +464,19 @@ _SKIP_LOOKUP_KEYS = frozenset({
     "if", "when", "default", "unmapped", "unknown", "unmatched", "else", "*",
 })
 _BLANK_LOOKUP_KEYS = frozenset({"blank", "empty", "null", "missing"})
+
+
+def is_identity_speech(text: str) -> bool:
+    """True when the cell is a spoken Direct / rename, not a type convert."""
+    raw = (text or "").strip()
+    if not raw or not _IDENTITY_SPEECH.match(raw):
+        return False
+    tokens = [token.lower() for token in re.findall(r"[A-Za-z_][\w.]*", raw)]
+    if "to" in tokens:
+        dest = tokens[tokens.index("to") + 1] if tokens.index("to") + 1 < len(tokens) else ""
+        if dest in _IDENTITY_BLOCKED:
+            return False
+    return True
 
 
 def named_rule_ref(text: str) -> str:
@@ -1875,7 +1922,7 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
-    if _DIRECT.match(raw):
+    if _DIRECT.match(raw) or is_identity_speech(raw):
         return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
 
     casted = _CAST_SQL.search(raw) or _PG_CAST.search(raw)
@@ -2637,6 +2684,30 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     reason = volatile_reason(raw)
     if reason:
         return {"kind": "unknown", "plane": "review", "confidence": 0.4, "reason": reason, **flags}
+    if _STATE_NAME_TO_CODE.search(raw):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "US state names need a lookup sheet of pairs (Texas → TX). "
+                "This compiler will not invent the fifty-state table. "
+                "If Lookups already compiled that edge, this prose row is a note — not a second algorithm."
+            ),
+            **flags,
+        }
+    if _VALIDATE_CHECK.search(raw):
+        return {
+            "kind": "contract",
+            "plane": "review",
+            "confidence": 0.65,
+            "reason": (
+                "This is a Validate check, not a Transform write. "
+                "The compiler will not invent a filter or domain table from this sentence. "
+                "Confirm the mapping on Map; Validate re-checks the population."
+            ),
+            **flags,
+        }
     return {
         "kind": "unknown",
         "plane": "review",

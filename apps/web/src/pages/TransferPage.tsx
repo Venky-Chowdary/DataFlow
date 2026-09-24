@@ -255,6 +255,7 @@ import {
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import {
+  acceptRuleAsDirect,
   mergeBusinessRules,
   mergeCompiledShapeSteps,
   ruleReportSummary,
@@ -3284,6 +3285,29 @@ export function TransferPage({
     setStep(STEP_DESTINATION);
   };
 
+  const acceptWorkbookRuleAsDirect = (index: number) => {
+    const current = businessRuleReportRef.current;
+    if (!current) return;
+    const next = acceptRuleAsDirect(current, index);
+    if (next === current) return;
+    setBusinessRuleReport(next);
+    const primary = primarySourceStream || sourceTable || undefined;
+    setColumnMappings((prev) => mergeBusinessRules(prev, next, { sourceTable: primary }));
+    setStreamMappings((prev) => {
+      const copy = { ...prev };
+      for (const name of multiStreamNames) {
+        copy[name] = mergeBusinessRules(copy[name] || [], next, { sourceTable: name });
+      }
+      return copy;
+    });
+    const rule = next.rules[index];
+    toast({
+      title: "Accepted as Direct map",
+      message: rule ? `${rule.source_column} → ${rule.dest_column} is on Map` : "Rule accepted",
+      tone: "success",
+    });
+  };
+
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
@@ -6061,6 +6085,7 @@ export function TransferPage({
           analysis={analysis}
           destColumns={destColumns}
           ruleReport={businessRuleReport}
+          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destCatalogExists(destKindMode, destTableExists)}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
@@ -7368,6 +7393,7 @@ export function TransferPage({
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
           ruleReport={businessRuleReport}
+          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           sourceTable={primarySourceStream || sourceTable}
           destTable={targetCollection}
           sourceTables={multiStreamNames.length ? multiStreamNames : undefined}

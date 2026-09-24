@@ -237,6 +237,8 @@ describe("Transfer Studio chrome contracts", () => {
     const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
     assert.match(ledger, /header_roles/);
     assert.match(ledger, /How this file was read/);
+    assert.match(ledger, /Accept as Direct/);
+    assert.match(ledger, /canAcceptAsDirect/);
     assert.match(ledger, /sheet_kinds/);
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);

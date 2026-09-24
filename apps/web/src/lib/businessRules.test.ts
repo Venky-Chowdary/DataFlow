@@ -4,10 +4,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  acceptRuleAsDirect,
+  canAcceptAsDirect,
   mergeBusinessRules,
   mergeCompiledShapeSteps,
   ruleReportSummary,
   ruleToEvidence,
+  type CompiledRule,
   type RuleCompileReport,
 } from "./businessRules";
 import type { EditableMapping } from "./mapping";
@@ -274,5 +277,34 @@ describe("mergeBusinessRules", () => {
     assert.equal(next.length, 2);
     assert.equal(next[1].op, "parse_date");
     assert.equal(next.some((step) => step.column === "sku"), false);
+  });
+});
+
+describe("operator accept of a review rule", () => {
+  it("accepts a bound rename as Direct and refuses a validation dest", () => {
+    assert.equal(canAcceptAsDirect(report.rules[2]), true);
+    const next = acceptRuleAsDirect(report, 2);
+    assert.equal(next.rules[2].status, "executable");
+    assert.equal(next.rules[2].kind, "direct");
+    assert.equal(next.buckets.executable, 3);
+    assert.equal(next.buckets.needs_confirmation, 0);
+    const mapped = mergeBusinessRules(seed, next);
+    assert.equal(mapped.find((row) => row.source === "mystery")?.target, "segment");
+    assert.equal(mapped.find((row) => row.source === "mystery")?.approved, true);
+
+    const validation: CompiledRule = {
+      ...report.rules[2],
+      dest_column: "V001",
+      rule_text: "Must not be null",
+      kind: "contract",
+    };
+    assert.equal(canAcceptAsDirect(validation), false);
+    const missing: CompiledRule = {
+      ...report.rules[2],
+      source_column: "annual_salary",
+      dest_column: "annual_salary",
+      issues: ['Source column "annual_salary" is not on the selected source.'],
+    };
+    assert.equal(canAcceptAsDirect(missing), false);
   });
 });

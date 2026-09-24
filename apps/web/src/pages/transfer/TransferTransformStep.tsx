@@ -63,6 +63,7 @@ interface TransferTransformStepProps {
    * because both schemas exist here; Map owns the per-column evidence.
    */
   onApplyRules?: (report: RuleCompileReport) => void;
+  onAcceptRuleDirect?: (index: number) => void;
   ruleReport?: RuleCompileReport | null;
   sourceTable?: string;
   destTable?: string;
@@ -121,6 +122,7 @@ export function TransferTransformStep({
   onContinue,
   syncMode,
   onApplyRules,
+  onAcceptRuleDirect,
   ruleReport,
   sourceTable = "",
   destTable = "",
@@ -408,6 +410,10 @@ export function TransferTransformStep({
             fixed column list. Closed-form rows compile onto this recipe and
             Map. Anything we cannot execute stays in review —             unused
             destination columns are not written.
+            Applied rows land on this recipe and Map immediately.
+            Review is for sentences that are not a closed form, unbound
+            columns, or Validate checks — Accept as Direct on a bound
+            rename, or continue to Map to remap.
             {sourceTables.length > 1
               ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
               : ""}
@@ -433,7 +439,12 @@ export function TransferTransformStep({
           </button>
         </div>
       </div> : null}
-      {ruleReport ? <BusinessRuleLedger report={ruleReport} /> : null}
+      {ruleReport ? (
+        <BusinessRuleLedger
+          report={ruleReport}
+          onAcceptDirect={onAcceptRuleDirect}
+        />
+      ) : null}
 
       <dl className="df2-xform-stats">
         <div>

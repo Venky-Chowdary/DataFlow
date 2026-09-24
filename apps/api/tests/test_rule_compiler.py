@@ -1428,6 +1428,19 @@ def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
     assert classify_rule("same as source")["kind"] == "direct"
     assert classify_rule("copy from source")["kind"] == "direct"
     assert classify_rule("-")["kind"] == "direct"
+    assert classify_rule("Copy customer_id without modification")["kind"] == "direct"
+    assert classify_rule("Map fname to first_name")["kind"] == "direct"
+    assert classify_rule("Map lname to last_name")["kind"] == "direct"
+    assert classify_rule("no transformation")["kind"] == "direct"
+    assert classify_rule("Map date to ISO")["kind"] != "direct"
+    nulls = classify_rule("Must not be null")
+    assert nulls["kind"] == "contract"
+    assert nulls["plane"] == "review"
+    contain = classify_rule("Must contain @")
+    assert contain["kind"] == "contract"
+    state = classify_rule("Convert full US state name to 2-letter code")
+    assert state["kind"] == "unknown"
+    assert "lookup" in state["reason"].lower()
 
     utf = classify_rule("convert to utf-8")
     assert utf["kind"] == "unknown"

@@ -84,6 +84,7 @@ interface TransferMapStepProps {
   onReloadDestSchema?: () => void | Promise<void>;
   /** Compiled workbook — shown as evidence on each mapped column. */
   ruleReport?: RuleCompileReport | null;
+  onAcceptRuleDirect?: (index: number) => void;
 }
 
 
@@ -139,6 +140,7 @@ export function TransferMapStep({
   destShapeHeadline = "",
   onReloadDestSchema,
   ruleReport = null,
+  onAcceptRuleDirect,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -320,7 +322,11 @@ export function TransferMapStep({
             <span> · {ruleReportSummary(ruleReport)}</span>
           </summary>
           <p>{ruleReport.honesty}</p>
-          <BusinessRuleLedger report={ruleReport} defaultOpen />
+          <BusinessRuleLedger
+            report={ruleReport}
+            defaultOpen
+            onAcceptDirect={onAcceptRuleDirect}
+          />
         </details>
       )}
 

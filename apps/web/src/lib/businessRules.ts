@@ -294,3 +294,54 @@ export function ruleStatusLabel(status: string): string {
   if (status === "conflict") return "Conflict";
   return "Needs review";
 }
+
+const VALIDATION_DEST = /^v\d+$/i;
+const SOURCE_MISSING = /source column .+ is not on the selected source/i;
+
+/**
+ * A review row the operator may accept as Direct: both columns bound, the
+ * dest is not a validation id, and the compiler did not refuse the source.
+ * Contracts and joins stay review — accepting them would invent a write.
+ */
+export function canAcceptAsDirect(rule: CompiledRule): boolean {
+  if (rule.status !== "needs_confirmation") return false;
+  if (rule.kind === "contract" || rule.kind === "join") return false;
+  const source = (rule.source_column || "").trim();
+  const dest = (rule.dest_column || "").trim();
+  if (!source || !dest) return false;
+  if (VALIDATION_DEST.test(dest)) return false;
+  if ((rule.issues || []).some((issue) => SOURCE_MISSING.test(issue))) return false;
+  return true;
+}
+
+/** Operator accept: the pair is a rename / passthrough. No invented transform. */
+export function acceptRuleAsDirect(
+  report: RuleCompileReport,
+  index: number,
+): RuleCompileReport {
+  const current = report.rules[index];
+  if (!current || !canAcceptAsDirect(current)) return report;
+  const rules = report.rules.map((rule, i) => (
+    i === index
+      ? {
+          ...rule,
+          kind: "direct",
+          kind_label: "Direct map",
+          plane: "map",
+          transform: "none",
+          status: "executable",
+          confidence: Math.max(rule.confidence, 0.9),
+          issues: [],
+        }
+      : rule
+  ));
+  return {
+    ...report,
+    rules,
+    buckets: {
+      executable: rules.filter((rule) => rule.status === "executable").length,
+      needs_confirmation: rules.filter((rule) => rule.status === "needs_confirmation").length,
+      conflict: rules.filter((rule) => rule.status === "conflict").length,
+    },
+  };
+}

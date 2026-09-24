@@ -1,10 +1,16 @@
 import type { CompiledRule, RuleCompileReport } from "../../lib/businessRules";
-import { ruleReportSummary, ruleStatusLabel } from "../../lib/businessRules";
+import {
+  canAcceptAsDirect,
+  ruleReportSummary,
+  ruleStatusLabel,
+} from "../../lib/businessRules";
 
 interface BusinessRuleLedgerProps {
   report: RuleCompileReport;
   /** When true, start expanded so review rows are visible. */
   defaultOpen?: boolean;
+  /** Operator accept of a bound rename — never invents a transform. */
+  onAcceptDirect?: (index: number) => void;
 }
 
 function lineClass(status: string): string {
@@ -22,6 +28,19 @@ function provenance(rule: CompiledRule): string {
   return "";
 }
 
+function reviewHint(rule: CompiledRule): string {
+  if (rule.kind === "contract") {
+    return "Validate contract — confirm the mapping on Map. Validate fail-closes it. This is not a Transform write.";
+  }
+  if (rule.kind === "join") {
+    return "Joins stay in review — this compiler will not invent a grain.";
+  }
+  if (canAcceptAsDirect(rule)) {
+    return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
+  }
+  return "The compiler will not invent an algorithm from this sentence. Confirm or remap on Map.";
+}
+
 /**
  * Line-by-line compiled workbook. Every uploaded row is listed — applied,
  * review, or conflict — so the operator can read the file the compiler read.
@@ -29,6 +48,7 @@ function provenance(rule: CompiledRule): string {
 export function BusinessRuleLedger({
   report,
   defaultOpen,
+  onAcceptDirect,
 }: BusinessRuleLedgerProps) {
   const open = defaultOpen
     ?? (report.buckets.needs_confirmation > 0 || report.buckets.conflict > 0);
@@ -38,6 +58,14 @@ export function BusinessRuleLedger({
         <strong>Rules, line by line</strong>
         <span>{ruleReportSummary(report)}</span>
       </summary>
+      <p className="df2-rule-ledger-how">
+        Applied rows are already on this Transform recipe and on Map.
+        Review is required when the sentence is not a closed form, the
+        column did not bind to the selected schemas, or the row is a
+        Validate check (must not be null, must contain). Accept a bound
+        rename as Direct here — Map is where you remap or approve the rest.
+        Validate re-checks the population.
+      </p>
       {report.sheet_kinds?.length ? (
         <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
           {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
@@ -91,6 +119,20 @@ export function BusinessRuleLedger({
             ) : null}
             {rule.issues?.length ? (
               <span className="df2-rule-line-issue">{rule.issues.join(" · ")}</span>
+            ) : null}
+            {rule.status === "needs_confirmation" ? (
+              <span className="df2-rule-line-next">
+                <span>{reviewHint(rule)}</span>
+                {onAcceptDirect && canAcceptAsDirect(rule) ? (
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm"
+                    onClick={() => onAcceptDirect(index)}
+                  >
+                    Accept as Direct
+                  </button>
+                ) : null}
+              </span>
             ) : null}
           </li>
         ))}
