@@ -16,6 +16,7 @@ and nothing else is written.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -26,7 +27,8 @@ from services.transform_engine import apply_transform
 
 from .normalize import fold
 
-_SKIP_KINDS = frozenset({"omit", "join", "unknown"})
+_SKIP_KINDS = frozenset({"omit", "join", "unknown", "contract"})
+_MISSING = object()
 _ENGINE_META = frozenset({"source_table", "dest_table"})
 
 
@@ -84,6 +86,98 @@ def executable_edges_for_table(
             continue
         edges.append(dict(item))
     return edges
+
+
+def executable_contracts_for_table(
+    report: Mapping[str, Any],
+    source_table: str,
+) -> list[dict[str, Any]]:
+    """Closed-form destination contracts. They never write a dest column."""
+    multi = len(_selected_tables(report)) > 1
+    out: list[dict[str, Any]] = []
+    for item in report.get("rules") or []:
+        if not isinstance(item, Mapping):
+            continue
+        if item.get("status") != "executable" or item.get("kind") != "contract":
+            continue
+        if not isinstance(item.get("contract"), Mapping):
+            continue
+        table = str(item.get("source_table") or "")
+        if table and source_table and not _table_matches(table, source_table):
+            continue
+        if not table and multi:
+            continue
+        out.append(dict(item))
+    return out
+
+
+def evaluate_contract(value: Any, contract: Mapping[str, Any], *, missing: bool) -> str | None:
+    """Deterministic check. None means pass. A string is the quarantine reason."""
+    kind = str(contract.get("type") or "")
+    if kind == "not_null":
+        if missing or value is None or (isinstance(value, str) and not str(value).strip()):
+            return "must not be null"
+        return None
+    if missing:
+        return "column is not in the dest image"
+    if kind == "contains":
+        needle = str(contract.get("value") or "")
+        if needle and needle not in str(value):
+            return f"must contain {needle}"
+        return None
+    if kind == "in_set":
+        allowed = [str(item) for item in (contract.get("values") or [])]
+        if allowed and str(value) not in allowed:
+            return f"must be one of {', '.join(allowed)}"
+        return None
+    if kind == "compare":
+        try:
+            number = float(value)
+            bound = float(contract.get("value"))
+        except (TypeError, ValueError):
+            return "must be numeric"
+        op = str(contract.get("op") or "")
+        ok = (
+            (op == ">" and number > bound)
+            or (op == ">=" and number >= bound)
+            or (op == "<" and number < bound)
+            or (op == "<=" and number <= bound)
+        )
+        if not ok:
+            return f"must be {op} {contract.get('value')}"
+        return None
+    if kind == "pattern":
+        pattern = str(contract.get("pattern") or "")
+        if pattern and re.fullmatch(pattern, str(value) or "") is None:
+            return "must match the compiled pattern"
+        return None
+    return None
+
+
+def _contract_value(
+    image: Mapping[str, Any],
+    shaped: Mapping[str, Any],
+    edges: Sequence[Mapping[str, Any]],
+    rule: Mapping[str, Any],
+) -> tuple[Any, bool]:
+    dest = str(rule.get("dest_column") or "").strip()
+    src = str(rule.get("source_column") or "").strip()
+    if dest and dest in image:
+        return image.get(dest), False
+    if src and src in image:
+        return image.get(src), False
+    for edge in edges:
+        edge_src = str(edge.get("source_column") or "")
+        edge_dest = str(edge.get("dest_column") or "")
+        if src and fold(edge_src) == fold(src) and edge_dest in image:
+            return image.get(edge_dest), False
+        if dest and fold(edge_dest) == fold(dest) and edge_dest in image:
+            return image.get(edge_dest), False
+    if dest and dest in shaped:
+        return shaped.get(dest), False
+    if src and src in shaped:
+        return shaped.get(src), False
+    return _MISSING, True
 
 
 def _apply_edge(raw: Any, edge: Mapping[str, Any]) -> tuple[Any, str | None]:
@@ -195,6 +289,7 @@ def apply_compiled_projection(
     """
     table = (source_table or "").strip()
     edges = executable_edges_for_table(report, table)
+    contracts = executable_contracts_for_table(report, table)
     steps = shape_steps_for_table(report, table)
     shaped_rows, shape_quarantine = _shape_population(rows, steps, source_columns)
 
@@ -229,8 +324,29 @@ def apply_compiled_projection(
                 if errors:
                     dest_quarantine.extend({**item, "dest_table": dest_table, "plane": "map"} for item in errors)
                     continue
-                if image is not None:
-                    dest_rows.append(image)
+                if image is None:
+                    continue
+                contract_errors: list[dict[str, Any]] = []
+                for rule in contracts:
+                    value, missing = _contract_value(image, shaped, dest_edges, rule)
+                    err = evaluate_contract(
+                        None if value is _MISSING else value,
+                        rule.get("contract") or {},
+                        missing=missing,
+                    )
+                    if err:
+                        contract_errors.append({
+                            "row_index": row_index,
+                            "column": str(rule.get("dest_column") or rule.get("source_column") or ""),
+                            "source_column": str(rule.get("source_column") or ""),
+                            "error": err,
+                            "dest_table": dest_table,
+                            "plane": "validate",
+                        })
+                if contract_errors:
+                    dest_quarantine.extend(contract_errors)
+                    continue
+                dest_rows.append(image)
             destinations.append({
                 "dest_table": dest_table,
                 "columns": columns,
@@ -252,9 +368,10 @@ def apply_compiled_projection(
         "written": written,
         "refused": refused,
         "honesty": (
-            "Named executable columns only. Review, join, omit, and unnamed "
-            "catalog columns were not written. One refused edge quarantines "
-            "that dest image — never a partial row."
+            "Named executable columns only. Review, join, omit, contract, and "
+            "unnamed catalog columns were not written. Destination contracts "
+            "quarantine after Map. One refused edge quarantines that dest "
+            "image — never a partial row."
         ),
     }
 

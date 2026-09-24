@@ -411,9 +411,10 @@ export function TransferTransformStep({
             Map. Anything we cannot execute stays in review —             unused
             destination columns are not written.
             Applied rows land on this recipe and Map immediately.
-            Review is for sentences that are not a closed form, unbound
-            columns, or Validate checks — Accept as Direct on a bound
-            rename, or continue to Map to remap.
+            Closed-form Validate checks compile as destination contracts
+            — they never write. Review is for sentences that are not a
+            closed form or did not bind. Accept as Direct on a leftover
+            bound rename, or continue to Map to remap.
             {sourceTables.length > 1
               ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
               : ""}

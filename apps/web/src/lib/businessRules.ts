@@ -19,8 +19,11 @@ export interface CompiledRule {
   rule_text: string;
   kind: string;
   kind_label: string;
+  interpretation?: string;
+  action?: string;
   plane: string;
   confidence: number;
+  contract?: { type: string; value?: string; values?: string[]; op?: string; pattern?: string } | null;
   transform?: string;
   engine_transform?: string;
   timezone?: string;
@@ -70,6 +73,7 @@ export interface RuleCompileReport {
   source_catalog_tables?: string[];
   dest_tables?: string[];
   dest_catalog_tables?: string[];
+  contracts?: CompiledRule[];
   projection?: Array<{
     source_table: string;
     columns: Array<{ source_column: string; dest_column: string; dest_table?: string }>;
@@ -166,6 +170,7 @@ export function mergeBusinessRules(
   });
 
   for (const rule of report.rules) {
+    if (rule.kind === "contract" || rule.plane === "validate") continue;
     if (tableFold) {
       const ruleTable = (rule.source_table || "").trim().toLowerCase();
       if (ruleTable && ruleTable !== tableFold) continue;
@@ -293,6 +298,20 @@ export function ruleStatusLabel(status: string): string {
   if (status === "executable") return "Applied";
   if (status === "conflict") return "Conflict";
   return "Needs review";
+}
+
+export function ruleActionLabel(action?: string, status?: string): string {
+  const token = (action || "").trim() || (
+    status === "executable" ? "auto" : status === "conflict" ? "conflict" : "review"
+  );
+  if (token === "auto") return "Auto";
+  if (token === "conflict") return "Conflict";
+  return "Review";
+}
+
+export function ruleConfidenceLabel(confidence: number): string {
+  if (!Number.isFinite(confidence) || confidence <= 0) return "—";
+  return `${Math.round(confidence * 100)}%`;
 }
 
 const VALIDATION_DEST = /^v\d+$/i;

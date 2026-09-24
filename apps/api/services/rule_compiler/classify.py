@@ -50,6 +50,31 @@ _VALIDATE_CHECK = re.compile(
     r"must\s+be\s+(?:one\s+of\s+)?[A-Za-z0-9])",
     re.I,
 )
+# Whole-cell validation only. A write verb means this is still a mapping row.
+_VALIDATE_WRITE_VERB = re.compile(
+    r"\b(?:copy|map|mapped|rename|convert|lowercase|uppercase|trim|parse|"
+    r"direct|passthrough|derive|concat|hash|cast|lookup|crosswalk)\b|[*=×]",
+    re.I,
+)
+_VALIDATE_COMPARE = re.compile(
+    r"^must\s+be\s+(?:greater|more)\s+than\s+(?P<gt>-?\d+(?:\.\d+)?)\s*$"
+    r"|^must\s+be\s+less\s+than\s+(?P<lt>-?\d+(?:\.\d+)?)\s*$"
+    r"|^must\s+be\s*(?P<op>>=|<=|>|<)\s*(?P<n>-?\d+(?:\.\d+)?)\s*$",
+    re.I,
+)
+_VALIDATE_CONTAINS = re.compile(
+    r"^must\s+contain\s+['\"]?(?P<val>.+?)['\"]?\s*$",
+    re.I,
+)
+_VALIDATE_TWO_LETTER = re.compile(
+    r"^must\s+be\s+a\s+valid\s+2[\s-]?letter(?:\s+(?:us\s+)?state)?\s+codes?\s*$",
+    re.I,
+)
+_VALIDATE_IN_SET = re.compile(
+    r"^must\s+be\s+(?:one\s+of\s+)?(?P<body>.+)$",
+    re.I,
+)
+_TWO_LETTER_PATTERN = r"^[A-Za-z]{2}$"
 _NA_CELL = re.compile(r"^(?:n/?a|na|n\.a\.|not\s+applicable)$", re.I)
 _OMIT = re.compile(
     r"\b(?:omit|do\s+not\s+(?:map|load|transfer|send)|"
@@ -477,6 +502,82 @@ def is_identity_speech(text: str) -> bool:
         if dest in _IDENTITY_BLOCKED:
             return False
     return True
+
+
+def parse_validate_check(text: str) -> dict[str, Any] | None:
+    """Whole-cell Validate sentence → structured contract IR, or None.
+
+    This is not a write. The compiler will not invent a 50-state table.
+    A 2-letter code check is the letter-pair shape only.
+    """
+    raw = (text or "").strip()
+    if not raw or _VALIDATE_WRITE_VERB.search(raw):
+        return None
+    if _REQUIRED.search(raw) or _STANDALONE_NOT_NULL.match(raw):
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.99,
+            "interpretation": "Destination not-null",
+            "contract": {"type": "not_null"},
+            "required": True,
+        }
+    contained = _VALIDATE_CONTAINS.match(raw)
+    if contained:
+        value = (contained.group("val") or "").strip()
+        if value:
+            return {
+                "kind": "contract",
+                "plane": "validate",
+                "confidence": 0.98,
+                "interpretation": f"Contains {value}",
+                "contract": {"type": "contains", "value": value},
+            }
+    compared = _VALIDATE_COMPARE.match(raw)
+    if compared:
+        if compared.group("gt") is not None:
+            op, number = ">", compared.group("gt")
+        elif compared.group("lt") is not None:
+            op, number = "<", compared.group("lt")
+        else:
+            op, number = compared.group("op"), compared.group("n")
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.99,
+            "interpretation": f"Compare {op} {number}",
+            "contract": {"type": "compare", "op": op, "value": number},
+        }
+    if _VALIDATE_TWO_LETTER.match(raw):
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.96,
+            "interpretation": "2-letter code shape (fifty-state table not invented)",
+            "contract": {"type": "pattern", "pattern": _TWO_LETTER_PATTERN},
+            "reason": (
+                "Compiled as a 2-letter code shape. The fifty-state table "
+                "was not invented."
+            ),
+        }
+    listed = _VALIDATE_IN_SET.match(raw)
+    if listed:
+        body = (listed.group("body") or "").strip()
+        values = [
+            part.strip().strip("\"'")
+            for part in re.split(r"\s*(?:,|\bor\b)\s*", body)
+            if part.strip() and part.strip().lower() not in {"one", "of"}
+        ]
+        values = [item for item in values if re.fullmatch(r"[A-Za-z0-9_.-]+", item or "")]
+        if len(values) >= 2:
+            return {
+                "kind": "contract",
+                "plane": "validate",
+                "confidence": 0.98,
+                "interpretation": "In-set domain",
+                "contract": {"type": "in_set", "values": values},
+            }
+    return None
 
 
 def named_rule_ref(text: str) -> str:
@@ -2666,6 +2767,11 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return {"kind": "case_upper", "plane": "map", "confidence": 0.97, "extras": _compound_extras(raw, "case_upper"), **flags}
     if _TRIM.search(raw):
         return {"kind": "trim", "plane": "map", "confidence": 0.97, **flags}
+
+    check = parse_validate_check(raw)
+    if check:
+        check.update({key: value for key, value in flags.items() if key not in check})
+        return check
 
     if flags.get("required") or flags.get("unique"):
         return {

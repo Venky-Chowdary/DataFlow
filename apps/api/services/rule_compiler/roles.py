@@ -51,7 +51,10 @@ _HINTS: dict[str, frozenset[str]] = {
     "join_type": frozenset({"jointype"}),
     "lookup_from": frozenset({"old", "fromcode", "inbound", "legacycode"}),
     "lookup_to": frozenset({"new", "tocode", "outbound"}),
-    "rule_name": frozenset({"rulename", "namedrule", "ruleid", "mapplet", "macroname", "reusablerule"}),
+    "rule_name": frozenset({
+        "rulename", "namedrule", "ruleid", "mapplet", "macroname", "reusablerule",
+        "validationid", "checkid", "constraintid",
+    }),
 }
 
 # Single-token priors that collide across roles ("to", "from").

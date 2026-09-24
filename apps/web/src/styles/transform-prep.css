@@ -1241,23 +1241,36 @@
   font-weight: 600;
 }
 
-.df2-rule-ledger-list {
+.df2-rule-analysis-head {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(140px, 1fr) 72px 64px;
+  gap: 6px 10px;
   margin: 10px 0 0;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-rule-ledger-list {
+  margin: 6px 0 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 280px;
+  max-height: 320px;
   overflow-y: auto;
 }
 
 .df2-rule-line {
   display: grid;
-  grid-template-columns: 110px minmax(120px, 1fr) minmax(140px, 1.4fr) auto auto;
+  grid-template-columns: 110px minmax(140px, 1.3fr) minmax(120px, 1fr) 56px 64px;
   gap: 6px 10px;
   align-items: start;
-  padding: 7px 8px;
+  padding: 8px;
   border-radius: 8px;
   border: 1px solid var(--df-border, #e4e8ee);
   font-size: 12px;
@@ -1274,7 +1287,23 @@
 }
 
 .df2-rule-line-edge { font-weight: 600; color: var(--df-text-primary, #0f172a); word-break: break-word; }
-.df2-rule-line-text { color: var(--df-text-secondary, #475569); word-break: break-word; }
+.df2-rule-line-read { color: var(--df-text-primary, #0f172a); word-break: break-word; }
+.df2-rule-line-confidence {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  color: var(--df-text-primary, #0f172a);
+}
+.df2-rule-line-action {
+  font-weight: 700;
+}
+.df2-rule-line-action.is-applied { color: #0f766e; }
+.df2-rule-line-action.is-review { color: #b45309; }
+.df2-rule-line-action.is-conflict { color: #b91c1c; }
+.df2-rule-line-text {
+  grid-column: 2 / 4;
+  color: var(--df-text-secondary, #475569);
+  word-break: break-word;
+}
 .df2-rule-line-status { font-weight: 600; }
 .df2-rule-line-issue {
   grid-column: 1 / -1;
@@ -1292,9 +1321,12 @@
 .df2-badge.df2-rule-chip.is-conflict { background: #fee2e2; color: #991b1b; }
 
 @media (max-width: 860px) {
+  .df2-rule-analysis-head,
   .df2-rule-line {
     grid-template-columns: 1fr;
   }
+
+  .df2-rule-line-text { grid-column: auto; }
 
   .df2-xform .df2-rule-import {
     flex-direction: column;

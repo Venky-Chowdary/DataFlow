@@ -240,6 +240,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(ledger, /Accept as Direct/);
     assert.match(ledger, /canAcceptAsDirect/);
     assert.match(ledger, /sheet_kinds/);
+    assert.match(ledger, /Rule analysis/);
+    assert.match(ledger, /interpretation/);
+    assert.match(ledger, /ruleConfidenceLabel/);
+    assert.match(ledger, /ruleActionLabel/);
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);
     assert.match(ledger, /named_rules/);

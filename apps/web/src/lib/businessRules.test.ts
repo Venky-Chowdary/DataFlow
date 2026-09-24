@@ -307,4 +307,33 @@ describe("operator accept of a review rule", () => {
     };
     assert.equal(canAcceptAsDirect(missing), false);
   });
+
+  it("does not merge destination contracts onto Map writes", () => {
+    const withContract: RuleCompileReport = {
+      ...report,
+      rules: [
+        ...report.rules,
+        {
+          source_column: "email",
+          dest_column: "email_address",
+          rule_text: "Must contain @",
+          kind: "contract",
+          kind_label: "Validate contract",
+          interpretation: "Contains @",
+          action: "auto",
+          plane: "validate",
+          confidence: 0.98,
+          status: "executable",
+          contract: { type: "contains", value: "@" },
+        },
+      ],
+    };
+    const next = mergeBusinessRules(
+      [{ source: "email", target: "", confidence: 0.4, approved: false, transform: "none" }],
+      withContract,
+    );
+    const email = next.find((row) => row.source === "email");
+    assert.equal(email?.target, "");
+    assert.equal(email?.businessRule, undefined);
+  });
 });

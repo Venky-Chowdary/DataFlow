@@ -20,6 +20,7 @@ from .classify import (
     classify_rule,
     named_rule_ref,
     named_rule_targets,
+    parse_validate_check,
     unknown_code_policy,
     workbook_mask_to_strptime,
 )
@@ -179,6 +180,59 @@ _PRECISION = re.compile(
     r"\s*\(\s*(?P<p>\d+)(?:\s*,\s*(?P<s>\d+))?\s*\)",
     re.I,
 )
+_VALIDATION_SHEET = re.compile(r"validat|constraint|check.?rules?", re.I)
+_LOOKUP_SHEET = re.compile(r"lookup|crosswalk|code.?table|enumerat|domain", re.I)
+_VALIDATION_ID = re.compile(r"^v\d+$", re.I)
+_KIND_INTERPRETATION = {
+    "direct": "Direct copy",
+    "lookup": "Lookup / code crosswalk",
+    "omit": "Omit",
+    "trim": "Trim",
+    "case_lower": "Lowercase",
+    "case_upper": "Uppercase",
+    "title": "Title case",
+    "collapse": "Collapse spaces",
+    "date": "Date → ISO",
+    "time": "Time → ISO",
+    "email": "Lowercase email",
+    "phone": "Normalize phone",
+    "hash": "Hash PII",
+    "cast_integer": "Parse integer",
+    "cast_number": "Parse decimal",
+    "cast_boolean": "Parse boolean",
+    "currency": "Parse currency",
+    "percentage": "Parse percentage",
+    "json": "Parse JSON",
+    "binary": "Binary / base64",
+    "strip_controls": "Strip controls",
+    "derive": "Derived value",
+    "default": "Default if null",
+    "concat": "Concatenate",
+    "replace": "Replace text",
+    "null_if": "Null if sentinel",
+    "constant": "Constant value",
+    "pad": "Pad",
+    "split": "Split column",
+    "round": "Round number",
+    "truncate": "Truncate number",
+    "absolute": "Absolute value",
+    "clamp": "Clamp",
+    "substr": "Substring",
+    "prefix": "Prefix",
+    "suffix": "Suffix",
+    "unicode": "Normalize Unicode",
+    "filter": "Filter rows",
+    "divert": "Quarantine rows",
+    "join": "Join (review)",
+    "contract": "Destination validation",
+    "timezone": "Assume timezone",
+    "hash_identity": "Hash identity",
+    "unnest": "Unnest JSON",
+    "flatten": "Flatten JSON",
+    "keep_columns": "Keep columns",
+    "drop_column": "Drop column",
+    "unknown": "Needs review",
+}
 
 
 def _type_family(db_type: str) -> str:
@@ -342,8 +396,10 @@ def compile_rule_workbook(
     sync = (sync_mode or "").strip()
     header_roles = ground_workbook_rows(rows, src_cols, dst_cols)
     sheet_kinds = _classify_sheets(rows)
+    kind_by_sheet = {str(item["sheet"] or ""): str(item["kind"] or "") for item in sheet_kinds}
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
-    lookup_pairs = _collect_lookup_pairs(rows)
+    validation_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "validation"}
+    lookup_pairs = _collect_lookup_pairs(rows, src_cols)
     orphan_notices = _attach_orphan_enumerations(rows, lookup_pairs, src_cols, dst_cols)
     named_catalog, catalog_conflicts = _collect_named_catalog(rows)
     compiled: list[dict[str, Any]] = []
@@ -366,9 +422,17 @@ def compile_rule_workbook(
     for notice in catalog_conflicts:
         compiled.append(_review_notice(notice, notice, source_table, dest_table))
 
-    for raw in rows:
-        if str(raw.get("_sheet") or "") in notes_sheets:
-            continue
+    mapping_rows = [
+        raw for raw in rows
+        if str(raw.get("_sheet") or "") not in notes_sheets
+        and str(raw.get("_sheet") or "") not in validation_sheets
+    ]
+    validation_rows = [
+        raw for raw in rows
+        if str(raw.get("_sheet") or "") in validation_sheets
+    ]
+
+    for raw in mapping_rows:
         if _is_pair_only(raw):
             continue
         if _is_catalog_def(raw):
@@ -411,6 +475,7 @@ def compile_rule_workbook(
                 named_catalog=named_catalog,
                 source_types=src_types,
                 dest_types=dst_types,
+                sheet_kind=kind_by_sheet.get(str(work.get("_sheet") or ""), ""),
             )
             _refuse_preload_on_history(item, sync)
             _mark_edge_conflicts(item, seen_edges, seen_dest)
@@ -434,8 +499,8 @@ def compile_rule_workbook(
             continue
         already = any(
             fold(r.get("source_column") or "") == fold(src)
-            and fold(r.get("dest_column") or "") == fold(dst)
             and r.get("code_crosswalk")
+            and r.get("status") == "executable"
             for r in compiled
         )
         if already:
@@ -464,6 +529,29 @@ def compile_rule_workbook(
         )
         _refuse_preload_on_history(synthetic, sync)
         compiled.append(synthetic)
+
+    derived_columns = _derived_columns(compiled, dst_cols)
+    for raw in validation_rows:
+        if _is_pair_only(raw) or _is_catalog_def(raw):
+            continue
+        item = _compile_row(
+            raw,
+            src_cols=src_cols,
+            dst_cols=dst_cols,
+            source_table=source_table,
+            dest_table=dest_table,
+            source_tables=selected_tables,
+            source_catalog=catalog,
+            dest_tables=selected_dest_tables,
+            dest_catalog=dest_cat,
+            lookup_pairs=lookup_pairs,
+            named_catalog=named_catalog,
+            source_types=src_types,
+            dest_types=dst_types,
+            sheet_kind="validation",
+            extra_columns=derived_columns,
+        )
+        compiled.append(item)
 
     overflow_steps: list[dict[str, Any]] = []
     if len(shape_steps) > _MAX_SHAPE_STEPS:
@@ -517,14 +605,27 @@ def compile_rule_workbook(
         "named_rules": sorted(named_catalog),
         "matcher": "cupid-linguistic+instance+type+constraint",
         "sync_mode": sync,
+        "contracts": [
+            item for item in compiled
+            if item.get("kind") == "contract" and item.get("contract")
+        ],
         "honesty": (
             "Headers are inferred from the uploaded file and the selected "
             "schemas — they are not a fixed column list. Spoken column names "
             "bind with Cupid-style linguistic matching (unique winner, "
             "threshold, gap). Accepted rules execute deterministically on "
             "Transform + Map. Spoken identity (copy without modification, "
-            "map A to B) is Direct. Validate sentences stay in review as "
-            "contracts, not writes. Unrecognised, unbound, or weakly inferred "
+            "map A to B) is Direct. Sheets are classified first "
+            "(mapping / lookup / validation) and compiled separately. "
+            "Lookup tables attach to a mapping edge by source name or "
+            "unique dest alias — STATE pairs compile onto state → state_code. "
+            "This compiler will not invent the fifty-state table. "
+            "Closed-form Validate sentences compile as destination contracts "
+            "(not-null, contains, in-set, compare, 2-letter shape) on the "
+            "Validate plane — they never write a dest column. Validation_ID "
+            "is a rule name, not a destination. Column binds source, dest, "
+            "or a derived transform column. Unstructured or unbound checks "
+            "stay in review. Unrecognised, unbound, or weakly inferred "
             "rules stay in the review queue — they are never applied to a "
             "row. An operator may accept a bound rename as Direct. Date masks must name MM/DD vs DD/MM. Orphan enumeration "
             "sheets attach only when the edge is unique. Commentary sheets "
@@ -566,7 +667,8 @@ def compile_rule_workbook(
             "Shape steps carry the source table they belong to; a "
             "customers date parse is not applied to orders. "
             "apply_compiled_projection runs that projection on live rows "
-            "through ShapeEngine + apply_transform + apply_code_crosswalk. "
+            "through ShapeEngine + apply_transform + apply_code_crosswalk, "
+            "then evaluates destination contracts and quarantines failures. "
             "CDC / SCD2 / mirror refuse pre-load shape — history was not "
             "written by this recipe. Map-plane pairs still compile. "
             "Unknown-code policy is "
@@ -579,18 +681,33 @@ def compile_rule_workbook(
 
 
 def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """COMA-style instance classification: rules vs lookups vs commentary."""
+    """Classify each sheet before compile: mapping / lookup / validation / notes."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         groups.setdefault(str(row.get("_sheet") or ""), []).append(row)
     out: list[dict[str, Any]] = []
     for sheet, items in groups.items():
         n = len(items)
+        headers = {
+            fold(h)
+            for row in items
+            for h in (row.get("_headers") or [])
+            if str(h).strip()
+        }
         has_src = sum(1 for row in items if str(row.get("source_column") or "").strip())
         has_dest = sum(1 for row in items if str(row.get("dest_column") or "").strip())
         has_lookup = sum(
             1 for row in items
             if str(row.get("lookup_from") or "").strip() and str(row.get("lookup_to") or "").strip()
+        )
+        contracts = sum(
+            1 for row in items
+            if parse_validate_check(str(row.get("rule") or ""))
+            or str(classify_rule(str(row.get("rule") or "")).get("kind") or "") == "contract"
+        )
+        dest_ids = sum(
+            1 for row in items
+            if _VALIDATION_ID.match(str(row.get("dest_column") or "").strip())
         )
         prose = []
         for row in items:
@@ -599,7 +716,13 @@ def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 prose.append(sum(len(v) for v in cells) / len(cells))
         median_len = sorted(prose)[len(prose) // 2] if prose else 0
         has_named = sum(1 for row in items if str(row.get("rule_name") or "").strip())
-        if has_named >= max(1, int(n * 0.6)) and has_src == 0:
+        if _VALIDATION_SHEET.search(sheet) or headers & {
+            "validationid", "checkid", "constraintid",
+        } or (contracts >= max(2, int(n * 0.6)) and dest_ids >= max(1, int(n * 0.4))):
+            kind = "validation"
+        elif _LOOKUP_SHEET.search(sheet) and has_lookup >= max(2, int(n * 0.5)):
+            kind = "lookups"
+        elif has_named >= max(1, int(n * 0.6)) and has_src == 0:
             kind = "catalog"
         elif has_src + has_dest + has_lookup == 0 and median_len >= 40:
             kind = "notes"
@@ -623,7 +746,10 @@ def _bind_method_counts(compiled: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def _collect_lookup_pairs(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, str]]:
+def _collect_lookup_pairs(
+    rows: list[dict[str, Any]],
+    src_cols: list[str] | None = None,
+) -> dict[tuple[str, str], dict[str, str]]:
     pairs: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
     for raw in rows:
         frm = str(raw.get("lookup_from") or "").strip()
@@ -631,10 +757,95 @@ def _collect_lookup_pairs(rows: list[dict[str, Any]]) -> dict[tuple[str, str], d
         if not frm or not to:
             continue
         src = str(raw.get("source_column") or "").strip()
-        dst = str(raw.get("dest_column") or src)
-        if src:
-            pairs[(src, dst)][frm] = to
+        dst = str(raw.get("dest_column") or "").strip()
+        if not src:
+            continue
+        edge_dst = dst or src
+        pairs[(src, edge_dst)][frm] = to
+        resolved = resolve_name(src, src_cols) if src_cols else ""
+        if resolved:
+            pairs[(resolved, dst or resolved)][frm] = to
+            if dst:
+                pairs[(resolved, dst)][frm] = to
     return pairs
+
+
+def _pairs_for_edge(
+    lookup_pairs: dict[tuple[str, str], dict[str, str]] | None,
+    spoken_src: str,
+    spoken_dst: str,
+    source_column: str,
+    dest_column: str,
+) -> dict[str, str]:
+    """Attach a lookup table to a mapping edge by source, then unique dest alias."""
+    store = lookup_pairs or {}
+    keys = [
+        (spoken_src, spoken_dst),
+        (spoken_src, spoken_dst or spoken_src),
+        (source_column, dest_column),
+        (source_column, dest_column or source_column),
+    ]
+    for key in keys:
+        if key[0] and store.get(key):
+            return dict(store[key])
+    src_hits: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for (src, _dst), mapping in store.items():
+        if not mapping:
+            continue
+        if fold(src) in {fold(spoken_src), fold(source_column)} and fold(src):
+            fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                src_hits.append(dict(mapping))
+    if len(src_hits) == 1:
+        return src_hits[0]
+    dest_hits: list[dict[str, str]] = []
+    dest_seen: set[tuple[str, ...]] = set()
+    for (src, dst), mapping in store.items():
+        if not mapping:
+            continue
+        labels = [label for label in (spoken_src, spoken_dst, source_column, dest_column) if label]
+        if not any(
+            name_similarity(dst, label) >= 0.72 or name_similarity(src, label) >= 0.72
+            for label in labels
+        ):
+            continue
+        fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+        if fingerprint not in dest_seen:
+            dest_seen.add(fingerprint)
+            dest_hits.append(dict(mapping))
+    if len(dest_hits) == 1:
+        return dest_hits[0]
+    return {}
+
+
+def _derived_columns(compiled: list[dict[str, Any]], dest_columns: list[str]) -> list[str]:
+    names: list[str] = [c for c in dest_columns if c]
+    for item in compiled:
+        dest = str(item.get("dest_column") or "").strip()
+        if dest and dest not in names:
+            names.append(dest)
+        step = item.get("shape_step") if isinstance(item.get("shape_step"), dict) else None
+        to = str((step or {}).get("options", {}).get("to") or "").strip() if step else ""
+        if to and to not in names:
+            names.append(to)
+    return names
+
+
+def _action_for(status: str) -> str:
+    if status == "executable":
+        return "auto"
+    if status == "conflict":
+        return "conflict"
+    return "review"
+
+
+def _interpretation_for(kind: str, classified: dict[str, Any] | None = None) -> str:
+    spoken = str((classified or {}).get("interpretation") or "").strip()
+    if spoken:
+        return spoken
+    return _KIND_INTERPRETATION.get(kind, _KIND_LABEL.get(kind, kind))
 
 
 def _is_pair_only(raw: dict[str, Any]) -> bool:
@@ -660,6 +871,8 @@ def _collect_named_catalog(rows: list[dict[str, Any]]) -> tuple[dict[str, str], 
         name = str(raw.get("rule_name") or "").strip()
         expr = str(raw.get("rule") or "").strip()
         if not name or not expr:
+            continue
+        if parse_validate_check(expr) or str(classify_rule(expr).get("kind") or "") == "contract":
             continue
         self_ref = named_rule_ref(expr)
         if self_ref and fold(self_ref) == fold(name):
@@ -842,7 +1055,7 @@ def _named_projection(compiled: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_table: dict[str, list[dict[str, str]]] = {}
     seen: set[tuple[str, str]] = set()
     for item in compiled:
-        if item.get("status") != "executable" or item.get("kind") in {"omit", "join"}:
+        if item.get("status") != "executable" or item.get("kind") in {"omit", "join", "contract"}:
             continue
         table = str(item.get("source_table") or "")
         col = str(item.get("source_column") or "")
@@ -934,10 +1147,13 @@ def _review_notice(text: str, issue: str, source_table: str, dest_table: str) ->
         "rule_text": text,
         "kind": "unknown",
         "kind_label": "Needs review",
+        "interpretation": "Needs review",
+        "action": "review",
         "plane": "review",
         "confidence": 0.0,
         "transform": "none",
         "code_crosswalk": None,
+        "contract": None,
         "shape_step": None,
         "shape_steps": [],
         "status": "needs_confirmation",
@@ -961,9 +1177,19 @@ def _compile_row(
     named_catalog: dict[str, str] | None = None,
     source_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
+    sheet_kind: str = "",
+    extra_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     spoken_src = str(raw.get("source_column") or "").strip()
     spoken_dst = str(raw.get("dest_column") or "").strip()
+    spoken_name = str(raw.get("rule_name") or "").strip()
+    validation_sheet = sheet_kind == "validation" or (
+        _VALIDATION_ID.match(spoken_dst) and bool(parse_validate_check(str(raw.get("rule") or "")))
+    )
+    if validation_sheet and _VALIDATION_ID.match(spoken_dst):
+        if not spoken_name:
+            spoken_name = spoken_dst
+        spoken_dst = ""
     table_from_cell, spoken_src_col = split_qualified(spoken_src)
     spoken_src = spoken_src_col or spoken_src
     dest_from_cell, spoken_dst_col = split_qualified(spoken_dst)
@@ -1029,28 +1255,57 @@ def _compile_row(
     if not source_column and spoken_src and not src_cols:
         source_column = spoken_src
 
+    extra = [c for c in (extra_columns or []) if c]
+    validation_bound = ""
+    if validation_sheet:
+        spoken_col = spoken_src or spoken_dst
+        dest_pool = bind_dst_cols or dst_cols
+        src_pool = bind_src_cols or src_cols
+        dest_hit = resolve_name(spoken_col, dest_pool) if spoken_col and dest_pool else ""
+        extra_hit = resolve_name(spoken_col, extra) if spoken_col and extra else ""
+        src_hit = source_column or (
+            resolve_name(spoken_col, src_pool) if spoken_col and src_pool else ""
+        )
+        if dest_hit:
+            dest_column = dest_hit
+            dst_method = dst_method or "schema"
+            dst_score = max(dst_score, 0.95)
+            validation_bound = dest_hit
+        elif extra_hit:
+            dest_column = extra_hit
+            dst_method = "derived"
+            dst_score = 0.9
+            validation_bound = extra_hit
+        elif src_hit:
+            source_column = src_hit
+            src_method = src_method or "schema"
+            src_score = max(src_score, 0.9)
+            validation_bound = src_hit
+        if src_hit:
+            source_column = src_hit
+
     issues: list[str] = []
     if table_issue:
         issues.append(table_issue)
     if dest_table_issue:
         issues.append(dest_table_issue)
     if spoken_src and (bind_src_cols or src_cols or catalog or selected) and not source_column:
-        if not table_issue:
+        if not table_issue and not (validation_sheet and validation_bound):
             issues.append(
                 f"Source column “{spoken_src}” is not on the selected source"
                 + (f" table {effective_table}" if effective_table else "")
                 + "."
             )
     if spoken_dst and (bind_dst_cols or dst_cols or dest_cat or dest_selected) and not dest_column:
-        if not dest_table_issue:
+        if not dest_table_issue and not (validation_sheet and validation_bound):
             issues.append(
                 f"Destination column “{spoken_dst}” is not on the selected destination"
                 + (f" table {effective_dest}" if effective_dest else "")
                 + "."
             )
-    if not spoken_src and kind not in _NO_SOURCE_OK:
+    if not spoken_src and kind not in _NO_SOURCE_OK and not (validation_sheet and validation_bound):
         issues.append("No source column was named.")
-    if not spoken_dst and kind not in _NO_DEST_OK:
+    if not spoken_dst and kind not in _NO_DEST_OK and not validation_sheet:
         issues.append("No destination column was named.")
     if classified.get("reason"):
         issues.append(str(classified["reason"]))
@@ -1091,6 +1346,8 @@ def _compile_row(
         ("dest_column", "Destination column"),
     ):
         method = str(methods.get(key) or "")
+        if validation_sheet and key == "dest_column":
+            continue
         if method and method not in GROUNDED_METHODS:
             weak_bind = True
             issues.append(
@@ -1098,7 +1355,10 @@ def _compile_row(
                 "match — confirm the binding."
             )
 
-    review_kinds = {"unknown", "join", "contract"}
+    structured_contract = bool(classified.get("contract")) and kind == "contract"
+    review_kinds = {"unknown", "join"}
+    if kind == "contract" and not structured_contract:
+        review_kinds = {"unknown", "join", "contract"}
     bind_fail = any(
         i.startswith("Source column")
         or i.startswith("Destination column")
@@ -1108,7 +1368,9 @@ def _compile_row(
         for i in issues
     ) or weak_bind or bool(table_issue) or bool(dest_table_issue)
     low_confidence_reason = bool(
-        classified.get("reason") and float(classified.get("confidence") or 0) < 0.9
+        classified.get("reason")
+        and float(classified.get("confidence") or 0) < 0.9
+        and not structured_contract
     )
     unnamed_zone = kind == "timezone" and not classified.get("zone")
     status = "executable"
@@ -1119,9 +1381,9 @@ def _compile_row(
     shape_step: dict[str, Any] | None = None
     extra_steps: list[dict[str, Any]] = []
     map_source = source_column
-    pairs = dict((lookup_pairs or {}).get((spoken_src, spoken_dst or spoken_src)) or {})
-    if not pairs and source_column and dest_column:
-        pairs = dict((lookup_pairs or {}).get((source_column, dest_column)) or {})
+    pairs = _pairs_for_edge(
+        lookup_pairs, spoken_src, spoken_dst, source_column, dest_column,
+    )
     if classified.get("mapping"):
         pairs = {**pairs, **classified["mapping"]}
     blocked_keys = {"unmapped", "unknown", "unmatched", "else", "*"}
@@ -1513,13 +1775,28 @@ def _compile_row(
             "options": {"value": classified.get("blank_default") or ""},
         })
 
-    if pairs and (
+    state_name_prose = "fifty-state" in str(classified.get("reason") or "").lower() or (
+        "lookup sheet of pairs" in str(classified.get("reason") or "").lower()
+    )
+    if pairs and not validation_sheet and (
         kind in {"direct", "lookup", ""}
-        or (kind == "unknown" and str(classified.get("reason") or "").startswith("lookup named"))
+        or (
+            kind == "unknown"
+            and (
+                str(classified.get("reason") or "").startswith("lookup named")
+                or state_name_prose
+            )
+        )
     ):
         kind = "lookup"
         transform = "none"
-        issues = [item for item in issues if "lookup named" not in item]
+        issues = [
+            item for item in issues
+            if "lookup named" not in item
+            and "fifty-state" not in item.lower()
+            and "lookup sheet of pairs" not in item.lower()
+            and "not a closed form" not in item.lower()
+        ]
         if (
             status == "needs_confirmation"
             and not bind_fail
@@ -1549,6 +1826,27 @@ def _compile_row(
             + ". G20 still refuses unmapped population codes — never silent identity."
         )
 
+    if kind == "contract":
+        shape_step = None
+        extra_steps = []
+        transform = "none"
+        map_source = dest_column or source_column or spoken_src
+        if structured_contract and validation_bound and status == "executable":
+            issues = [
+                item for item in issues
+                if not item.startswith("Marked required")
+                and not item.startswith("Marked unique")
+            ]
+
+    plane = "review"
+    if status == "executable":
+        plane = "validate" if kind == "contract" else (classified.get("plane") or "map")
+    confidence = float(classified.get("confidence") or 0)
+    if kind == "lookup" and pairs:
+        confidence = max(confidence, 0.99)
+    if kind == "direct":
+        confidence = max(confidence, 0.99)
+
     return {
         "source_table": effective_table or str(raw.get("source_table") or table_from_cell or source_table or ""),
         "source_column": source_column or spoken_src,
@@ -1556,15 +1854,17 @@ def _compile_row(
         "dest_table": effective_dest or str(raw.get("dest_table") or dest_from_cell or dest_table or ""),
         "dest_column": dest_column or spoken_dst,
         "rule_text": spoken_rule if catalog_name else rule_text,
-        "named_rule": catalog_name or "",
+        "named_rule": catalog_name or spoken_name or "",
         "resolved_rule": rule_text if catalog_name else "",
         "unknown_code_policy": (
             policy if (kind == "lookup" or pairs) else {"action": "refuse", "value": ""}
         ),
         "kind": kind,
         "kind_label": _KIND_LABEL.get(kind, kind),
-        "plane": "review" if status != "executable" else classified.get("plane") or "map",
-        "confidence": float(classified.get("confidence") or 0),
+        "interpretation": _interpretation_for(kind, classified),
+        "action": _action_for(status),
+        "plane": plane,
+        "confidence": confidence,
         "transform": transform,
         "engine_transform": (
             f"assume_timezone:{classified.get('zone')}"
@@ -1572,7 +1872,8 @@ def _compile_row(
             else ""
         ),
         "timezone": classified.get("zone") or "",
-        "code_crosswalk": pairs or None,
+        "code_crosswalk": None if kind == "contract" else (pairs or None),
+        "contract": classified.get("contract") if kind == "contract" else None,
         "date_format": classified.get("format") or "",
         "shape_step": shape_step if status == "executable" else None,
         "shape_steps": extra_steps if status == "executable" else [],
@@ -1615,6 +1916,8 @@ def _join_review_item(
         "rule_text": spoken or "join",
         "kind": "join",
         "kind_label": "Join (review)",
+        "interpretation": "Join (review)",
+        "action": "review",
         "plane": "review",
         "confidence": 0.4,
         "transform": "none",

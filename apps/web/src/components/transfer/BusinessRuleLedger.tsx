@@ -1,6 +1,8 @@
 import type { CompiledRule, RuleCompileReport } from "../../lib/businessRules";
 import {
   canAcceptAsDirect,
+  ruleActionLabel,
+  ruleConfidenceLabel,
   ruleReportSummary,
   ruleStatusLabel,
 } from "../../lib/businessRules";
@@ -28,9 +30,21 @@ function provenance(rule: CompiledRule): string {
   return "";
 }
 
-function reviewHint(rule: CompiledRule): string {
+function edgeLabel(rule: CompiledRule): string {
   if (rule.kind === "contract") {
-    return "Validate contract — confirm the mapping on Map. Validate fail-closes it. This is not a Transform write.";
+    const col = rule.dest_column || rule.source_column || "—";
+    const name = rule.named_rule ? ` · ${rule.named_rule}` : "";
+    return `${col}${name}`;
+  }
+  return `${rule.source_column || "—"} → ${rule.dest_column || "—"}`;
+}
+
+function reviewHint(rule: CompiledRule): string {
+  if (rule.kind === "contract" && rule.status === "executable") {
+    return "Destination validation — compiled IR, not a Transform write.";
+  }
+  if (rule.kind === "contract") {
+    return "Validate contract — confirm the column binding. This is not a Transform write.";
   }
   if (rule.kind === "join") {
     return "Joins stay in review — this compiler will not invent a grain.";
@@ -55,16 +69,15 @@ export function BusinessRuleLedger({
   return (
     <details className="df2-rule-ledger" open={open}>
       <summary>
-        <strong>Rules, line by line</strong>
+        <strong>Rule analysis</strong>
         <span>{ruleReportSummary(report)}</span>
       </summary>
       <p className="df2-rule-ledger-how">
-        Applied rows are already on this Transform recipe and on Map.
-        Review is required when the sentence is not a closed form, the
-        column did not bind to the selected schemas, or the row is a
-        Validate check (must not be null, must contain). Accept a bound
-        rename as Direct here — Map is where you remap or approve the rest.
-        Validate re-checks the population.
+        Closed-form rows compile to structured IR, then Transform / Map /
+        Validate execute them. Review is required when the sentence is not
+        a closed form or the column did not bind. Validate contracts never
+        write a destination column. Accept a leftover bound rename as Direct
+        here — Map is where you remap the rest.
       </p>
       {report.sheet_kinds?.length ? (
         <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
@@ -89,6 +102,12 @@ export function BusinessRuleLedger({
           ))}
         </ul>
       ) : null}
+      <div className="df2-rule-analysis-head" aria-hidden>
+        <span>Rule</span>
+        <span>Interpretation</span>
+        <span>Confidence</span>
+        <span>Action</span>
+      </div>
       <ol className="df2-rule-ledger-list">
         {report.rules.map((rule, index) => (
           <li
@@ -96,13 +115,16 @@ export function BusinessRuleLedger({
             className={`df2-rule-line ${lineClass(rule.status)}`}
           >
             <span className="df2-rule-line-meta">{provenance(rule) || `line ${index + 1}`}</span>
-            <span className="df2-rule-line-edge">
-              {rule.source_column || "—"}
-              <span aria-hidden> → </span>
-              {rule.dest_column || "—"}
+            <span className="df2-rule-line-edge">{edgeLabel(rule)}</span>
+            <span className="df2-rule-line-read">
+              {rule.interpretation || rule.kind_label}
+            </span>
+            <span className="df2-rule-line-confidence">{ruleConfidenceLabel(rule.confidence)}</span>
+            <span className={`df2-rule-line-action ${lineClass(rule.status)}`}>
+              {ruleActionLabel(rule.action, rule.status)}
             </span>
             <span className="df2-rule-line-text" title={rule.resolved_rule || rule.rule_text}>
-              {rule.named_rule
+              {rule.named_rule && rule.kind !== "contract"
                 ? `${rule.rule_text || rule.named_rule} → ${rule.resolved_rule || rule.named_rule}`
                 : (rule.rule_text || "(direct)")}
             </span>

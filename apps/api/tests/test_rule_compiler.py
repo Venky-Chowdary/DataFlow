@@ -17,6 +17,7 @@ from services.rule_compiler.classify import (
     parse_lookup,
     parse_lookup_spec,
     parse_sql_case,
+    parse_validate_check,
     unknown_code_policy,
     workbook_mask_to_strptime,
 )
@@ -65,6 +66,10 @@ def test_spoken_headers_fold_onto_compiler_columns():
     assert canonical_header("destination_column") == "dest_column"
     assert canonical_header("Join From") == "join_from"
     assert canonical_header("Business Rule") == "rule"
+    assert canonical_header("Validation_ID") == "rule_name"
+    assert canonical_header("Lookup_Type") == "source_column"
+    assert canonical_header("Source_Value") == "lookup_from"
+    assert canonical_header("Destination_Value") == "lookup_to"
 
 
 def test_resolve_name_fails_closed_on_short_or_ambiguous():
@@ -1435,12 +1440,22 @@ def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
     assert classify_rule("Map date to ISO")["kind"] != "direct"
     nulls = classify_rule("Must not be null")
     assert nulls["kind"] == "contract"
-    assert nulls["plane"] == "review"
+    assert nulls["plane"] == "validate"
+    assert nulls["contract"]["type"] == "not_null"
     contain = classify_rule("Must contain @")
     assert contain["kind"] == "contract"
+    assert contain["plane"] == "validate"
+    assert contain["contract"]["type"] == "contains"
+    domain = classify_rule("Must be ACTIVE, INACTIVE, or PENDING")
+    assert domain["contract"]["values"] == ["ACTIVE", "INACTIVE", "PENDING"]
+    assert classify_rule("Must be greater than 0")["contract"]["op"] == ">"
+    two = classify_rule("Must be a valid 2-letter state code")
+    assert two["contract"]["type"] == "pattern"
+    assert "fifty-state" in (two.get("reason") or "").lower()
     state = classify_rule("Convert full US state name to 2-letter code")
     assert state["kind"] == "unknown"
     assert "lookup" in state["reason"].lower()
+    assert parse_validate_check("Copy customer_id without modification") is None
 
     utf = classify_rule("convert to utf-8")
     assert utf["kind"] == "unknown"
@@ -1713,3 +1728,120 @@ def test_apply_projection_is_table_scoped_and_fail_closed():
     leaked_row = leaked["destinations"][0]["rows"][0] if leaked["destinations"][0]["rows"] else {}
     assert "email" not in leaked_row
     assert "birth_date" not in leaked_row
+
+
+def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
+    """The Datawrap sample: identity speech, STATE pairs, dest validation."""
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+    from services.rule_compiler.apply import apply_compiled_projection
+
+    src = [
+        "customer_id", "fname", "lname", "email", "status",
+        "state", "monthly_salary", "dob",
+    ]
+    dst = [
+        "customer_key", "first_name", "last_name", "email_address",
+        "customer_status", "state_code", "annual_salary", "birth_date",
+    ]
+    wb = Workbook()
+    mapping = wb.active
+    mapping.title = "Mapping_Rules"
+    mapping.append(["Rule_ID", "Source_Column", "Destination_Column", "Business_Rule"])
+    mapping.append(["R1", "customer_id", "customer_key", "Copy customer_id without modification"])
+    mapping.append(["R2", "fname", "first_name", "Map fname to first_name"])
+    mapping.append(["R3", "lname", "last_name", "Map lname to last_name"])
+    mapping.append(["R4", "email", "email_address", "Convert email to lowercase"])
+    mapping.append(["R5", "status", "customer_status", "A=ACTIVE; I=INACTIVE; P=PENDING"])
+    mapping.append(["R6", "state", "state_code", "Convert full US state name to 2-letter code"])
+    mapping.append(["R7", "monthly_salary", "annual_salary", "monthly_salary * 12"])
+    mapping.append(["R8", "dob", "birth_date", "Convert MM/DD/YYYY to YYYY-MM-DD"])
+    lookups = wb.create_sheet("Lookup_Tables")
+    lookups.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    for frm, to in (("A", "ACTIVE"), ("I", "INACTIVE"), ("P", "PENDING")):
+        lookups.append(["STATUS", frm, to])
+    for frm, to in (
+        ("North Carolina", "NC"), ("Texas", "TX"), ("California", "CA"),
+        ("New York", "NY"), ("Florida", "FL"),
+    ):
+        lookups.append(["STATE", frm, to])
+    checks = wb.create_sheet("Validation_Rules")
+    checks.append(["Validation_ID", "Column", "Rule", "Action"])
+    checks.append(["V001", "customer_key", "Must not be null", "QUARANTINE"])
+    checks.append(["V002", "email", "Must contain @", "QUARANTINE"])
+    checks.append(["V003", "status", "Must be ACTIVE, INACTIVE, or PENDING", "QUARANTINE"])
+    checks.append(["V004", "state", "Must be a valid 2-letter state code", "QUARANTINE"])
+    checks.append(["V005", "annual_salary", "Must be greater than 0", "QUARANTINE"])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    report = compile_rule_workbook(
+        "Datawrap_Sample.xlsx",
+        buf.getvalue(),
+        source_columns=src,
+        dest_columns=dst,
+    )
+    kinds = {item["sheet"]: item["kind"] for item in report["sheet_kinds"]}
+    assert kinds["Mapping_Rules"] == "rules"
+    assert kinds["Lookup_Tables"] == "lookups"
+    assert kinds["Validation_Rules"] == "validation"
+
+    by_src = {
+        r["source_column"]: r
+        for r in report["rules"]
+        if r.get("source_column") and r.get("kind") != "contract"
+    }
+    assert by_src["customer_id"]["kind"] == "direct"
+    assert by_src["customer_id"]["status"] == "executable"
+    assert by_src["customer_id"]["action"] == "auto"
+    assert by_src["fname"]["kind"] == "direct"
+    assert by_src["lname"]["kind"] == "direct"
+    assert by_src["email"]["kind"] == "email"
+    assert by_src["status"]["kind"] == "lookup"
+    assert by_src["status"]["code_crosswalk"]["A"] == "ACTIVE"
+    assert by_src["state"]["kind"] == "lookup"
+    assert by_src["state"]["status"] == "executable"
+    assert by_src["state"]["dest_column"] == "state_code"
+    assert by_src["state"]["code_crosswalk"]["Texas"] == "TX"
+    assert by_src["monthly_salary"]["kind"] == "derive"
+    assert by_src["dob"]["kind"] == "date"
+
+    contracts = [r for r in report["rules"] if r.get("kind") == "contract"]
+    assert len(contracts) == 5
+    assert all(r["status"] == "executable" for r in contracts)
+    assert all(r["plane"] == "validate" for r in contracts)
+    assert all(r["action"] == "auto" for r in contracts)
+    by_id = {r.get("named_rule"): r for r in contracts}
+    assert by_id["V001"]["dest_column"] == "customer_key"
+    assert by_id["V001"]["contract"]["type"] == "not_null"
+    assert by_id["V002"]["source_column"] == "email"
+    assert by_id["V002"]["contract"]["value"] == "@"
+    assert by_id["V005"]["dest_column"] == "annual_salary"
+    assert report["buckets"]["needs_confirmation"] <= 1
+    assert report["buckets"]["executable"] >= 13
+    assert "V001" not in (report.get("named_rules") or [])
+
+    rows = [
+        {
+            "customer_id": 1001, "fname": "John", "lname": "Smith",
+            "email": "john.smith@EXAMPLE.COM", "status": "A",
+            "state": "North Carolina", "monthly_salary": 5000, "dob": "01/15/2024",
+        },
+        {
+            "customer_id": 1002, "fname": "Mary", "lname": "Jones",
+            "email": "no-at-sign", "status": "I",
+            "state": "Texas", "monthly_salary": 6200, "dob": "03/22/2023",
+        },
+    ]
+    applied = apply_compiled_projection(
+        report, source_table="", rows=rows, source_columns=src,
+    )
+    dest = applied["destinations"][0]
+    assert dest["written"] == 1
+    image = dest["rows"][0]
+    assert image["customer_key"] == 1001
+    assert image["state_code"] == "NC"
+    assert image["annual_salary"] == 60000
+    assert image["birth_date"] == "2024-01-15"
+    assert image["customer_status"] == "ACTIVE"
+    assert any("contain" in (q.get("error") or "") for q in dest["quarantine"])
