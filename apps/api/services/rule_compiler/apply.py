@@ -148,10 +148,16 @@ def evaluate_contract(value: Any, contract: Mapping[str, Any], *, missing: bool)
         return None
     if kind == "pattern":
         pattern = str(contract.get("pattern") or "")
-        if pattern and re.fullmatch(pattern, str(value) or "") is None:
+        if not pattern:
+            return "contract pattern is missing"
+        try:
+            compiled = re.compile(pattern)
+        except re.error:
+            return "contract pattern is not executable"
+        if compiled.fullmatch(str(value) or "") is None:
             return "must match the compiled pattern"
         return None
-    return None
+    return "contract type is not executable"
 
 
 def _contract_value(

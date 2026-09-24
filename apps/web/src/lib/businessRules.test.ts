@@ -286,6 +286,8 @@ describe("operator accept of a review rule", () => {
     const next = acceptRuleAsDirect(report, 2);
     assert.equal(next.rules[2].status, "executable");
     assert.equal(next.rules[2].kind, "direct");
+    assert.equal(next.rules[2].interpretation, "Direct copy");
+    assert.equal(next.rules[2].action, "auto");
     assert.equal(next.buckets.executable, 3);
     assert.equal(next.buckets.needs_confirmation, 0);
     const mapped = mergeBusinessRules(seed, next);

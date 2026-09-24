@@ -1456,6 +1456,10 @@ def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
     assert state["kind"] == "unknown"
     assert "lookup" in state["reason"].lower()
     assert parse_validate_check("Copy customer_id without modification") is None
+    assert parse_validate_check("Must be a valid customer in the CRM") is None
+    assert parse_validate_check("Must be ACTIVE or PENDING")["contract"]["values"] == [
+        "ACTIVE", "PENDING",
+    ]
 
     utf = classify_rule("convert to utf-8")
     assert utf["kind"] == "unknown"
@@ -1848,3 +1852,59 @@ def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
         q.get("column") == "annual_salary" and ">" in (q.get("error") or "")
         for q in dest["quarantine"]
     )
+
+
+def test_validation_does_not_hide_unused_dest_or_attach_the_wrong_lookup():
+    from services.rule_compiler.apply import evaluate_contract
+
+    assert evaluate_contract(None, {"type": "mystery"}, missing=False) == "contract type is not executable"
+    assert evaluate_contract("", {"type": "not_null"}, missing=False) == "must not be null"
+    assert evaluate_contract("NC", {"type": "pattern", "pattern": r"^[A-Za-z]{2}$"}, missing=False) is None
+
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    rules = wb.active
+    rules.title = "Mapping_Rules"
+    rules.append(["Source_Column", "Destination_Column", "Business_Rule"])
+    rules.append(["fname", "first_name", "Direct"])
+    rules.append(["status", "customer_status", "A=ACTIVE; I=INACTIVE"])
+    lookups = wb.create_sheet("Lookup_Tables")
+    lookups.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    lookups.append(["STATE", "Texas", "TX"])
+    lookups.append(["STATE", "Florida", "FL"])
+    checks = wb.create_sheet("Validation_Rules")
+    checks.append(["Validation_ID", "Column", "Rule", "Action"])
+    checks.append(["V001", "notes", "Must not be null", "QUARANTINE"])
+    checks.append(["V099", "ghost_col", "Must not be null", "QUARANTINE"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    report = compile_rule_workbook(
+        "honesty.xlsx",
+        buf.getvalue(),
+        source_columns=["fname", "status", "state"],
+        dest_columns=["first_name", "customer_status", "state_code", "notes"],
+    )
+    kinds = {item["sheet"]: item["kind"] for item in report["sheet_kinds"]}
+    assert kinds["Validation_Rules"] == "validation"
+    status = next(r for r in report["rules"] if r.get("source_column") == "status" and r.get("kind") != "contract")
+    assert status["kind"] == "lookup"
+    assert status["code_crosswalk"] == {"A": "ACTIVE", "I": "INACTIVE"}
+    assert "Texas" not in (status.get("code_crosswalk") or {})
+    fname = next(r for r in report["rules"] if r.get("source_column") == "fname")
+    assert fname["kind"] == "direct"
+    assert not fname.get("code_crosswalk")
+    assert "notes" in report["unused_dest_columns"]
+    assert "notes" not in {
+        col
+        for item in report.get("projection") or []
+        for col in (c.get("dest_column") for c in item.get("columns") or [])
+    }
+    ghost = next(r for r in report["rules"] if r.get("named_rule") == "V099")
+    assert ghost["status"] == "needs_confirmation"
+    assert ghost["action"] == "review"
+    notes = next(r for r in report["rules"] if r.get("named_rule") == "V001")
+    assert notes["status"] == "executable"
+    assert notes["dest_column"] == "notes"
+    assert notes["kind"] == "contract"

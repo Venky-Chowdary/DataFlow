@@ -563,20 +563,28 @@ def parse_validate_check(text: str) -> dict[str, Any] | None:
     listed = _VALIDATE_IN_SET.match(raw)
     if listed:
         body = (listed.group("body") or "").strip()
-        values = [
-            part.strip().strip("\"'")
-            for part in re.split(r"\s*(?:,|\bor\b)\s*", body)
-            if part.strip() and part.strip().lower() not in {"one", "of"}
-        ]
-        values = [item for item in values if re.fullmatch(r"[A-Za-z0-9_.-]+", item or "")]
-        if len(values) >= 2:
-            return {
-                "kind": "contract",
-                "plane": "validate",
-                "confidence": 0.98,
-                "interpretation": "In-set domain",
-                "contract": {"type": "in_set", "values": values},
+        if "," in body or re.search(r"\bor\b", body, re.I):
+            values = [
+                part.strip().strip("\"'")
+                for part in re.split(r"\s*(?:,|\bor\b)\s*", body)
+                if part.strip() and part.strip().lower() not in {"one", "of"}
+            ]
+            values = [item for item in values if re.fullmatch(r"[A-Za-z0-9_.-]+", item or "")]
+            prose = {
+                "the", "valid", "an", "in", "on", "for", "to", "and",
+                "customer", "value", "values", "field", "column",
             }
+            if (
+                len(values) >= 2
+                and not any(item.lower() in prose for item in values)
+            ):
+                return {
+                    "kind": "contract",
+                    "plane": "validate",
+                    "confidence": 0.98,
+                    "interpretation": "In-set domain",
+                    "contract": {"type": "in_set", "values": values},
+                }
     return None
 
 

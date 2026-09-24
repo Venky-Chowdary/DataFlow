@@ -479,6 +479,7 @@ def compile_rule_workbook(
             )
             _refuse_preload_on_history(item, sync)
             _mark_edge_conflicts(item, seen_edges, seen_dest)
+            _refresh_status_fields(item)
             compiled.append(item)
             for step in _item_shape_steps(item):
                 shape_steps.append(step)
@@ -528,6 +529,7 @@ def compile_rule_workbook(
             dest_types=dst_types,
         )
         _refuse_preload_on_history(synthetic, sync)
+        _refresh_status_fields(synthetic)
         compiled.append(synthetic)
 
     derived_columns = _derived_columns(compiled, dst_cols)
@@ -551,6 +553,7 @@ def compile_rule_workbook(
             sheet_kind="validation",
             extra_columns=derived_columns,
         )
+        _refresh_status_fields(item)
         compiled.append(item)
 
     overflow_steps: list[dict[str, Any]] = []
@@ -577,9 +580,17 @@ def compile_rule_workbook(
         "needs_confirmation": sum(1 for r in compiled if r["status"] == "needs_confirmation"),
         "conflict": sum(1 for r in compiled if r["status"] == "conflict"),
     }
-    named_dest = {fold(r["dest_column"]) for r in compiled if r.get("dest_column")}
+    named_dest = {
+        fold(r["dest_column"])
+        for r in compiled
+        if r.get("dest_column") and r.get("kind") != "contract"
+    }
     unused_dest = [c for c in dst_cols if fold(c) not in named_dest]
-    accounted_src = {fold(r["source_column"]) for r in compiled if r.get("source_column")}
+    accounted_src = {
+        fold(r["source_column"])
+        for r in compiled
+        if r.get("source_column") and r.get("kind") not in {"contract", "join"}
+    }
     unmapped_src = [c for c in src_cols if fold(c) not in accounted_src]
     return {
         "filename": filename,
@@ -800,16 +811,13 @@ def _pairs_for_edge(
                 src_hits.append(dict(mapping))
     if len(src_hits) == 1:
         return src_hits[0]
+    dest_labels = [label for label in (spoken_dst, dest_column) if label]
     dest_hits: list[dict[str, str]] = []
     dest_seen: set[tuple[str, ...]] = set()
     for (src, dst), mapping in store.items():
-        if not mapping:
+        if not mapping or not dest_labels:
             continue
-        labels = [label for label in (spoken_src, spoken_dst, source_column, dest_column) if label]
-        if not any(
-            name_similarity(dst, label) >= 0.72 or name_similarity(src, label) >= 0.72
-            for label in labels
-        ):
+        if not any(fold(dst) == fold(label) or fold(src) == fold(label) for label in dest_labels):
             continue
         fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
         if fingerprint not in dest_seen:
@@ -839,6 +847,14 @@ def _action_for(status: str) -> str:
     if status == "conflict":
         return "conflict"
     return "review"
+
+
+def _refresh_status_fields(item: dict[str, Any]) -> None:
+    """Keep action / plane honest after conflict or CDC preload refuse."""
+    status = str(item.get("status") or "")
+    item["action"] = _action_for(status)
+    if status != "executable":
+        item["plane"] = "review"
 
 
 def _interpretation_for(kind: str, classified: dict[str, Any] | None = None) -> str:

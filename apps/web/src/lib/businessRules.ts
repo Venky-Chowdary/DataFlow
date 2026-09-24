@@ -346,6 +346,8 @@ export function acceptRuleAsDirect(
           ...rule,
           kind: "direct",
           kind_label: "Direct map",
+          interpretation: "Direct copy",
+          action: "auto",
           plane: "map",
           transform: "none",
           status: "executable",

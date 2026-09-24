@@ -102,7 +102,8 @@ export function BusinessRuleLedger({
           ))}
         </ul>
       ) : null}
-      <div className="df2-rule-analysis-head" aria-hidden>
+      <div className="df2-rule-analysis-head">
+        <span>Line</span>
         <span>Rule</span>
         <span>Interpretation</span>
         <span>Confidence</span>
