@@ -5,8 +5,12 @@ import {
   describeStep,
   fieldsFor,
   linesToList,
+  draftOptionsForWire,
+  isBlankOption,
   missingRequired,
   moveStep,
+  parseNumberOption,
+  settleExpressionCheck,
   operationsByFamily,
   previewSampleNote,
   continueTransformState,
@@ -115,6 +119,26 @@ test("a missing required option is named before the step can be added", () => {
   // Zero is a real answer: round to no decimal places.
   assert.equal(missingRequired(ROUND, "arr_time", { places: 0 }), "");
   assert.match(missingRequired(FILTER, "", { condition: "" }), /Condition is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: Number.NaN }), /Decimal places is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: Number.POSITIVE_INFINITY }), /Decimal places is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: "abc" }), /Decimal places is required/);
+});
+
+test("number option drafts keep the typed text until they are a finite number", () => {
+  assert.equal(parseNumberOption(""), "");
+  assert.equal(parseNumberOption("  "), "");
+  assert.equal(parseNumberOption("8"), 8);
+  assert.equal(parseNumberOption("0"), 0);
+  assert.equal(parseNumberOption("abc"), "abc");
+  assert.equal(isBlankOption("places", "abc"), true);
+  assert.equal(isBlankOption("places", 0), false);
+  assert.deepEqual(draftOptionsForWire({ places: Number.NaN, mode: "upper" }), { mode: "upper" });
+});
+
+test("a stale expression compile must not settle over a newer keystroke", () => {
+  assert.equal(settleExpressionCheck(1, 2, { valid: false, error: "stale" }), undefined);
+  assert.equal(settleExpressionCheck(2, 2, { valid: true }), "");
+  assert.equal(settleExpressionCheck(2, 2, { valid: false, error: "bad token" }), "bad token");
 });
 
 test("a one-per-line list drops blank lines and surrounding space", () => {

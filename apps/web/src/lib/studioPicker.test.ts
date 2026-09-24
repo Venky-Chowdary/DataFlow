@@ -48,5 +48,19 @@ describe("Transform step builder uses the studio picker", () => {
     assert.match(builder, /disabled=\{!canPlan \|\| !operation \|\| Boolean\(missing\)/);
     assert.match(builder, /is-invalid/);
     assert.match(builder, /role="alert"/);
+    assert.match(builder, /settleExpressionCheck/);
+    assert.match(builder, /parseNumberOption/);
+  });
+
+  it("the multi-column picker owns the same listbox keys as the single picker", () => {
+    const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const picker = readFileSync(join(webRoot, "components/ui/StudioPicker.tsx"), "utf8");
+    const multi = picker.slice(picker.indexOf("export function StudioMultiPicker"));
+    assert.match(multi, /const onKeyDown/);
+    assert.match(multi, /Escape/);
+    assert.match(multi, /ArrowDown/);
+    assert.match(multi, /ArrowUp/);
+    assert.match(multi, /Enter/);
+    assert.match(multi, /onKeyDown=\{onKeyDown\}/);
   });
 });

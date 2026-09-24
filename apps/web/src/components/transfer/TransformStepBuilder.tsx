@@ -1,13 +1,17 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { StudioMultiPicker, StudioPicker } from "../ui/StudioPicker";
 import { checkShapeExpression } from "../../lib/api";
 import type { StudioPickerOption } from "../../lib/studioPicker";
 import {
+  draftOptionsForWire,
   fieldsFor,
+  isBlankOption,
   linesToList,
   missingRequired,
   operationsByFamily,
+  parseNumberOption,
+  settleExpressionCheck,
   type ShapeCatalog,
   type ShapeOperation,
   type ShapeStepWire,
@@ -45,6 +49,7 @@ export function TransformStepBuilder({
   const [error, setError] = useState("");
   const [expressionError, setExpressionError] = useState("");
   const [showFunctions, setShowFunctions] = useState(false);
+  const expressionGen = useRef(0);
 
   const operation: ShapeOperation | undefined = useMemo(
     () => catalog?.operations.find((entry) => entry.op === op),
@@ -90,19 +95,12 @@ export function TransformStepBuilder({
   const blankRequired = useMemo(() => {
     if (!operation) return new Set<string>();
     return new Set(
-      operation.required.filter((name) => {
-        const value = options[name];
-        return (
-          value === undefined
-          || value === null
-          || value === ""
-          || (Array.isArray(value) && value.length === 0)
-        );
-      }),
+      operation.required.filter((name) => isBlankOption(name, options[name])),
     );
   }, [operation, options]);
 
   const reset = useCallback(() => {
+    expressionGen.current += 1;
     setOp("");
     setColumn("");
     setOptions({});
@@ -113,15 +111,20 @@ export function TransformStepBuilder({
   }, []);
 
   const validateExpression = useCallback(async (text: string) => {
+    const requestId = ++expressionGen.current;
     if (!text.trim()) {
       setExpressionError("");
       return;
     }
     try {
       const answer = await checkShapeExpression({ expression: text, source_columns: columns });
-      setExpressionError(answer.valid ? "" : (answer.error ?? "Expression is not valid."));
+      const next = settleExpressionCheck(requestId, expressionGen.current, answer);
+      if (next !== undefined) setExpressionError(next);
     } catch (err) {
-      setExpressionError(err instanceof Error ? err.message : String(err));
+      const next = settleExpressionCheck(requestId, expressionGen.current, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (next !== undefined) setExpressionError(next);
     }
   }, [columns]);
 
@@ -139,7 +142,7 @@ export function TransformStepBuilder({
       setError(expressionError);
       return;
     }
-    const step: ShapeStepWire = { op: operation.op, options };
+    const step: ShapeStepWire = { op: operation.op, options: draftOptionsForWire(options) };
     if (operation.needs_column) step.column = column;
     if (label.trim()) step.label = label.trim();
     if (policy !== "refuse") step.on_error = policy;
@@ -191,7 +194,13 @@ export function TransformStepBuilder({
             placeholder="Search trim, parse date, filter…"
             disabled={!canPlan || !catalog}
             emptyHint="No operation matches that search."
-            onChange={(next) => { setOp(next); setOptions({}); setError(""); setExpressionError(""); }}
+            onChange={(next) => {
+              expressionGen.current += 1;
+              setOp(next);
+              setOptions({});
+              setError("");
+              setExpressionError("");
+            }}
             hint={operation
               ? `${operation.op}${operation.expands
                 ? " · adds rows (unnest) — dest COUNT is the expanded image, not a surplus"
@@ -323,9 +332,7 @@ export function TransformStepBuilder({
                       const raw = e.target.value;
                       setOptions({
                         ...options,
-                        [field.name]: field.kind === "number"
-                          ? (raw.trim() === "" ? "" : Number(raw))
-                          : raw,
+                        [field.name]: field.kind === "number" ? parseNumberOption(raw) : raw,
                       });
                     }}
                   />

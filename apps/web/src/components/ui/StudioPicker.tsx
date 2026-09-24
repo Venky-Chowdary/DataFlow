@@ -314,6 +314,7 @@ export function StudioMultiPicker({
   const controlRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -339,14 +340,45 @@ export function StudioMultiPicker({
   }, [open]);
 
   useEffect(() => {
-    if (open && searchable) {
-      window.requestAnimationFrame(() => searchRef.current?.focus());
-    }
+    setActiveIndex(0);
+  }, [query, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    window.requestAnimationFrame(() => {
+      if (searchable) searchRef.current?.focus();
+      if (listRef.current) listRef.current.scrollTop = 0;
+    });
   }, [open, searchable]);
 
   const toggle = (next: string) => {
     if (value.includes(next)) onChange(value.filter((item) => item !== next));
     else onChange([...value, next]);
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      controlRef.current?.focus();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (!open) setOpen(true);
+      else setActiveIndex((index) => Math.min(index + 1, Math.max(filtered.length - 1, 0)));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((index) => Math.max(index - 1, 0));
+      return;
+    }
+    const typing = event.target instanceof HTMLInputElement;
+    if ((event.key === "Enter" || (event.key === " " && !typing)) && open && filtered[activeIndex]) {
+      event.preventDefault();
+      toggle(filtered[activeIndex].value);
+    }
   };
 
   const menu = open && box
@@ -359,6 +391,7 @@ export function StudioMultiPicker({
           aria-multiselectable="true"
           aria-label={label}
           style={{ top: box.top, left: box.left, width: box.width, maxHeight: box.maxHeight }}
+          onKeyDown={onKeyDown}
         >
           {searchable && (
             <div className="df2-studio-picker-search">
@@ -375,7 +408,7 @@ export function StudioMultiPicker({
               />
             </div>
           )}
-          <div className="df2-studio-picker-list">
+          <div ref={listRef} className="df2-studio-picker-list">
             {filtered.length === 0 ? (
               <p className="df2-studio-picker-empty">{emptyHint}</p>
             ) : filtered.map((opt, index) => {
@@ -417,6 +450,7 @@ export function StudioMultiPicker({
           aria-controls={listId}
           aria-invalid={invalid || undefined}
           onClick={() => { if (!disabled) setOpen((next) => !next); }}
+          onKeyDown={onKeyDown}
         >
           <span className={`df2-studio-picker-value${selected.length ? "" : " is-placeholder"}`}>
             {selected.length
