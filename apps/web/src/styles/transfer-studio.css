@@ -9023,8 +9023,26 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-rule-map-banner[open] {
   max-height: min(58vh, 560px);
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: scroll;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #0f766e #ccfbf1;
+}
+
+.df2-rule-map-banner[open]::-webkit-scrollbar {
+  width: 10px;
+}
+
+.df2-rule-map-banner[open]::-webkit-scrollbar-track {
+  background: #ccfbf1;
+  border-radius: 8px;
+}
+
+.df2-rule-map-banner[open]::-webkit-scrollbar-thumb {
+  background: #0f766e;
+  border-radius: 8px;
+  border: 2px solid #ccfbf1;
 }
 
 .df2-rule-map-banner > summary {

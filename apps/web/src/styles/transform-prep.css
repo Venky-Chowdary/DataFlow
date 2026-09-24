@@ -1328,9 +1328,9 @@
 .df2-rule-line-tags {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(3, minmax(8.5rem, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  width: min(100%, 28.5rem);
+  width: 100%;
 }
 .df2-rule-tag {
   display: inline-flex;

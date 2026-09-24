@@ -376,6 +376,7 @@ describe("Transfer Studio chrome contracts", () => {
     const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
     const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+    const ledgerCss = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
 
     assert.match(mapStep, /\{continueToValidate\}/);
     assert.match(mapStep, /Continue to Validate →/);
@@ -383,7 +384,11 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(mapStep, /df2-rule-honesty/);
     assert.match(mapStep, /embedded/);
     assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
-    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*auto/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*scroll/);
+    assert.match(studio, /df2-rule-map-banner\[open\]::-webkit-scrollbar/);
+    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*width:\s*100%/);
+    assert.match(ledgerCss, /df2-rule-tag[\s\S]*width:\s*100%/);
     assert.doesNotMatch(mapStep, /footerAction=/);
     assert.doesNotMatch(review, /footerAction/);
     assert.match(review, /pages > 1 &&/);
