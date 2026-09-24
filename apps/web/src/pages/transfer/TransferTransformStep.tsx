@@ -408,9 +408,10 @@ export function TransferTransformStep({
             Upload the mapping workbook (Excel, CSV, TSV or JSON). Headers are
             inferred from the file and the schemas you already selected — not a
             fixed column list. Closed-form rows compile onto this recipe and
-            Map. Anything we cannot execute stays in review —             unused
-            destination columns are not written.
-            Applied rows land on this recipe and Map immediately.
+            Map. Destination names land on Map — this catalog stays the
+            pre-load image (source names plus derived columns). Anything we
+            cannot execute stays in review — unused destination columns are
+            not written. Applied rows land on this recipe and Map immediately.
             Closed-form Validate checks compile as destination contracts
             — they never write. Review is for sentences that are not a
             closed form or did not bind. Accept as Direct on a leftover
@@ -570,8 +571,9 @@ export function TransferTransformStep({
           </header>
           {kitchen.from === "shaped" ? (
             <p className="df2-xform-note">
-              These columns are the transformed image — what Map and the writer will see, including
-              columns an unnest or flatten just produced.
+              These columns are the pre-load image — source names plus columns
+              this recipe just derived. Destination names (customer_key,
+              first_name, …) land on Map. Validate contracts never write.
             </p>
           ) : profile?.sample_notice ? (
             <p className="df2-xform-note">{profile.sample_notice}</p>
@@ -792,7 +794,7 @@ export function TransferTransformStep({
             </div>
           </div>
           <div className="df2-xform-gridpane">
-            <h4>Transformed — what Map and the writer will see</h4>
+            <h4>Pre-load image — source names plus derived columns. Map renames to destination names.</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
                 {steps.length ? "No rows survive the recipe on this sample." : "Nothing transformed yet."}

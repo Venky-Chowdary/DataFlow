@@ -1821,8 +1821,16 @@ def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
     assert by_id["V002"]["source_column"] == "email"
     assert by_id["V002"]["contract"]["value"] == "@"
     assert by_id["V005"]["dest_column"] == "annual_salary"
+    assert by_id["V001"].get("on_fail") == "quarantine"
+    assert all(r.get("dest_column") != "QUARANTINE" for r in contracts)
+    action_roles = [item for item in report["header_roles"] if item["header"] == "Action"]
+    assert action_roles
+    assert all(item["role"] == "action" for item in action_roles)
     assert report["buckets"]["needs_confirmation"] <= 1
     assert report["buckets"]["executable"] >= 13
+    assert report["coverage"]["detected"] == report["rule_count"]
+    if report["buckets"]["needs_confirmation"] == 0 and report["buckets"]["conflict"] == 0:
+        assert report["coverage"]["percent"] == 100
     assert "V001" not in (report.get("named_rules") or [])
 
     rows = [
@@ -1908,3 +1916,161 @@ def test_validation_does_not_hide_unused_dest_or_attach_the_wrong_lookup():
     assert notes["status"] == "executable"
     assert notes["dest_column"] == "notes"
     assert notes["kind"] == "contract"
+    assert notes.get("on_fail") == "quarantine"
+
+
+def test_level2_closed_forms_stay_honest_on_join_and_lookup():
+    """Level-2: conditionals, concat, cleanse, unique — JOIN and lookup() stay review."""
+    from services.rule_compiler.apply import apply_compiled_projection
+    from services.rule_compiler.classify import classify_rule, parse_spoken_if, parse_validate_check
+
+    spoken = parse_spoken_if(
+        "IF status = 'A' AND account_type = 'PREMIUM' THEN customer_segment = 'VIP' ELSE customer_segment = 'STANDARD'"
+    )
+    assert spoken and spoken["kind"] == "derive"
+    assert "if(" in spoken["expression"]
+    assert spoken.get("dest_hint") == "customer_segment"
+
+    concat = classify_rule("first_name + ' ' + last_name")
+    assert concat["kind"] == "concat"
+    assert concat["columns"] == ["first_name", "last_name"]
+    assert concat["separator"] == " "
+
+    digits = classify_rule("REMOVE_NON_NUMERIC(phone)")
+    assert digits["kind"] == "replace"
+    assert digits.get("regex") is True
+
+    unique = parse_validate_check("customer_id must be unique")
+    assert unique and unique["contract"]["type"] == "unique"
+    email = parse_validate_check("email must be valid")
+    assert email and email["contract"]["type"] == "pattern"
+    exist = parse_validate_check("state_code must exist in lookup")
+    assert exist and exist["contract"]["type"] == "in_lookup"
+    lookup_if = classify_rule("IF state = 'NC' THEN tax_rate = 0.0475 ELSE tax_rate = lookup(state)")
+    assert lookup_if["kind"] == "unknown"
+
+    src = [
+        "first_name", "last_name", "status", "account_type", "phone",
+        "name", "country", "email", "termination_date", "department_id",
+        "customer_id", "salary", "state", "raw_phone",
+    ]
+    dst = [
+        "given_name", "surname", "customer_segment", "full_name", "phone",
+        "name", "country", "email_address", "employee_status", "department_name",
+        "customer_key", "salary", "state_code", "phone_digits",
+    ]
+    csv = (
+        "Source_Column,Destination_Column,Business_Rule,Join_From,Join_On\n"
+        "first_name,given_name,Direct,,\n"
+        "last_name,surname,Direct,,\n"
+        "status,customer_segment,IF status = 'A' AND account_type = 'PREMIUM' THEN customer_segment = 'VIP' ELSE customer_segment = 'STANDARD',,\n"
+        "first_name,full_name,first_name + ' ' + last_name,,\n"
+        "phone,phone,IF phone IS NULL THEN phone = 'UNKNOWN',,\n"
+        "name,name,TRIM(name),,\n"
+        "country,country,UPPER(country),,\n"
+        "email,email_address,LOWER(email),,\n"
+        "raw_phone,phone_digits,REMOVE_NON_NUMERIC(phone),,\n"
+        "termination_date,employee_status,IF termination_date IS NULL THEN employee_status = 'ACTIVE' ELSE employee_status = 'TERMINATED',,\n"
+        "department_id,department_name,Direct,,\n"
+        "customer_id,customer_key,Direct,Orders,customer_id = orders.customer_id\n"
+    )
+    report = compile_rule_workbook(
+        "level2.csv",
+        csv.encode(),
+        source_columns=src,
+        dest_columns=dst,
+    )
+    by_dest = {r["dest_column"]: r for r in report["rules"] if r.get("status") == "executable"}
+    assert by_dest["given_name"]["kind"] == "direct"
+    assert by_dest["customer_segment"]["kind"] == "derive"
+    assert by_dest["full_name"]["kind"] == "concat"
+    assert by_dest["full_name"]["shape_step"]["options"]["separator"] == " "
+    assert by_dest["phone"]["kind"] == "default"
+    assert by_dest["phone_digits"]["kind"] == "replace"
+    assert by_dest["employee_status"]["kind"] == "derive"
+    assert any(r["kind"] == "join" and r["status"] == "needs_confirmation" for r in report["rules"])
+    assert report["coverage"]["percent"] < 100
+    assert "does not invent a source_query" in " ".join(
+        " ".join(r.get("issues") or []) for r in report["rules"] if r.get("kind") == "join"
+    ).lower()
+
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    mapping = wb.active
+    mapping.title = "Mapping_Rules"
+    mapping.append(["Source_Column", "Destination_Column", "Business_Rule"])
+    mapping.append(["department_id", "department_name", "Direct"])
+    mapping.append(["state", "state_code", "Direct"])
+    lookups = wb.create_sheet("Lookup_Tables")
+    lookups.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    lookups.append(["department_id", "10", "Finance"])
+    lookups.append(["department_id", "20", "Engineering"])
+    lookups.append(["state", "NC", "NC"])
+    lookups.append(["state", "TX", "TX"])
+    checks = wb.create_sheet("Validation_Rules")
+    checks.append(["Validation_ID", "Column", "Rule", "Action"])
+    checks.append(["V001", "customer_key", "Must be unique", "QUARANTINE"])
+    checks.append(["V002", "email_address", "Must be a valid email", "QUARANTINE"])
+    checks.append(["V003", "salary", "Must be greater than or equal to 0", "QUARANTINE"])
+    checks.append(["V004", "state_code", "Must exist in lookup", "QUARANTINE"])
+    checks.append(["V005", "ghost", "Must exist in lookup", "QUARANTINE"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    bound = compile_rule_workbook(
+        "level2-validate.xlsx",
+        buf.getvalue(),
+        source_columns=["department_id", "state", "email", "salary", "customer_id"],
+        dest_columns=["department_name", "state_code", "email_address", "salary", "customer_key"],
+    )
+    by_id = {r.get("named_rule"): r for r in bound["rules"] if r.get("kind") == "contract"}
+    assert by_id["V001"]["contract"]["type"] == "unique"
+    assert by_id["V001"]["status"] == "executable"
+    assert by_id["V001"]["dest_column"] == "customer_key"
+    assert by_id["V001"].get("on_fail") == "quarantine"
+    assert by_id["V002"]["contract"]["type"] == "pattern"
+    assert by_id["V003"]["contract"]["op"] == ">="
+    assert by_id["V004"]["status"] == "executable"
+    assert by_id["V004"]["contract"]["type"] == "in_set"
+    assert set(by_id["V004"]["contract"]["values"]) == {"NC", "TX"}
+    assert by_id["V005"]["status"] == "needs_confirmation"
+    dept = next(r for r in bound["rules"] if r.get("source_column") == "department_id" and r.get("kind") != "contract")
+    assert dept["kind"] == "lookup"
+    assert dept["code_crosswalk"]["10"] == "Finance"
+    action_roles = [item for item in bound["header_roles"] if item["header"] == "Action"]
+    assert action_roles and all(item["role"] == "action" for item in action_roles)
+
+    unique_report = compile_rule_workbook(
+        "unique.csv",
+        (
+            "Source_Column,Destination_Column,Business_Rule\n"
+            "customer_id,customer_key,Direct\n"
+        ).encode(),
+        source_columns=["customer_id"],
+        dest_columns=["customer_key"],
+    )
+    unique_report["rules"].append({
+        "source_column": "customer_id",
+        "dest_column": "customer_key",
+        "kind": "contract",
+        "status": "executable",
+        "plane": "validate",
+        "contract": {"type": "unique"},
+        "source_table": "",
+        "dest_table": "",
+    })
+    applied = apply_compiled_projection(
+        unique_report,
+        source_table="",
+        rows=[
+            {"customer_id": "1001"},
+            {"customer_id": "1001"},
+            {"customer_id": "1002"},
+        ],
+        source_columns=["customer_id"],
+    )
+    dest = applied["destinations"][0]
+    assert dest["written"] == 1
+    assert dest["rows"][0]["customer_key"] == "1002"
+    assert sum(1 for q in dest["quarantine"] if q.get("error") == "must be unique") == 2

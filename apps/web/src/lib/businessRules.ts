@@ -36,8 +36,19 @@ export interface CompiledRule {
   date_format?: string;
   named_rule?: string;
   resolved_rule?: string;
+  on_fail?: string;
   unknown_code_policy?: { action: string; value?: string };
   provenance?: { sheet?: string; row?: number };
+}
+
+export interface RuleCoverage {
+  detected: number;
+  executable: number;
+  review: number;
+  conflict: number;
+  writes: number;
+  validations: number;
+  percent: number;
 }
 
 export interface HeaderRoleEvidence {
@@ -57,6 +68,7 @@ export interface RuleCompileReport {
     needs_confirmation: number;
     conflict: number;
   };
+  coverage?: RuleCoverage;
   unused_dest_columns: string[];
   unused_dest_count: number;
   unmapped_source_columns?: string[];
@@ -94,10 +106,44 @@ function asTransform(value: string | undefined): MappingTransform {
   return (known as string[]).includes(value || "") ? (value as MappingTransform) : "none";
 }
 
+export function namedRuleDisplay(rule: CompiledRule): string {
+  if (rule.named_rule) {
+    const text = (rule.resolved_rule || rule.rule_text || "").trim();
+    return text ? `${rule.named_rule} · ${text}` : rule.named_rule;
+  }
+  return rule.rule_text || "(direct)";
+}
+
+export function proofRuleClaim(report: RuleCompileReport): string {
+  const executable = report.coverage?.executable ?? report.buckets.executable;
+  const review = report.coverage?.review ?? report.buckets.needs_confirmation;
+  const conflict = report.coverage?.conflict ?? report.buckets.conflict;
+  if (review || conflict) {
+    return `Migration compiled ${executable} executable business rule(s); review remains`;
+  }
+  return `Migration verified against ${executable} business rules`;
+}
+
+function coverageFromRules(rules: CompiledRule[]): RuleCoverage {
+  const detected = rules.length;
+  const executable = rules.filter((rule) => rule.status === "executable").length;
+  const review = rules.filter((rule) => rule.status === "needs_confirmation").length;
+  const conflict = rules.filter((rule) => rule.status === "conflict").length;
+  return {
+    detected,
+    executable,
+    review,
+    conflict,
+    writes: rules.filter((rule) => (
+      rule.status === "executable" && !["contract", "omit", "join"].includes(rule.kind)
+    )).length,
+    validations: rules.filter((rule) => rule.status === "executable" && rule.kind === "contract").length,
+    percent: detected ? Math.round((100 * executable) / detected) : 0,
+  };
+}
+
 export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
-  const expanded = rule.named_rule && rule.resolved_rule
-    ? `${rule.rule_text} → ${rule.resolved_rule}`
-    : rule.rule_text;
+  const expanded = namedRuleDisplay(rule);
   return {
     kind: rule.kind,
     kindLabel: rule.kind_label,
@@ -253,9 +299,12 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const projection = report.projection?.length
     ? ` · ${report.projection.length} source table(s) projected`
     : "";
+  const coverage = report.coverage
+    ? ` · rule coverage ${report.coverage.percent}%`
+    : "";
   return (
     `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${unused}${unmapped}${truncated}${inferred}${named}${projection}`
+    + `${needs_confirmation} need review · ${conflict} conflict${coverage}${unused}${unmapped}${truncated}${inferred}${named}${projection}`
   );
 }
 
@@ -356,13 +405,16 @@ export function acceptRuleAsDirect(
         }
       : rule
   ));
+  const buckets = {
+    executable: rules.filter((rule) => rule.status === "executable").length,
+    needs_confirmation: rules.filter((rule) => rule.status === "needs_confirmation").length,
+    conflict: rules.filter((rule) => rule.status === "conflict").length,
+  };
   return {
     ...report,
     rules,
-    buckets: {
-      executable: rules.filter((rule) => rule.status === "executable").length,
-      needs_confirmation: rules.filter((rule) => rule.status === "needs_confirmation").length,
-      conflict: rules.filter((rule) => rule.status === "conflict").length,
-    },
+    buckets,
+    coverage: coverageFromRules(rules),
+    rule_count: rules.length,
   };
 }

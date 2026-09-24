@@ -8,6 +8,8 @@ import {
   canAcceptAsDirect,
   mergeBusinessRules,
   mergeCompiledShapeSteps,
+  namedRuleDisplay,
+  proofRuleClaim,
   ruleReportSummary,
   ruleToEvidence,
   type CompiledRule,
@@ -98,6 +100,38 @@ describe("mergeBusinessRules", () => {
   it("summarises unused dest columns as not written", () => {
     assert.match(ruleReportSummary(report), /2 executable/);
     assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
+  });
+
+  it("shows named rules as R001 · text and honest coverage without inventing execution", () => {
+    const named: CompiledRule = {
+      ...report.rules[0],
+      named_rule: "R001",
+      rule_text: "Copy customer_id without modification",
+      resolved_rule: "",
+    };
+    assert.equal(namedRuleDisplay(named), "R001 · Copy customer_id without modification");
+    const covered: RuleCompileReport = {
+      ...report,
+      coverage: {
+        detected: 3,
+        executable: 2,
+        review: 1,
+        conflict: 0,
+        writes: 2,
+        validations: 0,
+        percent: 67,
+      },
+    };
+    assert.match(ruleReportSummary(covered), /rule coverage 67%/);
+    assert.match(proofRuleClaim(covered), /review remains/);
+    const proven: RuleCompileReport = {
+      ...report,
+      buckets: { executable: 3, needs_confirmation: 0, conflict: 0 },
+      coverage: {
+        detected: 3, executable: 3, review: 0, conflict: 0, writes: 3, validations: 0, percent: 100,
+      },
+    };
+    assert.equal(proofRuleClaim(proven), "Migration verified against 3 business rules");
   });
 
   it("summarises inferred headers when the file did not use aliases", () => {

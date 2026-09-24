@@ -157,6 +157,10 @@ def evaluate_contract(value: Any, contract: Mapping[str, Any], *, missing: bool)
         if compiled.fullmatch(str(value) or "") is None:
             return "must match the compiled pattern"
         return None
+    if kind == "unique":
+        return None
+    if kind == "in_lookup":
+        return "exist-in-lookup has no named pairs"
     return "contract type is not executable"
 
 
@@ -315,7 +319,7 @@ def apply_compiled_projection(
         })
     else:
         for dest_table, dest_edges in by_dest.items():
-            dest_rows: list[dict[str, Any]] = []
+            pending: list[tuple[int, dict[str, Any]]] = []
             dest_quarantine = [dict(item, dest_table=dest_table) for item in shape_quarantine]
             columns = []
             seen_cols: set[str] = set()
@@ -334,6 +338,8 @@ def apply_compiled_projection(
                     continue
                 contract_errors: list[dict[str, Any]] = []
                 for rule in contracts:
+                    if str((rule.get("contract") or {}).get("type") or "") == "unique":
+                        continue
                     value, missing = _contract_value(image, shaped, dest_edges, rule)
                     err = evaluate_contract(
                         None if value is _MISSING else value,
@@ -352,7 +358,14 @@ def apply_compiled_projection(
                 if contract_errors:
                     dest_quarantine.extend(contract_errors)
                     continue
-                dest_rows.append(image)
+                pending.append((row_index, image))
+            dest_quarantine.extend(_unique_failures(pending, contracts, dest_table))
+            unique_rows = {
+                int(item["row_index"])
+                for item in dest_quarantine
+                if item.get("error") == "must be unique"
+            }
+            dest_rows = [image for row_index, image in pending if row_index not in unique_rows]
             destinations.append({
                 "dest_table": dest_table,
                 "columns": columns,
@@ -376,10 +389,49 @@ def apply_compiled_projection(
         "honesty": (
             "Named executable columns only. Review, join, omit, contract, and "
             "unnamed catalog columns were not written. Destination contracts "
-            "quarantine after Map. One refused edge quarantines that dest "
-            "image — never a partial row."
+            "quarantine after Map. Unique is a population check — duplicates "
+            "are quarantined together, never silently kept. One refused edge "
+            "quarantines that dest image — never a partial row."
         ),
     }
+
+
+def _unique_failures(
+    pending: Sequence[tuple[int, Mapping[str, Any]]],
+    contracts: Sequence[Mapping[str, Any]],
+    dest_table: str,
+) -> list[dict[str, Any]]:
+    """Population unique: every row that shares a key is quarantined."""
+    out: list[dict[str, Any]] = []
+    for rule in contracts:
+        if str((rule.get("contract") or {}).get("type") or "") != "unique":
+            continue
+        dest = str(rule.get("dest_column") or "").strip()
+        src = str(rule.get("source_column") or "").strip()
+        col = dest or src
+        if not col:
+            continue
+        seen: dict[str, list[int]] = {}
+        for row_index, image in pending:
+            if col not in image:
+                continue
+            key = fold(str(image.get(col) if image.get(col) is not None else ""))
+            if not key:
+                continue
+            seen.setdefault(key, []).append(int(row_index))
+        for rows in seen.values():
+            if len(rows) < 2:
+                continue
+            for row_index in rows:
+                out.append({
+                    "row_index": row_index,
+                    "column": col,
+                    "source_column": src,
+                    "error": "must be unique",
+                    "dest_table": dest_table,
+                    "plane": "validate",
+                })
+    return out
 
 
 def apply_selected_tables(

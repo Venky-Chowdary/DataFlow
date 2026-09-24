@@ -234,6 +234,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(step, /destTypes/);
     assert.match(step, /syncMode/);
     assert.match(step, /Headers are\s+inferred from the file/);
+    assert.match(step, /pre-load image/);
+    assert.match(step, /Destination names land on Map/);
     const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
     assert.match(ledger, /header_roles/);
     assert.match(ledger, /How this file was read/);
@@ -249,6 +251,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);
     assert.match(ledger, /named_rules/);
+    assert.match(ledger, /namedRuleDisplay/);
+    assert.match(ledger, /proofRuleClaim/);
+    assert.match(ledger, /rule coverage/);
+    assert.match(ledger, /pre-load image/);
     assert.match(ledger, /resolved_rule/);
     assert.match(ledger, /unknown_code_policy/);
     assert.match(ledger, /G20 still refuses/);

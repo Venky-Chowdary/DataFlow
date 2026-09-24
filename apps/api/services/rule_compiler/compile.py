@@ -592,10 +592,27 @@ def compile_rule_workbook(
         if r.get("source_column") and r.get("kind") not in {"contract", "join"}
     }
     unmapped_src = [c for c in src_cols if fold(c) not in accounted_src]
+    detected = len(compiled)
+    coverage = {
+        "detected": detected,
+        "executable": buckets["executable"],
+        "review": buckets["needs_confirmation"],
+        "conflict": buckets["conflict"],
+        "writes": sum(
+            1 for r in compiled
+            if r["status"] == "executable" and r.get("kind") not in {"contract", "omit", "join"}
+        ),
+        "validations": sum(
+            1 for r in compiled
+            if r["status"] == "executable" and r.get("kind") == "contract"
+        ),
+        "percent": int(round(100 * buckets["executable"] / detected)) if detected else 0,
+    }
     return {
         "filename": filename,
-        "rule_count": len(compiled),
+        "rule_count": detected,
         "buckets": buckets,
+        "coverage": coverage,
         "unused_dest_columns": unused_dest[:80],
         "unused_dest_count": len(unused_dest),
         "unmapped_source_columns": unmapped_src[:80],
@@ -635,8 +652,13 @@ def compile_rule_workbook(
             "(not-null, contains, in-set, compare, 2-letter shape) on the "
             "Validate plane — they never write a dest column. Validation_ID "
             "is a rule name, not a destination. Column binds source, dest, "
-            "or a derived transform column. Unstructured or unbound checks "
-            "stay in review. Unrecognised, unbound, or weakly inferred "
+            "or a derived transform column. Action is on-fail policy "
+            "(quarantine), never a destination. Unstructured or unbound "
+            "checks stay in review. Coverage is executable / detected on "
+            "this workbook — 100% means every compiled row is executable "
+            "and none are in review or conflict. Executed and validated "
+            "counts land on Proof after the run, not at compile. "
+            "Unrecognised, unbound, or weakly inferred "
             "rules stay in the review queue — they are never applied to a "
             "row. An operator may accept a bound rename as Direct. Date masks must name MM/DD vs DD/MM. Orphan enumeration "
             "sheets attach only when the edge is unique. Commentary sheets "
@@ -828,6 +850,47 @@ def _pairs_for_edge(
     return {}
 
 
+def _pairs_for_contract(
+    lookup_pairs: dict[tuple[str, str], dict[str, str]] | None,
+    spoken_src: str,
+    spoken_dst: str,
+    source_column: str,
+    dest_column: str,
+) -> dict[str, str]:
+    """Attach lookup values to a Validate check. Unique dest alias only — no invented table."""
+    direct = _pairs_for_edge(lookup_pairs, spoken_src, spoken_dst, source_column, dest_column)
+    if direct:
+        return direct
+    store = lookup_pairs or {}
+    labels = {fold(name) for name in (spoken_src, spoken_dst, source_column, dest_column) if name}
+    hits: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for (src, dst), mapping in store.items():
+        if not mapping:
+            continue
+        if fold(src) in labels or fold(dst) in labels:
+            fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                hits.append(dict(mapping))
+    if len(hits) == 1:
+        return hits[0]
+    dest_labels = [name for name in (spoken_src, spoken_dst, dest_column) if name]
+    contained: list[dict[str, str]] = []
+    contained_seen: set[tuple[str, ...]] = set()
+    for (src, _dst), mapping in store.items():
+        if not mapping or not src:
+            continue
+        if any(fold(src) and fold(src) in fold(label) for label in dest_labels):
+            fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+            if fingerprint not in contained_seen:
+                contained_seen.add(fingerprint)
+                contained.append(dict(mapping))
+    if len(contained) == 1:
+        return contained[0]
+    return {}
+
+
 def _derived_columns(compiled: list[dict[str, Any]], dest_columns: list[str]) -> list[str]:
     names: list[str] = [c for c in dest_columns if c]
     for item in compiled:
@@ -847,6 +910,26 @@ def _action_for(status: str) -> str:
     if status == "conflict":
         return "conflict"
     return "review"
+
+
+def _normalize_on_fail(text: str) -> str:
+    """Workbook Action is policy. Skip would be silent drop — still quarantine."""
+    token = fold(text)
+    if token in {"review", "warn", "warning", "flag"}:
+        return "review"
+    return "quarantine"
+
+
+def _unique_lookup_values(pairs: dict[str, str] | None) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for value in (pairs or {}).values():
+        text = str(value or "").strip()
+        key = fold(text)
+        if text and key not in seen:
+            seen.add(key)
+            values.append(text)
+    return values
 
 
 def _refresh_status_fields(item: dict[str, Any]) -> None:
@@ -1211,10 +1294,15 @@ def _compile_row(
     dest_from_cell, spoken_dst_col = split_qualified(spoken_dst)
     spoken_dst = spoken_dst_col or spoken_dst
     spoken_rule = str(raw.get("rule") or "").strip()
+    spoken_on_fail = str(raw.get("action") or "").strip()
     expanded, catalog_name, missing_name = _expand_named_rule(spoken_rule, named_catalog or {})
     rule_text = expanded
     classified = classify_rule(rule_text)
     kind = str(classified.get("kind") or "unknown")
+    if not spoken_dst and classified.get("dest_hint"):
+        spoken_dst = str(classified.get("dest_hint") or "").strip()
+        dest_from_cell, spoken_dst_col = split_qualified(spoken_dst)
+        spoken_dst = spoken_dst_col or spoken_dst
 
     catalog = source_catalog or {}
     selected = list(source_tables or [])
@@ -1847,6 +1935,37 @@ def _compile_row(
         extra_steps = []
         transform = "none"
         map_source = dest_column or source_column or spoken_src
+        contract_ir = classified.get("contract") if isinstance(classified.get("contract"), dict) else None
+        if contract_ir and str(contract_ir.get("type") or "") == "in_lookup":
+            values = _unique_lookup_values(
+                _pairs_for_contract(
+                    lookup_pairs, spoken_src, spoken_dst, source_column, dest_column,
+                ) or pairs
+            )
+            if values:
+                classified["contract"] = {"type": "in_set", "values": values}
+                classified["interpretation"] = "Exist in named lookup"
+                issues = [
+                    item for item in issues
+                    if "exist-in-lookup" not in item.lower()
+                    and "fifty-state" not in item.lower()
+                ]
+                if (
+                    status == "needs_confirmation"
+                    and validation_bound
+                    and not bind_fail
+                    and not weak_bind
+                    and not type_issue
+                    and not prec_issue
+                    and not ident_issue
+                ):
+                    status = "executable"
+            else:
+                issues.append(
+                    "Exist-in-lookup needs a lookup sheet of pairs. "
+                    "The fifty-state table was not invented."
+                )
+                status = "needs_confirmation"
         if structured_contract and validation_bound and status == "executable":
             issues = [
                 item for item in issues
@@ -1890,6 +2009,7 @@ def _compile_row(
         "timezone": classified.get("zone") or "",
         "code_crosswalk": None if kind == "contract" else (pairs or None),
         "contract": classified.get("contract") if kind == "contract" else None,
+        "on_fail": _normalize_on_fail(spoken_on_fail),
         "date_format": classified.get("format") or "",
         "shape_step": shape_step if status == "executable" else None,
         "shape_steps": extra_steps if status == "executable" else [],

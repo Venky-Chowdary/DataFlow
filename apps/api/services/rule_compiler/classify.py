@@ -59,9 +59,34 @@ _VALIDATE_WRITE_VERB = re.compile(
 _VALIDATE_COMPARE = re.compile(
     r"^must\s+be\s+(?:greater|more)\s+than\s+(?P<gt>-?\d+(?:\.\d+)?)\s*$"
     r"|^must\s+be\s+less\s+than\s+(?P<lt>-?\d+(?:\.\d+)?)\s*$"
-    r"|^must\s+be\s*(?P<op>>=|<=|>|<)\s*(?P<n>-?\d+(?:\.\d+)?)\s*$",
+    r"|^must\s+be\s*(?P<op>>=|<=|>|<)\s*(?P<n>-?\d+(?:\.\d+)?)\s*$"
+    r"|^must\s+be\s+(?:greater|more)\s+than\s+or\s+equal\s+to\s+(?P<gte>-?\d+(?:\.\d+)?)\s*$"
+    r"|^(?P<bare_op>>=|<=|>|<)\s*(?P<bare_n>-?\d+(?:\.\d+)?)\s*$",
     re.I,
 )
+_VALIDATE_UNIQUE = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\s+)?(?:must\s+be\s+)?unique(?:\s+(?:key|values?))?$",
+    re.I,
+)
+_VALIDATE_EMAIL = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\s+)?(?:email\s+must\s+be\s+valid|must\s+be\s+(?:a\s+)?valid\s+email(?:\s+address)?)$",
+    re.I,
+)
+_VALIDATE_IN_LOOKUP = re.compile(
+    r"^(?:[A-Za-z_][\w.]*\s+)?(?:must\s+)?(?:exist|be(?:\s+present)?)\s+"
+    r"in(?:\s+the)?\s+(?:named\s+)?(?:lookup(?:\s+table)?|code\s+table|crosswalk)"
+    r"(?:\s+table)?$",
+    re.I,
+)
+_SPOKEN_IF = re.compile(
+    r"^if\s+(?P<cond>.+?)\s+then\s+(?P<then>.+?)(?:\s+else\s+(?P<else>.+))?$",
+    re.I,
+)
+_DIGITS_ONLY = re.compile(
+    r"\b(?:remove[_-]?non[_-]?numeric|digits?\s+only|keep\s+digits)\b",
+    re.I,
+)
+_EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 _VALIDATE_CONTAINS = re.compile(
     r"^must\s+contain\s+['\"]?(?P<val>.+?)['\"]?\s*$",
     re.I,
@@ -124,7 +149,10 @@ _CONCAT_HINT = re.compile(
     re.I,
 )
 _CONCAT_EXPR = re.compile(
-    r"([A-Za-z_][\w.]*)\s*(?:\+|\&|\|\|)\s*([A-Za-z_][\w.]*)",
+    r"([A-Za-z_][\w.]*)\s*(?:\+|\&|\|\|)\s*(?:(?:'[^']*'|\"[^\"]*\")\s*(?:\+|\&|\|\|)\s*)?([A-Za-z_][\w.]*)",
+)
+_CONCAT_CHAIN = re.compile(
+    r"[A-Za-z_][\w.]*\s*\+\s*(?:'[^']*'|\"[^\"]*\")\s*\+\s*[A-Za-z_][\w.]*",
 )
 _REPLACE = re.compile(
     r"\b(?:replace|substitute)\s+['\"]?(?P<search>.+?)['\"]?\s+(?:with|by)\s+['\"]?(?P<repl>.*)$",
@@ -511,7 +539,21 @@ def parse_validate_check(text: str) -> dict[str, Any] | None:
     A 2-letter code check is the letter-pair shape only.
     """
     raw = (text or "").strip()
-    if not raw or _VALIDATE_WRITE_VERB.search(raw):
+    if not raw:
+        return None
+    if _VALIDATE_IN_LOOKUP.match(raw):
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.9,
+            "interpretation": "Exist in lookup",
+            "contract": {"type": "in_lookup"},
+            "reason": (
+                "Exist-in-lookup needs a lookup sheet of pairs. "
+                "The fifty-state table was not invented."
+            ),
+        }
+    if _VALIDATE_WRITE_VERB.search(raw):
         return None
     if _REQUIRED.search(raw) or _STANDALONE_NOT_NULL.match(raw):
         return {
@@ -533,12 +575,33 @@ def parse_validate_check(text: str) -> dict[str, Any] | None:
                 "interpretation": f"Contains {value}",
                 "contract": {"type": "contains", "value": value},
             }
+    if _VALIDATE_UNIQUE.match(raw):
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.97,
+            "interpretation": "Destination unique",
+            "contract": {"type": "unique"},
+            "unique": True,
+        }
+    if _VALIDATE_EMAIL.match(raw):
+        return {
+            "kind": "contract",
+            "plane": "validate",
+            "confidence": 0.96,
+            "interpretation": "Valid email shape",
+            "contract": {"type": "pattern", "pattern": _EMAIL_PATTERN},
+        }
     compared = _VALIDATE_COMPARE.match(raw)
     if compared:
         if compared.group("gt") is not None:
             op, number = ">", compared.group("gt")
         elif compared.group("lt") is not None:
             op, number = "<", compared.group("lt")
+        elif compared.group("gte") is not None:
+            op, number = ">=", compared.group("gte")
+        elif compared.group("bare_op") is not None:
+            op, number = compared.group("bare_op"), compared.group("bare_n")
         else:
             op, number = compared.group("op"), compared.group("n")
         return {
@@ -1646,9 +1709,95 @@ def parse_to_number(text: str) -> dict[str, Any] | None:
     return None
 
 
+def parse_spoken_if(text: str) -> dict[str, Any] | None:
+    """Spoken IF cond THEN value ELSE value → shape if(), or review."""
+    raw = (text or "").strip()
+    match = _SPOKEN_IF.match(raw)
+    if not match:
+        return None
+    if re.search(r"\bjoin\b", raw, re.I):
+        return None
+    if re.search(r"\blookup\s*\(", raw, re.I):
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "lookup() inside a spoken IF needs a lookup sheet of pairs. "
+                "This compiler will not invent it."
+            ),
+        }
+    cond = _rewrite_spoken_pred(match.group("cond") or "")
+    then_ = _assignment_or_value(match.group("then") or "")
+    else_ = _assignment_or_value(match.group("else") or "")
+    if not cond or not then_:
+        return None
+    null_only = re.fullmatch(r"is_null\(([A-Za-z_][\w.]*)\)", cond)
+    if (null_only or re.fullmatch(r"null", cond, re.I)) and not else_:
+        return {
+            "kind": "default",
+            "plane": "shape",
+            "confidence": 0.96,
+            "interpretation": "Default if null",
+            "value": then_.strip("\""),
+        }
+    dest_hint = ""
+    assigned = re.match(r"^([A-Za-z_][\w.]*)\s*=\s*", match.group("then") or "")
+    if assigned:
+        dest_hint = assigned.group(1)
+    expr = f"if({cond}, {then_}" + (f", {else_}" if else_ else "") + ")"
+    return {
+        "kind": "derive",
+        "plane": "shape",
+        "confidence": 0.93,
+        "interpretation": "Conditional",
+        "expression": expr,
+        **({"dest_hint": dest_hint} if dest_hint else {}),
+    }
+
+
+def _rewrite_spoken_pred(text: str) -> str:
+    out = (text or "").strip()
+    out = re.sub(
+        r"\b([A-Za-z_][\w.]*)\s+is\s+not\s+null\b",
+        r"is_not_null(\1)",
+        out,
+        flags=re.I,
+    )
+    out = re.sub(
+        r"\b([A-Za-z_][\w.]*)\s+is\s+null\b",
+        r"is_null(\1)",
+        out,
+        flags=re.I,
+    )
+    return _rewrite_informatica_pred(out)
+
+
+def _assignment_or_value(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    assigned = re.match(r"^[A-Za-z_][\w.]*\s*=\s*(.+)$", raw)
+    value = (assigned.group(1) if assigned else raw).strip()
+    if re.fullmatch(r"-?[\d.]+", value):
+        return value
+    return _quote_lit(value)
+
+
 def _concat_columns(text: str) -> tuple[list[str], str]:
     """Named columns and an optional separator from a concat cell."""
     columns: list[str] = []
+    tokens = re.findall(r"'[^']*'|\"[^\"]*\"|[A-Za-z_][\w.]*", text or "")
+    lits = [token[1:-1] for token in tokens if token[:1] in {"'", '"'}]
+    idents = [
+        token for token in tokens
+        if re.fullmatch(r"[A-Za-z_][\w.]*", token or "")
+        and token.lower() not in {
+            "concat", "concatenate", "combine", "columns", "fields", "join", "textjoin",
+        }
+    ]
+    if len(idents) >= 2 and len(lits) <= 1 and re.search(r"[+&]|\|\|", text or ""):
+        return idents, (lits[0] if lits else "")
     for left, right in _CONCAT_EXPR.findall(text or ""):
         for part in (left, right):
             name = part.strip()
@@ -2031,6 +2180,11 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             ),
             **flags,
         }
+    check = parse_validate_check(raw)
+    if check:
+        check.update({key: value for key, value in flags.items() if key not in check})
+        return check
+
     if _DIRECT.match(raw) or is_identity_speech(raw):
         return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
 
@@ -2247,6 +2401,11 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
+    spoken_if = parse_spoken_if(raw)
+    if spoken_if:
+        spoken_if.update(flags)
+        return spoken_if
+
     pairs, blank = parse_lookup_spec(raw)
     lookup = parse_lookup(raw)
     if lookup:
@@ -2351,7 +2510,7 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         concat_tokens_ok = (
             left.lower() not in _NOT_COLUMN and right.lower() not in _NOT_COLUMN
         )
-    if concat_hint or concat_tokens_ok:
+    if concat_hint or concat_tokens_ok or _CONCAT_CHAIN.search(raw):
         columns, separator = _concat_columns(raw)
         columns = [c for c in columns if c.lower() not in _NOT_COLUMN]
         return {
@@ -2383,6 +2542,21 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
                 + (f", {closed_if.group('else')}" if closed_if.group("else") else "")
                 + ")"
             ),
+            **flags,
+        }
+    spoken_if = parse_spoken_if(raw)
+    if spoken_if:
+        spoken_if.update(flags)
+        return spoken_if
+    if _DIGITS_ONLY.search(raw):
+        return {
+            "kind": "replace",
+            "plane": "shape",
+            "confidence": 0.94,
+            "interpretation": "Digits only",
+            "search": r"[^0-9]",
+            "replacement": "",
+            "regex": True,
             **flags,
         }
     ternary = _TERNARY.match(raw)

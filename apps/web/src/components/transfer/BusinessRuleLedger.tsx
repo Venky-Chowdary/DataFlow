@@ -1,6 +1,8 @@
 import type { CompiledRule, RuleCompileReport } from "../../lib/businessRules";
 import {
   canAcceptAsDirect,
+  namedRuleDisplay,
+  proofRuleClaim,
   ruleActionLabel,
   ruleConfidenceLabel,
   ruleReportSummary,
@@ -28,6 +30,13 @@ function provenance(rule: CompiledRule): string {
   if (row) return `row ${row}`;
   if (sheet) return sheet;
   return "";
+}
+
+function planeLabel(plane?: string): string {
+  if (plane === "shape") return "Transform";
+  if (plane === "map") return "Map";
+  if (plane === "validate") return "Validate";
+  return "Review";
 }
 
 function edgeLabel(rule: CompiledRule): string {
@@ -73,12 +82,24 @@ export function BusinessRuleLedger({
         <span>{ruleReportSummary(report)}</span>
       </summary>
       <p className="df2-rule-ledger-how">
-        Closed-form rows compile to structured IR, then Transform / Map /
-        Validate execute them. Review is required when the sentence is not
-        a closed form or the column did not bind. Validate contracts never
-        write a destination column. Accept a leftover bound rename as Direct
-        here — Map is where you remap the rest.
+        Transform is the pre-load image (source names plus derived columns).
+        Map is destination names, write transforms, and lookups. Validate is
+        destination contracts — they never write. Closed-form rows compile
+        to structured IR on those planes. Review is required when the
+        sentence is not a closed form or the column did not bind. Accept a
+        leftover bound rename as Direct here — Map is where you remap the rest.
       </p>
+      {report.coverage ? (
+        <p className="df2-rule-ledger-unused" aria-label="Rule coverage">
+          {report.coverage.detected} detected · {report.coverage.executable} executable
+          · {report.coverage.writes} write(s) · {report.coverage.validations} validation(s)
+          · rule coverage {report.coverage.percent}%
+          {report.coverage.review || report.coverage.conflict
+            ? ""
+            : ` · Proof will say: ${proofRuleClaim(report)}`}
+          . Executed and validated counts land on Proof after the run.
+        </p>
+      ) : null}
       {report.sheet_kinds?.length ? (
         <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
           {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
@@ -125,12 +146,10 @@ export function BusinessRuleLedger({
               {ruleActionLabel(rule.action, rule.status)}
             </span>
             <span className="df2-rule-line-text" title={rule.resolved_rule || rule.rule_text}>
-              {rule.named_rule && rule.kind !== "contract"
-                ? `${rule.rule_text || rule.named_rule} → ${rule.resolved_rule || rule.named_rule}`
-                : (rule.rule_text || "(direct)")}
+              {namedRuleDisplay(rule)}
             </span>
             <span className={`df2-badge df2-badge-xs df2-rule-chip ${lineClass(rule.status)}`}>
-              {rule.kind_label}
+              {planeLabel(rule.plane)} · {rule.kind_label}
             </span>
             <span className="df2-rule-line-status">{ruleStatusLabel(rule.status)}</span>
             {rule.unknown_code_policy?.action && rule.unknown_code_policy.action !== "refuse" ? (

@@ -29,6 +29,7 @@ ROLES = (
     "join_type",
     "lookup_from",
     "lookup_to",
+    "action",
 )
 
 # Weak prior only. Content-vs-schema wins when schemas are present.
@@ -44,8 +45,9 @@ _HINTS: dict[str, frozenset[str]] = {
     }),
     "rule": frozenset({
         "rule", "logic", "formula", "transform", "how", "convert",
-        "instruction", "action", "conversion", "mapping",
+        "instruction", "conversion", "mapping",
     }),
+    "action": frozenset({"action", "onfail", "quarantine", "reject"}),
     "join_from": frozenset({"joinfrom", "lefttable"}),
     "join_on": frozenset({"joinon", "leftkey", "rightkey", "joinkey"}),
     "join_type": frozenset({"jointype"}),
@@ -84,6 +86,7 @@ def infer_header_roles(
     cell_rows: list[dict[str, str]],
     source_columns: list[str] | None = None,
     dest_columns: list[str] | None = None,
+    sheet: str = "",
 ) -> InferredRoles:
     """Assign each header a compiler role, or leave it unassigned."""
     clean = [h for h in headers if str(h or "").strip()]
@@ -231,8 +234,17 @@ def infer_header_roles(
             )
 
     unused = [h for h in clean if h not in used]
-    if unused and ("source_column" not in assigned or "dest_column" not in assigned or "rule" not in assigned):
-        _positional_fallback(unused, assigned, used, evidence, ident_scores, rule_scores, clean)
+    validation_sheet = _is_validation_sheet(sheet, clean)
+    needs_positional = unused and (
+        "source_column" not in assigned
+        or (not validation_sheet and "dest_column" not in assigned)
+        or "rule" not in assigned
+    )
+    if needs_positional:
+        _positional_fallback(
+            unused, assigned, used, evidence, ident_scores, rule_scores, clean,
+            allow_dest=not validation_sheet,
+        )
 
     return InferredRoles(
         roles={header: role for role, header in assigned.items()},
@@ -288,7 +300,9 @@ def ground_workbook_rows(
     evidence: list[dict[str, Any]] = []
     for (sheet, headers), indices in groups.items():
         cells = [rows[i].get("_cells") or {} for i in indices]
-        inferred = infer_header_roles(list(headers), cells, source_columns, dest_columns)
+        inferred = infer_header_roles(
+            list(headers), cells, source_columns, dest_columns, sheet=sheet,
+        )
         for index in indices:
             rows[index] = apply_roles(rows[index], inferred)
         for item in inferred.evidence:
@@ -375,6 +389,13 @@ def _unique_hint(header: str, taken: set[str]) -> tuple[str, int]:
     return "", 0
 
 
+def _is_validation_sheet(sheet: str, headers: list[str]) -> bool:
+    if re.search(r"validat|constraint", sheet or "", re.I):
+        return True
+    names = {fold(h) for h in headers}
+    return bool(names & {"validationid", "checkid", "constraintid"})
+
+
 def _positional_fallback(
     unused: list[str],
     assigned: dict[str, str],
@@ -383,6 +404,7 @@ def _positional_fallback(
     ident_scores: dict[str, float],
     rule_scores: dict[str, float],
     clean: list[str],
+    allow_dest: bool = True,
 ) -> None:
     """Left-to-right mapping-spec layout when schemas cannot decide."""
     if "rule" not in assigned:
@@ -424,7 +446,7 @@ def _positional_fallback(
             ),
         })
         ident_cols = ident_cols[1:]
-    if "dest_column" not in assigned and ident_cols:
+    if allow_dest and "dest_column" not in assigned and ident_cols:
         header = ident_cols[0]
         assigned["dest_column"] = header
         used.add(header)
