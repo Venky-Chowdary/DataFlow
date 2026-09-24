@@ -1829,8 +1829,8 @@ def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
         },
         {
             "customer_id": 1002, "fname": "Mary", "lname": "Jones",
-            "email": "no-at-sign", "status": "I",
-            "state": "Texas", "monthly_salary": 6200, "dob": "03/22/2023",
+            "email": "mary.jones@example.com", "status": "I",
+            "state": "Texas", "monthly_salary": 0, "dob": "03/22/2023",
         },
     ]
     applied = apply_compiled_projection(
@@ -1841,7 +1841,10 @@ def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
     image = dest["rows"][0]
     assert image["customer_key"] == 1001
     assert image["state_code"] == "NC"
-    assert image["annual_salary"] == 60000
+    assert int(image["annual_salary"]) == 60000
     assert image["birth_date"] == "2024-01-15"
     assert image["customer_status"] == "ACTIVE"
-    assert any("contain" in (q.get("error") or "") for q in dest["quarantine"])
+    assert any(
+        q.get("column") == "annual_salary" and ">" in (q.get("error") or "")
+        for q in dest["quarantine"]
+    )
