@@ -250,11 +250,14 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(ledger, />Interpretation</);
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);
-    assert.match(ledger, /named_rules/);
+    assert.match(ledger, /named mapping/);
+    assert.match(ledger, /named validation/);
     assert.match(ledger, /namedRuleDisplay/);
     assert.match(ledger, /proofRuleClaim/);
     assert.match(ledger, /rule coverage/);
     assert.match(ledger, /pre-load image/);
+    assert.match(ledger, /df2-rule-tag/);
+    assert.match(ledger, /df2-rule-provenance/);
     assert.match(ledger, /resolved_rule/);
     assert.match(ledger, /unknown_code_policy/);
     assert.match(ledger, /G20 still refuses/);
@@ -376,6 +379,11 @@ describe("Transfer Studio chrome contracts", () => {
 
     assert.match(mapStep, /\{continueToValidate\}/);
     assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /df2-rule-map-body/);
+    assert.match(mapStep, /df2-rule-honesty/);
+    assert.match(mapStep, /embedded/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*auto/);
     assert.doesNotMatch(mapStep, /footerAction=/);
     assert.doesNotMatch(review, /footerAction/);
     assert.match(review, /pages > 1 &&/);

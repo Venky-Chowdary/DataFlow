@@ -279,8 +279,64 @@ export function mergeBusinessRules(
   return next;
 }
 
+export interface RuleCensus {
+  total: number;
+  mapping: number;
+  validation: number;
+  namedMapping: number;
+  namedValidation: number;
+  executable: number;
+  review: number;
+  conflict: number;
+  coveragePercent: number;
+}
+
+export function ruleCensus(report: RuleCompileReport): RuleCensus {
+  const rules = report.rules || [];
+  const mapping = rules.filter((rule) => rule.kind !== "contract").length;
+  const validation = rules.filter((rule) => rule.kind === "contract").length;
+  const namedMapping = rules.filter((rule) => rule.named_rule && rule.kind !== "contract").length;
+  const namedValidation = rules.filter((rule) => rule.named_rule && rule.kind === "contract").length;
+  const executable = report.coverage?.executable ?? report.buckets.executable;
+  const review = report.coverage?.review ?? report.buckets.needs_confirmation;
+  const conflict = report.coverage?.conflict ?? report.buckets.conflict;
+  const total = report.coverage?.detected ?? report.rule_count;
+  return {
+    total,
+    mapping,
+    validation,
+    namedMapping,
+    namedValidation,
+    executable,
+    review,
+    conflict,
+    coveragePercent: report.coverage?.percent
+      ?? (total ? Math.round((100 * executable) / total) : 0),
+  };
+}
+
+export function compiledExpression(rule: CompiledRule): string {
+  if (rule.resolved_rule) return rule.resolved_rule;
+  const options = rule.shape_step?.options && typeof rule.shape_step.options === "object"
+    ? rule.shape_step.options as Record<string, unknown>
+    : {};
+  if (typeof options.expression === "string" && options.expression.trim()) {
+    return options.expression;
+  }
+  if (rule.code_crosswalk) {
+    return Object.entries(rule.code_crosswalk).map(([key, value]) => `${key} → ${value}`).join("; ");
+  }
+  const contract = rule.contract;
+  if (contract?.type === "compare") return `${contract.op} ${contract.value}`;
+  if (contract?.type === "contains") return `contains ${contract.value}`;
+  if (contract?.type === "in_set") return `in (${(contract.values || []).join(", ")})`;
+  if (contract?.type === "pattern") return contract.pattern || "pattern";
+  if (contract?.type) return contract.type;
+  return rule.rule_text || "";
+}
+
 export function ruleReportSummary(report: RuleCompileReport): string {
-  const { executable, needs_confirmation, conflict } = report.buckets;
+  const census = ruleCensus(report);
   const unused = report.unused_dest_count
     ? ` · ${report.unused_dest_count} dest column(s) unused (not written)`
     : "";
@@ -293,18 +349,19 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const inferred = (report.header_roles || []).some((item) => item.method !== "alias")
     ? " · headers inferred from file + schema"
     : "";
-  const named = report.named_rules?.length
-    ? ` · ${report.named_rules.length} named rule(s)`
-    : "";
+  const named = [
+    census.namedMapping ? `${census.namedMapping} named mapping` : "",
+    census.namedValidation ? `${census.namedValidation} named validation` : "",
+  ].filter(Boolean).join(" · ");
+  const namedBit = named ? ` · ${named}` : "";
   const projection = report.projection?.length
     ? ` · ${report.projection.length} source table(s) projected`
     : "";
-  const coverage = report.coverage
-    ? ` · rule coverage ${report.coverage.percent}%`
-    : "";
+  const coverage = ` · rule coverage ${census.coveragePercent}%`;
   return (
-    `${report.rule_count} rule(s) · ${executable} executable · `
-    + `${needs_confirmation} need review · ${conflict} conflict${coverage}${unused}${unmapped}${truncated}${inferred}${named}${projection}`
+    `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · `
+    + `${census.executable} executable · ${census.review} review · ${census.conflict} conflict`
+    + `${coverage}${unused}${unmapped}${truncated}${inferred}${namedBit}${projection}`
   );
 }
 

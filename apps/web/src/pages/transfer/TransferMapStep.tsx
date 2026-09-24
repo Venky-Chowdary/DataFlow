@@ -13,7 +13,7 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
-import { ruleReportSummary } from "../../lib/businessRules";
+import { ruleCensus, ruleReportSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
@@ -319,14 +319,32 @@ export function TransferMapStep({
           <summary>
             <DtIcon name="book" size={16} />
             <strong>Business rules applied on this map</strong>
-            <span> · {ruleReportSummary(ruleReport)}</span>
+            <span>
+              {" · "}
+              {(() => {
+                const census = ruleCensus(ruleReport);
+                return `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
+              })()}
+            </span>
           </summary>
-          <p>{ruleReport.honesty}</p>
-          <BusinessRuleLedger
-            report={ruleReport}
-            defaultOpen
-            onAcceptDirect={onAcceptRuleDirect}
-          />
+          <div className="df2-rule-map-body">
+            <p className="df2-rule-map-kicker">
+              Destination names, write transforms, and lookups land here.
+              Transform kept the pre-load image. Validate contracts never write.
+              Click a rule for provenance — customer document → compiled IR → dest.
+            </p>
+            {ruleReport.honesty ? (
+              <details className="df2-rule-honesty">
+                <summary>Compiler contract</summary>
+                <p>{ruleReport.honesty}</p>
+              </details>
+            ) : null}
+            <BusinessRuleLedger
+              report={ruleReport}
+              embedded
+              onAcceptDirect={onAcceptRuleDirect}
+            />
+          </div>
         </details>
       )}
 

@@ -6,10 +6,12 @@ import { describe, it } from "node:test";
 import {
   acceptRuleAsDirect,
   canAcceptAsDirect,
+  compiledExpression,
   mergeBusinessRules,
   mergeCompiledShapeSteps,
   namedRuleDisplay,
   proofRuleClaim,
+  ruleCensus,
   ruleReportSummary,
   ruleToEvidence,
   type CompiledRule,
@@ -100,6 +102,12 @@ describe("mergeBusinessRules", () => {
   it("summarises unused dest columns as not written", () => {
     assert.match(ruleReportSummary(report), /2 executable/);
     assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
+    assert.match(ruleReportSummary(report), /3 total · 3 mapping · 0 validation/);
+    const census = ruleCensus(report);
+    assert.equal(census.total, 3);
+    assert.equal(census.mapping, 3);
+    assert.equal(census.validation, 0);
+    assert.equal(compiledExpression(report.rules[1]), "A → ACTIVE; I → INACTIVE");
   });
 
   it("shows named rules as R001 · text and honest coverage without inventing execution", () => {
@@ -217,7 +225,7 @@ describe("mergeBusinessRules", () => {
     const status = next.find((m) => m.source === "status")!;
     assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE" });
     assert.equal(Object.prototype.hasOwnProperty.call(status.codeCrosswalk || {}, "OTHER"), false);
-    assert.match(ruleReportSummary(named), /1 named rule/);
+    assert.match(ruleReportSummary(named), /1 named mapping/);
   });
 
   it("applies a named IANA zone instead of a zoneless assume_timezone", () => {

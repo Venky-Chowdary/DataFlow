@@ -9017,6 +9017,14 @@ button.df2-vd-assist-toggle:focus-visible {
   border-radius: 8px;
   background: #f0fdfa;
   font-size: 13px;
+  min-width: 0;
+}
+
+.df2-rule-map-banner[open] {
+  max-height: min(58vh, 560px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .df2-rule-map-banner > summary {
@@ -9027,6 +9035,8 @@ button.df2-vd-assist-toggle:focus-visible {
   cursor: pointer;
   list-style: none;
   color: var(--df-text-primary, #0f172a);
+  flex: 0 0 auto;
+  background: #f0fdfa;
 }
 
 .df2-rule-map-banner > summary::-webkit-details-marker { display: none; }
@@ -9036,11 +9046,42 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 12px;
 }
 
+.df2-rule-map-body {
+  margin-top: 8px;
+  padding-right: 4px;
+}
+
+.df2-rule-map-kicker,
 .df2-rule-map-banner > p {
-  margin: 8px 0 0;
+  margin: 0;
   color: var(--df-text-secondary, #475569);
   font-size: 12px;
   line-height: 1.45;
+}
+
+.df2-rule-honesty {
+  margin: 8px 0 0;
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: 8px;
+  background: var(--df-surface, #ffffff);
+  padding: 6px 10px;
+}
+
+.df2-rule-honesty > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-rule-honesty > summary::-webkit-details-marker { display: none; }
+
+.df2-rule-honesty > p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
 }
 
 .df2-rule-map-banner .df2-rule-ledger {
