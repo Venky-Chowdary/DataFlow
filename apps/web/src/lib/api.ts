@@ -1682,6 +1682,7 @@ export function streamJobProgress(
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
     const es = new EventSource(streamUrl);
+    let closedTerminal = false;
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
@@ -1693,6 +1694,7 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
+          closedTerminal = true;
           es.close();
         }
       } catch {
@@ -1701,6 +1703,9 @@ export function streamJobProgress(
     };
     es.onerror = () => {
       es.close();
+      // Closing a completed stream fires onerror in some browsers. Do not
+      // reconnect — that re-appends the last log line and makes it jump.
+      if (stopped || closedTerminal) return;
       startPolling();
     };
     return () => {

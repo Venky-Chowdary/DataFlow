@@ -185,6 +185,12 @@ export function JobTheater({
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
+  const onCompleteRef = useRef(onComplete);
+  const onFailedRef = useRef(onFailed);
+  const onCancelledRef = useRef(onCancelled);
+  onCompleteRef.current = onComplete;
+  onFailedRef.current = onFailed;
+  onCancelledRef.current = onCancelled;
 
   useEffect(() => {
     setActiveData((prev) => ({
@@ -229,11 +235,11 @@ export function JobTheater({
       (update) => {
         const prev = prevRef.current;
 
-        if (update.phase && update.phase !== prev.phase) {
+        if (!doneRef.current && update.phase && update.phase !== prev.phase) {
           append(`Entered ${update.phase} phase`);
           prev.phase = update.phase;
         }
-        if (update.message && update.message !== prev.message) {
+        if (!doneRef.current && update.message && update.message !== prev.message) {
           append(update.message);
           prev.message = update.message;
         }
@@ -262,7 +268,7 @@ export function JobTheater({
         }
 
         setJob(update);
-        if (update.event_log?.length) {
+        if (!doneRef.current && update.event_log?.length) {
           setLog((current) => {
             const merged = mergeEventLogLines(
               current.map((e) => e.text),
@@ -310,26 +316,27 @@ export function JobTheater({
               ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
               : `Job completed — ${conservationCompleteCopy(update)}`,
           );
-          onComplete?.(update);
+          onCompleteRef.current?.(update);
         }
         if (!doneRef.current && update.status === "failed") {
           doneRef.current = true;
           append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
-          onFailed?.(update);
+          onFailedRef.current?.(update);
         }
         if (!doneRef.current && update.status === "cancelled") {
           doneRef.current = true;
           append("Job cancelled by user");
-          onCancelled?.(update);
+          onCancelledRef.current?.(update);
         }
       },
       () => {
+        if (doneRef.current) return;
         append("Live stream interrupted — connection lost");
         setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
       },
     );
     return stop;
-  }, [jobId, onComplete, onFailed, onCancelled]);
+  }, [jobId]);
 
   const handleCancel = async () => {
     if (cancelling || doneRef.current) return;

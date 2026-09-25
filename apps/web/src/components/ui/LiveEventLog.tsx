@@ -20,6 +20,11 @@ type LiveEventLogProps = {
   storageKey?: string;
 };
 
+/** Enter motion only when a new tail arrives — not on every parent re-render. */
+export function isNewLiveLogTail(lastId: number, seenLastId: number | null): boolean {
+  return lastId > 0 && lastId !== seenLastId;
+}
+
 function toEntries(lines: LiveLogEntry[] | string[]): LiveLogEntry[] {
   if (lines.length === 0) return [];
   if (typeof lines[0] === "string") {
@@ -58,8 +63,10 @@ export function LiveEventLog({
 }: LiveEventLogProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const seenLastIdRef = useRef<number | null>(null);
   const entries = toEntries(lines);
   const lastId = entries.length ? entries[entries.length - 1].id : 0;
+  const enterNewest = isNewLiveLogTail(lastId, seenLastIdRef.current);
   const [open, setOpen] = useState(() =>
     collapsible ? readStoredOpen(storageKey, defaultOpen) : true,
   );
@@ -72,6 +79,10 @@ export function LiveEventLog({
       /* private mode */
     }
   }, [collapsible, storageKey, open]);
+
+  useEffect(() => {
+    seenLastIdRef.current = lastId;
+  }, [lastId]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -142,7 +153,7 @@ export function LiveEventLog({
             <div className="df2-live-log-empty">{empty}</div>
           ) : (
             entries.map((entry, i) => {
-              const isNewest = i === entries.length - 1;
+              const isNewest = i === entries.length - 1 && enterNewest;
               return (
                 <div
                   key={entry.id}

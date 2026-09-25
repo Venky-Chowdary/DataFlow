@@ -989,6 +989,14 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /<Gate8ProofCard/);
     assert.match(theater, /onSchedule/);
     assert.match(theater, /Schedule/);
+    assert.match(theater, /onCompleteRef\.current/);
+    assert.match(theater, /return stop;\s*\}, \[jobId\]/);
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(api, /closedTerminal/);
+    assert.match(api, /if \(stopped \|\| closedTerminal\) return/);
+    const liveLog = readFileSync(join(webRoot, "components/ui/LiveEventLog.tsx"), "utf8");
+    assert.match(liveLog, /isNewLiveLogTail/);
+    assert.match(liveLog, /i === entries\.length - 1 && enterNewest/);
     assert.match(page, /canPersistStudioSchedule/);
     assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
     assert.match(page, /studioSchedulePersistable && \(/);
