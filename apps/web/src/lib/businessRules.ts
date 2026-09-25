@@ -160,7 +160,7 @@ export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
   };
 }
 
-function isAutoIdentityDest(mapping: EditableMapping): boolean {
+export function isAutoIdentityDest(mapping: EditableMapping): boolean {
   const target = (mapping.target || "").trim();
   if (!target) return true;
   return target.toLowerCase() === (mapping.source || "").trim().toLowerCase();

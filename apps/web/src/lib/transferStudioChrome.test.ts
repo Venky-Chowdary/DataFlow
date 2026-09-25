@@ -414,6 +414,8 @@ describe("Transfer Studio chrome contracts", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     assert.match(page, /businessRuleReportRef\.current/);
     assert.match(page, /mergeBusinessRules\(prev, businessRuleReportRef\.current/);
+    assert.match(page, /stampCompiledWorkbookMappings/);
+    assert.match(page, /const carried = stampCompiledWorkbookMappings\(carryOperatorDecisions\(next, prior\)\)/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {
