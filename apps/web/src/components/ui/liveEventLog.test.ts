@@ -17,3 +17,9 @@ describe("isNewLiveLogTail", () => {
     assert.equal(isNewLiveLogTail(0, 0), false);
   });
 });
+
+describe("completed log stay still", () => {
+  it("does not re-enter a seen tail after complete", () => {
+    assert.equal(isNewLiveLogTail(19, 19), false);
+  });
+});

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   eventLogMessageBody,
+  isTerminalJobLogLine,
   keepEventLogStartAndTail,
   mergeEventLogLines,
 } from "./jobEventLog.js";
@@ -35,6 +36,16 @@ describe("mergeEventLogLines", () => {
     const merged = mergeEventLogLines(local, incoming);
     assert.equal(eventLogMessageBody(merged[0]), "Entered extract phase");
     assert.ok(merged.some((l) => l.includes("Connecting")));
+  });
+});
+
+describe("isTerminalJobLogLine", () => {
+  it("matches a client-stamped completion once", () => {
+    assert.equal(
+      isTerminalJobLogLine("10:10:09 PM — Job completed — 5 writer-acked — dest COUNT unmeasured"),
+      true,
+    );
+    assert.equal(isTerminalJobLogLine("10:10:04 PM — Batch 1/1 written"), false);
   });
 });
 

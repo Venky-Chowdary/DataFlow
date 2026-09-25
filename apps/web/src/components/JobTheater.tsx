@@ -27,23 +27,19 @@ import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagree
 import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
+import { earliestJobStartMs, jobAverageRowsPerSecond, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
-import {
-  earliestJobStartMs,
-  jobAverageRowsPerSecond,
-  theaterProgressPct,
-} from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -180,6 +176,7 @@ export function JobTheater({
   const [resuming, setResuming] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
+  const completedLoggedRef = useRef(false);
   const logSeqRef = useRef(0);
   const rateSamplesRef = useRef<{ t: number; rows: number }[]>([]);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
@@ -211,6 +208,7 @@ export function JobTheater({
   useEffect(() => {
     startRef.current = Date.now();
     doneRef.current = false;
+    completedLoggedRef.current = false;
     prevRef.current = { loggedRows: 0 };
     logSeqRef.current = 0;
     rateSamplesRef.current = [];
@@ -224,6 +222,9 @@ export function JobTheater({
       });
     };
     const persisted = readJobEventLog(jobId);
+    const alreadyTerminal = persisted.some(isTerminalJobLogLine);
+    doneRef.current = alreadyTerminal;
+    completedLoggedRef.current = alreadyTerminal;
     const bootText = `${new Date().toLocaleTimeString()} — Connecting to live job stream…`;
     const initial: LiveLogEntry[] = persisted.length
       ? persisted.map((text) => ({ id: ++logSeqRef.current, text }))
@@ -308,25 +309,35 @@ export function JobTheater({
         } else if (averageRps > 0) {
           setThroughput(averageRps);
         }
-        if (!doneRef.current && isJobSuccess(update.status)) {
+        if (isJobSuccess(update.status)) {
+          const first = !doneRef.current;
           doneRef.current = true;
-          const quarantine = update.status === "completed_with_quarantine";
-          append(
-            quarantine
-              ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
-              : `Job completed — ${conservationCompleteCopy(update)}`,
-          );
-          onCompleteRef.current?.(update);
-        }
-        if (!doneRef.current && update.status === "failed") {
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            const quarantine = update.status === "completed_with_quarantine";
+            append(
+              quarantine
+                ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
+                : `Job completed — ${conservationCompleteCopy(update)}`,
+            );
+          }
+          if (first) onCompleteRef.current?.(update);
+        } else if (update.status === "failed") {
+          const first = !doneRef.current;
           doneRef.current = true;
-          append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
-          onFailedRef.current?.(update);
-        }
-        if (!doneRef.current && update.status === "cancelled") {
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
+          }
+          if (first) onFailedRef.current?.(update);
+        } else if (update.status === "cancelled") {
+          const first = !doneRef.current;
           doneRef.current = true;
-          append("Job cancelled by user");
-          onCancelledRef.current?.(update);
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            append("Job cancelled by user");
+          }
+          if (first) onCancelledRef.current?.(update);
         }
       },
       () => {
@@ -559,13 +570,27 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs = earliestJobStartMs({
+  const frozenEndRef = useRef<number | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isRunning]);
+  if (isRunning) {
+    frozenEndRef.current = null;
+  } else if (frozenEndRef.current == null) {
+    frozenEndRef.current = toEpochMs(job.completed_at) ?? nowTick;
+  }
+  const elapsed = theaterElapsedMs({
     startedAt: job.started_at,
     createdAt: job.created_at,
-    fallbackMs: startedAtFallback,
+    completedAt: job.completed_at,
+    fallbackStartMs: startedAtFallback,
+    nowMs: nowTick,
+    terminal: !isRunning,
+    frozenEndMs: frozenEndRef.current,
   });
-  const endMs = toEpochMs(job.completed_at) ?? Date.now();
-  const elapsed = Math.max(0, endMs - startMs);
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;

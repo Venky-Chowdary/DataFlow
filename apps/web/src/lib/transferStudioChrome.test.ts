@@ -991,6 +991,9 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /Schedule/);
     assert.match(theater, /onCompleteRef\.current/);
     assert.match(theater, /return stop;\s*\}, \[jobId\]/);
+    assert.match(theater, /completedLoggedRef/);
+    assert.match(theater, /alreadyTerminal/);
+    assert.match(theater, /theaterElapsedMs/);
     const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
     assert.match(api, /closedTerminal/);
     assert.match(api, /if \(stopped \|\| closedTerminal\) return/);

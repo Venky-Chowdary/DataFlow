@@ -66,7 +66,7 @@ export function LiveEventLog({
   const seenLastIdRef = useRef<number | null>(null);
   const entries = toEntries(lines);
   const lastId = entries.length ? entries[entries.length - 1].id : 0;
-  const enterNewest = isNewLiveLogTail(lastId, seenLastIdRef.current);
+  const enterNewest = live && isNewLiveLogTail(lastId, seenLastIdRef.current);
   const [open, setOpen] = useState(() =>
     collapsible ? readStoredOpen(storageKey, defaultOpen) : true,
   );
