@@ -1,11 +1,17 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
+import { StudioMultiPicker, StudioPicker } from "../ui/StudioPicker";
 import { checkShapeExpression } from "../../lib/api";
+import type { StudioPickerOption } from "../../lib/studioPicker";
 import {
+  draftOptionsForWire,
   fieldsFor,
+  isBlankOption,
   linesToList,
   missingRequired,
   operationsByFamily,
+  parseNumberOption,
+  settleExpressionCheck,
   type ShapeCatalog,
   type ShapeOperation,
   type ShapeStepWire,
@@ -43,10 +49,38 @@ export function TransformStepBuilder({
   const [error, setError] = useState("");
   const [expressionError, setExpressionError] = useState("");
   const [showFunctions, setShowFunctions] = useState(false);
+  const expressionGen = useRef(0);
 
   const operation: ShapeOperation | undefined = useMemo(
     () => catalog?.operations.find((entry) => entry.op === op),
     [catalog, op],
+  );
+
+  const operationOptions = useMemo<StudioPickerOption[]>(
+    () => operationsByFamily(catalog?.operations ?? []).flatMap((group) => (
+      group.operations.map((entry) => ({
+        value: entry.op,
+        label: entry.summary,
+        hint: entry.op,
+        group: group.label,
+        meta: entry.expands ? "expands rows" : entry.active ? "moves ledger" : "value",
+      }))
+    )),
+    [catalog],
+  );
+
+  const columnOptions = useMemo<StudioPickerOption[]>(
+    () => columns.map((name) => ({ value: name, label: name })),
+    [columns],
+  );
+
+  const policyOptions = useMemo<StudioPickerOption[]>(
+    () => (catalog?.error_policies ?? []).map((entry) => ({
+      value: entry.value,
+      label: entry.label,
+      hint: entry.detail,
+    })),
+    [catalog],
   );
 
   /**
@@ -61,19 +95,12 @@ export function TransformStepBuilder({
   const blankRequired = useMemo(() => {
     if (!operation) return new Set<string>();
     return new Set(
-      operation.required.filter((name) => {
-        const value = options[name];
-        return (
-          value === undefined
-          || value === null
-          || value === ""
-          || (Array.isArray(value) && value.length === 0)
-        );
-      }),
+      operation.required.filter((name) => isBlankOption(name, options[name])),
     );
   }, [operation, options]);
 
   const reset = useCallback(() => {
+    expressionGen.current += 1;
     setOp("");
     setColumn("");
     setOptions({});
@@ -84,15 +111,20 @@ export function TransformStepBuilder({
   }, []);
 
   const validateExpression = useCallback(async (text: string) => {
+    const requestId = ++expressionGen.current;
     if (!text.trim()) {
       setExpressionError("");
       return;
     }
     try {
       const answer = await checkShapeExpression({ expression: text, source_columns: columns });
-      setExpressionError(answer.valid ? "" : (answer.error ?? "Expression is not valid."));
+      const next = settleExpressionCheck(requestId, expressionGen.current, answer);
+      if (next !== undefined) setExpressionError(next);
     } catch (err) {
-      setExpressionError(err instanceof Error ? err.message : String(err));
+      const next = settleExpressionCheck(requestId, expressionGen.current, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      if (next !== undefined) setExpressionError(next);
     }
   }, [columns]);
 
@@ -110,7 +142,7 @@ export function TransformStepBuilder({
       setError(expressionError);
       return;
     }
-    const step: ShapeStepWire = { op: operation.op, options };
+    const step: ShapeStepWire = { op: operation.op, options: draftOptionsForWire(options) };
     if (operation.needs_column) step.column = column;
     if (label.trim()) step.label = label.trim();
     if (policy !== "refuse") step.on_error = policy;
@@ -124,6 +156,7 @@ export function TransformStepBuilder({
   if (!canPlan) {
     return (
       <div className="df2-xform-builder">
+        <p className="df2-xform-builder-kicker">Engine vocabulary</p>
         <p className="df2-label-hint">{disabledReason}</p>
         <ul className="df2-xform-vocab">
           {(catalog?.operations ?? []).map((entry) => (
@@ -144,69 +177,63 @@ export function TransformStepBuilder({
 
   return (
     <div className="df2-xform-builder">
+      <div className="df2-xform-builder-intro">
+        <p className="df2-xform-builder-kicker">Compose a step</p>
+        <p className="df2-xform-builder-lead">
+          Search the engine vocabulary. The step joins the recipe only when every required
+          field is filled and any expression compiles.
+        </p>
+      </div>
       <div className="df2-xform-builder-row">
-        <div className="df2-field df2-xform-field-op">
-          <label className="df2-label" htmlFor="xform-op">Operation</label>
-          <select
+        <div className="df2-xform-field-op">
+          <StudioPicker
             id="xform-op"
-            className="df2-input df2-select"
+            label="Operation"
             value={op}
+            options={operationOptions}
+            placeholder="Search trim, parse date, filter…"
             disabled={!canPlan || !catalog}
-            onChange={(e) => { setOp(e.target.value); setOptions({}); setError(""); setExpressionError(""); }}
-          >
-            <option value="">Pick an operation…</option>
-            {operationsByFamily(catalog?.operations ?? []).map((group) => (
-              <optgroup key={group.family} label={group.label}>
-                {group.operations.map((entry) => (
-                  <option key={entry.op} value={entry.op}>{entry.summary}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          {operation && (
-            <span className="df2-label-hint">
-              <code>{operation.op}</code>
-              {operation.expands
+            emptyHint="No operation matches that search."
+            onChange={(next) => {
+              expressionGen.current += 1;
+              setOp(next);
+              setOptions({});
+              setError("");
+              setExpressionError("");
+            }}
+            hint={operation
+              ? `${operation.op}${operation.expands
                 ? " · adds rows (unnest) — dest COUNT is the expanded image, not a surplus"
                 : operation.active
                   ? " · changes the row count, so it moves the ledger"
-                  : " · value-only, the row count is unchanged"}
-            </span>
-          )}
+                  : " · value-only, the row count is unchanged"}`
+              : "Grouped the way the engine catalogues them — values, columns, rows, nested JSON."}
+          />
         </div>
         {operation?.needs_column && (
-          <div className="df2-field">
-            <label className="df2-label" htmlFor="xform-column">Column</label>
-            <select
-              id="xform-column"
-              className="df2-input df2-select"
-              value={column}
-              disabled={!canPlan}
-              onChange={(e) => { setColumn(e.target.value); setError(""); }}
-            >
-              <option value="">Pick a column…</option>
-              {columns.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          </div>
+          <StudioPicker
+            id="xform-column"
+            label="Column"
+            value={column}
+            options={columnOptions}
+            placeholder="Search a column…"
+            disabled={!canPlan}
+            required
+            emptyHint="No column matches that search."
+            onChange={(next) => { setColumn(next); setError(""); }}
+          />
         )}
         {operation && (
-          <div className="df2-field">
-            <label className="df2-label" htmlFor="xform-policy">If a value cannot be computed</label>
-            <select
-              id="xform-policy"
-              className="df2-input df2-select"
-              value={policy}
-              disabled={!canPlan}
-              onChange={(e) => setPolicy(e.target.value)}
-            >
-              {(catalog?.error_policies ?? []).map((entry) => (
-                <option key={entry.value} value={entry.value}>{entry.label}</option>
-              ))}
-            </select>
-            <span className="df2-label-hint">
-              {catalog?.error_policies.find((entry) => entry.value === policy)?.detail ?? ""}
-            </span>
-          </div>
+          <StudioPicker
+            id="xform-policy"
+            label="If a value cannot be computed"
+            value={policy}
+            options={policyOptions}
+            disabled={!canPlan}
+            searchable={false}
+            onChange={setPolicy}
+            hint={catalog?.error_policies.find((entry) => entry.value === policy)?.detail ?? ""}
+          />
         )}
       </div>
 
@@ -229,6 +256,40 @@ export function TransformStepBuilder({
               );
             }
             const invalid = field.required && blankRequired.has(field.name);
+            if (field.kind === "choice") {
+              return (
+                <StudioPicker
+                  key={field.name}
+                  id={id}
+                  label={field.label}
+                  required={field.required}
+                  invalid={invalid}
+                  value={typeof value === "string" ? value : ""}
+                  options={(field.choices ?? []).map((choice) => ({ value: choice, label: choice }))}
+                  placeholder="Pick…"
+                  disabled={!canPlan}
+                  searchable={(field.choices ?? []).length > 6}
+                  hint={field.hint}
+                  onChange={(next) => setOptions({ ...options, [field.name]: next })}
+                />
+              );
+            }
+            if (field.kind === "columns") {
+              return (
+                <StudioMultiPicker
+                  key={field.name}
+                  id={id}
+                  label={field.label}
+                  required={field.required}
+                  invalid={invalid}
+                  value={Array.isArray(value) ? (value as string[]) : []}
+                  options={columnOptions}
+                  disabled={!canPlan}
+                  hint={field.hint}
+                  onChange={(next) => setOptions({ ...options, [field.name]: next })}
+                />
+              );
+            }
             return (
               <div
                 className={`df2-field${invalid ? " is-invalid" : ""}`}
@@ -237,37 +298,10 @@ export function TransformStepBuilder({
                 <label className="df2-label" htmlFor={id}>
                   {field.label}{field.required ? " *" : ""}
                 </label>
-                {field.kind === "choice" ? (
-                  <select
-                    id={id}
-                    className="df2-input df2-select"
-                    value={typeof value === "string" ? value : ""}
-                    disabled={!canPlan}
-                    onChange={(e) => setOptions({ ...options, [field.name]: e.target.value })}
-                  >
-                    <option value="">Pick…</option>
-                    {(field.choices ?? []).map((choice) => (
-                      <option key={choice} value={choice}>{choice}</option>
-                    ))}
-                  </select>
-                ) : field.kind === "columns" ? (
-                  <select
-                    id={id}
-                    multiple
-                    className="df2-input df2-select df2-xform-multi"
-                    value={Array.isArray(value) ? (value as string[]) : []}
-                    disabled={!canPlan}
-                    onChange={(e) => setOptions({
-                      ...options,
-                      [field.name]: Array.from(e.target.selectedOptions, (o) => o.value),
-                    })}
-                  >
-                    {columns.map((name) => <option key={name} value={name}>{name}</option>)}
-                  </select>
-                ) : field.kind === "list" ? (
+                {field.kind === "list" ? (
                   <textarea
                     id={id}
-                    className="df2-input"
+                    className="df2-input df2-studio-field"
                     rows={3}
                     value={Array.isArray(value) ? (value as string[]).join("\n") : ""}
                     disabled={!canPlan}
@@ -276,8 +310,8 @@ export function TransformStepBuilder({
                 ) : field.kind === "expression" ? (
                   <textarea
                     id={id}
-                    className={`df2-input df2-xform-code${expressionError ? " is-invalid" : ""}`}
-                    rows={2}
+                    className={`df2-input df2-studio-field df2-xform-code${expressionError ? " is-invalid" : ""}`}
+                    rows={3}
                     placeholder="[status] <> 'void'"
                     value={typeof value === "string" ? value : ""}
                     disabled={!canPlan}
@@ -290,7 +324,7 @@ export function TransformStepBuilder({
                 ) : (
                   <input
                     id={id}
-                    className="df2-input"
+                    className={`df2-input df2-studio-field${field.name === "format" || field.name === "output_format" || field.name === "characters" ? " df2-xform-code" : ""}`}
                     inputMode={field.kind === "number" ? "numeric" : undefined}
                     value={value === undefined || value === null ? "" : String(value)}
                     disabled={!canPlan}
@@ -298,9 +332,7 @@ export function TransformStepBuilder({
                       const raw = e.target.value;
                       setOptions({
                         ...options,
-                        [field.name]: field.kind === "number"
-                          ? (raw.trim() === "" ? "" : Number(raw))
-                          : raw,
+                        [field.name]: field.kind === "number" ? parseNumberOption(raw) : raw,
                       });
                     }}
                   />
@@ -318,7 +350,7 @@ export function TransformStepBuilder({
             <label className="df2-label" htmlFor="xform-label">Step name (optional)</label>
             <input
               id="xform-label"
-              className="df2-input"
+              className="df2-input df2-studio-field"
               value={label}
               disabled={!canPlan}
               placeholder="Tidy customer names"

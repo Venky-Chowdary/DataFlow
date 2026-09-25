@@ -25,6 +25,32 @@ export function earliestJobStartMs(input: {
   return Math.min(...candidates);
 }
 
+/** Wall clock for Theater Elapsed. Terminal jobs freeze — never Date.now() after done. */
+export function theaterElapsedMs(input: {
+  startedAt?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  fallbackStartMs?: number | null;
+  nowMs?: number;
+  terminal?: boolean;
+  frozenEndMs?: number | null;
+}): number {
+  const now = input.nowMs ?? Date.now();
+  const start = earliestJobStartMs({
+    startedAt: input.startedAt,
+    createdAt: input.createdAt,
+    fallbackMs: input.fallbackStartMs,
+    nowMs: now,
+  });
+  const completed = parseEpochMs(input.completedAt);
+  const frozen =
+    typeof input.frozenEndMs === "number" && Number.isFinite(input.frozenEndMs) && input.frozenEndMs > 0
+      ? input.frozenEndMs
+      : null;
+  const end = completed ?? (input.terminal ? (frozen ?? now) : now);
+  return Math.max(0, end - start);
+}
+
 /** Job-average rows/s. Refuse a reconnect-window invent (460k / 0.5s). */
 export function jobAverageRowsPerSecond(processed: number, elapsedMs: number): number {
   if (!(processed > 0) || !(elapsedMs >= 5_000)) return 0;

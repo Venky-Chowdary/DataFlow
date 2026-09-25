@@ -202,7 +202,7 @@ describe("Transfer Studio chrome contracts", () => {
     // Every class the step used was previously undefined, so the panel laid out
     // in default flow. The stylesheet must be reachable from the one entrypoint.
     assert.match(entry, /@import "\.\/transform-prep\.css";/);
-    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll"]) {
+    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll", ".df2-xform .df2-rule-import"]) {
       assert.ok(css.includes(rule), `${rule} has no rule`);
     }
     assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
@@ -229,6 +229,38 @@ describe("Transfer Studio chrome contracts", () => {
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(studio, /df2-xform-step/);
     assert.match(step, /isTransportTimeout/);
+    assert.match(step, /Upload rules/);
+    assert.match(step, /importBusinessRules/);
+    assert.match(step, /destTypes/);
+    assert.match(step, /syncMode/);
+    assert.match(step, /Headers are\s+inferred from the file/);
+    assert.match(step, /pre-load image/);
+    assert.match(step, /Destination names land on Map/);
+    const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
+    assert.match(ledger, /header_roles/);
+    assert.match(ledger, /How this file was read/);
+    assert.match(ledger, /Accept as Direct/);
+    assert.match(ledger, /canAcceptAsDirect/);
+    assert.match(ledger, /sheet_kinds/);
+    assert.match(ledger, /Rule analysis/);
+    assert.match(ledger, /interpretation/);
+    assert.match(ledger, /ruleConfidenceLabel/);
+    assert.match(ledger, /ruleActionLabel/);
+    assert.match(ledger, />Line</);
+    assert.match(ledger, />Interpretation</);
+    assert.match(ledger, /matcher/);
+    assert.match(ledger, /lookup_coverage/);
+    assert.match(ledger, /named mapping/);
+    assert.match(ledger, /named validation/);
+    assert.match(ledger, /namedRuleDisplay/);
+    assert.match(ledger, /proofRuleClaim/);
+    assert.match(ledger, /rule coverage/);
+    assert.match(ledger, /pre-load image/);
+    assert.match(ledger, /df2-rule-tag/);
+    assert.match(ledger, /df2-rule-provenance/);
+    assert.match(ledger, /resolved_rule/);
+    assert.match(ledger, /unknown_code_policy/);
+    assert.match(ledger, /G20 still refuses/);
     assert.match(step, /Retry preview/);
     assert.match(step, /disabled=\{!continueState\.enabled\}/);
     // A hung preview of an empty recipe must not lock Continue — only a recipe
@@ -344,9 +376,18 @@ describe("Transfer Studio chrome contracts", () => {
     const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
     const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+    const ledgerCss = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
 
     assert.match(mapStep, /\{continueToValidate\}/);
     assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /df2-rule-map-body/);
+    assert.match(mapStep, /df2-rule-honesty/);
+    assert.match(mapStep, /embedded/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
+    assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*scroll/);
+    assert.match(studio, /df2-rule-map-banner\[open\]::-webkit-scrollbar/);
+    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*grid-template-columns:\s*repeat\(3, 10rem\)/);
+    assert.match(ledgerCss, /df2-rule-tag[\s\S]*width:\s*100%/);
     assert.doesNotMatch(mapStep, /footerAction=/);
     assert.doesNotMatch(review, /footerAction/);
     assert.match(review, /pages > 1 &&/);
@@ -369,6 +410,12 @@ describe("Transfer Studio chrome contracts", () => {
     assert.equal(totalPages(8, 50), 1);
     assert.equal(totalPages(51, 50), 2);
     assert.equal(totalPages(100, 25), 4);
+
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(page, /businessRuleReportRef\.current/);
+    assert.match(page, /mergeBusinessRules\(prev, businessRuleReportRef\.current/);
+    assert.match(page, /stampCompiledWorkbookMappings/);
+    assert.match(page, /const carried = stampCompiledWorkbookMappings\(carryOperatorDecisions\(next, prior\)\)/);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {
@@ -942,6 +989,17 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(theater, /<Gate8ProofCard/);
     assert.match(theater, /onSchedule/);
     assert.match(theater, /Schedule/);
+    assert.match(theater, /onCompleteRef\.current/);
+    assert.match(theater, /return stop;\s*\}, \[jobId\]/);
+    assert.match(theater, /completedLoggedRef/);
+    assert.match(theater, /alreadyTerminal/);
+    assert.match(theater, /theaterElapsedMs/);
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(api, /closedTerminal/);
+    assert.match(api, /if \(stopped \|\| closedTerminal\) return/);
+    const liveLog = readFileSync(join(webRoot, "components/ui/LiveEventLog.tsx"), "utf8");
+    assert.match(liveLog, /isNewLiveLogTail/);
+    assert.match(liveLog, /i === entries\.length - 1 && enterNewest/);
     assert.match(page, /canPersistStudioSchedule/);
     assert.match(page, /studioSchedulePersistable \? \(\) => void handleScheduleRoute\(\) : undefined/);
     assert.match(page, /studioSchedulePersistable && \(/);

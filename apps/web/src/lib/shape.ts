@@ -18,6 +18,9 @@ export interface ShapeStepWire {
   enabled?: boolean;
   on_error?: string;
   label?: string;
+  /** Compiler stamp — a customers step is not applied to orders. */
+  source_table?: string;
+  dest_table?: string;
 }
 
 export interface ShapeRecipeWire {
@@ -331,6 +334,51 @@ export function fieldsFor(operation: ShapeOperation): ShapeField[] {
   });
 }
 
+/** Keep the typed text when it is not a finite number so the field does not snap to NaN. */
+export function parseNumberOption(raw: string): number | string {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : raw;
+}
+
+/**
+ * Blank for Add / required chrome: empty, empty list, or a number field that is
+ * not a finite number (NaN, Infinity, or leftover text). Zero is a real answer.
+ */
+export function isBlankOption(name: string, value: unknown): boolean {
+  if (value === undefined || value === null || value === "") return true;
+  if (Array.isArray(value) && value.length === 0) return true;
+  if (NUMBER_FIELDS.has(name)) {
+    return typeof value !== "number" || !Number.isFinite(value);
+  }
+  return false;
+}
+
+/** Drop blank / non-finite number drafts so the recipe never carries NaN. */
+export function draftOptionsForWire(options: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(options)) {
+    if (isBlankOption(name, value)) continue;
+    next[name] = value;
+  }
+  return next;
+}
+
+/**
+ * Ignore a compile answer that is older than the text now in the box.
+ * Undefined means the caller must not touch expressionError.
+ */
+export function settleExpressionCheck(
+  requestId: number,
+  latestId: number,
+  result: { valid?: boolean; error?: string },
+): string | undefined {
+  if (requestId !== latestId) return undefined;
+  if (result.valid) return "";
+  return result.error || "Expression is not valid.";
+}
+
 /** Which required option the draft is still missing, so Add can say why. */
 export function missingRequired(
   operation: ShapeOperation,
@@ -339,12 +387,9 @@ export function missingRequired(
 ): string {
   if (operation.needs_column && !column) return "Pick the column this step applies to.";
   for (const name of operation.required) {
-    const value = options[name];
-    const empty = value === undefined
-      || value === null
-      || value === ""
-      || (Array.isArray(value) && value.length === 0);
-    if (empty) return `${FIELD_LABEL[name] ?? name} is required for ${operation.op}.`;
+    if (isBlankOption(name, options[name])) {
+      return `${FIELD_LABEL[name] ?? name} is required for ${operation.op}.`;
+    }
   }
   return "";
 }
@@ -524,7 +569,7 @@ export function suggestionRank(severity: string): number {
   return 2;
 }
 
-const FAMILY_ORDER = ["nested", "rows", "structural", "cleanse"] as const;
+const FAMILY_ORDER = ["cleanse", "structural", "rows", "nested"] as const;
 const FAMILY_LABEL: Record<string, string> = {
   nested: "Nested JSON",
   rows: "Row count",

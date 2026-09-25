@@ -2674,6 +2674,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
@@ -3910,6 +3915,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
@@ -4734,6 +4744,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,

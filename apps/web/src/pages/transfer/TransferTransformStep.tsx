@@ -4,7 +4,10 @@ import { TransformColumnCatalog } from "../../components/transfer/TransformColum
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
-import { fetchShapeCatalog, previewShapeRecipe, profileShapeSource } from "../../lib/api";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
+import type { RuleCompileReport } from "../../lib/businessRules";
+import { ruleReportSummary } from "../../lib/businessRules";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import {
   changedCellIndex,
@@ -55,6 +58,19 @@ interface TransferTransformStepProps {
   onContinue: () => void;
   /** CDC / SCD2 / mirror refuse pre-load — history was not written by this recipe. */
   syncMode?: string;
+  /**
+   * Compiled workbook applied onto this transfer. Transform owns the upload
+   * because both schemas exist here; Map owns the per-column evidence.
+   */
+  onApplyRules?: (report: RuleCompileReport) => void;
+  onAcceptRuleDirect?: (index: number) => void;
+  ruleReport?: RuleCompileReport | null;
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
 }
 
 const PREVIEW_ROWS = 12;
@@ -105,6 +121,15 @@ export function TransferTransformStep({
   onBack,
   onContinue,
   syncMode,
+  onApplyRules,
+  onAcceptRuleDirect,
+  ruleReport,
+  sourceTable = "",
+  destTable = "",
+  sourceTables = [],
+  sourceCatalog = {},
+  destTables = [],
+  destCatalog = {},
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -125,6 +150,9 @@ export function TransferTransformStep({
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
   const [previewRetry, setPreviewRetry] = useState(0);
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [previewedStepsKey, setPreviewedStepsKey] = useState("");
   const stepsListRef = useRef<HTMLOListElement | null>(null);
 
@@ -137,6 +165,38 @@ export function TransferTransformStep({
     () => Object.entries(preview?.retyped_columns ?? {}).sort(([a], [b]) => a.localeCompare(b)),
     [preview],
   );
+
+  const onPickRules = useCallback(async (file: File | undefined) => {
+    if (!file || !onApplyRules) return;
+    if (!plan.allowed) {
+      setRuleError("Planning a transfer is required to import rules.");
+      return;
+    }
+    setRuleBusy(true);
+    setRuleError("");
+    try {
+      const report = await importBusinessRules({
+        file,
+        sourceColumns,
+        destColumns: Object.keys(targetSchema || {}),
+        sourceTable,
+        destTable,
+        sourceTables,
+        sourceCatalog,
+        destTables,
+        destCatalog,
+        sourceTypes: sourceSchema,
+        destTypes: targetSchema,
+        syncMode,
+      });
+      onApplyRules(report);
+    } catch (err) {
+      setRuleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRuleBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, destTables, destCatalog, syncMode]);
 
   const toggleGuide = useCallback(() => {
     setShowGuide((open) => {
@@ -341,6 +401,53 @@ export function TransferTransformStep({
         <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
       )}
 
+      {onApplyRules ? <div className="df2-rule-import">
+        <div className="df2-rule-import-copy">
+          <strong>Business rules</strong>
+          <p>
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Headers are
+            inferred from the file and the schemas you already selected — not a
+            fixed column list. Closed-form rows compile onto this recipe and
+            Map. Destination names land on Map — this catalog stays the
+            pre-load image (source names plus derived columns). Anything we
+            cannot execute stays in review — unused destination columns are
+            not written. Applied rows land on this recipe and Map immediately.
+            Closed-form Validate checks compile as destination contracts
+            — they never write. Review is for sentences that are not a
+            closed form or did not bind. Accept as Direct on a leftover
+            bound rename, or continue to Map to remap.
+            {sourceTables.length > 1
+              ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
+              : ""}
+          </p>
+          {ruleReport ? <p className="df2-rule-import-summary">{ruleReportSummary(ruleReport)}</p> : null}
+          {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}
+        </div>
+        <div className="df2-rule-import-actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            hidden
+            onChange={(event) => void onPickRules(event.target.files?.[0])}
+          />
+          <button
+            type="button"
+            className="df2-btn df2-btn-secondary df2-btn-sm"
+            disabled={ruleBusy || !plan.allowed}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {ruleBusy ? "Reading…" : ruleReport ? "Replace rules file" : "Upload rules"}
+          </button>
+        </div>
+      </div> : null}
+      {ruleReport ? (
+        <BusinessRuleLedger
+          report={ruleReport}
+          onAcceptDirect={onAcceptRuleDirect}
+        />
+      ) : null}
+
       <dl className="df2-xform-stats">
         <div>
           <dt>Sampled rows</dt>
@@ -464,8 +571,9 @@ export function TransferTransformStep({
           </header>
           {kitchen.from === "shaped" ? (
             <p className="df2-xform-note">
-              These columns are the transformed image — what Map and the writer will see, including
-              columns an unnest or flatten just produced.
+              These columns are the pre-load image — source names plus columns
+              this recipe just derived. Destination names (customer_key,
+              first_name, …) land on Map. Validate contracts never write.
             </p>
           ) : profile?.sample_notice ? (
             <p className="df2-xform-note">{profile.sample_notice}</p>
@@ -686,7 +794,7 @@ export function TransferTransformStep({
             </div>
           </div>
           <div className="df2-xform-gridpane">
-            <h4>Transformed — what Map and the writer will see</h4>
+            <h4>Pre-load image — source names plus derived columns. Map renames to destination names.</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
                 {steps.length ? "No rows survive the recipe on this sample." : "Nothing transformed yet."}

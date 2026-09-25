@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   earliestJobStartMs,
   jobAverageRowsPerSecond,
+  theaterElapsedMs,
   theaterProgressPct,
 } from "./jobTheaterProgress.js";
 
@@ -102,6 +103,27 @@ describe("earliestJobStartMs", () => {
     assert.equal(start, created);
     const elapsedMin = (resetStarted - start) / 60_000;
     assert.ok(elapsedMin > 25 && elapsedMin < 35);
+  });
+});
+
+describe("theaterElapsedMs", () => {
+  it("freezes after complete when completed_at is missing", () => {
+    const start = Date.parse("2026-09-25T02:09:51.000Z");
+    const done = start + 18_000;
+    const later = done + 239 * 60_000;
+    const frozen = theaterElapsedMs({
+      createdAt: "2026-09-25T02:09:51.000Z",
+      terminal: true,
+      frozenEndMs: done,
+      nowMs: later,
+    });
+    assert.equal(frozen, 18_000);
+    const live = theaterElapsedMs({
+      createdAt: "2026-09-25T02:09:51.000Z",
+      terminal: false,
+      nowMs: later,
+    });
+    assert.ok(live > 200 * 60_000);
   });
 });
 

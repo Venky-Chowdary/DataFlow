@@ -1,0 +1,448 @@
+/**
+ * Run: npx --yes tsx --test apps/web/src/lib/businessRules.test.ts
+ */
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import {
+  acceptRuleAsDirect,
+  canAcceptAsDirect,
+  compiledExpression,
+  mergeBusinessRules,
+  mergeCompiledShapeSteps,
+  namedRuleDisplay,
+  proofRuleClaim,
+  ruleCensus,
+  ruleReportSummary,
+  ruleToEvidence,
+  type CompiledRule,
+  type RuleCompileReport,
+} from "./businessRules";
+import type { EditableMapping } from "./mapping";
+
+const report: RuleCompileReport = {
+  filename: "rules.csv",
+  rule_count: 3,
+  buckets: { executable: 2, needs_confirmation: 1, conflict: 0 },
+  unused_dest_columns: ["unused_flag"],
+  unused_dest_count: 1,
+  shape_steps: [],
+  honesty: "test",
+  rules: [
+    {
+      source_column: "fname",
+      dest_column: "first_name",
+      rule_text: "Direct",
+      kind: "direct",
+      kind_label: "Direct map",
+      plane: "map",
+      confidence: 0.99,
+      transform: "none",
+      status: "executable",
+      provenance: { sheet: "Rules", row: 2 },
+    },
+    {
+      source_column: "status",
+      dest_column: "status",
+      rule_text: "A → ACTIVE, I → INACTIVE",
+      kind: "lookup",
+      kind_label: "Code crosswalk",
+      plane: "map",
+      confidence: 0.98,
+      transform: "none",
+      code_crosswalk: { A: "ACTIVE", I: "INACTIVE" },
+      status: "executable",
+      provenance: { sheet: "Rules", row: 3 },
+    },
+    {
+      source_column: "mystery",
+      dest_column: "segment",
+      rule_text: "use the legacy id unless migrated",
+      kind: "unknown",
+      kind_label: "Needs review",
+      plane: "review",
+      confidence: 0.35,
+      status: "needs_confirmation",
+      issues: ["rule text is not a closed form this compiler can execute"],
+      provenance: { sheet: "Rules", row: 4 },
+    },
+  ],
+};
+
+const seed: EditableMapping[] = [
+  { source: "fname", target: "", confidence: 0.4, approved: false, transform: "none" },
+  { source: "status", target: "status", confidence: 0.8, approved: false, transform: "none" },
+  { source: "mystery", target: "", confidence: 0.2, approved: false, transform: "none" },
+];
+
+describe("mergeBusinessRules", () => {
+  it("binds executable rules and leaves unknown ones for review", () => {
+    const next = mergeBusinessRules(seed, report);
+    const fname = next.find((m) => m.source === "fname")!;
+    assert.equal(fname.target, "first_name");
+    assert.equal(fname.approved, true);
+    assert.equal(fname.businessRule?.kind, "direct");
+    assert.equal(fname.businessRule?.row, 2);
+
+    const status = next.find((m) => m.source === "status")!;
+    assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE", I: "INACTIVE" });
+    assert.equal(status.approved, true);
+
+    const mystery = next.find((m) => m.source === "mystery")!;
+    assert.equal(mystery.approved, false);
+    assert.equal(mystery.requiresReview, true);
+    assert.equal(mystery.businessRule?.status, "needs_confirmation");
+    assert.equal(mystery.target, "");
+  });
+
+  it("does not invent a dest column for unused dests", () => {
+    const next = mergeBusinessRules(seed, report);
+    assert.equal(next.some((m) => m.target === "unused_flag"), false);
+  });
+
+  it("summarises unused dest columns as not written", () => {
+    assert.match(ruleReportSummary(report), /2 executable/);
+    assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
+    assert.match(ruleReportSummary(report), /3 total · 3 mapping · 0 validation/);
+    const census = ruleCensus(report);
+    assert.equal(census.total, 3);
+    assert.equal(census.mapping, 3);
+    assert.equal(census.validation, 0);
+    assert.equal(compiledExpression(report.rules[1]), "A → ACTIVE; I → INACTIVE");
+  });
+
+  it("shows named rules as R001 · text and honest coverage without inventing execution", () => {
+    const named: CompiledRule = {
+      ...report.rules[0],
+      named_rule: "R001",
+      rule_text: "Copy customer_id without modification",
+      resolved_rule: "",
+    };
+    assert.equal(namedRuleDisplay(named), "R001 · Copy customer_id without modification");
+    const covered: RuleCompileReport = {
+      ...report,
+      coverage: {
+        detected: 3,
+        executable: 2,
+        review: 1,
+        conflict: 0,
+        writes: 2,
+        validations: 0,
+        percent: 67,
+      },
+    };
+    assert.match(ruleReportSummary(covered), /rule coverage 67%/);
+    assert.match(proofRuleClaim(covered), /review remains/);
+    const proven: RuleCompileReport = {
+      ...report,
+      buckets: { executable: 3, needs_confirmation: 0, conflict: 0 },
+      coverage: {
+        detected: 3, executable: 3, review: 0, conflict: 0, writes: 3, validations: 0, percent: 100,
+      },
+    };
+    assert.equal(proofRuleClaim(proven), "Migration verified against 3 business rules");
+  });
+
+  it("summarises inferred headers when the file did not use aliases", () => {
+    const inferred: RuleCompileReport = {
+      ...report,
+      header_roles: [
+        { header: "Orig Field", role: "source_column", method: "schema", confidence: 1, reason: "schema" },
+        { header: "How to convert", role: "rule", method: "rule_pattern", confidence: 1, reason: "rules" },
+      ],
+    };
+    assert.match(ruleReportSummary(inferred), /headers inferred from file \+ schema/);
+  });
+
+  it("does not overwrite an operator-locked dest", () => {
+    const locked: EditableMapping[] = [
+      { source: "fname", target: "given_name", confidence: 0.9, approved: true, transform: "none" },
+    ];
+    const next = mergeBusinessRules(locked, report);
+    assert.equal(next[0].target, "given_name");
+    assert.equal(next[0].businessRule?.status, "conflict");
+    assert.equal(next[0].requiresReview, true);
+  });
+
+  it("replaces create-new identity dests with compiled workbook names", () => {
+    const rematch: EditableMapping[] = [
+      { source: "customer_id", target: "customer_id", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "fname", target: "fname", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "email", target: "email", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "status", target: "status", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "monthly_salary", target: "monthly_salary", confidence: 0.93, approved: true, transform: "none", createNew: true },
+      { source: "annual_salary", target: "annual_salary", confidence: 0.93, approved: true, transform: "none", createNew: true },
+    ];
+    const workbook: RuleCompileReport = {
+      ...report,
+      rule_count: 5,
+      buckets: { executable: 5, needs_confirmation: 0, conflict: 0 },
+      unused_dest_columns: [],
+      unused_dest_count: 0,
+      rules: [
+        { ...report.rules[0], source_column: "customer_id", dest_column: "customer_key", kind: "direct", kind_label: "Direct map" },
+        { ...report.rules[0], source_column: "fname", dest_column: "first_name" },
+        {
+          source_column: "email",
+          dest_column: "email_address",
+          rule_text: "Convert email to lowercase",
+          kind: "email",
+          kind_label: "Normalize email",
+          plane: "map",
+          confidence: 0.99,
+          transform: "email",
+          status: "executable",
+        },
+        { ...report.rules[1], dest_column: "customer_status" },
+        {
+          source_column: "monthly_salary",
+          map_source: "annual_salary",
+          dest_column: "annual_salary",
+          rule_text: "monthly_salary * 12",
+          kind: "derive",
+          kind_label: "Derived value",
+          plane: "shape",
+          confidence: 0.99,
+          transform: "none",
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules(rematch, workbook);
+    assert.equal(next.find((m) => m.source === "customer_id")?.target, "customer_key");
+    // Map rematch after merge (step/analyze effect) must not lock identity dests.
+    const rematchAgain = rematch.map((row) => ({
+      ...row,
+      target: row.source,
+      businessRule: undefined,
+    }));
+    const restamped = mergeBusinessRules(rematchAgain, workbook);
+    assert.equal(restamped.find((m) => m.source === "fname")?.target, "first_name");
+    assert.equal(restamped.find((m) => m.source === "email")?.target, "email_address");
+    assert.equal(next.find((m) => m.source === "fname")?.target, "first_name");
+    const email = next.find((m) => m.source === "email")!;
+    assert.equal(email.target, "email_address");
+    assert.equal(email.transform, "email");
+    assert.equal(next.find((m) => m.source === "status")?.target, "customer_status");
+    assert.equal(next.find((m) => m.source === "monthly_salary")?.target, "monthly_salary");
+    assert.equal(next.find((m) => m.source === "annual_salary")?.target, "annual_salary");
+    assert.equal(next.filter((m) => m.source === "fname").length, 1);
+  });
+
+  it("fans one source out to a second dest instead of overwriting", () => {
+    const twoDest: RuleCompileReport = {
+      ...report,
+      rules: [
+        report.rules[0],
+        {
+          ...report.rules[0],
+          dest_column: "display_name",
+          rule_text: "Direct",
+          provenance: { sheet: "Rules", row: 9 },
+        },
+      ],
+    };
+    const next = mergeBusinessRules(seed, twoDest);
+    const fnameRows = next.filter((m) => m.source === "fname");
+    assert.equal(fnameRows.length, 2);
+    assert.deepEqual(fnameRows.map((m) => m.target).sort(), ["display_name", "first_name"]);
+  });
+
+  it("shows named-rule expansion and never writes an unknown-code default", () => {
+    const named: RuleCompileReport = {
+      ...report,
+      named_rules: ["EmailClean"],
+      rules: [
+        {
+          source_column: "email",
+          dest_column: "email",
+          rule_text: "%EmailClean%",
+          named_rule: "EmailClean",
+          resolved_rule: "lowercase + validate email",
+          kind: "email",
+          kind_label: "Normalize email",
+          plane: "map",
+          confidence: 0.96,
+          transform: "email",
+          status: "executable",
+        },
+        {
+          source_column: "status",
+          dest_column: "status",
+          rule_text: "A → ACTIVE, unmapped → OTHER",
+          kind: "lookup",
+          kind_label: "Code crosswalk",
+          plane: "map",
+          confidence: 0.98,
+          transform: "none",
+          code_crosswalk: { A: "ACTIVE" },
+          unknown_code_policy: { action: "default", value: "OTHER" },
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules([
+      { source: "email", target: "", confidence: 0.4, approved: false, transform: "none" },
+      { source: "status", target: "status", confidence: 0.8, approved: false, transform: "none" },
+    ], named);
+    const email = next.find((m) => m.source === "email")!;
+    assert.match(ruleToEvidence(named.rules[0]).text, /EmailClean/);
+    assert.match(email.businessRule?.text || "", /lowercase/);
+    const status = next.find((m) => m.source === "status")!;
+    assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE" });
+    assert.equal(Object.prototype.hasOwnProperty.call(status.codeCrosswalk || {}, "OTHER"), false);
+    assert.match(ruleReportSummary(named), /1 named mapping/);
+  });
+
+  it("applies a named IANA zone instead of a zoneless assume_timezone", () => {
+    const zoned: RuleCompileReport = {
+      ...report,
+      rules: [
+        {
+          source_column: "created_at",
+          dest_column: "created_at",
+          rule_text: "assume timezone America/New_York",
+          kind: "timezone",
+          kind_label: "Timezone (review)",
+          plane: "map",
+          confidence: 0.96,
+          transform: "assume_timezone",
+          engine_transform: "assume_timezone:America/New_York",
+          timezone: "America/New_York",
+          status: "executable",
+        },
+      ],
+    };
+    const next = mergeBusinessRules(
+      [{ source: "created_at", target: "created_at", confidence: 0.8, approved: false, transform: "none" }],
+      zoned,
+    );
+    assert.equal(next[0].transform, "assume_timezone");
+    assert.equal(next[0].engineTransform, "assume_timezone:America/New_York");
+  });
+
+  it("scopes merge to one selected source table so id does not cross streams", () => {
+    const twoTables: RuleCompileReport = {
+      ...report,
+      source_tables: ["customers", "orders"],
+      rules: [
+        {
+          source_table: "customers",
+          source_column: "id",
+          dest_column: "customer_id",
+          rule_text: "Direct",
+          kind: "direct",
+          kind_label: "Direct",
+          plane: "map",
+          confidence: 0.99,
+          status: "executable",
+        },
+        {
+          source_table: "orders",
+          source_column: "id",
+          dest_column: "order_id",
+          rule_text: "Direct",
+          kind: "direct",
+          kind_label: "Direct",
+          plane: "map",
+          confidence: 0.99,
+          status: "executable",
+        },
+      ],
+    };
+    const customers = mergeBusinessRules(
+      [{ source: "id", target: "", confidence: 0.5, approved: false, transform: "none" }],
+      twoTables,
+      { sourceTable: "customers" },
+    );
+    assert.equal(customers[0].target, "customer_id");
+    const orders = mergeBusinessRules(
+      [{ source: "id", target: "", confidence: 0.5, approved: false, transform: "none" }],
+      twoTables,
+      { sourceTable: "orders" },
+    );
+    assert.equal(orders[0].target, "order_id");
+  });
+
+  it("merges compiled shape steps without dropping operator steps", () => {
+    const existing = [{ op: "trim", column: "email", enabled: true }];
+    const compiled = [
+      { op: "trim", column: "email", enabled: true },
+      { op: "derive_column", options: { to: "annual_salary", expression: "salary * 12" }, enabled: true },
+    ];
+    const next = mergeCompiledShapeSteps(existing, compiled);
+    assert.equal(next.length, 2);
+    assert.equal(next[1].op, "derive_column");
+  });
+
+  it("does not merge another table's compiled shape steps onto this stream", () => {
+    const existing = [{ op: "trim", column: "note", enabled: true }];
+    const compiled = [
+      { op: "parse_date", column: "signed_on", source_table: "customers", options: { format: "MM/DD/YYYY" }, enabled: true },
+      { op: "trim", column: "sku", source_table: "orders", enabled: true },
+    ];
+    const next = mergeCompiledShapeSteps(existing, compiled, { sourceTable: "customers" });
+    assert.equal(next.length, 2);
+    assert.equal(next[1].op, "parse_date");
+    assert.equal(next.some((step) => step.column === "sku"), false);
+  });
+});
+
+describe("operator accept of a review rule", () => {
+  it("accepts a bound rename as Direct and refuses a validation dest", () => {
+    assert.equal(canAcceptAsDirect(report.rules[2]), true);
+    const next = acceptRuleAsDirect(report, 2);
+    assert.equal(next.rules[2].status, "executable");
+    assert.equal(next.rules[2].kind, "direct");
+    assert.equal(next.rules[2].interpretation, "Direct copy");
+    assert.equal(next.rules[2].action, "auto");
+    assert.equal(next.buckets.executable, 3);
+    assert.equal(next.buckets.needs_confirmation, 0);
+    const mapped = mergeBusinessRules(seed, next);
+    assert.equal(mapped.find((row) => row.source === "mystery")?.target, "segment");
+    assert.equal(mapped.find((row) => row.source === "mystery")?.approved, true);
+
+    const validation: CompiledRule = {
+      ...report.rules[2],
+      dest_column: "V001",
+      rule_text: "Must not be null",
+      kind: "contract",
+    };
+    assert.equal(canAcceptAsDirect(validation), false);
+    const missing: CompiledRule = {
+      ...report.rules[2],
+      source_column: "annual_salary",
+      dest_column: "annual_salary",
+      issues: ['Source column "annual_salary" is not on the selected source.'],
+    };
+    assert.equal(canAcceptAsDirect(missing), false);
+  });
+
+  it("does not merge destination contracts onto Map writes", () => {
+    const withContract: RuleCompileReport = {
+      ...report,
+      rules: [
+        ...report.rules,
+        {
+          source_column: "email",
+          dest_column: "email_address",
+          rule_text: "Must contain @",
+          kind: "contract",
+          kind_label: "Validate contract",
+          interpretation: "Contains @",
+          action: "auto",
+          plane: "validate",
+          confidence: 0.98,
+          status: "executable",
+          contract: { type: "contains", value: "@" },
+        },
+      ],
+    };
+    const next = mergeBusinessRules(
+      [{ source: "email", target: "", confidence: 0.4, approved: false, transform: "none" }],
+      withContract,
+    );
+    const email = next.find((row) => row.source === "email");
+    assert.equal(email?.target, "");
+    assert.equal(email?.businessRule, undefined);
+  });
+});
