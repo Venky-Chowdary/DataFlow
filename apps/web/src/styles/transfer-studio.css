@@ -6863,7 +6863,6 @@ th.df2-type-string .df2-type-badge {
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
   white-space: pre-wrap;
   word-break: break-word;
-  contain-intrinsic-size: 0 22px;
 }
 .df2-live-log-line.is-ok { color: #6ee7b7; }
 .df2-live-log-line.is-warn { color: #fcd34d; }

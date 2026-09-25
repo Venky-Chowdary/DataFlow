@@ -243,7 +243,7 @@ export function JobTheater({
           append(update.message);
           prev.message = update.message;
         }
-        if (update.chunk_current != null && update.chunk_current !== prev.chunk) {
+        if (!doneRef.current && update.chunk_current != null && update.chunk_current !== prev.chunk) {
           const totalChunks = update.chunk_total ?? 0;
           // High batch counts (proxy loads) — don't spam every chunk line.
           const every = totalChunks > 80 ? 10 : totalChunks > 30 ? 5 : 1;
@@ -262,7 +262,7 @@ export function JobTheater({
         const processed = update.records_processed ?? 0;
         // Log a row milestone at least every 10k rows so the feed keeps moving
         // even when the backend only streams counters.
-        if (processed - prev.loggedRows >= 10000) {
+        if (!doneRef.current && processed - prev.loggedRows >= 10000) {
           prev.loggedRows = processed;
           append(`${processed.toLocaleString()} rows processed`);
         }
