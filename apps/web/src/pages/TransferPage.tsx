@@ -1484,6 +1484,18 @@ export function TransferPage({
     }>) | null
   >(null);
 
+  /** Rematch invents identity dests. Stamp compiled workbook names after every commit. */
+  const stampCompiledWorkbookMappings = useCallback(
+    (mappings: EditableMapping[], sourceTable?: string) => {
+      const report = businessRuleReportRef.current;
+      if (!report || !mappings.length) return mappings;
+      return mergeBusinessRules(mappings, report, {
+        sourceTable: sourceTable || primarySourceStream || undefined,
+      });
+    },
+    [primarySourceStream],
+  );
+
   const applyPipelineMappings = useCallback(
     async (
       targetCols?: string[],
@@ -1558,9 +1570,11 @@ export function TransferPage({
         if (gen !== mappingGenRef.current) return next;
         const prior = columnMappingsRef.current;
         if (!next.length && sourceCols.length) {
-          const identity = carryOperatorDecisions(
-            buildMappingsFromSource(analysisCols, targetCols),
-            prior,
+          const identity = stampCompiledWorkbookMappings(
+            carryOperatorDecisions(
+              buildMappingsFromSource(analysisCols, targetCols),
+              prior,
+            ),
           );
           if (identity.length) {
             setColumnMappings(identity);
@@ -1569,7 +1583,7 @@ export function TransferPage({
             return identity;
           }
         }
-        const carried = carryOperatorDecisions(next, prior);
+        const carried = stampCompiledWorkbookMappings(carryOperatorDecisions(next, prior));
         setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
@@ -1715,6 +1729,7 @@ export function TransferPage({
       destColumns,
       connectorId,
       targetCollection,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -1749,25 +1764,31 @@ export function TransferPage({
               ? (destTableExists ?? destTableExistsRef.current)
               : false,
         });
-        return editableFromPipelineMappings(
-          result.mappings,
-          rows,
-          targetCols,
-          threshold,
-          targetSchema,
+        return stampCompiledWorkbookMappings(
+          editableFromPipelineMappings(
+            result.mappings,
+            rows,
+            targetCols,
+            threshold,
+            targetSchema,
+          ),
+          streamName,
         );
       } catch (e) {
         console.error(`Stream mapping failed for ${streamName}:`, e);
-        return sourceCols.map((col) => ({
-          source: col,
-          target: col,
-          confidence: 0.5,
-          approved: false,
-          requiresReview: true,
-          existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
-          reason: "Fallback identity mapping (stream rematch unavailable)",
-          transform: "none" as const,
-        }));
+        return stampCompiledWorkbookMappings(
+          sourceCols.map((col) => ({
+            source: col,
+            target: col,
+            confidence: 0.5,
+            approved: false,
+            requiresReview: true,
+            existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
+            reason: "Fallback identity mapping (stream rematch unavailable)",
+            transform: "none" as const,
+          })),
+          streamName,
+        );
       }
     },
     [
@@ -1782,6 +1803,7 @@ export function TransferPage({
       destType,
       syncMode,
       destTableExists,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -2012,6 +2034,8 @@ export function TransferPage({
     ) {
       return;
     }
+    // Rematch is identity on CREATE. commitMappings stamps compiled dest names
+    // so this effect cannot wipe fname → first_name back to fname → fname.
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
   }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 

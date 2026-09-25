@@ -209,6 +209,15 @@ describe("mergeBusinessRules", () => {
     };
     const next = mergeBusinessRules(rematch, workbook);
     assert.equal(next.find((m) => m.source === "customer_id")?.target, "customer_key");
+    // Map rematch after merge (step/analyze effect) must not lock identity dests.
+    const rematchAgain = rematch.map((row) => ({
+      ...row,
+      target: row.source,
+      businessRule: undefined,
+    }));
+    const restamped = mergeBusinessRules(rematchAgain, workbook);
+    assert.equal(restamped.find((m) => m.source === "fname")?.target, "first_name");
+    assert.equal(restamped.find((m) => m.source === "email")?.target, "email_address");
     assert.equal(next.find((m) => m.source === "fname")?.target, "first_name");
     const email = next.find((m) => m.source === "email")!;
     assert.equal(email.target, "email_address");

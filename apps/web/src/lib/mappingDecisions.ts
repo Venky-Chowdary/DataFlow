@@ -28,6 +28,7 @@ import {
   type EditableMapping,
   type ExecutionPolicy,
 } from "./mapping";
+import { isAutoIdentityDest } from "./businessRules";
 
 /** Facts an operator decision is scoped to — any change invalidates the ack. */
 export function mappingDecisionFingerprint(m: EditableMapping): string {
@@ -63,6 +64,7 @@ export function carryOperatorDecisions(
   const omitted = new Map<string, EditableMapping>();
   const crosswalks = new Map<string, { table: Record<string, string>; system?: string }>();
   const declaredTypes = new Map<string, string>();
+  const compiledDests = new Map<string, string>();
   for (const p of prior) {
     if (isIntentionalOmit(p)) omitted.set(p.source, p);
     if (p.destTypeDeclared && !isIntentionalOmit(p)) {
@@ -70,6 +72,15 @@ export function carryOperatorDecisions(
     }
     if (p.codeCrosswalk && Object.keys(p.codeCrosswalk).length && !isIntentionalOmit(p)) {
       crosswalks.set(p.source, { table: p.codeCrosswalk, system: p.codeCrosswalkSystem });
+    }
+    const compiledDest = (p.target || "").trim();
+    if (
+      !isIntentionalOmit(p)
+      && p.businessRule?.status === "executable"
+      && compiledDest
+      && compiledDest.toLowerCase() !== (p.source || "").trim().toLowerCase()
+    ) {
+      compiledDests.set(p.source, compiledDest);
     }
     if (!p.approved && !p.riskAcknowledged) continue;
     decided.set(mappingDecisionFingerprint(p), p);
@@ -79,6 +90,7 @@ export function carryOperatorDecisions(
     && !omitted.size
     && !crosswalks.size
     && !declaredTypes.size
+    && !compiledDests.size
     && !prior.some((p) => typeof p.controlTotal === "boolean")
   ) {
     return next;
@@ -97,9 +109,13 @@ export function carryOperatorDecisions(
     const restored = declared && declared !== m.destTypeDeclared
       ? applyDestTypeChange(m, declared)
       : m;
-    const hit = decided.get(mappingDecisionFingerprint(restored));
+    const compiledDest = compiledDests.get(m.source);
+    const destRestored = compiledDest && isAutoIdentityDest(restored)
+      ? { ...restored, target: compiledDest }
+      : restored;
+    const hit = decided.get(mappingDecisionFingerprint(destRestored));
     const priorWalk = crosswalks.get(m.source);
-    let nextRow = restored;
+    let nextRow = destRestored;
     if (priorWalk && !isIntentionalOmit(m)) {
       nextRow = { ...nextRow, codeCrosswalk: priorWalk.table, codeCrosswalkSystem: priorWalk.system };
     }
