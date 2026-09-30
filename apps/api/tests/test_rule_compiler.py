@@ -982,7 +982,7 @@ def test_informatica_iif_nvl2_and_update_strategy():
 def test_in_between_filters_and_regex_and_hash_identity():
     keep_in = classify_rule("keep if status in (A, I, P)")
     assert keep_in["kind"] == "filter"
-    assert 'status = "A"' in keep_in["condition"]
+    assert 'status = \'A\'' in keep_in["condition"]
     assert keep_in["keep"] is True
     exclude_in = classify_rule("exclude rows where status in (X, Y)")
     assert exclude_in["kind"] == "filter"
@@ -1036,7 +1036,7 @@ def test_in_between_filters_and_regex_and_hash_identity():
 def test_like_is_null_not_in_and_keep_drop_columns():
     like = classify_rule("keep if name like 'Acme%'")
     assert like["kind"] == "filter"
-    assert 'starts_with(name, "Acme")' in like["condition"]
+    assert "starts_with(name, 'Acme')" in like["condition"]
     contains = classify_rule("keep if email like '%@corp.com'")
     assert "ends_with(email" in contains["condition"]
     mid = classify_rule("keep if note like '%urgent%'")
@@ -1134,7 +1134,7 @@ def test_coma_type_constraint_and_cdc_refuse_preload():
 def test_compound_predicate_is_fail_closed_not_a_half_filter():
     both = classify_rule("keep if status = A and amount > 0")
     assert both["kind"] == "filter"
-    assert "status = \"A\"" in both["condition"]
+    assert "status = 'A'" in both["condition"]
     assert "amount > 0" in both["condition"]
     assert "and" in both["condition"]
     leftover = classify_rule("keep if status in (A, I) and use the legacy flag")
@@ -1148,7 +1148,7 @@ def test_compound_predicate_is_fail_closed_not_a_half_filter():
     assert "amount > 0" in grouped["condition"]
     starts = classify_rule("keep if name starts with Acme")
     assert starts["kind"] == "filter"
-    assert 'starts_with(name, "Acme")' in starts["condition"]
+    assert "starts_with(name, 'Acme')" in starts["condition"]
     contains = classify_rule("exclude rows where email contains test")
     assert contains["kind"] == "filter"
     assert contains["keep"] is False
@@ -1156,9 +1156,9 @@ def test_compound_predicate_is_fail_closed_not_a_half_filter():
     empty = classify_rule("keep if notes is empty")
     assert empty["condition"] == "is_null(notes)"
     ilike = classify_rule("keep if name ilike 'Acme%'")
-    assert 'starts_with(lower(name), "acme")' in ilike["condition"]
+    assert "starts_with(lower(name), 'acme')" in ilike["condition"]
     unquoted = classify_rule("keep if name like Acme%")
-    assert 'starts_with(name, "Acme")' in unquoted["condition"]
+    assert "starts_with(name, 'Acme')" in unquoted["condition"]
     assert classify_rule("keep distinct rows")["kind"] == "unknown"
     assert classify_rule("pivot country into columns")["kind"] == "unknown"
     assert classify_rule("Y/N flag")["kind"] == "unknown"
@@ -1168,7 +1168,7 @@ def test_compound_predicate_is_fail_closed_not_a_half_filter():
     coal = classify_rule("COALESCE(status, flag, 'UNK')")
     assert coal["kind"] == "derive"
     assert "coalesce(" in coal["expression"]
-    assert '"UNK"' in coal["expression"]
+    assert "'UNK'" in coal["expression"]
     two = classify_rule("NVL(status, 'X')")
     assert two["kind"] == "default"
     assert two["value"] == "X"
@@ -1196,7 +1196,7 @@ def test_compound_predicate_is_fail_closed_not_a_half_filter():
     )
     by = {r["source_column"]: r for r in report["rules"] if r.get("source_column")}
     filt = next(s for s in report["shape_steps"] if s["op"] == "filter_rows")
-    assert "status = \"A\"" in filt["options"]["condition"]
+    assert "status = 'A'" in filt["options"]["condition"]
     assert "amount > 0" in filt["options"]["condition"]
     assert by["created_at"]["status"] == "executable"
     assert by["created_at"]["transform"] == "assume_timezone"
@@ -1223,7 +1223,7 @@ def test_volatile_identity_wrappers_and_lookup_payload():
 
     wrapped = classify_rule("keep if trim(status) = A")
     assert wrapped["kind"] == "filter"
-    assert wrapped["condition"] == 'trim(status) = "A"'
+    assert wrapped["condition"] == "trim(status) = 'A'"
     nested = classify_rule("keep if upper(trim(status)) = ACTIVE")
     assert "upper(trim(status))" in nested["condition"]
     distinct = classify_rule("keep if status is distinct from flag")
@@ -1377,7 +1377,7 @@ def test_scd_timezone_isnull_jsonpath_and_regex_are_not_silent():
 
     regex = classify_rule("keep if regex_matches(code, '^[A-Z]')")
     assert regex["kind"] == "filter"
-    assert regex["condition"] == 'regex_matches(code, "^[A-Z]")'
+    assert regex["condition"] == "regex_matches(code, '^[A-Z]')"
     rlike = classify_rule("keep if code rlike 'A.*'")
     assert rlike["kind"] == "filter"
     assert "regex_matches(code" in rlike["condition"]
@@ -1492,7 +1492,7 @@ def test_na_utf8_tonumber_trycast_and_leftover_are_not_silent():
 
     quoted = classify_rule("iif(isnull(status), 'X', status)")
     assert quoted["kind"] == "derive"
-    assert '"X"' in quoted["expression"]
+    assert "'X'" in quoted["expression"]
     iff = classify_rule("iff(status='A','Y','N')")
     assert iff["kind"] == "derive"
     assert '"Y"' in iff["expression"] or "Y" in iff["expression"]
@@ -2074,3 +2074,122 @@ def test_level2_closed_forms_stay_honest_on_join_and_lookup():
     assert dest["written"] == 1
     assert dest["rows"][0]["customer_key"] == "1002"
     assert sum(1 for q in dest["quarantine"] if q.get("error") == "must be unique") == 2
+
+
+def test_direct_map_speech_copy_write_and_maps_to():
+    from services.shape_expr import compile_expression
+
+    cases = (
+        "Copy customer_id to customer_key",
+        "Write customer_id as customer_key",
+        "Map customer_id to customer_key",
+        "customer_id maps to customer_key",
+        "customer_id → customer_key",
+    )
+    for text in cases:
+        got = classify_rule(text)
+        assert got["kind"] == "direct", text
+        assert got["plane"] == "map"
+    copy = classify_rule("Copy customer_id to customer_key")
+    assert copy.get("dest_hint") == "customer_key"
+    assert classify_rule("Map date to ISO")["kind"] != "direct"
+
+    concat = classify_rule("Combine first_name + space + last_name")
+    assert concat["kind"] == "concat"
+    assert concat["columns"] == ["first_name", "last_name"]
+    assert concat["separator"] == " "
+    comma = classify_rule("first_name + comma + last_name")
+    assert comma["columns"] == ["first_name", "last_name"]
+    assert comma["separator"] == ","
+    compile_expression("concat(first_name, ' ', last_name)")
+    compile_expression('concat(first_name, " ", last_name)')
+
+
+def test_validation_severity_is_not_a_source_column():
+    openpyxl = pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    assert canonical_header("Severity") == "severity"
+    assert canonical_header("Validation_Rule") == "rule"
+
+    src = ["customer_id", "first_name", "last_name", "state"]
+    dst = ["customer_key", "full_name", "state_code", "region"]
+    wb = Workbook()
+    mapping = wb.active
+    mapping.title = "Mapping_Rules"
+    mapping.append(["Rule_ID", "Source_Column", "Destination_Column", "Business_Rule"])
+    mapping.append(["R001", "customer_id", "customer_key", "Copy customer_id to customer_key"])
+    mapping.append(["R002", "first_name", "full_name", "Combine first_name + space + last_name"])
+    mapping.append(["R006", "state", "state_code", "Convert full US state name to 2-letter code"])
+    mapping.append(["R018", "state", "region", "lookup"])
+    lookups = wb.create_sheet("Lookup_Tables")
+    lookups.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    lookups.append(["STATE", "North Carolina", "NC"])
+    lookups.append(["STATE", "Texas", "TX"])
+    lookups.append(["REGION", "North Carolina", "Southeast"])
+    lookups.append(["REGION", "Texas", "South"])
+    checks = wb.create_sheet("Validation_Rules")
+    checks.append(["Validation_ID", "Destination_Column", "Validation_Rule", "Severity"])
+    checks.append(["V001", "customer_key", "Must not be null", "ERROR"])
+    checks.append(["V002", "state_code", "Must be a valid 2-letter state code", "WARNING"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    report = compile_rule_workbook(
+        "critical-fixes.xlsx",
+        buf.getvalue(),
+        source_columns=src,
+        dest_columns=dst,
+    )
+    assert report["rule_count"] < 10
+    assert all(r.get("source_column") != "ERROR" for r in report["rules"])
+    assert all("“ERROR”" not in " ".join(r.get("issues") or []) for r in report["rules"])
+    by_dest = {
+        r["dest_column"]: r
+        for r in report["rules"]
+        if r.get("kind") != "contract"
+    }
+    assert by_dest["customer_key"]["kind"] == "direct"
+    assert by_dest["customer_key"]["status"] == "executable"
+    assert by_dest["full_name"]["kind"] == "concat"
+    assert "space" not in " ".join(by_dest["full_name"].get("issues") or [])
+    assert by_dest["full_name"]["status"] == "executable"
+    assert by_dest["full_name"]["shape_step"]["options"]["separator"] == " "
+    assert by_dest["state_code"]["kind"] == "lookup"
+    assert by_dest["state_code"]["status"] == "executable"
+    assert by_dest["state_code"]["code_crosswalk"]["Texas"] == "TX"
+    assert by_dest["region"]["kind"] == "lookup"
+    assert by_dest["region"]["status"] == "executable"
+    assert by_dest["region"]["code_crosswalk"]["Texas"] == "South"
+    v001 = next(r for r in report["rules"] if r.get("named_rule") == "V001")
+    assert v001["kind"] == "contract"
+    assert v001["dest_column"] == "customer_key"
+    assert v001["status"] == "executable"
+    assert "ERROR" not in (v001.get("source_column") or "")
+    lookup_only = (
+        "Source Column,From Code,To Value\n"
+        "status,A,ACTIVE\n"
+        "status,I,INACTIVE\n"
+    ).encode()
+    pairs = compile_rule_workbook(
+        "lookup-only.csv",
+        lookup_only,
+        source_columns=["status"],
+        dest_columns=["status"],
+    )
+    assert any(r.get("code_crosswalk") for r in pairs["rules"])
+    from services.shape_expr import compile_expression
+
+    prefix_csv = (
+        "Source Column,Destination Column,Rule\n"
+        "code,sku,prefix \"US-\"\n"
+    ).encode()
+    shaped = compile_rule_workbook(
+        "prefix.csv",
+        prefix_csv,
+        source_columns=["code"],
+        dest_columns=["sku"],
+    )
+    step = next(r for r in shaped["rules"] if r["kind"] == "prefix")
+    expr = step["shape_step"]["options"]["expression"]
+    compile_expression(expr)
+    assert expr.startswith("concat('")

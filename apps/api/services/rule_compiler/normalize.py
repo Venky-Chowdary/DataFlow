@@ -110,6 +110,15 @@ HEADER_ALIASES: dict[str, str] = {
     "newvalue": "lookup_to",
     "newcode": "lookup_to",
     "outbound": "lookup_to",
+    "severity": "severity",
+    "level": "severity",
+    "priority": "severity",
+    "validationseverity": "severity",
+    "validationrule": "rule",
+    "validation": "rule",
+    "check": "rule",
+    "predicate": "rule",
+    "constraint": "rule",
 }
 
 

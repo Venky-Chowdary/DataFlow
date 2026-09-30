@@ -24,6 +24,7 @@ ROLES = (
     "dest_column",
     "rule",
     "rule_name",
+    "severity",
     "join_from",
     "join_on",
     "join_type",
@@ -45,7 +46,8 @@ _HINTS: dict[str, frozenset[str]] = {
     }),
     "rule": frozenset({
         "rule", "logic", "formula", "transform", "how", "convert",
-        "instruction", "conversion", "mapping",
+        "instruction", "conversion", "mapping", "validation", "predicate",
+        "constraint", "check",
     }),
     "action": frozenset({"action", "onfail", "quarantine", "reject"}),
     "join_from": frozenset({"joinfrom", "lefttable"}),
@@ -57,6 +59,7 @@ _HINTS: dict[str, frozenset[str]] = {
         "rulename", "namedrule", "ruleid", "mapplet", "macroname", "reusablerule",
         "validationid", "checkid", "constraintid",
     }),
+    "severity": frozenset({"severity", "level", "priority"}),
 }
 
 # Single-token priors that collide across roles ("to", "from").
@@ -236,7 +239,7 @@ def infer_header_roles(
     unused = [h for h in clean if h not in used]
     validation_sheet = _is_validation_sheet(sheet, clean)
     needs_positional = unused and (
-        "source_column" not in assigned
+        (not validation_sheet and "source_column" not in assigned)
         or (not validation_sheet and "dest_column" not in assigned)
         or "rule" not in assigned
     )
@@ -244,6 +247,7 @@ def infer_header_roles(
         _positional_fallback(
             unused, assigned, used, evidence, ident_scores, rule_scores, clean,
             allow_dest=not validation_sheet,
+            allow_source=not validation_sheet,
         )
 
     return InferredRoles(
@@ -405,6 +409,7 @@ def _positional_fallback(
     rule_scores: dict[str, float],
     clean: list[str],
     allow_dest: bool = True,
+    allow_source: bool = True,
 ) -> None:
     """Left-to-right mapping-spec layout when schemas cannot decide."""
     if "rule" not in assigned:
@@ -431,7 +436,7 @@ def _positional_fallback(
         if ident_scores.get(header, 0.0) >= 0.55
     ]
     ident_cols.sort(key=lambda header: clean.index(header) if header in clean else 0)
-    if "source_column" not in assigned and ident_cols:
+    if allow_source and "source_column" not in assigned and ident_cols:
         header = ident_cols[0]
         assigned["source_column"] = header
         used.add(header)
