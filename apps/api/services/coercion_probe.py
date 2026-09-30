@@ -304,6 +304,17 @@ def _build_suggestion(
     return "", None, None, None
 
 
+def _probe_target_not_null(
+    mapping: dict[str, Any],
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> bool:
+    """True only when Map or live DDL proves NOT NULL. Unknown stays nullable."""
+    from connectors.writer_common import _target_explicitly_not_null
+
+    return _target_explicitly_not_null(mapping, tgt_name, dest_nullability)
+
+
 def analyze_coercion(
     *,
     sample_rows: list[dict[str, Any]] | None,
@@ -314,6 +325,8 @@ def analyze_coercion(
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
     table_exists: bool | None = None,
     validation_mode: str = "strict",
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -600,6 +613,22 @@ def analyze_coercion(
                     specialty_base
                     and specialty_base not in {"CITEXT", "TSVECTOR"}
                 ):
+                    # File/Excel blanks are absence. The writer stores SQL NULL
+                    # on a nullable typed column (``empty_cells_as_null``).
+                    # Counting them as cast failures made INTEGER→BIGINT look
+                    # like a fidelity collapse and locked Execute on CREATE.
+                    # Proven NOT NULL and unknown physical DDL stay blocked.
+                    # DB→DB keeps the flag off — do not invent NULL there.
+                    if (
+                        empty_cells_as_null
+                        and not unknown_physical
+                        and not _probe_target_not_null(
+                            m, tgt_name, dest_nullability or {}
+                        )
+                    ):
+                        nulls += 1
+                        observed_values.append("")
+                        continue
                     failed += 1
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({

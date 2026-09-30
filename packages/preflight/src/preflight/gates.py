@@ -694,23 +694,42 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if objectid_text_domain:
             lossy = True
         # Coercion probe may block wire values even when declared types look
-        # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
+        # safe (naive DATETIME→TIMESTAMPTZ, empty cells, bad casts). Examine
+        # those columns. Do not relabel a safe widening (INTEGER→BIGINT) as
+        # "Lossy coercion" just because a sample cell failed — that sent
+        # operators to a fidelity Risk Contract for a nullability problem.
+        probe_only = False
         probe_early = by_source.get(m.source) if value_aware else None
         if not lossy and probe_early:
             sev = str(probe_early.get("severity") or "").lower()
             if sev == "block" or bool(probe_early.get("has_blocking_failures")):
-                lossy = True
+                probe_only = True
             elif int(probe_early.get("json_scalar_wraps") or 0) > 0:
                 # Bare scalar→JSON string is a domain change even when declared
                 # types are not lossy (e.g. INTEGER→VARIANT). Examine wrap path.
                 lossy = True
-        if not lossy:
+        if not lossy and not probe_only:
             continue
 
-        label = (
-            f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
-            f"{m.target} ({target.inferred_type})"
-        )
+        if probe_only and not (
+            declared_lossy
+            or platform_decimal_trunc
+            or nested_collapse
+            or objectid_text_domain
+        ):
+            fix = str((probe_early or {}).get("suggested_fix") or "").strip()
+            failures = (probe_early or {}).get("sample_failures") or []
+            reason = ""
+            if failures and isinstance(failures[0], dict):
+                reason = str(failures[0].get("reason") or "").strip()
+            label = fix or reason or (
+                f"Sample value does not fit {m.target} ({target.inferred_type})"
+            )
+        else:
+            label = (
+                f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
+                f"{m.target} ({target.inferred_type})"
+            )
         # Surface scale / vector annotations so operators see the real risk.
         if pair and len(pair) == 2 and "[" in str(pair[1]):
             note = str(pair[1]).split("[", 1)[-1].rstrip("]")
@@ -1169,7 +1188,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "contracted_holdout": bool(
                     risk_ack and int(probe.get("failed") or 0) > 0
                 ),
-                "declared_lossy": True,
+                "declared_lossy": bool(declared_lossy),
+                "probe_cast_only": bool(probe_only and not declared_lossy),
+                "fidelity_collapse": bool(
+                    declared_lossy and not probe_only
+                ),
             }
             issues_detail.append(detail)
             if force_block:

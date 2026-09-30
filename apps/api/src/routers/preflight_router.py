@@ -720,12 +720,14 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                     [("" if row.get(h) is None else str(row.get(h))) for h in headers]
                     for row in (image.sample_rows or [])
                 ]
+            file_source = str(body.source_kind or "file").strip().lower() == "file"
             result = _preview(
                 headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
                 column_types=column_types,
                 sample_size=body.sample_size,
+                empty_cells_as_null=file_source,
             )
             if image.applied:
                 result["transform_image"] = {

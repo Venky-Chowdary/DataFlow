@@ -100,8 +100,12 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_status: str = "",
         source_duplicate_probe_message: str = "",
         source_duplicate_probe_expected: bool = False,
+        empty_cells_as_null: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        # Spreadsheet blanks are absence. Only file sources opt in — the same
+        # flag the file writer uses. Database extracts keep it off.
+        self.empty_cells_as_null = bool(empty_cells_as_null)
         self.destination_collision = destination_collision
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
@@ -169,6 +173,16 @@ class FilePreflightContext(PreflightContext):
             "code_crosswalk_system": getattr(m, "code_crosswalk_system", None),
         }
 
+    def _dest_nullability(self) -> dict[str, bool]:
+        """Live/create-new nullability. Missing columns stay unknown (nullable)."""
+        out: dict[str, bool] = {}
+        for col in getattr(self.plan.destination, "target_columns", None) or []:
+            name = getattr(col, "name", None)
+            if not name:
+                continue
+            out[str(name)] = bool(getattr(col, "nullable", True))
+        return out
+
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
             return False, [
@@ -208,6 +222,8 @@ class FilePreflightContext(PreflightContext):
                 sample_rows=rows,
                 mappings=mapping_dicts,
                 column_types=column_types,
+                empty_cells_as_null=self.empty_cells_as_null,
+                dest_nullability=self._dest_nullability(),
             )
         except Exception as exc:
             logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -258,6 +274,8 @@ class FilePreflightContext(PreflightContext):
                 dest_db_type=self.plan.destination.db_type,
                 table_exists=getattr(self.plan.destination, "table_exists", None),
                 validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
+                empty_cells_as_null=self.empty_cells_as_null,
+                dest_nullability=self._dest_nullability(),
             )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
@@ -397,6 +415,8 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
+            empty_cells_as_null=self.empty_cells_as_null,
+            dest_nullability=self._dest_nullability(),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -1519,6 +1539,7 @@ def run_file_preflight(
     ctx = FilePreflightContext(
         plan,
         sample_rows,
+        empty_cells_as_null=is_file_source,
         destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
