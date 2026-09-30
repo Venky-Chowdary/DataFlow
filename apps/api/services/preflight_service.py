@@ -847,6 +847,28 @@ from services.preflight_policy_gates import (  # noqa: E402
 )
 
 
+def resolve_preflight_source_kind(
+    source_kind: str | None,
+    *,
+    source_connector_id: str | None = None,
+    source_file_id: str | None = None,
+) -> str:
+    """File blanks become SQL NULL only for an upload, never for a connector.
+
+    The request model defaults ``source_kind`` to ``file``. A saved source
+    connector with no upload must not inherit that default: Validate would
+    accept empty integers that the database writer still rejects.
+    """
+    kind = (source_kind or "").strip().lower()
+    connector = (source_connector_id or "").strip()
+    upload = (source_file_id or "").strip()
+    if not kind:
+        kind = "database" if connector else "file"
+    if connector and not upload and kind == "file":
+        return "database"
+    return kind or "file"
+
+
 @_with_date_locale
 def run_file_preflight(
     *,
@@ -991,14 +1013,20 @@ def run_file_preflight(
     mappings = hydrated_mappings
     _unstamped_additive: list[str] = []
 
-    # If the operator did not specify a locale for ambiguous day/month dates,
-    # scan the sample for an unambiguous majority before any date coercion.
-    if sample_rows and columns:
-        inferred_locale = infer_date_locale(
-            sample_rows, columns, existing_locale=date_locale
-        )
-        if inferred_locale and not date_locale:
-            date_locale = inferred_locale
+    # Operator locale wins. Otherwise adopt one inferred order only when
+    # every date column agrees. A settler in ``dob`` must not rewrite an
+    # unrelated column whose slash dates are still ambiguous.
+    if sample_rows and columns and not date_locale:
+        from services.transform_engine import ambiguous_date_columns as _ambiguous_dates
+
+        per_column = {
+            col: infer_date_locale(sample_rows, [col])
+            for col in columns
+        }
+        agreed = {loc for loc in per_column.values() if loc}
+        unsettled = _ambiguous_dates(sample_rows, columns)
+        if len(agreed) == 1 and not unsettled:
+            date_locale = next(iter(agreed))
             set_active_date_locale(date_locale)
         inferred_numbers = infer_number_locale(
             sample_rows, columns, existing_locale=number_locale

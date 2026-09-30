@@ -23,6 +23,7 @@ from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
     inspect_destination_for_preflight,
+    resolve_preflight_source_kind,
     run_file_preflight,
     run_transfer_policy_gates,
 )
@@ -394,7 +395,11 @@ async def run_preflight(body: PreflightRequest):
             destination_error=dest_error,
             source_connected=source_connected,
             source_error=source_error,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=source_file_id,
+            ),
             source_format=body.source_type or body.source_kind,
             sync_mode=body.sync_mode,
             sample_rows=preflight_sample_rows,
@@ -512,7 +517,11 @@ async def run_preflight(body: PreflightRequest):
             dest_type=body.dest_type
             or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else None),
             source_type=body.source_type,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=str(body.source_file_id or ""),
+            ),
             write_via_staging=bool(body.write_via_staging),
             priority_column=str(body.priority_column or ""),
             priority_direction=str(body.priority_direction or "desc"),
@@ -720,7 +729,11 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                     [("" if row.get(h) is None else str(row.get(h))) for h in headers]
                     for row in (image.sample_rows or [])
                 ]
-            file_source = str(body.source_kind or "file").strip().lower() == "file"
+            file_source = resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=getattr(body, "source_connector_id", None),
+                source_file_id=getattr(body, "source_file_id", None),
+            ) == "file"
             result = _preview(
                 headers=headers,
                 sample_rows=rows,

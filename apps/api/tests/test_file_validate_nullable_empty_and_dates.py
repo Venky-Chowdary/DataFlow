@@ -243,6 +243,76 @@ def test_excel_create_new_phone_and_dob_do_not_block_validate():
     assert result.get("date_locale") == "MDY"
 
 
+def test_one_column_does_not_lend_its_date_order_to_another():
+    """01/15/2024 settles dob only. A different column of 05/06 stays ambiguous."""
+    from services.preflight_service import run_file_preflight
+
+    rows = [
+        {"dob": "01/15/2024", "hired": "05/06/2024"},
+        {"dob": "11/03/1992", "hired": "06/07/2024"},
+    ]
+    result = run_file_preflight(
+        columns=["dob", "hired"],
+        column_types={"dob": "DATE", "hired": "DATE"},
+        row_count=2,
+        mappings=[
+            {
+                "source": "dob",
+                "target": "dob",
+                "confidence": 0.93,
+                "target_type": "DATE",
+                "transform": "date_iso",
+                "create_new": True,
+            },
+            {
+                "source": "hired",
+                "target": "hired",
+                "confidence": 0.93,
+                "target_type": "DATE",
+                "transform": "date_iso",
+                "create_new": True,
+            },
+        ],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        source_format="xlsx",
+        sync_mode="full_refresh_append",
+        sample_rows=rows,
+        confidence_threshold=0.85,
+        validation_mode="strict",
+        destination_column_types={},
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+    )
+    report = result.get("date_locale_report") or {}
+    ambiguous = [c.get("column") for c in report.get("ambiguous_columns") or []]
+    assert "hired" in ambiguous, report
+    assert "dob" not in ambiguous, report
+    assert report.get("decision") == "set_locale"
+    blob = " ".join(str(g.get("message") or "") for g in result.get("gates") or [])
+    assert "11/03/1992" not in blob
+    assert "05/06/2024" in blob or "hired" in blob.lower()
+
+
+def test_connector_cannot_claim_the_file_blank_rule():
+    from services.preflight_service import resolve_preflight_source_kind
+
+    assert resolve_preflight_source_kind(
+        "file", source_connector_id="conn_pg", source_file_id=""
+    ) == "database"
+    assert resolve_preflight_source_kind(
+        "file", source_connector_id="", source_file_id="upload_1"
+    ) == "file"
+    assert resolve_preflight_source_kind(
+        "", source_connector_id="conn_pg"
+    ) == "database"
+    assert resolve_preflight_source_kind("file") == "file"
+
+
 def test_database_blank_integer_still_blocks_and_is_not_called_collapse():
     """DB extracts do not turn '' into NULL. The block is nullability, not fidelity."""
     from services.preflight_service import run_file_preflight
