@@ -240,11 +240,13 @@ _LIVENESS_PATHS = frozenset({"/health", "/health/ready", "/api/v1/health"})
 
 
 def is_liveness_path(path: str) -> bool:
-    """True for the deploy probe and the readiness probe, nothing else."""
+    """True only for the deploy probe and the readiness probe.
+
+    A prefix match would leave every future ``/health/…`` route open while
+    the API is refusing traffic.
+    """
     raw = (path or "").split("?", 1)[0].rstrip("/") or "/"
-    if raw in _LIVENESS_PATHS:
-        return True
-    return raw.startswith("/health/")
+    return raw in _LIVENESS_PATHS
 
 
 def enforce_production_config() -> None:

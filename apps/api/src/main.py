@@ -479,11 +479,12 @@ async def health_check():
 
     Railway deploy healthchecks must hit this path. Keep it cheap and never
     block on Mongo/RAG/catalog so a slow warm-up cannot fail the deploy.
-    Incomplete production config is reported here and does not kill the
-    process; every other route stays closed until it is fixed.
+    Incomplete production config does not kill the process. The missing
+    settings are written to the process log, not this public body. Every
+    other route stays closed until they are fixed.
     """
     errors = list(getattr(app.state, "config_errors", None) or [])
-    body = {
+    return {
         "status": "misconfigured" if errors else "healthy",
         "liveness": True,
         "ready": bool(getattr(app.state, "ready", False)) and not errors,
@@ -494,9 +495,6 @@ async def health_check():
             "proxy_write_reconnect": True,
         },
     }
-    if errors:
-        body["config_errors"] = errors
-    return body
 
 
 @app.get("/api/v1/health")

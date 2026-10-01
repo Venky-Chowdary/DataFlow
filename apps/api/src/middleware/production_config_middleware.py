@@ -1,6 +1,7 @@
 """Refuse traffic when production config is incomplete.
 
-Liveness stays open so a deploy probe can read the reason. Every other
+Liveness stays open so the deploy probe gets HTTP 200. It does not receive
+the missing-setting list — that list is process-log only. Every other
 route returns 503. The process does not exit: exiting before the socket
 accepts connections makes Railway report "service unavailable" for the
 whole healthcheck window.
@@ -24,6 +25,5 @@ class ProductionConfigMiddleware(BaseHTTPMiddleware):
             status_code=503,
             content={
                 "detail": "API is up but production configuration is incomplete",
-                "config_errors": errors,
             },
         )

@@ -51,6 +51,8 @@ def test_liveness_paths_are_only_the_deploy_probes():
     assert is_liveness_path("/health/")
     assert is_liveness_path("/health/ready")
     assert is_liveness_path("/api/v1/health")
+    assert is_liveness_path("/health/ready?probe=1")
+    assert is_liveness_path("/health/debug") is False
     assert is_liveness_path("/healthcare") is False
     assert is_liveness_path("/api/v1/transfer") is False
     assert is_liveness_path("/api/v1/auth/login") is False
