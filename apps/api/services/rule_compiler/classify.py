@@ -21,18 +21,28 @@ _DIRECT = re.compile(
     re.I,
 )
 # Spoken identity that still names the columns: "Copy customer_id without
-# modification", "Map fname to first_name". A dest that is a type/transform
-# word (ISO, lowercase) is not Direct — those are other closed forms.
+# modification", "Map fname to first_name", "Copy customer_id to customer_key".
+# A dest that is a type/transform word (ISO, lowercase) is not Direct.
 _IDENTITY_SPEECH = re.compile(
     r"^(?:"
     r"copy(?:\s+[A-Za-z_][\w.]*)?(?:\s+without\s+(?:any\s+)?(?:modification|change|changes)|\s+as[\s-]?is|\s+unchanged)?"
+    r"(?:\s+(?:to|as)\s+[A-Za-z_][\w.]*)?"
+    r"|write(?:\s+[A-Za-z_][\w.]*)?(?:\s+(?:to|as)\s+[A-Za-z_][\w.]*)?"
     r"|map(?:ped)?(?:\s+[A-Za-z_][\w.]*)?(?:\s+to\s+[A-Za-z_][\w.]*)?"
     r"|rename(?:\s+[A-Za-z_][\w.]*)?(?:\s+to\s+[A-Za-z_][\w.]*)?"
+    r"|(?:[A-Za-z_][\w.]*\s+)?maps\s+to\s+[A-Za-z_][\w.]*"
+    r"|[A-Za-z_][\w]*_[\w.]+\s*(?:→|->)\s+[A-Za-z_][\w]*_[\w.]+"
     r"|no(?:\s+transformation|\s+change|\s+transform)"
     r"|leave(?:\s+[A-Za-z_][\w.]*)?\s+as[\s-]?is"
     r"|use\s+as[\s-]?is"
     r"|passthrough(?:\s+of\s+[A-Za-z_][\w.]*)?"
     r")$",
+    re.I,
+)
+_IDENTITY_DEST_HINT = re.compile(
+    r"^(?:copy|write|map(?:ped)?|rename)\s+[A-Za-z_][\w.]*\s+(?:to|as)\s+(?P<dest>[A-Za-z_][\w.]*)\s*$"
+    r"|^(?:[A-Za-z_][\w.]*\s+)?maps\s+to\s+(?P<maps>[A-Za-z_][\w.]*)\s*$"
+    r"|^[A-Za-z_][\w]*_[\w.]+\s*(?:→|->)\s+(?P<arrow>[A-Za-z_][\w]*_[\w.]+)\s*$",
     re.I,
 )
 _IDENTITY_BLOCKED = frozenset({
@@ -152,8 +162,32 @@ _CONCAT_EXPR = re.compile(
     r"([A-Za-z_][\w.]*)\s*(?:\+|\&|\|\|)\s*(?:(?:'[^']*'|\"[^\"]*\")\s*(?:\+|\&|\|\|)\s*)?([A-Za-z_][\w.]*)",
 )
 _CONCAT_CHAIN = re.compile(
-    r"[A-Za-z_][\w.]*\s*\+\s*(?:'[^']*'|\"[^\"]*\")\s*\+\s*[A-Za-z_][\w.]*",
+    r"[A-Za-z_][\w.]*\s*\+\s*(?:'[^']*'|\"[^\"]*\"|space|comma|hyphen|dash|"
+    r"underscore|slash|colon|semicolon|tab|newline|dot|period)\s*\+\s*[A-Za-z_][\w.]*",
+    re.I,
 )
+_CONCAT_LITERAL_WORDS = {
+    "space": " ",
+    "blank": " ",
+    "comma": ",",
+    "hyphen": "-",
+    "dash": "-",
+    "minus": "-",
+    "underscore": "_",
+    "slash": "/",
+    "colon": ":",
+    "semicolon": ";",
+    "tab": "\t",
+    "newline": "\n",
+    "dot": ".",
+    "period": ".",
+    "plus": "+",
+    "star": "*",
+    "asterisk": "*",
+    "at": "@",
+    "hash": "#",
+    "empty": "",
+}
 _REPLACE = re.compile(
     r"\b(?:replace|substitute)\s+['\"]?(?P<search>.+?)['\"]?\s+(?:with|by)\s+['\"]?(?P<repl>.*)$",
     re.I,
@@ -262,6 +296,9 @@ _NOT_COLUMN = frozenset({
     "parse", "cast", "direct", "omit", "email", "phone", "hash", "replace",
     "default", "null", "concat", "concatenate", "combine", "and", "or",
     "convert", "normalize", "format", "title", "proper",
+    "space", "comma", "hyphen", "dash", "underscore", "slash", "colon",
+    "semicolon", "tab", "newline", "dot", "period", "plus", "star",
+    "asterisk", "blank", "empty", "literal", "separator",
 })
 _CURRENCY = re.compile(r"\b(?:currency|money|dollar)\b", re.I)
 _PERCENT = re.compile(r"\bpercent(?:age)?\b", re.I)
@@ -524,12 +561,26 @@ def is_identity_speech(text: str) -> bool:
     raw = (text or "").strip()
     if not raw or not _IDENTITY_SPEECH.match(raw):
         return False
+    dest = identity_dest_hint(raw)
+    if dest and dest.lower() in _IDENTITY_BLOCKED:
+        return False
     tokens = [token.lower() for token in re.findall(r"[A-Za-z_][\w.]*", raw)]
     if "to" in tokens:
-        dest = tokens[tokens.index("to") + 1] if tokens.index("to") + 1 < len(tokens) else ""
-        if dest in _IDENTITY_BLOCKED:
+        spoken = tokens[tokens.index("to") + 1] if tokens.index("to") + 1 < len(tokens) else ""
+        if spoken in _IDENTITY_BLOCKED:
             return False
     return True
+
+
+def identity_dest_hint(text: str) -> str:
+    """Destination named in Copy/Map/Write X to/as Y speech, else ''."""
+    match = _IDENTITY_DEST_HINT.match((text or "").strip())
+    if not match:
+        return ""
+    dest = str(match.group("dest") or match.group("maps") or match.group("arrow") or "").strip()
+    if dest.lower() in _IDENTITY_BLOCKED:
+        return ""
+    return dest
 
 
 def parse_validate_check(text: str) -> dict[str, Any] | None:
@@ -1787,37 +1838,48 @@ def _assignment_or_value(text: str) -> str:
 def _concat_columns(text: str) -> tuple[list[str], str]:
     """Named columns and an optional separator from a concat cell."""
     columns: list[str] = []
+    skip = {
+        "concat", "concatenate", "combine", "columns", "fields", "join", "textjoin",
+        "with", "into", "and", "to",
+        *_CONCAT_LITERAL_WORDS,
+        *_NOT_COLUMN,
+    }
     tokens = re.findall(r"'[^']*'|\"[^\"]*\"|[A-Za-z_][\w.]*", text or "")
     lits = [token[1:-1] for token in tokens if token[:1] in {"'", '"'}]
+    word_lits = [
+        _CONCAT_LITERAL_WORDS[token.lower()]
+        for token in tokens
+        if re.fullmatch(r"[A-Za-z_][\w.]*", token or "")
+        and token.lower() in _CONCAT_LITERAL_WORDS
+    ]
+    lits.extend(word_lits)
     idents = [
         token for token in tokens
         if re.fullmatch(r"[A-Za-z_][\w.]*", token or "")
-        and token.lower() not in {
-            "concat", "concatenate", "combine", "columns", "fields", "join", "textjoin",
-        }
+        and token.lower() not in skip
     ]
-    if len(idents) >= 2 and len(lits) <= 1 and re.search(r"[+&]|\|\|", text or ""):
+    if len(idents) >= 2 and len(set(lits)) <= 1 and re.search(r"[+&]|\|\|", text or ""):
         return idents, (lits[0] if lits else "")
     for left, right in _CONCAT_EXPR.findall(text or ""):
         for part in (left, right):
             name = part.strip()
-            if name and name not in columns:
+            if name and name.lower() not in skip and name not in columns:
                 columns.append(name)
     if not columns:
         tail = re.sub(r"^(?:concat(?:enate)?|combine|textjoin)\s+", "", text or "", flags=re.I)
         tail = re.sub(r"\b(?:and|with|into)\b", ",", tail, flags=re.I)
         for part in re.split(r"[,\s]+", tail):
             name = part.strip(" \"'")
-            if re.fullmatch(r"[A-Za-z_][\w.]*", name or "") and name.lower() not in {
-                "concat", "concatenate", "combine", "columns", "fields", "join", "textjoin",
-            }:
+            if re.fullmatch(r"[A-Za-z_][\w.]*", name or "") and name.lower() not in skip:
                 if name not in columns:
                     columns.append(name)
     separator = ""
     sep_match = re.search(r"(?:sep(?:arator)?|delimited?\s+by)\s+['\"](.+?)['\"]", text or "", re.I)
     if sep_match:
         separator = sep_match.group(1)
-    elif "space" in (text or "").lower() and re.search(r"concat|textjoin", text or "", re.I):
+    elif lits:
+        separator = lits[0]
+    elif "space" in (text or "").lower() and re.search(r"concat|textjoin|combine|[+&]|\|\|", text or "", re.I):
         separator = " "
     return columns, separator
 
@@ -1830,7 +1892,8 @@ def _quote_lit(value: str) -> str:
 
 
 def json_escape(value: str) -> str:
-    return '"' + (value or "").replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Shape-expr text literal. The tokenizer accepts SQL single quotes."""
+    return "'" + (value or "").replace("'", "''") + "'"
 
 
 def _condition(col: str, op: str, val: str) -> str:
@@ -2186,7 +2249,14 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
         return check
 
     if _DIRECT.match(raw) or is_identity_speech(raw):
-        return {"kind": "direct", "plane": "map", "confidence": 0.99, **flags}
+        dest_hint = identity_dest_hint(raw)
+        return {
+            "kind": "direct",
+            "plane": "map",
+            "confidence": 0.99,
+            **({"dest_hint": dest_hint} if dest_hint else {}),
+            **flags,
+        }
 
     casted = _CAST_SQL.search(raw) or _PG_CAST.search(raw)
     if casted:

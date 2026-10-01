@@ -23,9 +23,10 @@ from .classify import (
     parse_validate_check,
     unknown_code_policy,
     workbook_mask_to_strptime,
+    json_escape,
 )
 from .ingest import RuleIngestError, ingest_rule_workbook
-from .match import name_similarity, unique_linguistic_match
+from .match import name_similarity, name_tokens, unique_linguistic_match
 from .catalog import (
     bind_columns_for_table,
     lookup_type,
@@ -183,6 +184,13 @@ _PRECISION = re.compile(
 _VALIDATION_SHEET = re.compile(r"validat|constraint|check.?rules?", re.I)
 _LOOKUP_SHEET = re.compile(r"lookup|crosswalk|code.?table|enumerat|domain", re.I)
 _VALIDATION_ID = re.compile(r"^v\d+$", re.I)
+_SEVERITY_TOKENS = frozenset({
+    "error", "warning", "warn", "info", "fatal", "critical", "debug",
+})
+_LOOKUP_TYPE_STOP = frozenset({
+    "id", "no", "num", "pk", "fk", "key", "cd", "code", "val", "value",
+    "crosswalk", "lookup", "table", "map", "type", "name", "names",
+})
 _KIND_INTERPRETATION = {
     "direct": "Direct copy",
     "lookup": "Lookup / code crosswalk",
@@ -498,11 +506,12 @@ def compile_rule_workbook(
         src, dst = edge
         if not src or not mapping:
             continue
+        resolved = resolve_name(src, src_cols) if src_cols else ""
         already = any(
-            fold(r.get("source_column") or "") == fold(src)
-            and r.get("code_crosswalk")
-            and r.get("status") == "executable"
+            fold(r.get("source_column") or "") in {fold(src), fold(resolved)}
+            or fold(r.get("dest_column") or "") in {fold(dst), fold(src)}
             for r in compiled
+            if r.get("kind") not in {"contract", "join"}
         )
         if already:
             continue
@@ -534,7 +543,7 @@ def compile_rule_workbook(
 
     derived_columns = _derived_columns(compiled, dst_cols)
     for raw in validation_rows:
-        if _is_pair_only(raw) or _is_catalog_def(raw):
+        if _is_pair_only(raw):
             continue
         item = _compile_row(
             raw,
@@ -642,18 +651,21 @@ def compile_rule_workbook(
             "schemas — they are not a fixed column list. Spoken column names "
             "bind with Cupid-style linguistic matching (unique winner, "
             "threshold, gap). Accepted rules execute deterministically on "
-            "Transform + Map. Spoken identity (copy without modification, "
-            "map A to B) is Direct. Sheets are classified first "
+            "Transform + Map. Spoken identity (copy/map/write X to/as Y, "
+            "X maps to Y) is Direct. Concat treats space/comma as literals. "
+            "Shape literals use SQL single quotes. Sheets are classified first "
             "(mapping / lookup / validation) and compiled separately. "
-            "Lookup tables attach to a mapping edge by source name or "
-            "unique dest alias — STATE pairs compile onto state → state_code. "
+            "Lookup tables attach to a mapping edge by destination alias, "
+            "lookup-type name, or unique source — STATE pairs compile onto "
+            "state → state_code. Lookup pair rows are reference data, not "
+            "business rules, and do not inflate rule coverage. "
             "This compiler will not invent the fifty-state table. "
             "Closed-form Validate sentences compile as destination contracts "
             "(not-null, contains, in-set, compare, 2-letter shape) on the "
             "Validate plane — they never write a dest column. Validation_ID "
             "is a rule name, not a destination. Column binds source, dest, "
-            "or a derived transform column. Action is on-fail policy "
-            "(quarantine), never a destination. Unstructured or unbound "
+            "or a derived transform column. Action and Severity are metadata "
+            "(on-fail / ERROR), never source columns. Unstructured or unbound "
             "checks stay in review. Coverage is executable / detected on "
             "this workbook — 100% means every compiled row is executable "
             "and none are in review or conflict. Executed and validated "
@@ -797,7 +809,9 @@ def _collect_lookup_pairs(
         pairs[(src, edge_dst)][frm] = to
         resolved = resolve_name(src, src_cols) if src_cols else ""
         if resolved:
-            pairs[(resolved, dst or resolved)][frm] = to
+            # Keep the lookup-type label as dest when the sheet did not name one,
+            # so STATE vs REGION tables on the same source stay distinct edges.
+            pairs[(resolved, dst or src)][frm] = to
             if dst:
                 pairs[(resolved, dst)][frm] = to
     return pairs
@@ -810,7 +824,7 @@ def _pairs_for_edge(
     source_column: str,
     dest_column: str,
 ) -> dict[str, str]:
-    """Attach a lookup table to a mapping edge by source, then unique dest alias."""
+    """Attach a lookup table to a mapping edge by dest alias, then source."""
     store = lookup_pairs or {}
     keys = [
         (spoken_src, spoken_dst),
@@ -821,18 +835,6 @@ def _pairs_for_edge(
     for key in keys:
         if key[0] and store.get(key):
             return dict(store[key])
-    src_hits: list[dict[str, str]] = []
-    seen: set[tuple[str, ...]] = set()
-    for (src, _dst), mapping in store.items():
-        if not mapping:
-            continue
-        if fold(src) in {fold(spoken_src), fold(source_column)} and fold(src):
-            fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
-            if fingerprint not in seen:
-                seen.add(fingerprint)
-                src_hits.append(dict(mapping))
-    if len(src_hits) == 1:
-        return src_hits[0]
     dest_labels = [label for label in (spoken_dst, dest_column) if label]
     dest_hits: list[dict[str, str]] = []
     dest_seen: set[tuple[str, ...]] = set()
@@ -847,7 +849,151 @@ def _pairs_for_edge(
             dest_hits.append(dict(mapping))
     if len(dest_hits) == 1:
         return dest_hits[0]
+    labeled = _lookup_by_dest_label(store, dest_labels, spoken_src, source_column)
+    if labeled:
+        return labeled
+    src_hits: list[dict[str, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for (src, _dst), mapping in store.items():
+        if not mapping:
+            continue
+        if fold(src) in {fold(spoken_src), fold(source_column)} and fold(src):
+            fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                src_hits.append(dict(mapping))
+    if len(src_hits) == 1:
+        return src_hits[0]
+    related = _lookup_by_source_and_dest(store, spoken_src, source_column, dest_labels)
+    if related:
+        return related
     return {}
+
+
+def _lookup_label_score(label: str, candidate: str) -> float:
+    if not label or not candidate:
+        return 0.0
+    a, b = fold(label), fold(candidate)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    linguistic = name_similarity(label, candidate)
+    if a.startswith(b) or b.startswith(a):
+        linguistic = max(linguistic, 0.88)
+    label_tokens = {tok for tok in name_tokens(label) if tok not in _LOOKUP_TYPE_STOP}
+    cand_tokens = {tok for tok in name_tokens(candidate) if tok not in _LOOKUP_TYPE_STOP}
+    overlap = 0.0
+    if label_tokens and cand_tokens:
+        shared = label_tokens & cand_tokens
+        if shared and (cand_tokens <= label_tokens or label_tokens <= cand_tokens):
+            overlap = 1.0 if cand_tokens == label_tokens else 0.86
+        elif shared:
+            overlap = len(shared) / max(len(label_tokens), len(cand_tokens))
+    return max(linguistic, overlap)
+
+
+def _unique_lookup_label(
+    needles: list[str],
+    candidates: list[str],
+    *,
+    threshold: float = 0.72,
+    gap: float = 0.12,
+) -> str:
+    pool = [c for c in candidates if c]
+    if not pool:
+        return ""
+    scored: dict[str, float] = {c: 0.0 for c in pool}
+    for needle in needles:
+        for candidate in pool:
+            scored[candidate] = max(scored[candidate], _lookup_label_score(needle, candidate))
+    ranked = sorted(scored.items(), key=lambda item: item[1], reverse=True)
+    if not ranked or ranked[0][1] < threshold:
+        return ""
+    if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < gap:
+        return ""
+    return ranked[0][0]
+
+
+def _lookup_by_dest_label(
+    store: dict[tuple[str, str], dict[str, str]],
+    dest_labels: list[str],
+    spoken_src: str,
+    source_column: str,
+) -> dict[str, str]:
+    if not dest_labels:
+        return {}
+    dest_keys: list[str] = []
+    src_keys: list[str] = []
+    by_label: dict[str, list[dict[str, str]]] = defaultdict(list)
+    seen: dict[str, set[tuple[str, ...]]] = defaultdict(set)
+    src_folds = {fold(name) for name in (spoken_src, source_column) if name}
+    for (src, dst), mapping in store.items():
+        if not mapping:
+            continue
+        fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+        for label, bucket in ((dst, dest_keys), (src, src_keys)):
+            if not label:
+                continue
+            if fingerprint in seen[label]:
+                continue
+            seen[label].add(fingerprint)
+            by_label[label].append(dict(mapping))
+            if label not in bucket:
+                bucket.append(label)
+    winner = _unique_lookup_label(dest_labels, dest_keys)
+    if winner and len(by_label.get(winner) or []) == 1:
+        return dict(by_label[winner][0])
+    winner = _unique_lookup_label(dest_labels, src_keys)
+    if winner and len(by_label.get(winner) or []) == 1:
+        return dict(by_label[winner][0])
+    related = [
+        label for label in dest_keys + src_keys
+        if fold(label) in src_folds or any(tok in src_folds for tok in name_tokens(label))
+    ]
+    winner = _unique_lookup_label(dest_labels, related)
+    if winner and len(by_label.get(winner) or []) == 1:
+        return dict(by_label[winner][0])
+    return {}
+
+
+def _lookup_by_source_and_dest(
+    store: dict[tuple[str, str], dict[str, str]],
+    spoken_src: str,
+    source_column: str,
+    dest_labels: list[str],
+) -> dict[str, str]:
+    src_folds = {fold(name) for name in (spoken_src, source_column) if name}
+    if not src_folds:
+        return {}
+    related: list[tuple[str, str, dict[str, str]]] = []
+    seen: set[tuple[str, ...]] = set()
+    for (src, dst), mapping in store.items():
+        if not mapping:
+            continue
+        related_src = fold(src) in src_folds or any(tok in src_folds for tok in name_tokens(src))
+        if not related_src:
+            continue
+        fingerprint = tuple(sorted((fold(k), fold(v)) for k, v in mapping.items()))
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        related.append((src, dst, dict(mapping)))
+    if len(related) == 1:
+        return related[0][2]
+    if not dest_labels or len(related) < 2:
+        return {}
+    labels = []
+    for src, dst, _mapping in related:
+        labels.extend([src, dst])
+    winner = _unique_lookup_label(dest_labels, labels)
+    if not winner:
+        return {}
+    hits = [
+        mapping for src, dst, mapping in related
+        if fold(src) == fold(winner) or fold(dst) == fold(winner)
+    ]
+    return dict(hits[0]) if len(hits) == 1 else {}
 
 
 def _pairs_for_contract(
@@ -999,6 +1145,7 @@ def _is_catalog_def(raw: dict[str, Any]) -> bool:
         str(raw.get("rule_name") or "").strip()
         and str(raw.get("rule") or "").strip()
         and not str(raw.get("source_column") or "").strip()
+        and not str(raw.get("dest_column") or "").strip()
     )
 
 
@@ -1035,11 +1182,19 @@ def _expand_named_rule(
 
 
 def _lookup_coverage(pairs: dict[tuple[str, str], dict[str, str]]) -> list[dict[str, Any]]:
-    return [
-        {"source": src, "dest": dst, "pairs": len(mapping)}
-        for (src, dst), mapping in pairs.items()
-        if src and mapping
-    ]
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for (src, dst), mapping in pairs.items():
+        if not src or not mapping:
+            continue
+        fingerprint = (fold(src), fold(dst or src)) + tuple(
+            sorted((fold(k), fold(v)) for k, v in mapping.items())
+        )
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        out.append({"source": src, "dest": dst, "pairs": len(mapping)})
+    return out
 
 
 def _attach_orphan_enumerations(
@@ -1285,6 +1440,10 @@ def _compile_row(
     validation_sheet = sheet_kind == "validation" or (
         _VALIDATION_ID.match(spoken_dst) and bool(parse_validate_check(str(raw.get("rule") or "")))
     )
+    if validation_sheet and fold(spoken_src) in _SEVERITY_TOKENS:
+        spoken_src = ""
+    if validation_sheet and fold(spoken_dst) in _SEVERITY_TOKENS:
+        spoken_dst = ""
     if validation_sheet and _VALIDATION_ID.match(spoken_dst):
         if not spoken_name:
             spoken_name = spoken_dst
@@ -2027,8 +2186,7 @@ def _compile_row(
 
 
 def _lit(value: Any) -> str:
-    text = str(value or "")
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return json_escape(str(value or ""))
 
 
 def _join_review_item(
