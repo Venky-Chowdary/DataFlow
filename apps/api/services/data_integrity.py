@@ -209,6 +209,8 @@ def _check_transform_dry_run(
     *,
     dest_kind: str = "",
     target_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -232,6 +234,8 @@ def _check_transform_dry_run(
         sample_rows=sample_rows,
         mappings=enriched,
         column_types=source_types,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -1359,6 +1363,8 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     dest_table_exists: bool | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1447,6 +1453,8 @@ def run_integrity_audit(
                 rows,
                 dest_kind=dest_kind,
                 target_types=target_types,
+                empty_cells_as_null=empty_cells_as_null,
+                dest_nullability=dest_nullability,
             )
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))

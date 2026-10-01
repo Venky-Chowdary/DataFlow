@@ -156,6 +156,7 @@ class RuntimePreflightContext(PreflightContext):
             mappings=mapping_dicts,
             column_types=column_types,
             sample_size=min(sample_size, len(rows)),
+            empty_cells_as_null=bool(self.file_id),
         )
 
     def run_integrity_audit(self, sample_size: int = 1000) -> dict[str, Any]:

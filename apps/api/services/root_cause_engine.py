@@ -231,6 +231,52 @@ def _is_risk_contract_incomplete_signal(
     )
 
 
+def _is_sample_cast_not_declared_collapse(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """G3 sample cast / empty-cell blocks are not a declared type collapse.
+
+    The gate summary always says "type coercion issue(s)". That phrase used to
+    pull INTEGER→BIGINT widening, and blank spreadsheet cells, into
+    "Lossy / fidelity collapse" even when ``is_lossy_coercion`` was false.
+    """
+    gid = str(gate_id or "")
+    if gid not in {
+        "g3_schema_contract",
+        "g3_type_compat",
+        "g3_type_compatibility",
+    }:
+        return False
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    rows = [r for r in (details.get("issues_detail") or []) if isinstance(r, dict)]
+    if any(
+        r.get("fidelity_collapse")
+        or r.get("nested_shape_collapse")
+        or r.get("nested_document_collapse")
+        or r.get("declared_lossy")
+        for r in rows
+    ):
+        return False
+    issues = details.get("issues") or []
+    issue_text = " ".join(str(i) for i in issues).lower()
+    if re.search(r"lossy coercion|precision|fidelity|collapse|truncat", issue_text):
+        return False
+    if rows and all(
+        r.get("probe_cast_only") or r.get("not_null_contract")
+        for r in rows
+    ):
+        return True
+    if "empty value cannot coerce" in issue_text or "nullability" in issue_text:
+        return True
+    if "sample value does not fit" in issue_text:
+        return True
+    return False
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -293,6 +339,10 @@ def _is_fidelity_signal(
                 return False
     if details.get("fidelity_collapse") is True:
         return True
+    # Blank cells and bad casts on a safe widening are not fidelity collapse.
+    # The gate title still contains the word "coercion".
+    if _is_sample_cast_not_declared_collapse(message, details, gate_id):
+        return False
     # Invisible / undecodable characters are an encoding root with its own fix
     # (normalize or quarantine the rows). Absorbing them into fidelity collapse
     # told operators to remap a type path that is not the problem — a TEXT→TEXT
@@ -694,6 +744,19 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     continue
                 sev = str(col.get("severity") or "").lower()
                 if sev != "block":
+                    continue
+                # Empty cells and ordinary cast misses are a sample-transform
+                # root. Folding them in here labeled INTEGER→BIGINT as collapse.
+                if not col.get("fidelity_collapse") and str(
+                    col.get("failure_class") or ""
+                ) in {
+                    "EMPTY_VALUE_NOT_NULLABLE",
+                    "TYPE_CAST_FAILURE",
+                    "INVALID_TIMESTAMP",
+                    "INVALID_BOOLEAN",
+                    "INVALID_NUMERIC",
+                    "SEMANTIC_TRANSFORM_FAILURE",
+                }:
                     continue
                 src = col.get("source") or col.get("column")
                 if src:
