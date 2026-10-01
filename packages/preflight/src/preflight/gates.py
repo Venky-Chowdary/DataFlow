@@ -2694,9 +2694,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 },
             )
 
+        blank_clause = ""
+        if file_blank_nulls:
+            word = "blank" if len(file_blank_nulls) == 1 else "blanks"
+            blank_clause = (
+                f"; {len(file_blank_nulls)} spreadsheet {word} stored as SQL NULL"
+            )
         return _pass(
             GateId.G8_RECONCILIATION,
-            f"Dry-run reconciliation passed — {source_count} row(s) (write-path sample)",
+            (
+                f"Dry-run reconciliation passed — {source_count} row(s) "
+                f"(write-path sample){blank_clause}"
+            ),
             start,
             _with_scope(
                 {
@@ -2711,11 +2720,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "file_blank_null_count": len(file_blank_nulls),
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
-                        + (
-                            f"; {len(file_blank_nulls)} spreadsheet blank(s) stored as SQL NULL"
-                            if file_blank_nulls
-                            else ""
-                        )
+                        + blank_clause
                         + (
                             f"; {len(contracted_holdouts)} row(s) held out under "
                             "quarantine/skip continue-policy"

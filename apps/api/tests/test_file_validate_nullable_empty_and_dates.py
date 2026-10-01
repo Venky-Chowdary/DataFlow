@@ -237,6 +237,11 @@ def test_excel_create_new_phone_and_dob_do_not_block_validate():
     messages = " ".join(str(g.get("message") or "") for g in blocked)
     assert "phone" not in messages.lower(), messages
     assert "11/03/1992" not in messages
+    g8 = next(g for g in result.get("gates") or [] if g.get("id") == "g8_reconciliation")
+    # Validate receives transform "none". The plan resolves the write cast, so
+    # the same gate Execute runs names the blanks instead of a clean identity pass.
+    assert int((g8.get("details") or {}).get("file_blank_null_count") or 0) == 3
+    assert "3 spreadsheet blanks stored as SQL NULL" in str(g8.get("message") or "")
     assert "fidelity collapse" not in messages.lower()
     kinds = [r.get("kind") if isinstance(r, dict) else getattr(r, "kind", "") for r in (result.get("root_causes") or [])]
     assert "fidelity_collapse" not in kinds, result.get("root_causes")

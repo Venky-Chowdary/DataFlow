@@ -1267,12 +1267,34 @@ def run_file_preflight(
         dest_cols.append(
             ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
+
+    def _plan_write_transform(mapping: dict) -> Any:
+        """Write-path cast Gate-8 will apply — the same resolver Execute stamps.
+
+        The Decision Artifact keeps the operator's transform. Only the gate
+        plan sees the resolved cast, so a blank integer is judged as SQL NULL
+        on Validate instead of passing as identity and failing at Run.
+        """
+        raw = mapping.get("transform")
+        try:
+            from services.transform_resolver import resolve_transform
+
+            live = dest_types if destination_table_exists is True else {}
+            return resolve_transform(
+                mapping,
+                column_types=dict(column_types or {}),
+                dest_types=dict(live or {}),
+            )
+        except Exception:
+            logger.debug("write-path transform resolve skipped", exc_info=True)
+            return raw
+
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
             target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
-            transform=m.get("transform"),
+            transform=_plan_write_transform(m if isinstance(m, dict) else {}),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
