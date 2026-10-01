@@ -326,8 +326,45 @@ def _validation_plan_for_result(pf: dict | None) -> dict:
 
 
 
-def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
-    """Mark job failed at preflight and persist inspectable quarantine rows."""
+def _blank_cells_as_null_from_preflight(pf: dict) -> int:
+    """Highest Gate-8 count of spreadsheet blanks stored as SQL NULL.
+
+    Several gates can echo the same sample. Summing them would double-count
+    one blank cell. The max is the disposition the write path recorded.
+    """
+    highest = 0
+    for gate in pf.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        details = gate.get("details")
+        if not isinstance(details, dict):
+            continue
+        raw = details.get("file_blank_null_count")
+        if raw is None:
+            continue
+        try:
+            highest = max(highest, int(raw))
+        except (TypeError, ValueError):
+            continue
+    return highest
+
+
+def _fail_job_preflight(
+    mongo,
+    job_id: str,
+    pf: dict,
+    *,
+    lineage,
+    rows_read: int | None = None,
+    sync_mode: str = "",
+) -> tuple[str, dict]:
+    """Mark job failed at preflight and persist inspectable quarantine rows.
+
+    ``rows_read`` is the count already taken (file peek or in-memory batch).
+    When it is present the job ledger is write-refused: measured read, zero
+    writes, dest COUNT(*) not taken. Omitting it leaves the read unmeasured,
+    which is only honest when nothing was counted.
+    """
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
 
     decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
@@ -368,6 +405,17 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         "quarantine_issue_count": len(qrows),
         "quarantine_row_count": rejected_rows,
     }
+    ledger_dict: dict | None = None
+    if rows_read is not None:
+        from services.row_conservation import write_refused_ledger
+
+        ledger_dict = write_refused_ledger(
+            rows_read=int(rows_read),
+            quarantined_rows=rejected_rows,
+            blank_cells_as_null=_blank_cells_as_null_from_preflight(pf),
+            sync_mode=sync_mode,
+        ).to_dict()
+        error_details["row_accounting"] = ledger_dict
     error_message = (
         decision.get("reason")
         or "; ".join(str(x) for x in blocker_reasons if x)
@@ -386,17 +434,19 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
         error=error_message,
         error_details=error_details,
     )
-    mongo.update_job_status(
-        job_id,
-        "failed",
-        error=error_message,
-        phase="failed",
-        progress_pct=0,
-        error_details=error_details,
-        preflight=pf,
-        rejected_details=qrows,
-        rejected_rows=rejected_rows,
-    )
+    status_fields: dict = {
+        "error": error_message,
+        "phase": "failed",
+        "progress_pct": 0,
+        "error_details": error_details,
+        "preflight": pf,
+        "rejected_details": qrows,
+        "rejected_rows": rejected_rows,
+    }
+    if ledger_dict is not None:
+        status_fields["row_accounting"] = ledger_dict
+        status_fields["sync_mode"] = str(sync_mode or "")
+    mongo.update_job_status(job_id, "failed", **status_fields)
     return error_message, error_details
 
 
@@ -2717,7 +2767,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -2727,6 +2782,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator
@@ -3958,7 +4014,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -3968,6 +4029,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator
@@ -4787,7 +4849,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -4797,6 +4864,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator

@@ -4,6 +4,7 @@ import {
   conservationKindLabel,
   destHeadline,
   isDestMeasured,
+  isWriteRefused,
   ledgerEquation,
   ledgerIdentityCells,
   readConservationLedger,
@@ -44,9 +45,17 @@ export function ConservationLedgerCard({
   // A run whose read was never counted is *unmeasured*, not unbalanced: there
   // is no equation to fail. Calling it "Ledger unbalanced — rows read do not
   // equal dest COUNT(*)" beside "READ —" states a comparison that never ran.
+  const writeRefused = isWriteRefused(ledger);
+  // A counted file that preflight stopped is write-refused: the read is
+  // measured, dest COUNT(*) was not taken, and balanced=false is not a
+  // conservation failure. Do not title that "no measured read" or
+  // "Ledger unbalanced".
   const unmeasuredRead =
-    Boolean(ledger) && (ledger?.rows_read == null || ledger?.conservation_kind === "unmeasured");
-  const unbalanced = Boolean(ledger && ledger.balanced === false) && !unmeasuredRead;
+    Boolean(ledger) &&
+    !writeRefused &&
+    (ledger?.rows_read == null || ledger?.conservation_kind === "unmeasured");
+  const unbalanced =
+    Boolean(ledger && ledger.balanced === false) && !unmeasuredRead && !writeRefused;
   const isMirror = ledger?.conservation_kind === "mirror";
   const isJob = ledger?.conservation_kind === "job_rollup";
   const isArtifact = ledger?.rows_written_source === "artifact_readback";
@@ -68,7 +77,9 @@ export function ConservationLedgerCard({
       : null;
 
   const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : isScd2 ? "CURRENT" : isAppend || isKeyed ? "DEST Δ" : "COUNT(*)";
-  const nextTitle = unbalanced
+  const nextTitle = writeRefused
+    ? "Write did not start"
+    : unbalanced
     ? "Ledger unbalanced"
     : unmeasuredRead
       ? "Not proven — no measured read"
@@ -79,7 +90,9 @@ export function ConservationLedgerCard({
           ? "Keyed dest Δ balanced"
         : "Ledger balanced"
       : "Dest unmeasured";
-  const nextBody = unbalanced
+  const nextBody = writeRefused
+    ? (ledger?.note || "Source rows were counted. Preflight refused the load before any destination write, so COUNT(*) was not taken.")
+    : unbalanced
     ? isJob
       ? "The job is closed iff every stream ledger is closed. Last-table dest COUNT(*) is not the job."
       : isMirror
@@ -125,7 +138,9 @@ export function ConservationLedgerCard({
     <section
       className={`df2-conservation-ledger ${toneClass(tone)} ${isMirror ? "is-mirror" : ""} ${isAppend || isKeyed ? "is-append" : ""} ${compact ? "is-compact" : ""} ${className}`.trim()}
       aria-label={
-        isJob
+        writeRefused
+          ? "Write refused after a measured read"
+          : isJob
           ? "Job stream conservation"
           : isMirror
             ? "Mirror active population conservation"
@@ -150,7 +165,9 @@ export function ConservationLedgerCard({
         <div className="df2-conservation-ledger-title">
           <div className="df2-conservation-ledger-title-row">
             <h3>
-              {isJob
+              {writeRefused
+                ? "Write did not start"
+                : isJob
                 ? "Job destination population"
                 : isMirror
                   ? "Active destination population"
@@ -171,7 +188,9 @@ export function ConservationLedgerCard({
             </span>
           </div>
           <p>
-            {measured
+            {writeRefused
+              ? "The source was counted. Preflight stopped the load before any destination write, so COUNT(*) was not taken. Blank cells stored as SQL NULL are absence, not coerced loss."
+              : measured
               ? isJob
                 ? dest.value === "—"
                   ? "Every stream has a dest-engine ledger. Dest COUNT(*) is not summed across mixed or keyed kinds. Writer acknowledgement is diagnostic only."

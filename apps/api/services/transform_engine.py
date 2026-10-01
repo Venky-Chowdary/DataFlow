@@ -2179,14 +2179,15 @@ def _blank_is_nullable_absence(
     Same contract as the file writer (``empty_cells_as_null``). A proven NOT
     NULL destination still fails. DB→DB keeps the flag off.
     """
-    if not empty_cells_as_null or not err or not _blank_sample_cell(raw):
-        return False
-    if not str(err).lower().startswith("empty value cannot coerce"):
-        return False
-    from connectors.writer_common import _target_explicitly_not_null
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
 
-    target = str(mapping.get("target") or mapping.get("source") or "")
-    return not _target_explicitly_not_null(mapping, target, dest_nullability or {})
+    return blank_typed_cell_is_sql_null(
+        raw,
+        err,
+        mapping,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+    )
 
 
 def dry_run_sample(

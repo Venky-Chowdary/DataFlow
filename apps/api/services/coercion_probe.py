@@ -632,11 +632,16 @@ def analyze_coercion(
                         # like a fidelity collapse and locked Execute on CREATE.
                         # Proven NOT NULL and unknown physical DDL stay blocked.
                         # DB→DB keeps the flag off — do not invent NULL there.
+                        from services.blank_cell_contract import typed_blank_stores_sql_null
+
                         if (
-                            empty_cells_as_null
-                            and not unknown_physical
-                            and not _probe_target_not_null(
-                                m, tgt_name, dest_nullability or {}
+                            not unknown_physical
+                            and typed_blank_stores_sql_null(
+                                cell,
+                                m,
+                                tgt_name,
+                                empty_cells_as_null=empty_cells_as_null,
+                                dest_nullability=dest_nullability,
                             )
                         ):
                             nulls += 1

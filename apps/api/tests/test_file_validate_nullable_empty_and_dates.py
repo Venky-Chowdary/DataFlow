@@ -499,3 +499,53 @@ def test_empty_cell_g3_block_is_not_a_fidelity_root():
         lossy,
         "g3_schema_contract",
     ) is True
+
+
+def test_blank_cell_contract_is_one_decision():
+    """Writer, dry-run, and the coercion probe share this function.
+
+    A second copy is how Execute rejected phones Validate had accepted.
+    """
+    from services.blank_cell_contract import (
+        blank_typed_cell_is_sql_null,
+        is_spreadsheet_blank,
+        typed_blank_stores_sql_null,
+    )
+
+    nullable = {"target": "phone", "source": "phone"}
+    not_null = {**nullable, "target_nullable": False}
+    err = "Empty value cannot coerce to integer"
+    assert is_spreadsheet_blank("") is True
+    assert is_spreadsheet_blank("   ") is True
+    assert is_spreadsheet_blank(None) is True
+    assert is_spreadsheet_blank(0) is False
+    assert is_spreadsheet_blank(False) is False
+    assert is_spreadsheet_blank("415") is False
+    assert typed_blank_stores_sql_null(
+        "", nullable, "phone", empty_cells_as_null=True, dest_nullability=None,
+    ) is True
+    assert typed_blank_stores_sql_null(
+        "   ", nullable, "phone", empty_cells_as_null=True, dest_nullability={"phone": True},
+    ) is True
+    assert typed_blank_stores_sql_null(
+        "", not_null, "phone", empty_cells_as_null=True, dest_nullability={"phone": False},
+    ) is False
+    assert typed_blank_stores_sql_null(
+        "", nullable, "phone", empty_cells_as_null=False, dest_nullability=None,
+    ) is False
+    assert typed_blank_stores_sql_null(
+        0, nullable, "phone", empty_cells_as_null=True, dest_nullability=None,
+    ) is False
+    assert blank_typed_cell_is_sql_null(
+        "", err, nullable, empty_cells_as_null=True, dest_nullability=None,
+    ) is True
+    assert blank_typed_cell_is_sql_null(
+        "", err, not_null, empty_cells_as_null=True, dest_nullability=None, target="phone",
+    ) is False
+    assert blank_typed_cell_is_sql_null(
+        "11/03/1992",
+        "Invalid date: '11/03/1992'",
+        nullable,
+        empty_cells_as_null=True,
+        dest_nullability=None,
+    ) is False
