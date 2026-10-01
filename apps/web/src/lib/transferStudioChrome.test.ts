@@ -696,6 +696,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(dash, /DateLocalePanel/);
     assert.match(dash, /dateLocaleValidateAction\(preflight\)/);
     assert.match(panel, /Set date locale/);
+    assert.match(panel, /Change date locale/);
+    assert.match(panel, /is-settled/);
     assert.doesNotMatch(panel, /Set date locale[\s\S]*Set date locale/);
     assert.match(drawer, /id="df2-adv-date-locale"/);
     assert.match(drawer, /id="df2-adv-number-locale"/);

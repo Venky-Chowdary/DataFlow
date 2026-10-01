@@ -196,15 +196,49 @@ def _env_date_locale() -> str:
     return (getenv_brand("DATE_ORDER") or "").strip().upper()
 
 
+_DATE_LOCALES = frozenset({"DMY", "MDY"})
+# Pinned when the caller sent a token that is not a locale. Empty means
+# Auto (deployment default may apply). This marker is not a locale and
+# must not be copied onto a report.
+_DATE_LOCALE_REJECTED = "REJECTED"
+
+
+def canonical_date_locale(locale: str) -> str:
+    """DMY or MDY. Any other token is Auto — never a locale, never echoed."""
+    loc = (locale or "").strip().upper()
+    return loc if loc in _DATE_LOCALES else ""
+
+
 def _active_date_locale(explicit: str = "") -> str:
-    """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
-    loc = (explicit or _DATE_LOCALE_VAR.get() or "").strip().upper() or _env_date_locale()
-    return loc if loc in {"DMY", "MDY"} else ""
+    """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset.
+
+    A non-empty explicit token that is not DMY/MDY does not fall through
+    to context or the deployment default. A rejected pin does the same:
+    invalid means fail closed for that request, not the env order.
+    """
+    if (explicit or "").strip():
+        return canonical_date_locale(explicit)
+    pinned = (_DATE_LOCALE_VAR.get() or "").strip().upper()
+    if pinned == _DATE_LOCALE_REJECTED:
+        return ""
+    chosen = canonical_date_locale(pinned)
+    if chosen:
+        return chosen
+    return canonical_date_locale(_env_date_locale())
 
 
 def set_active_date_locale(locale: str) -> contextvars.Token[str]:
-    """Set the active date locale for the current request context."""
-    return _DATE_LOCALE_VAR.set((locale or "").strip().upper())
+    """Pin DMY/MDY for this request.
+
+    Empty is Auto: the deployment default may apply. Any other token that
+    is not DMY/MDY is a rejected pin — it is not stored, and it does not
+    fall through to the deployment default.
+    """
+    raw = (locale or "").strip()
+    if not raw:
+        return _DATE_LOCALE_VAR.set("")
+    chosen = canonical_date_locale(raw)
+    return _DATE_LOCALE_VAR.set(chosen or _DATE_LOCALE_REJECTED)
 
 
 def reset_active_date_locale(token: contextvars.Token[str]) -> None:
@@ -226,7 +260,14 @@ _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 def _active_number_locale(explicit: str = "") -> str:
-    loc = (explicit or _NUMBER_LOCALE_VAR.get() or "").strip().upper()
+    if (explicit or "").strip():
+        return canonical_number_locale(explicit)
+    return canonical_number_locale(_NUMBER_LOCALE_VAR.get())
+
+
+def canonical_number_locale(locale: str) -> str:
+    """US, EU, or WIRE. Any other token is Auto."""
+    loc = (locale or "").strip().upper()
     return loc if loc in _NUMBER_LOCALES else ""
 
 
@@ -243,8 +284,7 @@ def set_active_number_locale(locale: str) -> contextvars.Token[str]:
     ever typed it. Under WIRE a dot is the decimal point and a grouping
     separator is not a number at all — canonical, still no guessing.
     """
-    pinned = (locale or "").strip().upper()
-    return _NUMBER_LOCALE_VAR.set(pinned if pinned in _NUMBER_LOCALES else "")
+    return _NUMBER_LOCALE_VAR.set(canonical_number_locale(locale))
 
 
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:

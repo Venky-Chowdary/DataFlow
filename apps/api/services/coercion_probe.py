@@ -39,7 +39,11 @@ from typing import Any
 from services.decision_kernel.findings import FailureClass as _FailureClass
 from services.mapping_constraints import write_mappings
 from services.shape_contract import DEST_TYPE_UNREAD_REASON
-from services.transform_engine import apply_transform
+from services.transform_engine import (
+    apply_transform,
+    bind_column_date_locale,
+    reset_active_date_locale,
+)
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
     ddl_type,
@@ -550,11 +554,9 @@ def analyze_coercion(
         use_uuid_wire = tgt_logical == "uuid" and dest_l in _uuid_binary_dests
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
-        from services.transform_engine import bind_column_date_locale, reset_active_date_locale
-
         _date_token = bind_column_date_locale(
             (
-                row.get(src) if isinstance(row, dict) else None
+                lookup_row_value(row, src, None) if isinstance(row, dict) else None
                 for row in rows
             ),
             src,

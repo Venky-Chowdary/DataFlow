@@ -48,6 +48,8 @@ from services.transform_engine import (
     ambiguous_date_columns,
     ambiguous_number_columns,
     assumed_number_locale,
+    canonical_date_locale,
+    canonical_number_locale,
     infer_date_locale,
     infer_number_locale,
     reset_active_date_locale,
@@ -856,15 +858,20 @@ def resolve_preflight_source_kind(
     """File blanks become SQL NULL only for an upload, never for a connector.
 
     The request model defaults ``source_kind`` to ``file``. A saved source
-    connector with no upload must not inherit that default: Validate would
-    accept empty integers that the database writer still rejects.
+    connector must not inherit that default, even when a stale upload id is
+    sent with it: Validate would accept empty integers that the database
+    writer still rejects.
     """
     kind = (source_kind or "").strip().lower()
     connector = (source_connector_id or "").strip()
-    upload = (source_file_id or "").strip()
+    # The upload id is part of the call so every router can pass the id it
+    # already holds. It is not a selector: a stale upload cannot keep the
+    # spreadsheet NULL rule on a connector, and it cannot turn an explicit
+    # database kind into a file.
+    _ = source_file_id
     if not kind:
         kind = "database" if connector else "file"
-    if connector and not upload and kind == "file":
+    if connector and kind == "file":
         return "database"
     return kind or "file"
 
@@ -1013,6 +1020,10 @@ def run_file_preflight(
     mappings = hydrated_mappings
     _unstamped_additive: list[str] = []
 
+    # Only the allowlisted tokens are locales. Anything else is Auto, so a
+    # typo or a non-locale string cannot skip inference or land on the report.
+    date_locale = canonical_date_locale(date_locale)
+    number_locale = canonical_number_locale(number_locale)
     # Operator locale wins. Otherwise adopt one inferred order only when
     # every date column agrees. A settler in ``dob`` must not rewrite an
     # unrelated column whose slash dates are still ambiguous.
@@ -1028,6 +1039,7 @@ def run_file_preflight(
         if len(agreed) == 1 and not unsettled:
             date_locale = next(iter(agreed))
             set_active_date_locale(date_locale)
+    if sample_rows and columns:
         inferred_numbers = infer_number_locale(
             sample_rows, columns, existing_locale=number_locale
         )
