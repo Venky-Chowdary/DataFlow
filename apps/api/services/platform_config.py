@@ -234,7 +234,27 @@ def validate_production_config() -> list[str]:
     return errors
 
 
+# Railway liveness must answer even when production config is incomplete.
+# Every other route stays closed until the errors are fixed.
+_LIVENESS_PATHS = frozenset({"/health", "/health/ready", "/api/v1/health"})
+
+
+def is_liveness_path(path: str) -> bool:
+    """True for the deploy probe and the readiness probe, nothing else."""
+    raw = (path or "").split("?", 1)[0].rstrip("/") or "/"
+    if raw in _LIVENESS_PATHS:
+        return True
+    return raw.startswith("/health/")
+
+
 def enforce_production_config() -> None:
+    """Exit the process when production config is incomplete.
+
+    The API server must not call this from its lifespan. Railway marks the
+    deploy failed with "service unavailable" when the process dies before
+    ``/health`` can answer. The server records the same errors and refuses
+    every route except liveness.
+    """
     errors = validate_production_config()
     if errors:
         for msg in errors:

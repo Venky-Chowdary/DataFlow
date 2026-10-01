@@ -20,13 +20,14 @@ from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
     docs_enabled,
-    enforce_production_config,
     is_production,
     is_railway,
+    validate_production_config,
     vector_store_dir,
 )
 
 from .middleware.auth_middleware import AuthMiddleware
+from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
@@ -69,7 +70,15 @@ async def lifespan(app: FastAPI):
     Railway ``/health`` liveness can pass within the healthcheck window.
     """
     apply_railway_defaults()
-    enforce_production_config()
+    # Do not sys.exit here. The socket is not accepting yet, so a fatal
+    # config used to fail Railway's /health probe as "service unavailable"
+    # for the whole window. Liveness stays up; other routes return 503.
+    config_errors = validate_production_config()
+    app.state.config_errors = config_errors
+    if config_errors:
+        for msg in config_errors:
+            print(f"[FATAL] Production config: {msg}")
+        print("[!] Refusing traffic except /health until production config is fixed")
     # Configure logging before anything else can emit a line, so no startup
     # message escapes with Uvicorn's default handler and no correlation fields.
     try:
@@ -290,6 +299,8 @@ if not _cors_origin_regex and is_railway():
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
+# Outermost: a missing production secret must not reach auth or transfer.
+app.add_middleware(ProductionConfigMiddleware)
 
 # Enterprise CORS: no wildcard methods/headers, explicit list only.
 # Credentials are only sent from the configured origins (cors_origins) or the
@@ -468,11 +479,14 @@ async def health_check():
 
     Railway deploy healthchecks must hit this path. Keep it cheap and never
     block on Mongo/RAG/catalog so a slow warm-up cannot fail the deploy.
+    Incomplete production config is reported here and does not kill the
+    process; every other route stays closed until it is fixed.
     """
-    return {
-        "status": "healthy",
+    errors = list(getattr(app.state, "config_errors", None) or [])
+    body = {
+        "status": "misconfigured" if errors else "healthy",
         "liveness": True,
-        "ready": bool(getattr(app.state, "ready", False)),
+        "ready": bool(getattr(app.state, "ready", False)) and not errors,
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {
@@ -480,6 +494,9 @@ async def health_check():
             "proxy_write_reconnect": True,
         },
     }
+    if errors:
+        body["config_errors"] = errors
+    return body
 
 
 @app.get("/api/v1/health")

@@ -93,8 +93,11 @@ pytest-asyncio>=0.23.0
 httpx>=0.25.0
 responses>=0.24.0  # HTTP mocking for SaaS connector tests
 
-# Transitive floors for known CVEs (keep pip-audit green on default install)
-urllib3>=2.6.3
+# Transitive floors for known CVEs (keep pip-audit green on default install).
+# oauthlib stays on 3.3.1 because databricks-sql-connector 4.6.0 requires
+# oauthlib<4. Raising it here fails the install. PYSEC-2026-4114 waits on
+# a connector release that accepts oauthlib 4.
+urllib3>=2.8.0
 python-dotenv>=1.2.2
 
 # OpenTelemetry — opt-in via DATAFLOW_ENABLE_TRACING=1. The product boots
