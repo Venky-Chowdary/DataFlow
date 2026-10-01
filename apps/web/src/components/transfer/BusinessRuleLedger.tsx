@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Button } from "../ui/Button";
 import type { CompiledRule, RuleCompileReport } from "../../lib/businessRules";
 import {
   canAcceptAsDirect,
@@ -100,13 +101,21 @@ export function BusinessRuleLedger({
           leftover bound rename as Direct here — Map is where you remap the rest.
         </p>
       ) : null}
-      <p className="df2-rule-ledger-census" aria-label="Rule census">
-        {census.total} total · {census.mapping} mapping · {census.validation} validation
-        · {census.namedMapping} named mapping · {census.namedValidation} named validation
-        · {census.executable} executable · {census.review} review · {census.conflict} conflict
-        · rule coverage {census.coveragePercent}%
-        {census.review || census.conflict ? "" : ` · Proof will say: ${proofRuleClaim(report)}`}
-        . Executed and validated counts land on Proof after the run.
+      <dl className="df2-rule-ledger-census" aria-label="Rule census">
+        <div><dt>Total</dt><dd>{census.total}</dd></div>
+        <div><dt>Mapping</dt><dd>{census.mapping}</dd></div>
+        <div><dt>Validation</dt><dd>{census.validation}</dd></div>
+        <div><dt>named mapping</dt><dd>{census.namedMapping}</dd></div>
+        <div><dt>named validation</dt><dd>{census.namedValidation}</dd></div>
+        <div><dt>Executable</dt><dd>{census.executable}</dd></div>
+        <div><dt>Review</dt><dd>{census.review}</dd></div>
+        <div><dt>Conflict</dt><dd>{census.conflict}</dd></div>
+        <div><dt>rule coverage</dt><dd>{census.coveragePercent}%</dd></div>
+      </dl>
+      <p className="df2-rule-ledger-how">
+        {census.review || census.conflict
+          ? "Executed and validated counts land on Proof after the run."
+          : `Proof will say: ${proofRuleClaim(report)}. Executed and validated counts land on Proof after the run.`}
       </p>
       {report.sheet_kinds?.length ? (
         <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
@@ -196,13 +205,14 @@ export function BusinessRuleLedger({
                 <span className="df2-rule-line-next">
                   <span>{reviewHint(rule)}</span>
                   {onAcceptDirect && canAcceptAsDirect(rule) ? (
-                    <button
+                    <Button
                       type="button"
-                      className="df2-btn df2-btn-sm"
+                      size="sm"
+                      variant="secondary"
                       onClick={() => onAcceptDirect(index)}
                     >
                       Accept as Direct
-                    </button>
+                    </Button>
                   ) : null}
                 </span>
               ) : null}
