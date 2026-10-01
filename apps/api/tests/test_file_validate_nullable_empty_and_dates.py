@@ -305,6 +305,9 @@ def test_connector_cannot_claim_the_file_blank_rule():
         "file", source_connector_id="conn_pg", source_file_id=""
     ) == "database"
     assert resolve_preflight_source_kind(
+        "file", source_connector_id="conn_pg", source_file_id="stale_upload"
+    ) == "database"
+    assert resolve_preflight_source_kind(
         "file", source_connector_id="", source_file_id="upload_1"
     ) == "file"
     assert resolve_preflight_source_kind(

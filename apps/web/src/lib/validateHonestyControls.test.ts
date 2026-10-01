@@ -252,6 +252,17 @@ describe("validateHonestyControls", () => {
     assert.match(action.message, /Auto will not guess/);
   });
 
+  it("shows a settled date order without asking the operator to guess", () => {
+    const action = dateLocaleValidateAction({
+      date_locale: "MDY",
+      date_locale_report: { decision: "ok", date_locale: "MDY", ambiguous_columns: [] },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.equal(action.decision, "settled");
+    assert.equal(action.locale, "MDY");
+    assert.match(action.message, /Reading dates as MDY/);
+  });
+
   it("Advanced locale field ids stay one owner", () => {
     assert.equal(advancedLocaleFieldId("date"), "df2-adv-date-locale");
     assert.equal(advancedLocaleFieldId("number"), "df2-adv-number-locale");
