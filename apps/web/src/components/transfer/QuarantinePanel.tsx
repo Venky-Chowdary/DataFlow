@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
-import { isReplayable, type QuarantineRow } from "./quarantineReplay";
+import { isReplayable, quarantineEvidenceSource, type QuarantineRow } from "./quarantineReplay";
 
 export { isReplayable };
 export type { QuarantineRow };
@@ -79,7 +80,11 @@ function isOpenFinding(row: QuarantineRow): boolean {
 
 /** Make invisible format-control chars visible in the UI / CSV preview. */
 function formatQuarantineSample(value: unknown, chars?: string[]): string {
-  let text = String(value ?? "");
+  const labeled = nullWireLabel(value);
+  if (labeled) return labeled;
+  if (value == null) return "—";
+  let text = String(value);
+  if (text.trim() === "") return "(blank)";
   const replacements: Array<[RegExp, string]> = [
     [/\u200B/g, "⟦U+200B⟧"],
     [/\u200C/g, "⟦U+200C⟧"],
@@ -137,7 +142,7 @@ export function QuarantinePanel({
   const [remediatedPendingValidate, setRemediatedPendingValidate] = useState(false);
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
-  const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
+  const [source, setSource] = useState<string>(() => quarantineEvidenceSource(initialDetails));
   const [rowsRolledBack, setRowsRolledBack] = useState(0);
   const [destDlqDurable, setDestDlqDurable] = useState<boolean | null | undefined>(undefined);
   const [rowsUnaccounted, setRowsUnaccounted] = useState(0);
@@ -179,7 +184,11 @@ export function QuarantinePanel({
       setRowsRolledBack(data.rows_rolled_back ?? 0);
       setDestDlqDurable(data.dest_dlq_durable);
       setRowsUnaccounted(data.rows_unaccounted ?? 0);
-      setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
+      setSource(
+        apiRows.length
+          ? (data.source || "write")
+          : quarantineEvidenceSource(initialDetails, data.source),
+      );
       setDestDlq(data.dest_dlq);
       setQuarantineDurable(data.quarantine_durable);
       setQuarantineDlqError(data.quarantine_dlq_error ?? null);
@@ -190,7 +199,7 @@ export function QuarantinePanel({
       if (initialDetails?.length) {
         setRows(initialDetails);
         setIssueCount(initialDetails.length);
-        setSource("job");
+        setSource(quarantineEvidenceSource(initialDetails));
         setOpen(true);
         setLoaded(true);
       }

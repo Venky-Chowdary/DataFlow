@@ -2199,6 +2199,90 @@ def _continue_policy_disposition(mapping: Any) -> str:
     return "holdout"
 
 
+def _spreadsheet_blank_is_sql_null(
+    ctx: PreflightContext,
+    raw: Any,
+    err: str | None,
+    mapping: Any,
+) -> bool:
+    """File blank → SQL NULL, same contract as the file writer and G5 dry-run.
+
+    Execute stamps a typed transform (``none`` → ``integer``) before this gate.
+    G5 already clears those blanks when the destination is not proven NOT NULL.
+    G8 used to keep the coerce error and fail the load with zero rows written.
+    """
+    if not bool(getattr(ctx, "empty_cells_as_null", False)):
+        return False
+    try:
+        from services.transform_engine import _blank_is_nullable_absence
+    except Exception:
+        return False
+    target = str(getattr(mapping, "target", "") or "")
+    dest_cols = list(getattr(ctx.plan.destination, "target_columns", None) or [])
+    dest_nullability = {
+        str(getattr(col, "name", "") or ""): bool(getattr(col, "nullable", True))
+        for col in dest_cols
+        if getattr(col, "name", None)
+    }
+    mapping_dict: dict[str, Any] = {
+        "source": getattr(mapping, "source", ""),
+        "target": target,
+        "create_new": bool(getattr(mapping, "create_new", False)),
+    }
+    dest_col = next(
+        (
+            col
+            for col in dest_cols
+            if str(getattr(col, "name", "") or "").lower() == target.lower()
+        ),
+        None,
+    )
+    if dest_col is not None and not bool(getattr(dest_col, "nullable", True)):
+        mapping_dict["target_nullable"] = False
+    return _blank_is_nullable_absence(
+        raw,
+        err,
+        mapping_dict,
+        empty_cells_as_null=True,
+        dest_nullability=dest_nullability,
+    )
+
+
+def _write_path_cell_issue(
+    row_idx: int,
+    mapping: Any,
+    err: str,
+    raw_s: str | None,
+    line: str,
+) -> dict[str, Any]:
+    """Structured quarantine payload for one write-path cell failure.
+
+    The prose line ``row N src→dst: reason`` is not enough — Inspect Quarantine
+    only rebuilds a finding when column and sample are stored.
+    """
+    blank = str(err).lower().startswith("empty value cannot coerce")
+    if blank and (raw_s is None or str(raw_s).strip() == ""):
+        sample: Any = ""
+    else:
+        sample = "" if raw_s is None else raw_s
+    issue: dict[str, Any] = {
+        "row": row_idx,
+        "source": getattr(mapping, "source", ""),
+        "column": getattr(mapping, "source", ""),
+        "target": getattr(mapping, "target", ""),
+        "sample": sample,
+        "reason": err,
+        "message": line,
+    }
+    if blank:
+        issue["suggested_fix"] = (
+            "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+            "A NOT NULL column needs a source value or a nullability change — "
+            "replay cannot invent a typed value from an empty cell."
+        )
+    return issue
+
+
 def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
     """Prefer the real write-path transform so G8 matches coerce/quarantine behavior."""
     try:
@@ -2281,8 +2365,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             return str(value)
 
     transform_errors: list[str] = []
+    transform_issue_details: list[dict[str, Any]] = []
     contracted_holdouts: list[str] = []
     contracted_null_cells: list[str] = []
+    file_blank_nulls: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
@@ -2300,8 +2386,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 mapped[m.target] = None
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
-            if err:
+            if err and _spreadsheet_blank_is_sql_null(ctx, raw_s, err, m):
+                # Same disposition as the file writer: absence, not a cast failure
+                # and not a quarantined reject. Proven NOT NULL stays in ``err``.
+                mapped[m.target] = None
+                file_blank_nulls.append(
+                    f"row {row_idx} {m.source}→{m.target}: blank cell stored as SQL NULL"
+                )
+            elif err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
+                transform_issue_details.append(
+                    _write_path_cell_issue(row_idx, m, err, raw_s, line)
+                )
                 # Continue-policy Risk Contract matches write disposition:
                 # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell
                 # (blocked when destination is NOT NULL — same as G3).
@@ -2340,6 +2436,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             start,
             {
                 "errors": transform_errors[:20],
+                "issues_detail": transform_issue_details[:20],
                 "contracted_holdouts": contracted_holdouts[:20],
                 "source_rows": source_count,
                 "preview_only": True,
@@ -2610,8 +2707,15 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "contracted_holdout_count": len(contracted_holdouts),
                     "contracted_null_cells": contracted_null_cells[:20],
                     "contracted_null_cell_count": len(contracted_null_cells),
+                    "file_blank_nulls": file_blank_nulls[:20],
+                    "file_blank_null_count": len(file_blank_nulls),
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
+                        + (
+                            f"; {len(file_blank_nulls)} spreadsheet blank(s) stored as SQL NULL"
+                            if file_blank_nulls
+                            else ""
+                        )
                         + (
                             f"; {len(contracted_holdouts)} row(s) held out under "
                             "quarantine/skip continue-policy"

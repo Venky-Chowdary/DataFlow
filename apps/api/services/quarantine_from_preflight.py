@@ -14,6 +14,20 @@ _PAIR_RE = re.compile(
     r"(?P<source>[A-Za-z_][\w.]*)\s*\((?P<source_type>[^)]+)\)\s*→\s*"
     r"(?P<target>[A-Za-z_][\w.]*)\s*\((?P<target_type>[^)]+)\)",
 )
+# Gate-8 / dry-run cell line: ``row 1 phone→phone: Empty value cannot coerce to integer``.
+# Type-pair prose (``name (TYPE) → name (TYPE)``) is handled by ``_PAIR_RE`` first.
+_GATE_CELL_RE = re.compile(
+    r"^(?:row\s+(?P<row>\d+)\s+)?"
+    r"(?P<source>[A-Za-z_][\w.]*)\s*→\s*"
+    r"(?P<target>[A-Za-z_][\w.]*)\s*:\s*"
+    r"(?P<reason>.+)$",
+    re.IGNORECASE,
+)
+_BLANK_CELL_FIX = (
+    "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+    "A NOT NULL column needs a source value or a nullability change — "
+    "replay cannot invent a typed value from an empty cell."
+)
 
 
 def _as_issue_dict(item: Any) -> dict[str, Any] | None:
@@ -30,14 +44,35 @@ def _enrich_from_message(issue: dict[str, Any]) -> dict[str, Any]:
         return issue
     text = str(issue.get("reason") or issue.get("message") or "")
     m = _PAIR_RE.search(text)
-    if not m:
+    if m:
+        enriched = dict(issue)
+        enriched.setdefault("source", m.group("source"))
+        enriched.setdefault("column", m.group("source"))
+        enriched.setdefault("target", m.group("target"))
+        enriched.setdefault("source_type", m.group("source_type"))
+        enriched.setdefault("target_type", m.group("target_type"))
+        return enriched
+    cell = _GATE_CELL_RE.match(text.strip())
+    if not cell:
         return issue
     enriched = dict(issue)
-    enriched.setdefault("source", m.group("source"))
-    enriched.setdefault("column", m.group("source"))
-    enriched.setdefault("target", m.group("target"))
-    enriched.setdefault("source_type", m.group("source_type"))
-    enriched.setdefault("target_type", m.group("target_type"))
+    source = cell.group("source").strip()
+    target = cell.group("target").strip()
+    inner = cell.group("reason").strip()
+    enriched.setdefault("source", source)
+    enriched.setdefault("column", source)
+    enriched.setdefault("target", target)
+    if cell.group("row") and enriched.get("row") is None:
+        enriched["row"] = int(cell.group("row"))
+    enriched["reason"] = inner
+    enriched["message"] = inner
+    if inner.lower().startswith("empty value cannot coerce"):
+        if enriched.get("sample") is None and enriched.get("value") is None:
+            # The cell was blank. Wiring a missing sample as SQL NULL told the
+            # operator the probe saw ``__DF_SQL_NULL__`` and that replay had
+            # no payload.
+            enriched["sample"] = ""
+        enriched.setdefault("suggested_fix", _BLANK_CELL_FIX)
     return enriched
 
 
@@ -203,12 +238,49 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         rows.append(detail)
         if len(rows) >= 200:
             break
+    # A column-level dry-run line (no row index) duplicates the per-row Gate-8
+    # findings for the same cell. Keep the row that names the source record.
+    located = {
+        (str(r.get("column") or ""), str(r.get("target") or ""))
+        for r in rows
+        if r.get("row") is not None and r.get("column")
+    }
+    if located:
+        rows = [
+            r
+            for r in rows
+            if r.get("row") is not None
+            or (str(r.get("column") or ""), str(r.get("target") or "")) not in located
+        ]
     try:
         from services.quarantine_row_contract import normalize_quarantine_rows
 
         return normalize_quarantine_rows(rows, job_id="", connector="preflight")
     except Exception:
         return rows
+
+
+def quarantine_evidence_source(
+    job: dict[str, Any] | None,
+    details: list[dict[str, Any]] | None,
+) -> str:
+    """Label preflight findings that were stored before any destination write.
+
+    A blocked Execute persists those rows on ``rejected_details``. Calling that
+    a write-time reject offered replay for a load that committed nothing.
+    """
+    job = job or {}
+    rows = [d for d in (details or []) if isinstance(d, dict)]
+    summary = job.get("destination_summary")
+    wrote = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
+    if wrote:
+        return "write"
+    policies = {str(d.get("policy") or "") for d in rows}
+    if rows and policies <= {"preflight_quarantine"}:
+        return "preflight"
+    if job.get("rejected_details"):
+        return "write"
+    return "preflight" if rows else "none"
 
 
 def merge_job_quarantine(

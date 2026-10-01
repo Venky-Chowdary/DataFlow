@@ -360,6 +360,106 @@ def test_database_blank_integer_still_blocks_and_is_not_called_collapse():
     assert "fidelity_collapse" not in kinds, result.get("root_causes")
 
 
+def _phone_rows():
+    return [
+        {"phone": "5551234567"},
+        {"phone": ""},
+        {"phone": "5550001111"},
+        {"phone": ""},
+        {"phone": "5552223333"},
+        {"phone": ""},
+    ]
+
+
+def _run_phone_preflight(*, source_kind: str, nullable: bool, table_exists: bool):
+    from services.preflight_service import run_file_preflight
+
+    return run_file_preflight(
+        columns=["phone"],
+        column_types={"phone": "INTEGER"},
+        row_count=6,
+        mappings=[{
+            "source": "phone",
+            "target": "phone",
+            "confidence": 0.93,
+            # Execute stamps the write-path cast before Gate-8. Validate often
+            # still has transform "none"; both must share the file-blank contract.
+            "target_type": "BIGINT",
+            "transform": "integer",
+            "create_new": not table_exists,
+        }],
+        destination_connected=True,
+        source_connected=True,
+        source_kind=source_kind,
+        source_format="xlsx" if source_kind == "file" else "postgresql",
+        sync_mode="full_refresh_append",
+        sample_rows=_phone_rows(),
+        confidence_threshold=0.85,
+        validation_mode="strict",
+        destination_column_types={"phone": "BIGINT"} if table_exists else {},
+        destination_column_nullability={"phone": nullable},
+        destination_table_exists=table_exists,
+        destination_can_create=not table_exists,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+    )
+
+
+def test_execute_stamped_integer_file_blanks_do_not_fail_gate8():
+    """Live Run failure: approved Validate, then Gate-8 rejected blank phones.
+
+    Rows 2, 4, and 6 are empty. The destination BIGINT is nullable, so those
+    cells are SQL NULL and the other rows stay writable.
+    """
+    result = _run_phone_preflight(source_kind="file", nullable=True, table_exists=True)
+    blocked = [
+        g for g in result.get("gates") or []
+        if str(g.get("status") or "").lower() in {"block", "fail", "blocked"}
+        and "phone" in str(g.get("message") or "").lower()
+    ]
+    assert blocked == [], [g.get("message") for g in blocked]
+    g8 = next(g for g in result.get("gates") or [] if g.get("id") == "g8_reconciliation")
+    assert str(g8.get("status") or "").lower() in {"pass", "passed", "ok"}
+    assert int((g8.get("details") or {}).get("file_blank_null_count") or 0) == 3
+    kinds = [
+        r.get("kind") if isinstance(r, dict) else getattr(r, "kind", "")
+        for r in (result.get("root_causes") or [])
+    ]
+    assert "sample_transform" not in kinds
+
+
+def test_not_null_phone_blanks_are_inspectable_quarantine_rows():
+    """Proven NOT NULL still blocks, and each blank names row, column, and cell."""
+    from services.quarantine_from_preflight import quarantine_rows_from_preflight
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    result = _run_phone_preflight(source_kind="file", nullable=False, table_exists=True)
+    g8 = next(g for g in result.get("gates") or [] if g.get("id") == "g8_reconciliation")
+    assert str(g8.get("status") or "").lower() in {"block", "fail", "blocked"}
+    rows = quarantine_rows_from_preflight(result)
+    phone = [r for r in rows if r.get("column") == "phone"]
+    assert [r.get("row") for r in phone] == [2, 4, 6], phone
+    for row in phone:
+        assert row["target"] == "phone"
+        assert row["value"] == ""
+        assert row["value"] != SQL_NULL_SENTINEL
+        assert row["values"]["phone"] == ""
+        assert "Empty value cannot coerce to integer" in row["reason"]
+        assert "phone→phone" not in row["reason"]
+    assert quarantine_rows_from_preflight({"gates": [], "blockers": []}) == []
+
+
+def test_database_integer_blank_still_blocks_after_gate8_file_contract():
+    result = _run_phone_preflight(source_kind="database", nullable=True, table_exists=False)
+    blob = " ".join(
+        str(g.get("message") or "")
+        for g in result.get("gates") or []
+        if str(g.get("status") or "").lower() in {"block", "fail", "blocked"}
+    )
+    assert "cannot coerce" in blob.lower() or "empty" in blob.lower(), blob
+
+
 def test_empty_cell_g3_block_is_not_a_fidelity_root():
     details = {
         "issues": [
