@@ -260,7 +260,13 @@ describe("validateHonestyControls", () => {
     assert.ok(action);
     assert.equal(action.decision, "settled");
     assert.equal(action.locale, "MDY");
-    assert.match(action.message, /Reading dates as MDY/);
+    assert.match(action.message, /Reading dates as MDY \(month\/day\/year\)/);
+    const dmy = dateLocaleValidateAction({
+      date_locale_report: { decision: "ok", date_locale: "DMY", ambiguous_columns: [] },
+    } as unknown as PreflightResult);
+    assert.ok(dmy);
+    assert.equal(dmy.locale, "DMY");
+    assert.match(dmy.message, /day\/month\/year/);
   });
 
   it("Advanced locale field ids stay one owner", () => {

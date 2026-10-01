@@ -340,7 +340,9 @@ export function dateLocaleValidateAction(
         locale,
         columns: [],
         message:
-          `Reading dates as ${locale}. An unambiguous value in each date column settled the order.`,
+          locale === "DMY"
+            ? "Reading dates as DMY (day/month/year). A value in each date column fixed the order."
+            : "Reading dates as MDY (month/day/year). A value in each date column fixed the order.",
       };
     }
     return null;

@@ -9740,15 +9740,21 @@ button.df2-vd-assist-toggle:focus-visible {
   border-color: var(--df-success-border, rgba(5, 150, 105, 0.22));
   background: var(--df-success-bg, #ecfdf5);
 }
-.df2-vd-date-locale.is-settled .df2-load-history-head .dt-nav-icon,
-.df2-vd-date-locale.is-settled .df2-load-history-badge,
-.df2-vd-date-locale.is-settled .df2-load-history-ok {
+.df2-vd-date-locale.is-settled .df2-load-history-head .dt-nav-icon {
   color: var(--df-success, #059669);
+}
+.df2-vd-date-locale.is-settled .df2-load-history-ok {
+  color: var(--df-text-secondary, #475569);
 }
 .df2-vd-date-locale.is-settled .df2-load-history-badge {
   font-weight: 600;
   letter-spacing: 0.04em;
   opacity: 1;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--df-success, #059669);
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-success-border, rgba(5, 150, 105, 0.22));
 }
 
 @media (max-width: 1366px) {
