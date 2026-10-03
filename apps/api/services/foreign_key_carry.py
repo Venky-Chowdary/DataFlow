@@ -1019,6 +1019,7 @@ def verify_foreign_keys(
     dest_foreign_keys: ForeignKeys | None,
     *,
     table_kind: str = "",
+    index_status: str = "",
 ) -> list[ForeignKeyDecision]:
     """Settle planned keys against the destination catalog.
 
@@ -1029,9 +1030,10 @@ def verify_foreign_keys(
     is not. ON DELETE and ON UPDATE must be the source rule; a different
     action on the same columns is not carried. MATCH FULL on the source is
     not carried when the destination match is SIMPLE. A catalog bit that says
-    existing rows were not checked is not carried either. A Snowflake key
-    is that proof only when ``table_kind`` is the measured hybrid value and
-    the constraint row says it is enforced.
+    existing rows were not checked is not carried either.     A Snowflake key
+    is that proof only when ``table_kind`` is the measured hybrid value,
+    the constraint row says it is enforced, and ``SHOW INDEXES`` status
+    is ``ACTIVE``.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
@@ -1093,7 +1095,13 @@ def verify_foreign_keys(
         covering = [
             fk
             for fk in faithful
-            if row_proof_gap(dest_dialect, fk.validated, table_kind=table_kind) == ""
+            if row_proof_gap(
+                dest_dialect,
+                fk.validated,
+                table_kind=table_kind,
+                index_status=index_status,
+            )
+            == ""
         ]
         if covering:
             status = "carried"
@@ -1109,11 +1117,17 @@ def verify_foreign_keys(
                 )
         elif faithful:
             gap = row_proof_gap(
-                dest_dialect, faithful[0].validated, table_kind=table_kind
+                dest_dialect,
+                faithful[0].validated,
+                table_kind=table_kind,
+                index_status=index_status,
             )
             status = "unsupported"
             reason = row_proof_reason(
-                gap, dest_dialect, table_kind=table_kind
+                gap,
+                dest_dialect,
+                table_kind=table_kind,
+                index_status=index_status,
             ) or row_proof_reason("not_checked")
         elif same_actions:
             got = same_actions[0]

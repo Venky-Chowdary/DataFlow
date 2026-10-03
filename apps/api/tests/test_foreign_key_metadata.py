@@ -539,8 +539,14 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
     assert normalize_snowflake_table_kind(None) == ""
 
     for dialect in ("snowflake", "snowflake_aws", "snowflake_azure", "snowflake_gcp"):
-        assert uniqueness_proof_gap(dialect, table_kind="YES") == "", dialect
-        assert uniqueness_proof_reason(dialect, table_kind="hybrid") == "", dialect
+        assert uniqueness_proof_gap(
+            dialect, table_kind="YES", index_status="ACTIVE"
+        ) == "", dialect
+        assert uniqueness_proof_reason(
+            dialect, table_kind="hybrid", index_status="ACTIVE"
+        ) == "", dialect
+        assert uniqueness_proof_gap(dialect, table_kind="YES") == "unreported", dialect
+        assert "SHOW INDEXES" in uniqueness_proof_reason(dialect, table_kind="hybrid")
         assert uniqueness_proof_gap(dialect, table_kind="NO") == "unenforced", dialect
         assert "IS_HYBRID" in uniqueness_proof_reason(dialect, table_kind="NO")
         assert uniqueness_proof_gap(dialect, table_kind="iceberg") == "unenforced"
@@ -550,12 +556,24 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
         assert row_proof_gap(dialect, True, table_kind="iceberg") == "unenforced"
         assert "Iceberg" in row_proof_reason("unenforced", dialect, table_kind="iceberg")
         assert uniqueness_proof_gap(dialect) == "unenforced", dialect
-        assert row_proof_gap(dialect, True, table_kind="YES") == "", dialect
-        assert covers_existing_rows(dialect, True, table_kind="YES") is True
+        assert row_proof_gap(
+            dialect, True, table_kind="YES", index_status="ACTIVE"
+        ) == "", dialect
+        assert covers_existing_rows(
+            dialect, True, table_kind="YES", index_status="ACTIVE"
+        ) is True
+        assert row_proof_gap(dialect, True, table_kind="YES") == "unreported", dialect
+        assert covers_existing_rows(dialect, True, table_kind="YES") is False
         assert row_proof_gap(dialect, None, table_kind="hybrid") == "unreported"
         assert row_proof_gap(dialect, False, table_kind="hybrid") == "not_checked"
         assert "ENFORCED" in row_proof_reason(
             "not_checked", dialect, table_kind="YES"
+        )
+        assert "SHOW INDEXES" in row_proof_reason(
+            "not_checked",
+            dialect,
+            table_kind="YES",
+            index_status="BUILD VALIDATION FAILURE",
         )
         assert row_proof_gap(dialect, True) == "unenforced", dialect
 
@@ -587,13 +605,23 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
         ],
     )
     assert inspector_row_proof_gaps(
-        "snowflake", inspector, enforced, table_kind="YES"
+        "snowflake", inspector, enforced, table_kind="YES", index_status="ACTIVE"
     ) == [""]
+    assert inspector_row_proof_gaps(
+        "snowflake", inspector, enforced, table_kind="YES"
+    ) == ["unreported"]
     assert len(
         enforced_relationship_identities(
-            "snowflake_aws", inspector, enforced, table_kind="hybrid"
+            "snowflake_aws",
+            inspector,
+            enforced,
+            table_kind="hybrid",
+            index_status="ACTIVE",
         )
     ) == 1
+    assert enforced_relationship_identities(
+        "snowflake_aws", inspector, enforced, table_kind="hybrid"
+    ) == []
     assert inspector_row_proof_gaps(
         "snowflake", inspector, None, table_kind="YES"
     ) == ["unreported"]
@@ -615,6 +643,61 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
     assert inspector_row_proof_gaps(
         "snowflake", inspector, denied, table_kind="YES"
     ) == ["not_checked"]
+
+
+def test_show_indexes_active_is_the_existing_row_proof():
+    """SHOW INDEXES status. A live Snowflake account was not used.
+
+    ACTIVE is the only existing-row proof. A validation failure and an
+    in-progress build stay open. The identifier is quoted.
+    """
+    from services.foreign_key_metadata import (
+        read_snowflake_index_status,
+        summarize_snowflake_index_statuses,
+    )
+
+    columns = ["name", "is_unique", "status"]
+    assert summarize_snowflake_index_statuses(
+        [("pk", "Y", "ACTIVE")], columns
+    ) == "active"
+    assert summarize_snowflake_index_statuses(
+        [("pk", "Y", "ACTIVE"), ("fk", "N", "BUILD IN PROGRESS")], columns
+    ) == "building"
+    assert summarize_snowflake_index_statuses(
+        [("pk", "Y", "ACTIVE"), ("fk", "N", "BUILD VALIDATION FAILURE")],
+        columns,
+    ) == "failed"
+    assert summarize_snowflake_index_statuses([], columns) == ""
+    assert summarize_snowflake_index_statuses([("pk", "Y")], ["name", "is_unique"]) == ""
+
+    class _IndexCursor:
+        def __init__(self, rows, description, error: Exception | None = None):
+            self.rows = rows
+            self.description = description
+            self.error = error
+            self.sql = ""
+
+        def execute(self, sql, params=()):
+            self.sql = str(sql)
+            if self.error:
+                raise self.error
+
+        def fetchall(self):
+            return list(self.rows)
+
+    active = _IndexCursor(
+        [("SYS_INDEX_ORDERS_PRIMARY", "Y", "ACTIVE")],
+        [("name",), ("is_unique",), ("status",)],
+    )
+    assert read_snowflake_index_status(active, "PUBLIC", "ORDERS") == "active"
+    assert active.sql == 'SHOW INDEXES IN TABLE "PUBLIC"."ORDERS"'
+
+    quoted = _IndexCursor([], [("status",)])
+    assert read_snowflake_index_status(quoted, 'WE"IRD', "T") == ""
+    assert quoted.sql == 'SHOW INDEXES IN TABLE "WE""IRD"."T"'
+
+    failed = _IndexCursor([], [("status",)], error=RuntimeError("show indexes unavailable"))
+    assert read_snowflake_index_status(failed, "PUBLIC", "ORDERS") == ""
 
 
 def test_snowflake_foreign_key_probe_reads_enforced_match_and_deferral():
@@ -678,11 +761,18 @@ def test_snowflake_foreign_key_probe_reads_enforced_match_and_deferral():
         }
     ]
     assert inspector_row_proof_gaps(
-        "snowflake_aws", inspector, measured, table_kind="YES"
+        "snowflake_aws",
+        inspector,
+        measured,
+        table_kind="YES",
+        index_status="ACTIVE",
     ) == [""]
+    assert inspector_row_proof_gaps(
+        "snowflake_aws", inspector, measured, table_kind="YES"
+    ) == ["unreported"]
     assert len(
         enforced_relationship_identities(
-            "snowflake", inspector, measured, table_kind="YES"
+            "snowflake", inspector, measured, table_kind="YES", index_status="ACTIVE"
         )
     ) == 1
     assert enforced_relationship_identities("snowflake", inspector, measured) == []

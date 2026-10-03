@@ -315,14 +315,22 @@ class PhysicalState:
     #: read did not ask, or the catalog did not say. A dialect name is not
     #: this field.
     table_kind: str = ""
+    #: Summarized ``SHOW INDEXES`` status for a Snowflake table.
+    #: ``active`` only when every reported index is ``ACTIVE``. Empty when
+    #: this read did not ask, or the command did not return a status.
+    #: ``INFORMATION_SCHEMA`` enforcement is not this field.
+    index_status: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        from services.foreign_key_metadata import normalize_snowflake_index_status
+
         return {
             "readable": self.readable,
             "found": self.found,
             "reason": self.reason,
             "dialect": self.dialect,
             "table_kind": _reported_table_kind(self.table_kind),
+            "index_status": normalize_snowflake_index_status(self.index_status),
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
@@ -668,6 +676,7 @@ def _reflect_foreign_keys(
     inspector_fks: Any,
     *,
     table_kind: str = "",
+    index_status: str = "",
 ) -> tuple[
     set[tuple[str, str, str]],
     list[tuple[tuple[str, ...], str, str, tuple[str, ...]]],
@@ -733,7 +742,11 @@ def _reflect_foreign_keys(
         else None
     )
     gaps = inspector_row_proof_gaps(
-        db_type, kept, measured, table_kind=table_kind
+        db_type,
+        kept,
+        measured,
+        table_kind=table_kind,
+        index_status=index_status,
     )
     if len(gaps) != len(fk_facts):
         gaps = ["unreported"] * len(fk_facts)
@@ -822,8 +835,12 @@ def read_physical_state(
         from services.foreign_key_metadata import _dialect_key
 
         table_kind = ""
+        index_status = ""
         if _dialect_key(db_type) == "snowflake":
+            from services.foreign_key_metadata import read_snowflake_index_status
+
             table_kind = _read_snowflake_table_kind(conn, schema, name)
+            index_status = read_snowflake_index_status(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -833,7 +850,13 @@ def read_physical_state(
             fk_update,
             fk_deferral,
         ) = _reflect_foreign_keys(
-            db_type, conn, schema, name, fks, table_kind=table_kind
+            db_type,
+            conn,
+            schema,
+            name,
+            fks,
+            table_kind=table_kind,
+            index_status=index_status,
         )
 
     not_null: set[str] = set()
@@ -884,6 +907,7 @@ def read_physical_state(
         errors=tuple(collector.errors),
         dialect=str(db_type or ""),
         table_kind=table_kind,
+        index_status=index_status,
     )
 
 
@@ -1722,8 +1746,13 @@ def _diff_uniqueness(
     *,
     destination_dialect: str = "",
     table_kind: str = "",
+    index_status: str = "",
 ) -> dict[str, Any]:
-    """Carried when the column sets match and the engine rejects a duplicate.
+    """Carried when the column sets match and existing rows were checked.
+
+    A Snowflake hybrid table rejects a new duplicate when the key is
+    enforced. That write rule is not this verdict. Existing rows are
+    carried only when ``SHOW INDEXES`` status is ``ACTIVE``.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,
@@ -1747,14 +1776,24 @@ def _diff_uniqueness(
     missing = sorted(_wire(group) for group in src - dst)
     extra = sorted(_wire(group) for group in dst - src)
     gap = (
-        uniqueness_proof_gap(destination_dialect, table_kind=table_kind)
+        uniqueness_proof_gap(
+            destination_dialect,
+            table_kind=table_kind,
+            index_status=index_status,
+        )
         if destination_dialect
         else ""
     )
     matched = sorted(_wire(group) for group in src & dst)
-    unchecked = matched if gap == "unenforced" and matched else []
+    unchecked = matched if gap and matched else []
     reasons = (
-        [uniqueness_proof_reason(destination_dialect, table_kind=table_kind)]
+        [
+            uniqueness_proof_reason(
+                destination_dialect,
+                table_kind=table_kind,
+                index_status=index_status,
+            )
+        ]
         if unchecked
         else []
     )
@@ -1867,12 +1906,14 @@ def compare_physical_state(
             frozenset({destination.primary_key} if destination.primary_key else set()),
             destination_dialect=destination.dialect,
             table_kind=destination.table_kind,
+            index_status=destination.index_status,
         ),
         "unique_constraints": _diff_uniqueness(
             source.unique_constraints,
             destination.unique_constraints,
             destination_dialect=destination.dialect,
             table_kind=destination.table_kind,
+            index_status=destination.index_status,
         ),
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,

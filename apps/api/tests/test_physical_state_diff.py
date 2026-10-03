@@ -636,6 +636,7 @@ def test_measured_hybrid_primary_key_is_carried_row_proof() -> None:
             readable=True,
             dialect="snowflake_aws",
             table_kind="YES",
+            index_status="ACTIVE",
             primary_key=("id",),
             unique_constraints=frozenset({("email",)}),
         ),
@@ -645,6 +646,37 @@ def test_measured_hybrid_primary_key_is_carried_row_proof() -> None:
     assert hybrid["aspects"]["primary_key"]["unchecked"] == []
     assert "primary_key" not in hybrid["unchecked"]
     assert hybrid["destination"]["table_kind"] == "hybrid"
+    assert hybrid["destination"]["index_status"] == "active"
+
+    unread = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake",
+            table_kind="hybrid",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert unread["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "SHOW INDEXES" in unread["aspects"]["primary_key"]["reasons"][0]
+
+    failed_build = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake",
+            table_kind="hybrid",
+            index_status="BUILD VALIDATION FAILURE",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert failed_build["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "BUILD VALIDATION FAILURE" in failed_build["aspects"]["primary_key"]["reasons"][0]
+    assert failed_build["destination"]["index_status"] == "failed"
 
     standard = compare_physical_state(
         src,

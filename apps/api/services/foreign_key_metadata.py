@@ -482,32 +482,114 @@ def informational_key_engine(dialect: str) -> bool:
     return _dialect_key(dialect) in _INFORMATIONAL_KEY_DIALECTS
 
 
-def uniqueness_proof_gap(dialect: str, *, table_kind: str = "") -> str:
+def normalize_snowflake_index_status(value: Any) -> str:
+    """``SHOW INDEXES`` status, or empty when this cell was not a known status.
+
+    ``ACTIVE`` is the only status that proves rows already stored.
+    ``BUILD IN PROGRESS`` is still building. ``BUILD FAILURE`` and
+    ``BUILD VALIDATION FAILURE`` mean the build did not validate existing
+    rows. ``SUSPENDED`` is not a completed check. New writes can still be
+    rejected while the status is a validation failure.
+    """
+    text = " ".join(str(value or "").strip().upper().split())
+    if text == "ACTIVE":
+        return "active"
+    if text in {"BUILD IN PROGRESS", "BUILDING"}:
+        return "building"
+    if text in {"BUILD VALIDATION FAILURE", "BUILD FAILURE", "FAILED"}:
+        return "failed"
+    if text == "SUSPENDED":
+        return "suspended"
+    return ""
+
+
+def snowflake_index_proof_gap(index_status: str) -> str:
+    """Existing-row gap from one summarized ``SHOW INDEXES`` status.
+
+    Empty only for ``ACTIVE``. A failed or suspended index was measured and
+    is not that proof. Any other spelling, including an unread command, stays
+    unreported.
+    """
+    status = normalize_snowflake_index_status(index_status)
+    if status == "active":
+        return ""
+    if status in {"failed", "suspended"}:
+        return "not_checked"
+    return "unreported"
+
+
+def _snowflake_index_status_reason(index_status: str, *, foreign_key: bool) -> str:
+    """Sentence for a hybrid table whose index build is not ACTIVE."""
+    status = normalize_snowflake_index_status(index_status)
+    noun = "foreign key" if foreign_key else "primary key or unique constraint"
+    if status == "building":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES status is BUILD IN PROGRESS. The index does not "
+            "yet prove the rows already stored. New writes are still enforced."
+        )
+    if status == "failed":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES did not finish as ACTIVE (BUILD FAILURE or "
+            "BUILD VALIDATION FAILURE). Existing rows were not validated. "
+            "New writes are still rejected."
+        )
+    if status == "suspended":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES status is SUSPENDED. That index is not proof the "
+            "rows already stored were checked."
+        )
+    return (
+        f"Destination stores this {noun} on a hybrid table. "
+        "SHOW INDEXES did not report ACTIVE. "
+        "INFORMATION_SCHEMA.TABLE_CONSTRAINTS can list ENFORCED YES while "
+        "the index is still building or was not read. That is not proof "
+        "the rows already stored were checked."
+    )
+
+
+def uniqueness_proof_gap(
+    dialect: str, *, table_kind: str = "", index_status: str = ""
+) -> str:
     """Why a catalog primary key or unique constraint does not prove the rows.
 
-    Empty when the engine rejects a duplicate. ``unenforced`` when the
-    catalog object is planner metadata. A stray ``enforced=True`` on the
-    key dict cannot override a Snowflake dialect. A measured ``IS_HYBRID``
-    of ``YES`` can: hybrid tables reject a duplicate primary key or unique
-    value. The same label on BigQuery, Redshift, or Databricks does not.
+    Empty when the engine rejects a duplicate and the existing rows were
+    checked. ``unenforced`` when the catalog object is planner metadata.
+    A stray ``enforced=True`` on the key dict cannot override a Snowflake
+    dialect. A measured ``IS_HYBRID`` of ``YES`` can reject a new duplicate.
+    Existing rows on that hybrid table are proven only when ``SHOW INDEXES``
+    status is ``ACTIVE``. The same hybrid label on BigQuery, Redshift, or
+    Databricks does not.
     """
     if (
         _dialect_key(dialect) == "snowflake"
         and normalize_snowflake_table_kind(table_kind) == "hybrid"
     ):
-        return ""
+        return snowflake_index_proof_gap(index_status)
     if informational_key_engine(dialect):
         return "unenforced"
     return ""
 
 
-def uniqueness_proof_reason(dialect: str, *, table_kind: str = "") -> str:
+def uniqueness_proof_reason(
+    dialect: str, *, table_kind: str = "", index_status: str = ""
+) -> str:
     """Operator sentence for a non-empty :func:`uniqueness_proof_gap`.
 
-    Empty when this engine rejects a duplicate. The sentence is not emitted
-    for Postgres, SQL Server, or an unnamed dialect.
+    Empty when this engine rejects a duplicate and the index build is
+    ACTIVE. The sentence is not emitted for Postgres, SQL Server, or an
+    unnamed dialect.
     """
-    if uniqueness_proof_gap(dialect, table_kind=table_kind) != "unenforced":
+    gap = uniqueness_proof_gap(
+        dialect, table_kind=table_kind, index_status=index_status
+    )
+    if not gap:
+        return ""
+    if gap != "unenforced" and _dialect_key(dialect) == "snowflake":
+        return _snowflake_index_status_reason(index_status, foreign_key=False)
+    if gap != "unenforced":
         return ""
     key = _dialect_key(dialect)
     if key == "redshift":
@@ -551,20 +633,25 @@ def uniqueness_proof_reason(dialect: str, *, table_kind: str = "") -> str:
 
 
 def row_proof_gap(
-    dialect: str, validated: bool | None, *, table_kind: str = ""
+    dialect: str,
+    validated: bool | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
 ) -> str:
     """Why a catalog foreign key does not prove the rows already stored.
 
     Empty when it does. ``unenforced`` is an engine that never checks the
     constraint. ``not_checked`` is a bit that says the check was skipped.
     ``unreported`` is an engine that has the bit and did not return it.
-    A Snowflake hybrid table enforces a foreign key. That proof still needs
-    ``IS_HYBRID`` of ``YES`` and a measured ``ENFORCED`` of ``YES``.
+    A Snowflake hybrid table enforces a foreign key. Existing rows are
+    proven only when ``IS_HYBRID`` is ``YES``, ``ENFORCED`` is ``YES``, and
+    ``SHOW INDEXES`` status is ``ACTIVE``.
     """
     key = _dialect_key(dialect)
     if key == "snowflake" and normalize_snowflake_table_kind(table_kind) == "hybrid":
         if validated is True:
-            return ""
+            return snowflake_index_proof_gap(index_status)
         if validated is False:
             return "not_checked"
         return "unreported"
@@ -582,13 +669,28 @@ def row_proof_gap(
 
 
 def covers_existing_rows(
-    dialect: str, validated: bool | None, *, table_kind: str = ""
+    dialect: str,
+    validated: bool | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
 ) -> bool:
     """Whether a catalog foreign key proves the rows already stored."""
-    return row_proof_gap(dialect, validated, table_kind=table_kind) == ""
+    return (
+        row_proof_gap(
+            dialect, validated, table_kind=table_kind, index_status=index_status
+        )
+        == ""
+    )
 
 
-def row_proof_reason(gap: str, dialect: str = "", *, table_kind: str = "") -> str:
+def row_proof_reason(
+    gap: str,
+    dialect: str = "",
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> str:
     """Operator sentence for a non-empty :func:`row_proof_gap`.
 
     Empty when the catalog fact proves the rows. Carry and the catalog diff
@@ -640,9 +742,14 @@ def row_proof_reason(gap: str, dialect: str = "", *, table_kind: str = "") -> st
             _dialect_key(dialect) == "snowflake"
             and normalize_snowflake_table_kind(table_kind) == "hybrid"
         ):
+            if normalize_snowflake_index_status(index_status):
+                return _snowflake_index_status_reason(
+                    index_status, foreign_key=True
+                )
             return (
-                "Destination table is a hybrid table, and the catalog did "
-                "not say whether this foreign key is enforced. The "
+                "Destination table is a hybrid table. Existing rows are "
+                "proven only when ENFORCED is YES and SHOW INDEXES status "
+                "is ACTIVE. This catalog did not report both, so the "
                 "relationship is not proof the loaded rows match."
             )
         return (
@@ -655,6 +762,13 @@ def row_proof_reason(gap: str, dialect: str = "", *, table_kind: str = "") -> st
             _dialect_key(dialect) == "snowflake"
             and normalize_snowflake_table_kind(table_kind) == "hybrid"
         ):
+            if normalize_snowflake_index_status(index_status) in {
+                "failed",
+                "suspended",
+            }:
+                return _snowflake_index_status_reason(
+                    index_status, foreign_key=True
+                )
             return (
                 "Destination reports this relationship on a hybrid table, "
                 "and INFORMATION_SCHEMA.TABLE_CONSTRAINTS.ENFORCED is NO. "
@@ -1317,6 +1431,73 @@ def read_snowflake_table_kind(cursor_or_connection: Any, schema: str, table: str
     return snowflake_table_kind_from_row(rows[0])
 
 
+def _quote_snowflake_ident(name: str) -> str:
+    """One Snowflake identifier, quoted so ``SHOW INDEXES`` cannot be rewritten."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def summarize_snowflake_index_statuses(rows: Any, columns: list[str]) -> str:
+    """Worst ``SHOW INDEXES`` status on this table.
+
+    Empty when no status column or no index row was returned. ``active``
+    only when every reported index is ``ACTIVE``. A secondary index that is
+    still building or failed validation keeps the table unproven, because
+    ``TABLE_CONSTRAINTS`` does not say which index failed.
+    """
+    names = [str(name).strip().lower() for name in columns]
+    if "status" not in names:
+        return ""
+    status_at = names.index("status")
+    rank = {"": 1, "active": 0, "building": 2, "suspended": 3, "failed": 4}
+    worst = ""
+    worst_rank = -1
+    saw = False
+    for row in rows or []:
+        cells = list(row)
+        if status_at >= len(cells):
+            continue
+        saw = True
+        status = normalize_snowflake_index_status(cells[status_at])
+        score = rank.get(status, 1)
+        if score > worst_rank:
+            worst = status
+            worst_rank = score
+    if not saw:
+        return ""
+    return worst
+
+
+def read_snowflake_index_status(
+    cursor_or_connection: Any, schema: str, table: str
+) -> str:
+    """Summarized ``SHOW INDEXES`` status. Empty when the command was not read.
+
+    A failed read stays unreported. It does not invent ``ACTIVE``.
+    """
+    if not str(table or "").strip():
+        return ""
+    try:
+        cursor = as_driver_cursor(cursor_or_connection)
+    except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
+        return ""
+    ident = _quote_snowflake_ident(table)
+    if str(schema or "").strip():
+        ident = f"{_quote_snowflake_ident(schema)}.{ident}"
+    try:
+        cursor.execute(f"SHOW INDEXES IN TABLE {ident}")
+        rows = list(cursor.fetchall() or [])
+    except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
+        return ""
+    description = getattr(cursor, "description", None) or []
+    columns: list[str] = []
+    for col in description:
+        if isinstance(col, (tuple, list)) and col:
+            columns.append(str(col[0]))
+        else:
+            columns.append(str(getattr(col, "name", col)))
+    return summarize_snowflake_index_statuses(rows, columns)
+
+
 _SNOWFLAKE_FK_SQL = """
 SELECT tc.constraint_name,
        kcu.column_name,
@@ -1585,6 +1766,7 @@ def inspector_row_proof_gaps(
     measured: ForeignKeys | None,
     *,
     table_kind: str = "",
+    index_status: str = "",
 ) -> list[str]:
     """One :func:`row_proof_gap` per inspector foreign key, in that order.
 
@@ -1592,7 +1774,8 @@ def inspector_row_proof_gaps(
     Redshift, Snowflake, BigQuery, and Databricks are ``unenforced`` without
     a validation query. A measured Snowflake ``IS_HYBRID`` of ``YES`` uses
     each constraint's ``validated`` bit (``TABLE_CONSTRAINTS.ENFORCED``)
-    instead. PostgreSQL, SQL Server, and Oracle match the metadata probe
+    and ``SHOW INDEXES`` status. ``ACTIVE`` is the existing-row proof.
+    PostgreSQL, SQL Server, and Oracle match the metadata probe
     by relationship identity.
     SQLAlchemy's PostgreSQL reflection omits ``NOT VALID``, so an inspector
     hit alone is ``unreported``, not a yes. An unreadable probe is the same.
@@ -1634,9 +1817,17 @@ def inspector_row_proof_gaps(
             continue
         matched = [flag for known, flag in flags if same_relationship(ident, known)]
         if any(flag is False for flag in matched):
-            gaps.append("not_checked")
+            gaps.append(
+                row_proof_gap(
+                    dialect, False, table_kind=table_kind, index_status=index_status
+                )
+            )
         elif any(flag is True for flag in matched):
-            gaps.append("")
+            gaps.append(
+                row_proof_gap(
+                    dialect, True, table_kind=table_kind, index_status=index_status
+                )
+            )
         else:
             gaps.append("unreported")
     return gaps
@@ -1648,6 +1839,7 @@ def enforced_relationship_identities(
     measured: ForeignKeys | None,
     *,
     table_kind: str = "",
+    index_status: str = "",
 ) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
     """Inspector foreign keys that prove the rows already stored.
 
@@ -1660,7 +1852,11 @@ def enforced_relationship_identities(
     for fk, gap in zip(
         inspector_fks,
         inspector_row_proof_gaps(
-            dialect, inspector_fks, measured, table_kind=table_kind
+            dialect,
+            inspector_fks,
+            measured,
+            table_kind=table_kind,
+            index_status=index_status,
         ),
     ):
         if gap or not isinstance(fk, dict):

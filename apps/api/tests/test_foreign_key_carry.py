@@ -323,9 +323,24 @@ def test_measured_hybrid_foreign_key_is_carried():
             )
         ],
     )
-    carried = verify_foreign_keys(plan.decisions, dest, table_kind="YES")
+    carried = verify_foreign_keys(
+        plan.decisions, dest, table_kind="YES", index_status="ACTIVE"
+    )
     assert carried[0].status == "carried"
     assert "existing rows were checked" in carried[0].reason
+
+    unread = verify_foreign_keys(plan.decisions, dest, table_kind="YES")
+    assert unread[0].status == "unsupported"
+    assert "SHOW INDEXES" in unread[0].reason
+
+    failed = verify_foreign_keys(
+        plan.decisions,
+        dest,
+        table_kind="YES",
+        index_status="BUILD VALIDATION FAILURE",
+    )
+    assert failed[0].status == "unsupported"
+    assert "BUILD VALIDATION FAILURE" in failed[0].reason
 
     standard = verify_foreign_keys(plan.decisions, dest, table_kind="NO")
     assert standard[0].status == "unsupported"

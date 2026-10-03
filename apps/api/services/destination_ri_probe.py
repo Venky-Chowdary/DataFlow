@@ -12,11 +12,12 @@ module separates, which a catalog diff alone cannot:
                so the validation bit is read from the catalog probe. Redshift,
                Snowflake, BigQuery, and Databricks store the constraint and
                do not check rows against it, so a catalog hit is not this
-               proof either. A Snowflake hybrid table does enforce a foreign
-               key when ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``
-               and ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``. Those two
-               reads are what this scan trusts. A standard table, or a
-               hybrid table whose enforced bit was not read, is still scanned.
+               proof either. A Snowflake hybrid table skips the scan only when
+               ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``,
+               ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``, and ``SHOW INDEXES``
+               status is ``ACTIVE``. ``ENFORCED YES`` during
+               ``BUILD VALIDATION FAILURE`` still rejects new writes and does
+               not prove rows already stored, so those rows are scanned.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
@@ -172,10 +173,15 @@ def verify_destination_referential_integrity(
         table_kind = ""
         from services.foreign_key_metadata import _dialect_key
 
+        index_status = ""
         if _dialect_key(db_type) == "snowflake":
+            from services.foreign_key_metadata import read_snowflake_index_status
             from services.physical_state_diff import _read_snowflake_table_kind
 
             table_kind = _read_snowflake_table_kind(
+                conn, schema_arg or "", child_name
+            )
+            index_status = read_snowflake_index_status(
                 conn, schema_arg or "", child_name
             )
             measured = probe_foreign_keys(
@@ -188,7 +194,11 @@ def verify_destination_referential_integrity(
                     catalog_dialect, conn, schema_arg or "", child_name
                 )
         enforced = enforced_relationship_identities(
-            db_type, dest_fks, measured, table_kind=table_kind
+            db_type,
+            dest_fks,
+            measured,
+            table_kind=table_kind,
+            index_status=index_status,
         )
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:

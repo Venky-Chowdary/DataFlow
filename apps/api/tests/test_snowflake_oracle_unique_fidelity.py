@@ -283,6 +283,16 @@ def test_rely_yes_does_not_block_and_does_not_cancel_hybrid_enforcement():
     assert enforced["blocks_transfer"] is True
     assert any("UQ_EMAIL" in issue for issue in enforced["issues"])
 
+    # BUILD VALIDATION FAILURE still rejects a new write. SHOW INDEXES is
+    # the existing-row proof, not this duplicate block.
+    still_enforced = _run(
+        enforced=True,
+        table_kind="YES",
+        index_status="BUILD VALIDATION FAILURE",
+    )
+    assert still_enforced["passed"] is False
+    assert still_enforced["blocks_transfer"] is True
+
 
 def test_oracle_nlssort_binary_ci_forces_casefold():
     expr = "NLSSORT(\"EMAIL\",'NLS_SORT=BINARY_CI')"
