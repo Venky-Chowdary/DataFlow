@@ -102,6 +102,33 @@ def match_rules_agree(planned: str, measured: str) -> bool:
     return got in {"simple", "full"}
 
 
+def match_rule_disagreement(planned: str, measured: str) -> str:
+    """Why the destination match rule does not keep the source promise.
+
+    Empty when :func:`match_rules_agree` is true. Unreported is MATCH SIMPLE.
+    MATCH PARTIAL is stored by PostgreSQL and is not implemented, so two
+    PARTIAL facts are not an agreement.
+    """
+    if match_rules_agree(planned, measured):
+        return ""
+    want = normalize_match(planned)
+    got = normalize_match(measured)
+    if want == "partial" or got == "partial":
+        return (
+            "MATCH PARTIAL is stored and is not a completed comparison. "
+            "PostgreSQL accepts the type and does not implement it."
+        )
+    if want == "unknown" or got == "unknown":
+        return (
+            "Foreign key match type could not be read, so the relationship "
+            "was not certified."
+        )
+    return (
+        f"Destination records {match_rule_label(measured)}; "
+        f"the source rule is {match_rule_label(planned)}."
+    )
+
+
 def tuple_match_class(keys: Sequence[Any], match: str) -> str:
     """``skip``, ``check``, or ``violation`` for one child tuple.
 

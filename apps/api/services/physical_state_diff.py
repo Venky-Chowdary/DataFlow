@@ -11,9 +11,13 @@ Every aspect answers one of these honest states:
 
 ``carried``       present on both sides. A measured foreign key, primary
                   key, or unique constraint also proves the engine checks rows.
+                  When both catalogs named a foreign-key match type, carried
+                  also means the destination rule keeps the source promise.
+                  Unreported match is MATCH SIMPLE. An empty match list means
+                  this comparison did not measure match.
 ``absent``        present on the source, missing on the destination
-``unchecked``     the object is present and does not prove the rows
-                  (foreign key, primary key, or unique constraint)
+``unchecked``     the object is present and does not prove the rows, or the
+                  foreign-key match rule does not keep the source promise
 ``extra``         present on the destination only (informational, never a pass)
 ``unreadable``    the catalog could not be read — never counted as carried
 
@@ -31,9 +35,11 @@ from typing import Any, NamedTuple
 
 import sqlalchemy as sa
 
+from services.fk_tuple_scan import match_rule_disagreement, normalize_match
 from services.foreign_key_identity import (
     fk_identity,
     foreign_key_wire,
+    parse_foreign_key,
     render_foreign_key_fact,
     same_relationship,
 )
@@ -250,6 +256,13 @@ class PhysicalState:
     #: present and is not that proof. An empty tuple means this read did not
     #: attach a gap; the diff then compares relationship identity only.
     foreign_key_proof: tuple[str, ...] = ()
+    #: Match type for each fact, same order as ``foreign_key_facts``.
+    #: ``""`` is unreported (MATCH SIMPLE when a scan runs). ``simple``,
+    #: ``full``, ``partial``, and ``unknown`` are :func:`normalize_match`.
+    #: An empty tuple means this read did not attach a match type. The
+    #: relationship identity does not include it: ``MATCH FULL`` and
+    #: ``MATCH SIMPLE`` are one relationship with two rules.
+    foreign_key_match: tuple[str, ...] = ()
     #: Ordered key, uniqueness, predicate, covering columns, and access method.
     #: See :class:`CatalogIndex`. A unique, partial, covering, or gin index is
     #: not the plain column list.
@@ -284,6 +297,7 @@ class PhysicalState:
                     parent,
                     self._proof_at(index),
                     measured=bool(self.foreign_key_proof),
+                    match=self._match_at(index),
                 )
                 for index, (child, schema, table, parent) in enumerate(
                     self.foreign_key_facts
@@ -308,6 +322,18 @@ class PhysicalState:
         if len(self.foreign_key_proof) != len(self.foreign_key_facts):
             return "unreported"
         return self.foreign_key_proof[index] or ""
+
+    def _match_at(self, index: int) -> str | None:
+        """Match attached to fact ``index``, or None when this read did not measure one.
+
+        A list that does not line up with the facts is ``unknown``. A mis-attached
+        spelling is not a yes, and it is not silently SIMPLE.
+        """
+        if not self.foreign_key_match:
+            return None
+        if len(self.foreign_key_match) != len(self.foreign_key_facts):
+            return "unknown"
+        return normalize_match(self.foreign_key_match[index])
 
 
 @dataclass
@@ -422,8 +448,13 @@ def _foreign_key_fact_dict(
     gap: str,
     *,
     measured: bool,
+    match: str | None = None,
 ) -> dict[str, Any]:
-    """Report wire for one relationship. The gap is present only when measured."""
+    """Report wire for one relationship.
+
+    The gap is present only when this read measured one. ``match`` is present
+    only when this read measured a match type, including ``""`` for unreported.
+    """
     item = {
         "constrained_columns": list(child),
         "referred_schema": schema,
@@ -432,7 +463,17 @@ def _foreign_key_fact_dict(
     }
     if measured:
         item["row_proof_gap"] = gap
+    if match is not None:
+        item["match"] = match
     return item
+
+
+def _fact_names_match(item: Mapping[str, Any]) -> bool:
+    """True when this payload carries a match field, including an empty one."""
+    if "match" in item or "confmatchtype" in item:
+        return True
+    options = item.get("options")
+    return isinstance(options, Mapping) and "match" in options
 
 
 def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
@@ -452,15 +493,19 @@ def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
         schema = _fold(item.get("referred_schema") or item.get("referenced_schema"))
         if not child or not table or len(child) != len(parent_cols):
             return None, "incomplete foreign key"
-        return (
-            {
-                "constrained_columns": list(child),
-                "referred_schema": schema,
-                "referred_table": table,
-                "referred_columns": list(parent_cols),
-            },
-            "",
-        )
+        relationship = {
+            "constrained_columns": list(child),
+            "referred_schema": schema,
+            "referred_table": table,
+            "referred_columns": list(parent_cols),
+        }
+        if _fact_names_match(item):
+            parsed = parse_foreign_key(item)
+            if parsed.conflict.startswith("Foreign key names two match types"):
+                return None, parsed.conflict
+            if not parsed.conflict:
+                relationship["match"] = parsed.match
+        return relationship, ""
     text = str(item or "").strip()
     parts = text.split("->")
     if len(parts) != 3 or not all(part.strip() for part in parts):
@@ -516,24 +561,30 @@ def _reflect_foreign_keys(
     set[tuple[str, str, str]],
     list[tuple[tuple[str, ...], str, str, tuple[str, ...]]],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
-    """Relationship facts plus the row-proof gap for each one.
+    """Relationship facts, the row-proof gap, and the match type for each one.
 
     The gap is :func:`services.foreign_key_metadata.inspector_row_proof_gaps`.
-    Bit dialects read it from the metadata probe on this connection. Redshift
+    The match type is :func:`services.foreign_key_metadata.relationship_match_type`.
+    Bit dialects read both from the metadata probe on this connection. Redshift
     is unenforced without that query. MySQL and SQLite record an empty gap:
-    the constraint itself is the check those engines report.
+    the constraint itself is the check those engines report. An empty match
+    string means the catalog did not name one.
     """
     from services.foreign_key_metadata import (
         inspector_row_proof_gaps,
         probe_foreign_keys,
+        relationship_match_type,
         validation_catalog_dialect,
     )
 
     kept: list[dict[str, Any]] = []
+    originals: list[Mapping[str, Any]] = []
     fk_sets: set[tuple[str, str, str]] = set()
     fk_facts: list[tuple[tuple[str, ...], str, str, tuple[str, ...]]] = []
-    for fk in inspector_fks or []:
+    inspector_rows = list(inspector_fks or [])
+    for fk in inspector_rows:
         if not isinstance(fk, Mapping) or not fk.get("constrained_columns"):
             continue
         child_cols = _cols(fk.get("constrained_columns"))
@@ -548,12 +599,13 @@ def _reflect_foreign_keys(
                 "referred_columns": list(parent_cols),
             }
         )
+        originals.append(fk)
         fk_sets.add(
             foreign_key_wire(child_cols, parent_schema, parent_table, parent_cols)
         )
         fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     if not fk_facts:
-        return fk_sets, fk_facts, ()
+        return fk_sets, fk_facts, (), ()
     catalog_dialect = validation_catalog_dialect(db_type)
     measured = (
         probe_foreign_keys(catalog_dialect, conn, schema or "", table)
@@ -563,7 +615,11 @@ def _reflect_foreign_keys(
     gaps = inspector_row_proof_gaps(db_type, kept, measured)
     if len(gaps) != len(fk_facts):
         gaps = ["unreported"] * len(fk_facts)
-    return fk_sets, fk_facts, tuple(gaps)
+    matches = tuple(
+        relationship_match_type(fk_identity(fk), measured, inspector_rows)
+        for fk in originals
+    )
+    return fk_sets, fk_facts, tuple(gaps), matches
 
 
 def read_physical_state(
@@ -625,7 +681,7 @@ def read_physical_state(
         routines = collector.run(
             "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
         )
-        fk_sets, fk_facts, fk_proof = _reflect_foreign_keys(
+        fk_sets, fk_facts, fk_proof, fk_match = _reflect_foreign_keys(
             db_type, conn, schema, name, fks
         )
 
@@ -659,6 +715,7 @@ def read_physical_state(
         foreign_keys=frozenset(fk_sets),
         foreign_key_facts=tuple(fk_facts),
         foreign_key_proof=fk_proof,
+        foreign_key_match=fk_match,
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),
@@ -1295,14 +1352,29 @@ def _dest_row_proof_gap(proof: tuple[str, ...], index: int, count: int) -> str:
     return proof[index] or ""
 
 
+def _measured_match(matches: tuple[str, ...], index: int, count: int) -> str | None:
+    """Normalized match at ``index``, or None when this side did not measure one.
+
+    A list that does not line up with the facts is ``unknown``. That is not
+    a completed rule, and it is not silently MATCH SIMPLE.
+    """
+    if not matches:
+        return None
+    if len(matches) != count:
+        return "unknown"
+    return normalize_match(matches[index])
+
+
 def _diff_foreign_keys(
     source: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     *,
     destination_proof: tuple[str, ...] = (),
     destination_dialect: str = "",
+    source_match: tuple[str, ...] = (),
+    destination_match: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Carried only when the destination relationship proves existing rows.
+    """Carried only when the destination relationship proves the source rule.
 
     Set subtraction on the rendered string treats ``sales.parent`` and
     ``archive.parent`` as one key, and treats reversed column order as a
@@ -1310,6 +1382,14 @@ def _diff_foreign_keys(
     gap is ``unenforced``, ``not_checked``, or ``unreported`` stays listed:
     the object is present, and it is not row proof. That is ``unchecked``,
     not ``absent``.
+
+    Match type is not part of the relationship identity. When both sides
+    measured it, :func:`services.fk_tuple_scan.match_rule_disagreement`
+    decides whether the destination rule keeps the source promise. An empty
+    match list means that side did not measure one, so a hand-built state
+    still compares identity and the row-proof gap. Unreported is MATCH SIMPLE.
+    A destination MATCH FULL keeps a source MATCH SIMPLE promise. A
+    destination MATCH SIMPLE does not keep a source MATCH FULL promise.
     """
     from services.foreign_key_metadata import row_proof_reason
 
@@ -1324,8 +1404,8 @@ def _diff_foreign_keys(
 
     used: set[int] = set()
     missing: list[str] = []
-    unchecked: list[tuple[str, str]] = []
-    for fact in source:
+    unchecked: list[tuple[str, list[tuple[str, str]]]] = []
+    for source_index, fact in enumerate(source):
         ident = fk_identity(_as_mapping(fact))
         match = None
         for index, other in enumerate(destination):
@@ -1338,20 +1418,30 @@ def _diff_foreign_keys(
             missing.append(render_foreign_key_fact(*fact))
             continue
         used.add(match)
+        tagged: list[tuple[str, str]] = []
         gap = _dest_row_proof_gap(destination_proof, match, len(destination))
         if gap:
-            unchecked.append(
-                (
-                    render_foreign_key_fact(*fact),
-                    row_proof_reason(gap, destination_dialect),
-                )
-            )
+            tagged.append(("proof", row_proof_reason(gap, destination_dialect)))
+        planned = _measured_match(source_match, source_index, len(source))
+        measured = _measured_match(destination_match, match, len(destination))
+        if planned is not None and measured is not None:
+            disagreement = match_rule_disagreement(planned, measured)
+            if disagreement:
+                tagged.append(("match", disagreement))
+        if tagged:
+            unchecked.append((render_foreign_key_fact(*fact), tagged))
     extra = [
         render_foreign_key_fact(*fact)
         for index, fact in enumerate(destination)
         if index not in used
     ]
-    pairs = sorted(unchecked)
+    pairs = sorted(unchecked, key=lambda item: item[0])
+    proof_reasons = [
+        reason for _wire, tagged in pairs for kind, reason in tagged if kind == "proof"
+    ]
+    match_reasons = [
+        reason for _wire, tagged in pairs for kind, reason in tagged if kind == "match"
+    ]
     if missing:
         status = "absent"
     elif pairs:
@@ -1362,8 +1452,10 @@ def _diff_foreign_keys(
         "status": status,
         "missing": sorted(missing),
         "extra": sorted(extra),
-        "unchecked": [wire for wire, _reason in pairs],
-        "reasons": [reason for _wire, reason in pairs],
+        "unchecked": [wire for wire, _tagged in pairs],
+        "reasons": [reason for _wire, tagged in pairs for _kind, reason in tagged],
+        "proof_reasons": proof_reasons,
+        "match_reasons": match_reasons,
         "source_count": len(source),
         "destination_count": len(destination),
     }
@@ -1521,6 +1613,8 @@ def compare_physical_state(
             destination.foreign_key_facts,
             destination_proof=destination.foreign_key_proof,
             destination_dialect=destination.dialect,
+            source_match=source.foreign_key_match,
+            destination_match=destination.foreign_key_match,
         ),
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),

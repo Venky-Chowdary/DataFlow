@@ -757,6 +757,57 @@ _PROBES = {
 }
 
 
+def relationship_match_type(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> str:
+    """Match type the catalog recorded for this relationship.
+
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback
+    SQLAlchemy keeps when the DDL names the clause. Empty means unreported,
+    which a scan treats as MATCH SIMPLE. Two different spellings on the probe
+    are ``unknown``: the catalog did not name one rule.
+    """
+    from services.foreign_key_identity import (
+        fk_identity,
+        parse_foreign_key,
+        same_relationship,
+    )
+
+    if identity is None:
+        return ""
+    if measured is not None and measured.measured:
+        named = ""
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                    "match": item.match,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            kind = normalize_match(item.match)
+            if kind and named and kind != named:
+                return "unknown"
+            if kind:
+                named = kind
+        if named:
+            return named
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict or not same_relationship(identity, fk_identity(fk)):
+            continue
+        return normalize_match(parsed.match)
+    return ""
+
+
 def inspector_row_proof_gaps(
     dialect: str,
     inspector_fks: list[Any],

@@ -48,12 +48,12 @@ from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
 from services.foreign_key_metadata import (
     enforced_relationship_identities,
     probe_foreign_keys,
+    relationship_match_type,
     validation_catalog_dialect,
 )
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
 from services.fk_tuple_scan import match_scan_refusal, normalize_match, scan_orphan_anti_join
 from services.foreign_key_identity import (
-    fk_identity as _fk_identity,
     fold as _fold,
     parent_label as _parent_label,
     parse_foreign_key,
@@ -86,40 +86,11 @@ def _destination_match(
 ) -> str:
     """Match type the destination catalog recorded for this relationship.
 
-    The metadata probe wins. Inspector ``options["match"]`` is the fallback
-    SQLAlchemy keeps when the DDL names the clause. Empty means unreported.
+    Owner is :func:`services.foreign_key_metadata.relationship_match_type`.
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback.
+    Empty means unreported.
     """
-    if identity is None:
-        return ""
-    if measured is not None and getattr(measured, "measured", False):
-        named = ""
-        for item in measured.items:
-            ident = _fk_identity(
-                {
-                    "constrained_columns": item.columns,
-                    "referred_schema": item.referenced_schema,
-                    "referred_table": item.referenced_table,
-                    "referred_columns": item.referenced_columns,
-                    "match": item.match,
-                }
-            )
-            if not _same_relationship(identity, ident):
-                continue
-            kind = normalize_match(item.match)
-            if kind and named and kind != named:
-                return "unknown"
-            if kind:
-                named = kind
-        if named:
-            return named
-    for fk in inspector_fks:
-        if not isinstance(fk, dict):
-            continue
-        parsed = parse_foreign_key(fk)
-        if parsed.conflict or not _same_relationship(identity, _fk_identity(fk)):
-            continue
-        return normalize_match(parsed.match)
-    return ""
+    return relationship_match_type(identity, measured, inspector_fks)
 
 
 def _orphan_scan(

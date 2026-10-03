@@ -126,6 +126,7 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
             "referred_table": "parent",
             "referred_columns": ["id"],
             "row_proof_gap": "",
+            "match": "",
         }
     ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
@@ -195,6 +196,7 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert state.not_null >= {"code"}
     assert ("note", "n") in state.defaults
     assert state.foreign_key_proof == ("",)
+    assert state.foreign_key_match == ("",)
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -458,12 +460,14 @@ def _fk_state(
     *facts: tuple[tuple[str, ...], str, str, tuple[str, ...]],
     proof: tuple[str, ...] = (),
     dialect: str = "",
+    match: tuple[str, ...] = (),
 ) -> PhysicalState:
     return PhysicalState(
         found=True,
         readable=True,
         foreign_key_facts=tuple(facts),
         foreign_key_proof=proof,
+        foreign_key_match=match,
         dialect=dialect,
     )
 
@@ -945,6 +949,136 @@ def test_catalog_diff_does_not_treat_an_unchecked_foreign_key_as_carried() -> No
     )
     assert misaligned["aspects"]["foreign_keys"]["status"] == "unchecked"
     assert misaligned["verified"] is False
+
+
+def test_catalog_fact_keeps_the_match_the_catalog_named() -> None:
+    """The structured fact is what the orphan scan reads. Match must survive it."""
+    keys, unparsed = foreign_keys_from_catalog_state(
+        {
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": ["parent_id"],
+                    "referred_schema": "public",
+                    "referred_table": "parent",
+                    "referred_columns": ["id"],
+                    "match": "FULL",
+                }
+            ]
+        }
+    )
+    assert unparsed == []
+    assert keys[0]["match"] == "full"
+    _kept, conflict = foreign_keys_from_catalog_state(
+        {
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": ["a", "b"],
+                    "referred_schema": "public",
+                    "referred_table": "parent",
+                    "referred_columns": ["x", "y"],
+                    "match": "FULL",
+                    "options": {"match": "SIMPLE"},
+                }
+            ]
+        }
+    )
+    assert _kept == []
+    assert conflict and "two match types" in conflict[0]
+
+
+def test_catalog_diff_compares_match_type_after_relationship_identity() -> None:
+    """MATCH FULL and MATCH SIMPLE are one relationship and two rules.
+
+    Column order still matches. An empty match list is a comparison that did
+    not measure the type, so those states stay on identity and the row-proof
+    gap. A destination MATCH FULL keeps an unreported source promise.
+    MATCH PARTIAL is stored and is not a completed comparison. These facts
+    are catalog-shaped; a live Postgres server was not used.
+    """
+    fact = (("parent_id",), "public", "parent", ("id",))
+    full_to_simple = compare_physical_state(
+        _fk_state(fact, match=("full",)),
+        _fk_state(fact, match=("simple",)),
+    )
+    fk = full_to_simple["aspects"]["foreign_keys"]
+    assert fk["status"] == "unchecked"
+    assert fk["missing"] == []
+    assert fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert fk["unchecked"].count("parent_id->public.parent->id") == 1
+    assert "MATCH FULL" in fk["match_reasons"][0]
+    assert "MATCH SIMPLE" in fk["match_reasons"][0]
+    assert fk["proof_reasons"] == []
+    assert full_to_simple["verified"] is False
+    assert "foreign_keys" not in full_to_simple["absent"]
+
+    spelled = compare_physical_state(
+        _fk_state(fact, match=("f",)),
+        _fk_state(fact, match=("MATCH FULL",)),
+    )
+    assert spelled["aspects"]["foreign_keys"]["status"] == "carried"
+    assert spelled["verified"] is True
+
+    stricter = compare_physical_state(
+        _fk_state(fact, match=("",)),
+        _fk_state(fact, match=("full",)),
+    )
+    assert stricter["aspects"]["foreign_keys"]["status"] == "carried"
+
+    unreported_dest = compare_physical_state(
+        _fk_state(fact, match=("full",)),
+        _fk_state(fact, match=("",)),
+    )
+    dest_reason = unreported_dest["aspects"]["foreign_keys"]["match_reasons"][0]
+    assert unreported_dest["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "MATCH FULL" in dest_reason
+    assert "unreported" in dest_reason
+
+    partial = compare_physical_state(
+        _fk_state(fact, match=("partial",)),
+        _fk_state(fact, match=("partial",)),
+    )
+    partial_reason = partial["aspects"]["foreign_keys"]["match_reasons"][0]
+    assert partial["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "MATCH PARTIAL" in partial_reason
+    assert "not a completed comparison" in partial_reason
+    assert partial["verified"] is False
+
+    forward = (("a", "b"), "", "parent", ("x", "y"))
+    reversed_pairs = (("b", "a"), "", "parent", ("y", "x"))
+    order = compare_physical_state(
+        _fk_state(forward, match=("full",)),
+        _fk_state(reversed_pairs, match=("full",)),
+    )
+    assert order["aspects"]["foreign_keys"]["status"] == "carried"
+
+    both = compare_physical_state(
+        _fk_state(fact, proof=("",), match=("full",)),
+        _fk_state(fact, proof=("not_checked",), match=("simple",)),
+    )
+    both_fk = both["aspects"]["foreign_keys"]
+    assert both_fk["status"] == "unchecked"
+    assert both_fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert len(both_fk["proof_reasons"]) == 1
+    assert len(both_fk["match_reasons"]) == 1
+    assert "NOT VALID" in both_fk["proof_reasons"][0]
+
+    absent = compare_physical_state(
+        _fk_state(fact, match=("full",)),
+        _fk_state(match=("simple",)),
+    )
+    assert absent["aspects"]["foreign_keys"]["status"] == "absent"
+    assert absent["aspects"]["foreign_keys"]["match_reasons"] == []
+
+    misaligned = compare_physical_state(
+        _fk_state(fact, match=("full",)),
+        _fk_state(fact, match=("simple", "extra")),
+    )
+    assert misaligned["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "could not be read" in misaligned["aspects"]["foreign_keys"]["match_reasons"][0]
+
+    legacy = compare_physical_state(_fk_state(fact), _fk_state(fact))
+    assert legacy["aspects"]["foreign_keys"]["status"] == "carried"
+    assert legacy["verified"] is True
 
 
 def test_arrow_in_a_column_name_stays_one_wire_tuple(tmp_path: Path) -> None:

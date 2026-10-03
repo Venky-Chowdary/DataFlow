@@ -264,6 +264,25 @@ def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
         info = _dict(aspects.get(aspect))
         if aspect not in unchecked and not info.get("unchecked") and info.get("status") != "unchecked":
             continue
+        if aspect == "foreign_keys" and (
+            "proof_reasons" in info or "match_reasons" in info
+        ):
+            proof_reasons = [
+                str(reason) for reason in (info.get("proof_reasons") or []) if reason
+            ]
+            match_reasons = [
+                str(reason) for reason in (info.get("match_reasons") or []) if reason
+            ]
+            if proof_reasons:
+                out.append(f"{headline}: {'; '.join(proof_reasons)}")
+            elif not match_reasons:
+                out.append(f"{headline}: {fallback}")
+            if match_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    f"source match rule: {'; '.join(match_reasons)}"
+                )
+            continue
         reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
         detail = "; ".join(reasons) if reasons else fallback
         out.append(f"{headline}: {detail}")
