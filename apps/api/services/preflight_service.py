@@ -675,8 +675,8 @@ def run_transfer_policy_gates(
             }
         )
 
-
-    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+    from services.cdc_exactly_once import (
+        preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 
     eos_gate = preflight_delivery_gate(
         sync_mode=sync,
@@ -686,6 +686,7 @@ def run_transfer_policy_gates(
         has_primary_key=route_has_cdc_pk(contracts),
         allow_append_only=allow_append_only,
         callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+        has_lsn_column=route_declares_log_position(contracts),
     )
     if eos_gate:
         gates.append(eos_gate)

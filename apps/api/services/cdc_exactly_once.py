@@ -1371,6 +1371,12 @@ def classify_exactly_once_route(
         return EosEligibility(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
         )
+    # False is a measured absence. None/True means the caller already
+    # established a log position (or is proving the algorithm with one).
+    if has_lsn_column is False:
+        return EosEligibility(
+            False, REASON_NO_LSN, dest, None, False, tuple(notes)
+        )
     sink = classify_sink_delivery(
         dest_type=sink_dest,
         has_primary_key=has_primary_key,
@@ -1679,6 +1685,32 @@ def chaos_crash_after_commit_redelivery(
     return store
 
 
+def route_declares_log_position(stream_contracts: list[Any] | None) -> bool:
+    """True only when every selected contract declares a change-stream position.
+
+    ``modification_timestamp``, ``monotonic_sequence``, ``insert_only``, and a
+    blank declaration are not an LSN/GTID/SCN. Exactly-once compares those
+    positions. A route that has not declared ``cdc_position`` stays
+    at-least-once. One non-log stream keeps the whole route there: the
+    request carries one delivery guarantee.
+    """
+    saw = False
+    for raw in stream_contracts or []:
+        if isinstance(raw, dict):
+            if raw.get("selected", True) is False:
+                continue
+            semantics = raw.get("cursor_semantics") or ""
+        else:
+            if getattr(raw, "selected", True) is False:
+                continue
+            semantics = getattr(raw, "cursor_semantics", "") or ""
+        saw = True
+        token = str(semantics).strip().lower().replace("-", "_").replace(" ", "_")
+        if token != "cdc_position":
+            return False
+    return saw
+
+
 def route_has_cdc_pk(stream_contracts: list[Any] | None, primary_key: str = "") -> bool:
     if (primary_key or "").strip():
         return True
@@ -1715,6 +1747,7 @@ def preflight_delivery_gate(
     allow_append_only: bool = False,
     callable_source: bool = False,
     source_type: str = "",
+    has_lsn_column: bool | None = True,
 ) -> dict[str, Any] | None:
     """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
     raw = (delivery_guarantee or "").strip().lower().replace("-", "_")
@@ -1730,6 +1763,7 @@ def preflight_delivery_gate(
             allow_append_only=allow_append_only,
             callable_source=callable_source,
             source_type=source_type,
+            has_lsn_column=has_lsn_column,
         )
         if eligibility.eligible:
             details = eligibility.to_dict()
@@ -1790,6 +1824,7 @@ def preflight_delivery_gate(
         allow_append_only=allow_append_only,
         callable_source=callable_source,
         source_type=source_type,
+        has_lsn_column=has_lsn_column,
     )
     details = eligibility.to_dict()
     details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE

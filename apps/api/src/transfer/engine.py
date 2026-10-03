@@ -1874,6 +1874,7 @@ class UniversalTransferEngine:
         from services.cdc_exactly_once import (
             ExactlyOnceRouteError,
             dest_allow_append_only,
+            route_declares_log_position,
             route_has_cdc_pk,
             select_route_delivery,
         )
@@ -1888,6 +1889,9 @@ class UniversalTransferEngine:
                 dest_type=str(getattr(request.destination, "format", "") or ""),
                 source_type=str(getattr(request.source, "format", "") or ""),
                 has_primary_key=route_has_cdc_pk(
+                    getattr(request, "stream_contracts", None),
+                ),
+                has_lsn_column=route_declares_log_position(
                     getattr(request, "stream_contracts", None),
                 ),
                 allow_append_only=dest_allow_append_only(request.destination),
