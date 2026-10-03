@@ -241,6 +241,30 @@ def test_carry_is_claimed_only_after_the_destination_catalog_agrees():
     assert settled[0].status == "carried"
 
 
+def test_redshift_catalog_foreign_key_does_not_prove_loaded_rows():
+    """A matching Redshift constraint is not the engine validating the load."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="redshift",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "does not enforce" in settled[0].reason
+    assert "Redshift" in settled[0].reason
+
+
 def test_not_valid_catalog_bit_is_not_a_carried_foreign_key():
     """The relationship matches. The catalog says existing rows were not checked."""
     plan = _plan()

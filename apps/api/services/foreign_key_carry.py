@@ -48,9 +48,9 @@ from services.foreign_key_identity import fk_identity, fold, same_relationship, 
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
-    covers_existing_rows,
     foreign_keys_from_payload,
     normalize_action,
+    row_proof_gap,
 )
 
 logger = logging.getLogger(__name__)
@@ -951,13 +951,9 @@ def verify_foreign_keys(
                 decision.on_delete, decision.on_update, fk.on_delete, fk.on_update
             )
         ]
+        dest_dialect = dest_foreign_keys.dialect if dest_foreign_keys else ""
         covering = [
-            fk
-            for fk in faithful
-            if covers_existing_rows(
-                dest_foreign_keys.dialect if dest_foreign_keys else "",
-                fk.validated,
-            )
+            fk for fk in faithful if row_proof_gap(dest_dialect, fk.validated) == ""
         ]
         if covering:
             status = "carried"
@@ -972,14 +968,28 @@ def verify_foreign_keys(
                     "validated the loaded rows when it was added."
                 )
         elif faithful:
+            gap = row_proof_gap(dest_dialect, faithful[0].validated)
             status = "unsupported"
-            reason = (
-                "Destination reports this relationship, and the catalog records "
-                "that existing rows were not checked. A PostgreSQL NOT VALID "
-                "constraint, a SQL Server foreign key that is untrusted or "
-                "disabled, or an Oracle NOT VALIDATED constraint does not prove "
-                "the loaded rows."
-            )
+            if gap == "unenforced":
+                reason = (
+                    "Destination stores this foreign key and does not enforce "
+                    "it. A Redshift constraint is visible to the planner and "
+                    "is not proof the loaded rows match."
+                )
+            elif gap == "unreported":
+                reason = (
+                    "Destination reports this relationship, and the catalog did "
+                    "not say whether existing rows were checked. The constraint "
+                    "is not that proof."
+                )
+            else:
+                reason = (
+                    "Destination reports this relationship, and the catalog records "
+                    "that existing rows were not checked. A PostgreSQL NOT VALID "
+                    "constraint, a SQL Server foreign key that is untrusted or "
+                    "disabled, or an Oracle NOT VALIDATED constraint does not prove "
+                    "the loaded rows."
+                )
         elif matches:
             got = matches[0]
             status = "unsupported"

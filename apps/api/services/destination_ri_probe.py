@@ -9,7 +9,9 @@ module separates, which a catalog diff alone cannot:
                NOT VALID, a SQL Server untrusted or disabled key, and an
                Oracle NOT VALIDATED key are not this proof; those rows are
                scanned. SQLAlchemy's PostgreSQL reflection omits NOT VALID,
-               so the validation bit is read from the catalog probe.
+               so the validation bit is read from the catalog probe. Redshift
+               stores the constraint and does not enforce it, so a catalog
+               hit is not this proof either.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
@@ -40,6 +42,7 @@ from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
 from services.foreign_key_metadata import (
     enforced_relationship_identities,
     probe_foreign_keys,
+    validation_catalog_dialect,
 )
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
 from services.fk_tuple_scan import scan_orphan_anti_join
@@ -140,15 +143,10 @@ def verify_destination_referential_integrity(
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
         measured = None
-        if (db_type or "").strip().lower() in {
-            "postgres",
-            "postgresql",
-            "sqlserver",
-            "mssql",
-            "oracle",
-        }:
+        catalog_dialect = validation_catalog_dialect(db_type)
+        if catalog_dialect:
             measured = probe_foreign_keys(
-                db_type, conn, schema_arg or "", child_name
+                catalog_dialect, conn, schema_arg or "", child_name
             )
         enforced = enforced_relationship_identities(db_type, dest_fks, measured)
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)

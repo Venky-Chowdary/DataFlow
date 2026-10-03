@@ -13,6 +13,7 @@ from services.foreign_key_metadata import (
     ForeignKeys,
     covers_existing_rows,
     enforced_relationship_identities,
+    row_proof_gap,
     foreign_keys_from_payload,
     normalize_action,
     probe_foreign_keys,
@@ -248,6 +249,26 @@ def test_not_valid_inspector_fk_is_not_an_enforced_identity():
     )
     assert len(enforced_relationship_identities("postgresql", inspector, checked)) == 1
     assert enforced_relationship_identities("postgresql", inspector, None) == []
+    assert len(enforced_relationship_identities("sqlite", inspector, None)) == 1
+
+
+def test_redshift_foreign_key_does_not_prove_existing_rows():
+    """The engine stores the constraint and does not check rows against it."""
+    inspector = [
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "public",
+            "referred_table": "customers",
+            "referred_columns": ["id"],
+        }
+    ]
+    assert row_proof_gap("redshift", None) == "unenforced"
+    assert row_proof_gap("amazon_redshift", True) == "unenforced"
+    assert row_proof_gap("redshift_serverless", False) == "unenforced"
+    assert covers_existing_rows("redshift", True) is False
+    assert enforced_relationship_identities("redshift", inspector, None) == []
+    assert enforced_relationship_identities("amazon_redshift", inspector, None) == []
+    assert covers_existing_rows("sqlite", None) is True
     assert len(enforced_relationship_identities("sqlite", inspector, None)) == 1
 
 

@@ -23,6 +23,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from services.dialect_profiles import normalize_driver
 from services.physical_storage_metadata import as_driver_cursor
 
 logger = logging.getLogger(__name__)
@@ -146,25 +147,62 @@ def coerce_validated(value: Any) -> bool | None:
 
 
 # These catalogs record whether existing rows were checked. MySQL and SQLite
-# do not. Redshift stores the constraint and has no ``convalidated`` column.
+# do not: the constraint itself is the check they report.
 _VALIDATION_BIT_DIALECTS = frozenset(
-    {"postgres", "postgresql", "sqlserver", "mssql", "oracle"}
+    {"postgresql", "sqlserver", "mssql", "oracle"}
 )
+
+# These engines accept a foreign key and do not check rows against it.
+# Redshift documents the constraint for the planner and does not enforce it.
+# A stored bit cannot override that: there is no check to report.
+_UNENFORCED_FK_DIALECTS = frozenset({"redshift"})
+
+
+def _dialect_key(dialect: str) -> str:
+    key = normalize_driver(dialect)
+    if key == "postgres":
+        return "postgresql"
+    return key
+
+
+def row_proof_gap(dialect: str, validated: bool | None) -> str:
+    """Why a catalog foreign key does not prove the rows already stored.
+
+    Empty when it does. ``unenforced`` is an engine that never checks the
+    constraint. ``not_checked`` is a bit that says the check was skipped.
+    ``unreported`` is an engine that has the bit and did not return it.
+    """
+    key = _dialect_key(dialect)
+    if key in _UNENFORCED_FK_DIALECTS:
+        return "unenforced"
+    if key in _VALIDATION_BIT_DIALECTS:
+        if validated is True:
+            return ""
+        if validated is False:
+            return "not_checked"
+        return "unreported"
+    if validated is False:
+        return "not_checked"
+    return ""
 
 
 def covers_existing_rows(dialect: str, validated: bool | None) -> bool:
-    """Whether a catalog foreign key proves the rows already stored.
+    """Whether a catalog foreign key proves the rows already stored."""
+    return row_proof_gap(dialect, validated) == ""
 
-    A missing bit on PostgreSQL, SQL Server, or Oracle is not a yes.
-    SQLAlchemy's PostgreSQL reflection drops ``NOT VALID``, so an absent
-    flag would certify a constraint that never checked existing rows.
-    MySQL and SQLite have no such bit; the constraint itself is the check
-    those catalogs report.
+
+def validation_catalog_dialect(dialect: str) -> str | None:
+    """Probe dialect for the validation bit, or None when no probe is required.
+
+    Redshift has no ``convalidated`` column. Asking for the bit would fail
+    the catalog read. The unenforced rule covers that engine without a probe.
     """
-    key = (dialect or "").strip().lower()
+    key = _dialect_key(dialect)
+    if key in _UNENFORCED_FK_DIALECTS:
+        return None
     if key in _VALIDATION_BIT_DIALECTS:
-        return validated is True
-    return validated is not False
+        return "sqlserver" if key == "mssql" else key
+    return None
 
 
 def _collect(
@@ -552,11 +590,15 @@ def enforced_relationship_identities(
     bit, matched to the inspector row by relationship identity. SQLAlchemy's
     PostgreSQL reflection omits ``NOT VALID``, so an inspector hit alone is
     not that proof. An unreadable validation catalog yields no enforced
-    identity: the caller scans. MySQL and SQLite keep the inspector identity.
+    identity: the caller scans. Redshift stores the constraint and does not
+    enforce it, so none of its inspector hits are enforced. MySQL and
+    SQLite keep the inspector identity.
     """
     from services.foreign_key_identity import fk_identity, same_relationship
 
-    requires_bit = (dialect or "").strip().lower() in _VALIDATION_BIT_DIALECTS
+    if row_proof_gap(dialect, True) == "unenforced":
+        return []
+    requires_bit = validation_catalog_dialect(dialect) is not None
     if requires_bit and (measured is None or not measured.measured):
         return []
     flags: list[tuple[Any, bool | None]] = []
