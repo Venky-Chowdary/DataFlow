@@ -265,6 +265,46 @@ def test_redshift_catalog_foreign_key_does_not_prove_loaded_rows():
     assert "Redshift" in settled[0].reason
 
 
+def test_informational_warehouse_catalog_foreign_key_does_not_prove_loaded_rows():
+    """A matching Snowflake, BigQuery, or Databricks key is not a checked load.
+
+    ``validated=True`` is ignored. The reason names each engine. Snowflake
+    hybrid tables do enforce a foreign key; this dialect string does not say
+    the table is hybrid, so the catalog fact stays unsupported.
+    """
+    for dialect, named in (
+        ("snowflake", "Snowflake"),
+        ("snowflake_enterprise", "Snowflake"),
+        ("bigquery", "BigQuery"),
+        ("google_bigquery", "BigQuery"),
+        ("databricks", "Databricks"),
+        ("databricks_gcp", "Databricks"),
+    ):
+        plan = _plan()
+        dest = ForeignKeys(
+            dialect=dialect,
+            status="measured",
+            items=[
+                ForeignKey(
+                    name="orders_customer_fk",
+                    columns=["customer_id"],
+                    referenced_schema="public",
+                    referenced_table="customers",
+                    referenced_columns=["id"],
+                    on_delete="CASCADE",
+                    validated=True,
+                )
+            ],
+        )
+        settled = verify_foreign_keys(plan.decisions, dest)
+        assert settled[0].status == "unsupported", dialect
+        assert "does not enforce" in settled[0].reason
+        assert named in settled[0].reason, settled[0].reason
+        if named == "Snowflake":
+            assert "standard table" in settled[0].reason
+            assert "hybrid" in settled[0].reason
+
+
 def test_not_valid_catalog_bit_is_not_a_carried_foreign_key():
     """The relationship matches. The catalog says existing rows were not checked."""
     plan = _plan()

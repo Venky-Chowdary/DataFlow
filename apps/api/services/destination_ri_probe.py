@@ -9,9 +9,12 @@ module separates, which a catalog diff alone cannot:
                NOT VALID, a SQL Server untrusted or disabled key, and an
                Oracle NOT VALIDATED key are not this proof; those rows are
                scanned. SQLAlchemy's PostgreSQL reflection omits NOT VALID,
-               so the validation bit is read from the catalog probe. Redshift
-               stores the constraint and does not enforce it, so a catalog
-               hit is not this proof either.
+               so the validation bit is read from the catalog probe. Redshift,
+               Snowflake, BigQuery, and Databricks store the constraint and
+               do not check rows against it, so a catalog hit is not this
+               proof either. A Snowflake hybrid table does enforce a foreign
+               key; the dialect name does not say the table is hybrid, so
+               that catalog hit is not the proof either.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real

@@ -278,6 +278,43 @@ def test_redshift_foreign_key_does_not_prove_existing_rows():
     assert inspector_row_proof_gaps("sqlite", inspector, None) == [""]
 
 
+def test_informational_warehouse_foreign_key_does_not_prove_existing_rows():
+    """The planner can see the key. The engine does not check rows against it.
+
+    A stray validated bit cannot override that. Hosted connector names are
+    the same engine. These are catalog-shaped facts, not a live warehouse.
+    """
+    inspector = [
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "public",
+            "referred_table": "customers",
+            "referred_columns": ["id"],
+        }
+    ]
+    dialects = (
+        "snowflake",
+        "snowflake_aws",
+        "snowflake_azure",
+        "snowflake_gcp",
+        "bigquery",
+        "google_bigquery",
+        "bq",
+        "bigquery_us",
+        "databricks",
+        "databricks_sql",
+        "databricks_azure",
+    )
+    for dialect in dialects:
+        assert row_proof_gap(dialect, True) == "unenforced", dialect
+        assert row_proof_gap(dialect, None) == "unenforced", dialect
+        assert covers_existing_rows(dialect, True) is False
+        assert enforced_relationship_identities(dialect, inspector, None) == []
+        assert inspector_row_proof_gaps(dialect, inspector, None) == ["unenforced"]
+    assert covers_existing_rows("postgresql", True) is True
+    assert covers_existing_rows("sqlite", None) is True
+
+
 def test_payload_keeps_an_explicit_validation_bit():
     keys = foreign_keys_from_payload(
         [{"name": "fk", "columns": ["a"], "referenced_table": "t", "referenced_columns": ["b"], "validated": False}]

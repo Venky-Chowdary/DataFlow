@@ -457,12 +457,14 @@ def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
 def _fk_state(
     *facts: tuple[tuple[str, ...], str, str, tuple[str, ...]],
     proof: tuple[str, ...] = (),
+    dialect: str = "",
 ) -> PhysicalState:
     return PhysicalState(
         found=True,
         readable=True,
         foreign_key_facts=tuple(facts),
         foreign_key_proof=proof,
+        dialect=dialect,
     )
 
 
@@ -814,7 +816,7 @@ def test_catalog_diff_does_not_treat_an_unchecked_foreign_key_as_carried() -> No
 
     redshift = compare_physical_state(
         _fk_state(fact, proof=("",)),
-        _fk_state(fact, proof=("unenforced",)),
+        _fk_state(fact, proof=("unenforced",), dialect="redshift"),
     )
     reason = redshift["aspects"]["foreign_keys"]["reasons"][0]
     assert redshift["aspects"]["foreign_keys"]["status"] == "unchecked"
@@ -822,6 +824,17 @@ def test_catalog_diff_does_not_treat_an_unchecked_foreign_key_as_carried() -> No
     assert "Redshift" in reason
     assert redshift["verified"] is False
     assert "foreign_keys" not in redshift["absent"]
+
+    snowflake = compare_physical_state(
+        _fk_state(fact, proof=("",)),
+        _fk_state(fact, proof=("unenforced",), dialect="snowflake_aws"),
+    )
+    snow_reason = snowflake["aspects"]["foreign_keys"]["reasons"][0]
+    assert snowflake["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "Snowflake" in snow_reason
+    assert "standard table" in snow_reason
+    assert "hybrid" in snow_reason
+    assert snowflake["verified"] is False
 
     checked = compare_physical_state(
         _fk_state(fact, proof=("unreported",)),

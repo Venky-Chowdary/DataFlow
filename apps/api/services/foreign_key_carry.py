@@ -971,7 +971,9 @@ def verify_foreign_keys(
         elif faithful:
             gap = row_proof_gap(dest_dialect, faithful[0].validated)
             status = "unsupported"
-            reason = row_proof_reason(gap) or row_proof_reason("not_checked")
+            reason = row_proof_reason(gap, dest_dialect) or row_proof_reason(
+                "not_checked"
+            )
         elif matches:
             got = matches[0]
             status = "unsupported"

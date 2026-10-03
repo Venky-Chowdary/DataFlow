@@ -153,15 +153,47 @@ _VALIDATION_BIT_DIALECTS = frozenset(
 )
 
 # These engines accept a foreign key and do not check rows against it.
-# Redshift documents the constraint for the planner and does not enforce it.
-# A stored bit cannot override that: there is no check to report.
-_UNENFORCED_FK_DIALECTS = frozenset({"redshift"})
+# The constraint is planner metadata. A stored bit cannot override that:
+# there is no check to report.
+# Redshift: never enforced.
+# BigQuery: only NOT ENFORCED is supported.
+# Databricks: primary, foreign, and unique keys are informational.
+# Snowflake: not enforced on a standard table. A hybrid table does enforce
+# a foreign key. This dialect string does not say which table kind it is,
+# so a Snowflake catalog hit is not row proof. The orphan scan still runs.
+_UNENFORCED_FK_DIALECTS = frozenset(
+    {"redshift", "snowflake", "bigquery", "databricks"}
+)
+
+# Hosted Databricks names that are this engine. Hive, Spark, and Flink are
+# not in this set. ``databricks_sql`` is already folded by normalize_driver.
+_DATABRICKS_FAMILY = frozenset(
+    {
+        "databricks",
+        "databricks_azure",
+        "databricks_aws",
+        "databricks_gcp",
+        "unity_catalog",
+    }
+)
 
 
 def _dialect_key(dialect: str) -> str:
+    """Engine family for the row-proof rule.
+
+    Hosted twins use the family their copy path already names, so
+    ``snowflake_aws`` and ``google_bigquery`` are not a second rule.
+    """
     key = normalize_driver(dialect)
     if key == "postgres":
-        return "postgresql"
+        key = "postgresql"
+    from services.copy_bigquery_common import bigquery_family_name
+    from services.copy_snowflake_common import snowflake_family_name
+
+    key = snowflake_family_name(key)
+    key = bigquery_family_name(key)
+    if key in _DATABRICKS_FAMILY:
+        return "databricks"
     return key
 
 
@@ -191,17 +223,47 @@ def covers_existing_rows(dialect: str, validated: bool | None) -> bool:
     return row_proof_gap(dialect, validated) == ""
 
 
-def row_proof_reason(gap: str) -> str:
+def row_proof_reason(gap: str, dialect: str = "") -> str:
     """Operator sentence for a non-empty :func:`row_proof_gap`.
 
     Empty when the catalog fact proves the rows. Carry and the catalog diff
     share this sentence, so one relationship is not described two ways.
+    ``dialect`` names the destination engine. An empty dialect keeps the
+    class sentence, because the caller did not say which engine it was.
     """
     if gap == "unenforced":
+        key = _dialect_key(dialect) if dialect else ""
+        if key == "redshift":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Redshift constraint is visible to the planner and "
+                "is not proof the loaded rows match."
+            )
+        if key == "bigquery":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. BigQuery accepts only NOT ENFORCED, so the constraint "
+                "is not proof the loaded rows match."
+            )
+        if key == "databricks":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Databricks foreign key is informational and is not "
+                "proof the loaded rows match."
+            )
+        if key == "snowflake":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Snowflake foreign key on a standard table is visible "
+                "to the planner and is not proof the loaded rows match. "
+                "A hybrid table does enforce the key; this dialect name does "
+                "not say the table is hybrid."
+            )
         return (
             "Destination stores this foreign key and does not enforce "
-            "it. A Redshift constraint is visible to the planner and "
-            "is not proof the loaded rows match."
+            "it. Redshift, BigQuery, and Databricks keep the constraint "
+            "for the planner. Snowflake does the same on a standard table. "
+            "This catalog fact is not proof the loaded rows match."
         )
     if gap == "unreported":
         return (
@@ -223,8 +285,10 @@ def row_proof_reason(gap: str) -> str:
 def validation_catalog_dialect(dialect: str) -> str | None:
     """Probe dialect for the validation bit, or None when no probe is required.
 
-    Redshift has no ``convalidated`` column. Asking for the bit would fail
-    the catalog read. The unenforced rule covers that engine without a probe.
+    Redshift, Snowflake, BigQuery, and Databricks are not asked for a
+    validation bit. Redshift has no ``convalidated`` column, and the others
+    do not enforce the constraint. Asking would fail the catalog read or
+    invent a yes. The unenforced rule covers them without a probe.
     """
     key = _dialect_key(dialect)
     if key in _UNENFORCED_FK_DIALECTS:
@@ -616,8 +680,9 @@ def inspector_row_proof_gaps(
     """One :func:`row_proof_gap` per inspector foreign key, in that order.
 
     Carry, the destination scan, and the catalog diff all read this list.
-    Redshift is ``unenforced`` without a validation query. PostgreSQL, SQL
-    Server, and Oracle match the metadata probe by relationship identity.
+    Redshift, Snowflake, BigQuery, and Databricks are ``unenforced`` without
+    a validation query. PostgreSQL, SQL Server, and Oracle match the metadata
+    probe by relationship identity.
     SQLAlchemy's PostgreSQL reflection omits ``NOT VALID``, so an inspector
     hit alone is ``unreported``, not a yes. An unreadable probe is the same.
     MySQL and SQLite have no separate bit: the constraint itself is the check.

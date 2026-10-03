@@ -261,12 +261,16 @@ class PhysicalState:
     views: frozenset[str] = frozenset()
     routines: frozenset[str] = frozenset()
     errors: tuple[str, ...] = ()
+    #: Engine this catalog was read from. The foreign-key row-proof sentence
+    #: names this engine. Empty when the caller built the state by hand.
+    dialect: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "readable": self.readable,
             "found": self.found,
             "reason": self.reason,
+            "dialect": self.dialect,
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
@@ -665,6 +669,7 @@ def read_physical_state(
         views=frozenset(views or ()),
         routines=frozenset(routines or ()),
         errors=tuple(collector.errors),
+        dialect=str(db_type or ""),
     )
 
 
@@ -1293,6 +1298,7 @@ def _diff_foreign_keys(
     destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     *,
     destination_proof: tuple[str, ...] = (),
+    destination_dialect: str = "",
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves existing rows.
 
@@ -1332,7 +1338,12 @@ def _diff_foreign_keys(
         used.add(match)
         gap = _dest_row_proof_gap(destination_proof, match, len(destination))
         if gap:
-            unchecked.append((render_foreign_key_fact(*fact), row_proof_reason(gap)))
+            unchecked.append(
+                (
+                    render_foreign_key_fact(*fact),
+                    row_proof_reason(gap, destination_dialect),
+                )
+            )
     extra = [
         render_foreign_key_fact(*fact)
         for index, fact in enumerate(destination)
@@ -1481,6 +1492,7 @@ def compare_physical_state(
             source.foreign_key_facts,
             destination.foreign_key_facts,
             destination_proof=destination.foreign_key_proof,
+            destination_dialect=destination.dialect,
         ),
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
