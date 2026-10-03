@@ -232,11 +232,82 @@ def test_carry_is_claimed_only_after_the_destination_catalog_agrees():
                 referenced_schema="public",
                 referenced_table="customers",
                 referenced_columns=["id"],
+                on_delete="CASCADE",
             )
         ],
     )
     settled = verify_foreign_keys(plan.decisions, dest)
     assert settled[0].status == "carried"
+
+
+def test_a_different_referential_action_is_not_the_source_rule():
+    """NO ACTION on the same columns is not the CASCADE rule the source declared."""
+    plan = _plan()
+    weaker = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk_old",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="NO ACTION",
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, weaker)
+    assert settled[0].status == "unsupported"
+    assert "ON DELETE NO ACTION" in settled[0].reason
+    assert "ON DELETE CASCADE" in settled[0].reason
+    stronger = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk_strict",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="SET NULL",
+            )
+        ],
+    )
+    drifted = verify_foreign_keys(plan.decisions, stronger)
+    assert drifted[0].status == "unsupported"
+    assert "SET NULL" in drifted[0].reason
+
+
+def test_unreported_action_matches_only_the_engine_default():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                "name": "orders_customer_fk",
+                "columns": ["customer_id"],
+                "referenced_schema": "public",
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+            }
+        ],
+    }
+    plan = _plan(source_foreign_keys=source)
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+            )
+        ],
+    )
+    assert verify_foreign_keys(plan.decisions, dest)[0].status == "carried"
 
 
 def test_destination_without_the_reference_after_the_alter_is_not_carried():
@@ -750,6 +821,7 @@ def test_catalog_reread_matches_an_unqualified_parent_name():
                 referenced_schema="",
                 referenced_table="customers",
                 referenced_columns=["id"],
+                on_delete="CASCADE",
             )
         ],
     )

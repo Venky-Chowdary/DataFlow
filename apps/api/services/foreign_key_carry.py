@@ -49,6 +49,7 @@ from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
     foreign_keys_from_payload,
+    normalize_action,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ class ForeignKeyDecision:
     #: outside the job, which is not a cycle edge even when the leaf name
     #: matches a stream in the cycle.
     referenced_stream: str = ""
+    on_delete: str = ""
+    on_update: str = ""
     columns: tuple[str, ...] = ()
     referenced_columns: tuple[str, ...] = ()
     # True when the destination *rejected* the constraint because the loaded
@@ -214,6 +217,30 @@ def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
         ).hexdigest()[:6]
         base = f"{base[:23]}_{digest}"
     return base
+
+
+def referential_actions_match(
+    planned_delete: str,
+    planned_update: str,
+    measured_delete: str,
+    measured_update: str,
+) -> bool:
+    """True when the destination enforces the source ON DELETE and ON UPDATE.
+
+    An unreported catalog action matches only the engine default (NO ACTION).
+    CASCADE on one side and NO ACTION on the other is a different rule:
+    CASCADE deletes rows the source would have kept, and NO ACTION keeps rows
+    the source would have removed.
+    """
+
+    def _one(planned: str, measured: str) -> bool:
+        want = normalize_action(planned) or "NO ACTION"
+        got = normalize_action(measured)
+        if not got:
+            return want == "NO ACTION"
+        return want == got
+
+    return _one(planned_delete, measured_delete) and _one(planned_update, measured_update)
 
 
 def _is_cycle_edge(child: str, parent_stream: str, cycle_tables: set[str]) -> bool:
@@ -727,6 +754,8 @@ def plan_foreign_keys(
                 referenced_schema=parent_schema,
                 referenced_table=ref_dest,
                 referenced_stream=parent_stream or "",
+                on_delete=fk.on_delete,
+                on_update=fk.on_update,
                 columns=tuple(child_cols),
                 referenced_columns=tuple(ref_cols),
             )
@@ -817,6 +846,8 @@ def apply_foreign_keys(
                     referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
                     referenced_stream=decision.referenced_stream,
+                    on_delete=decision.on_delete,
+                    on_update=decision.on_update,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
                     integrity_violation=violation,
@@ -851,25 +882,12 @@ def verify_foreign_keys(
     the parent relation, including schema, plus the set of column pairs.
     An engine may store the constraint under a name of its own, and DDL
     order is the same relationship. A same-named table in another schema
-    is not.
+    is not. ON DELETE and ON UPDATE must be the source rule; a different
+    action on the same columns is not carried.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
-    present = (
-        [
-            fk_identity(
-                _relationship_fact(
-                    fk.columns,
-                    fk.referenced_schema,
-                    fk.referenced_table,
-                    fk.referenced_columns,
-                )
-            )
-            for fk in dest_foreign_keys.items
-        ]
-        if measured and dest_foreign_keys is not None
-        else []
-    )
+    present = list(dest_foreign_keys.items) if measured and dest_foreign_keys is not None else []
     for decision in decisions:
         if decision.status != "planned":
             out.append(decision)
@@ -894,6 +912,8 @@ def verify_foreign_keys(
                     referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
                     referenced_stream=decision.referenced_stream,
+                    on_delete=decision.on_delete,
+                    on_update=decision.on_update,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
                 )
@@ -907,20 +927,57 @@ def verify_foreign_keys(
                 decision.referenced_columns,
             )
         )
-        carried = any(same_relationship(wanted, known) for known in present)
+        matches = [
+            fk
+            for fk in present
+            if same_relationship(
+                wanted,
+                fk_identity(
+                    _relationship_fact(
+                        fk.columns,
+                        fk.referenced_schema,
+                        fk.referenced_table,
+                        fk.referenced_columns,
+                    )
+                ),
+            )
+        ]
+        faithful = [
+            fk
+            for fk in matches
+            if referential_actions_match(
+                decision.on_delete, decision.on_update, fk.on_delete, fk.on_update
+            )
+        ]
+        if faithful:
+            status = "carried"
+            reason = (
+                "Destination catalog reports the constraint, and the engine "
+                "validated the loaded rows when it was added."
+            )
+        elif matches:
+            got = matches[0]
+            status = "unsupported"
+            reason = (
+                "Destination has this relationship with "
+                f"ON DELETE {normalize_action(got.on_delete) or 'unreported'} "
+                f"ON UPDATE {normalize_action(got.on_update) or 'unreported'}; "
+                "the source rule is "
+                f"ON DELETE {normalize_action(decision.on_delete) or 'NO ACTION'} "
+                f"ON UPDATE {normalize_action(decision.on_update) or 'NO ACTION'}. "
+                "A different referential action is not the source rule."
+            )
+        else:
+            status = "unsupported"
+            reason = (
+                "Destination catalog does not report this reference after the "
+                "ALTER; the key is not enforced there."
+            )
         out.append(
             ForeignKeyDecision(
                 name=decision.name,
-                status="carried" if carried else "unsupported",
-                reason=(
-                    "Destination catalog reports the constraint, and the engine "
-                    "validated the loaded rows when it was added."
-                    if carried
-                    else (
-                        "Destination catalog does not report this reference after the "
-                        "ALTER; the key is not enforced there."
-                    )
-                ),
+                status=status,
+                reason=reason,
                 source_detail=decision.source_detail,
                 dest_ddl=decision.dest_ddl,
                 dest_table=decision.dest_table,
@@ -928,6 +985,8 @@ def verify_foreign_keys(
                 referenced_schema=decision.referenced_schema,
                 referenced_table=decision.referenced_table,
                 referenced_stream=decision.referenced_stream,
+                on_delete=decision.on_delete,
+                on_update=decision.on_update,
                 columns=decision.columns,
                 referenced_columns=decision.referenced_columns,
             )
