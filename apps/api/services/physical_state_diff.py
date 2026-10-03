@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +37,8 @@ __all__ = [
     "verify_physical_state",
     "resolve_stored_name",
     "catalog_table_names",
+    "decode_foreign_key_item",
+    "foreign_keys_from_catalog_state",
 ]
 
 # Aspects this module compares. Ordered as an operator reads a migration report.
@@ -225,6 +227,12 @@ class PhysicalState:
     primary_key: tuple[str, ...] = ()
     unique_constraints: frozenset[tuple[str, ...]] = frozenset()
     foreign_keys: frozenset[tuple[str, ...]] = frozenset()
+    #: Structured relationships. The rendered ``foreign_keys`` strings are the
+    #: diff wire; this tuple keeps parent schema and column order for the
+    #: orphan scan. Each fact is ``(child columns, schema, table, parent columns)``.
+    foreign_key_facts: tuple[
+        tuple[tuple[str, ...], str, str, tuple[str, ...]], ...
+    ] = ()
     indexes: frozenset[tuple[str, ...]] = frozenset()
     not_null: frozenset[str] = frozenset()
     defaults: frozenset[str] = frozenset()
@@ -242,6 +250,15 @@ class PhysicalState:
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": list(child),
+                    "referred_schema": schema,
+                    "referred_table": table,
+                    "referred_columns": list(parent),
+                }
+                for child, schema, table, parent in self.foreign_key_facts
+            ],
             "indexes": sorted("+".join(i) for i in self.indexes),
             "not_null": sorted(self.not_null),
             "defaults": sorted(self.defaults),
@@ -301,6 +318,77 @@ def _cols(values: Any) -> tuple[str, ...]:
     if not values:
         return ()
     return tuple(_fold(v) for v in values if str(v or "").strip())
+
+
+def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
+    """One catalog relationship, plus an error when the token cannot be read.
+
+    Dicts from ``foreign_key_facts`` and the canonical ``ForeignKey`` shape
+    are the structured form. The rendered wire ``child->parent->cols`` is
+    accepted for older reports. A token that is not three fields is an error:
+    dropping it would look like the source declared no foreign key.
+    """
+    if isinstance(item, Mapping):
+        child = _cols(item.get("constrained_columns") or item.get("columns"))
+        parent_cols = _cols(
+            item.get("referred_columns") or item.get("referenced_columns")
+        )
+        table = _fold(item.get("referred_table") or item.get("referenced_table"))
+        schema = _fold(item.get("referred_schema") or item.get("referenced_schema"))
+        if not child or not table or len(child) != len(parent_cols):
+            return None, "incomplete foreign key"
+        return (
+            {
+                "constrained_columns": list(child),
+                "referred_schema": schema,
+                "referred_table": table,
+                "referred_columns": list(parent_cols),
+            },
+            "",
+        )
+    text = str(item or "").strip()
+    parts = text.split("->")
+    if len(parts) != 3 or not all(part.strip() for part in parts):
+        return None, text or "blank foreign key"
+    child = _cols(parts[0].split("+"))
+    parent_cols = _cols(parts[2].split("+"))
+    schema, table = ("", _fold(parts[1]))
+    if table.count(".") == 1:
+        schema, table = table.split(".", 1)
+    if not child or not table or len(child) != len(parent_cols):
+        return None, text
+    return (
+        {
+            "constrained_columns": list(child),
+            "referred_schema": schema,
+            "referred_table": table,
+            "referred_columns": list(parent_cols),
+        },
+        "",
+    )
+
+
+def foreign_keys_from_catalog_state(
+    source: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Relationships the source catalog stated, and tokens that did not parse.
+
+    Structured facts win over the rendered diff strings. Both describe the
+    same read; the facts keep the parent schema the string leaves off.
+    """
+    state = source if isinstance(source, Mapping) else {}
+    facts = state.get("foreign_key_facts")
+    rendered = state.get("foreign_keys") or []
+    items = facts if isinstance(facts, list) and facts else rendered
+    keys: list[dict[str, Any]] = []
+    unparsed: list[str] = []
+    for item in items:
+        relationship, error = decode_foreign_key_item(item)
+        if error:
+            unparsed.append(error)
+        elif relationship is not None:
+            keys.append(relationship)
+    return keys, unparsed
 
 
 def read_physical_state(
@@ -369,15 +457,17 @@ def read_physical_state(
     unique_sets = {
         _cols(u.get("column_names")) for u in uniques or [] if u.get("column_names")
     }
-    fk_sets = {
-        (
-            "+".join(_cols(f.get("constrained_columns"))),
-            _fold(f.get("referred_table")),
-            "+".join(_cols(f.get("referred_columns"))),
-        )
-        for f in fks or []
-        if f.get("constrained_columns")
-    }
+    fk_sets: set[tuple[str, str, str]] = set()
+    fk_facts: list[tuple[tuple[str, ...], str, str, tuple[str, ...]]] = []
+    for fk in fks or []:
+        if not fk.get("constrained_columns"):
+            continue
+        child_cols = _cols(fk.get("constrained_columns"))
+        parent_cols = _cols(fk.get("referred_columns"))
+        parent_table = _fold(fk.get("referred_table"))
+        parent_schema = _fold(fk.get("referred_schema"))
+        fk_sets.add(("+".join(child_cols), parent_table, "+".join(parent_cols)))
+        fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     index_sets = {
         _cols(i.get("column_names")) for i in indexes or [] if i.get("column_names")
     }
@@ -389,6 +479,7 @@ def read_physical_state(
         primary_key=_cols((pk or {}).get("constrained_columns")),
         unique_constraints=frozenset(unique_sets),
         foreign_keys=frozenset(fk_sets),
+        foreign_key_facts=tuple(fk_facts),
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),

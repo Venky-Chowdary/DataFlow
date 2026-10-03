@@ -108,11 +108,29 @@ def relationship_identity(
     return (_fold(parent_table), pairs)
 
 
+def _qualified_parent(fk: Mapping[str, Any]) -> tuple[str, str]:
+    """``(schema, table)`` from a catalog fact or a rendered parent token."""
+    schema = _fold(fk.get("referred_schema") or fk.get("referenced_schema") or "")
+    table = _fold(fk.get("referred_table") or fk.get("referenced_table") or "")
+    if not schema and "." in table:
+        parsed_schema, parsed_table = _table_parts(table)
+        if parsed_schema and parsed_table:
+            return parsed_schema, parsed_table
+    return schema, table
+
+
+def _parent_label(schema: str, table: str) -> str:
+    if schema and table:
+        return f"{schema}.{table}"
+    return table
+
+
 def _fk_identity(fk: Mapping[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    schema, table = _qualified_parent(fk)
     return relationship_identity(
-        list(fk.get("constrained_columns") or ()),
-        str(fk.get("referred_table") or ""),
-        list(fk.get("referred_columns") or ()),
+        list(fk.get("constrained_columns") or fk.get("columns") or ()),
+        _parent_label(schema, table),
+        list(fk.get("referred_columns") or fk.get("referenced_columns") or ()),
     )
 
 
@@ -208,10 +226,22 @@ def verify_destination_referential_integrity(
             inspector, schema_arg, conn=conn, dialect=str(db_type)
         )
         for fk in wanted:
-            child_cols = [str(c) for c in fk.get("constrained_columns") or () if c]
-            parent_cols = [str(c) for c in fk.get("referred_columns") or () if c]
-            parent_table = str(fk.get("referred_table") or "")
-            key = relationship_identity(child_cols, parent_table, parent_cols)
+            child_cols = [
+                str(c)
+                for c in (fk.get("constrained_columns") or fk.get("columns") or ())
+                if c
+            ]
+            parent_cols = [
+                str(c)
+                for c in (
+                    fk.get("referred_columns") or fk.get("referenced_columns") or ()
+                )
+                if c
+            ]
+            parent_schema, parent_table = _qualified_parent(fk)
+            key = relationship_identity(
+                child_cols, _parent_label(parent_schema, parent_table), parent_cols
+            )
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,
@@ -229,19 +259,36 @@ def verify_destination_referential_integrity(
                 )
                 relations.append(rel)
                 continue
-            stored_parent = resolve_stored_name(table_names, parent_table)
+            parent_lookup_schema = parent_schema or None
+            if parent_schema and _fold(parent_schema) != _fold(schema_arg or ""):
+                parent_names = catalog_table_names(
+                    inspector,
+                    parent_lookup_schema,
+                    conn=conn,
+                    dialect=str(db_type),
+                )
+            else:
+                parent_names = table_names
+            stored_parent = resolve_stored_name(parent_names, parent_table)
             if stored_parent is None:
+                qualified = _parent_label(parent_schema, parent_table) or parent_table
                 rel.update(
                     status="unavailable",
                     available=False,
-                    reason=f"parent table {parent_table} absent from destination",
+                    reason=f"parent table {qualified} absent from destination",
                 )
                 relations.append(rel)
                 continue
             try:
                 child_tbl = _reflect(conn, meta, child_name, schema_arg)
                 parent_tbl = alias_parent_if_self_ref(
-                    child_tbl, _reflect(conn, meta, stored_parent, schema_arg)
+                    child_tbl,
+                    _reflect(
+                        conn,
+                        meta,
+                        stored_parent,
+                        parent_lookup_schema or schema_arg,
+                    ),
                 )
                 resolved_child = [
                     resolve_stored_name([c.name for c in child_tbl.columns], name)

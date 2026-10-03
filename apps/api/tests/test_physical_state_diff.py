@@ -16,6 +16,7 @@ from services.physical_state_diff import (
     ASPECTS,
     PhysicalState,
     compare_physical_state,
+    foreign_keys_from_catalog_state,
     _has_catalog_supplied_value,
     _normalize_predicate,
     read_physical_state,
@@ -57,6 +58,37 @@ def _verify(cfg: dict[str, str], src: str, dest: str) -> dict:
     )
 
 
+def test_unparsed_foreign_key_token_is_kept() -> None:
+    """A token that is not a relationship must not vanish into 'no foreign keys'."""
+    keys, unparsed = foreign_keys_from_catalog_state(
+        {"foreign_keys": ["parent_id->parent->id", "not-a-relationship"]}
+    )
+    assert keys == [
+        {
+            "constrained_columns": ["parent_id"],
+            "referred_schema": "",
+            "referred_table": "parent",
+            "referred_columns": ["id"],
+        }
+    ]
+    assert unparsed == ["not-a-relationship"]
+    qualified, broken = foreign_keys_from_catalog_state(
+        {
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": ["parent_id"],
+                    "referred_schema": "sales",
+                    "referred_table": "parent",
+                    "referred_columns": ["id"],
+                }
+            ]
+        }
+    )
+    assert broken == []
+    assert qualified[0]["referred_schema"] == "sales"
+    assert qualified[0]["referred_table"] == "parent"
+
+
 def test_faithful_copy_verifies_every_aspect(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,
@@ -84,6 +116,15 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
     assert set(result["absent"]) == set(ASPECTS)
     assert result["aspects"]["primary_key"]["missing"] == ["id"]
     assert result["aspects"]["foreign_keys"]["missing"] == ["parent_id->parent->id"]
+    facts = result["source"]["foreign_key_facts"]
+    assert facts == [
+        {
+            "constrained_columns": ["parent_id"],
+            "referred_schema": "",
+            "referred_table": "parent",
+            "referred_columns": ["id"],
+        }
+    ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
     assert result["aspects"]["defaults"]["missing"] == ["note"]
 

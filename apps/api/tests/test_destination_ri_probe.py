@@ -157,6 +157,31 @@ def test_reversed_composite_pairs_still_count_as_enforced(tmp_path: Path) -> Non
     assert result["relations"][0]["status"] == "enforced"
 
 
+def test_parent_named_in_another_schema_is_not_the_local_table(tmp_path: Path) -> None:
+    """A local ``parent`` does not prove ``sales.parent``. The scan must not borrow it."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER)",
+        "INSERT INTO child (id, parent_id) VALUES (1, 1)",
+    )
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["parent_id"],
+                "referred_schema": "sales",
+                "referred_table": "parent",
+                "referred_columns": ["id"],
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert "sales.parent" in result["relations"][0]["reason"]
+
+
 def test_missing_parent_table_is_unavailable_never_clean(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path, "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER)"
