@@ -677,6 +677,25 @@ def test_measured_hybrid_primary_key_is_carried_row_proof() -> None:
     assert failed_build["aspects"]["primary_key"]["status"] == "unchecked"
     assert "BUILD VALIDATION FAILURE" in failed_build["aspects"]["primary_key"]["reasons"][0]
     assert failed_build["destination"]["index_status"] == "failed"
+    assert "status_info" not in failed_build["aspects"]["primary_key"]["reasons"][0]
+
+    explained = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake",
+            table_kind="hybrid",
+            index_status="BUILD VALIDATION FAILURE",
+            index_detail="existing customer row 4",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    explained_reason = explained["aspects"]["primary_key"]["reasons"][0]
+    assert "existing customer row 4" in explained_reason
+    assert "SHOW INDEXES status_info" in explained_reason
+    assert explained["destination"]["index_detail"] == "existing customer row 4"
 
     standard = compare_physical_state(
         src,

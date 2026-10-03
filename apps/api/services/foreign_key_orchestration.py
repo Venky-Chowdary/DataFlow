@@ -235,12 +235,13 @@ def carry_foreign_keys(
         if any(d.status == "planned" for d in settled):
             from services.foreign_key_metadata import (
                 _dialect_key,
-                read_snowflake_index_status,
+                read_snowflake_index_proof,
                 read_snowflake_table_kind,
             )
 
             table_kind = ""
             index_status = ""
+            index_detail = ""
             with engine.connect() as conn:
                 dest_keys = probe_foreign_keys(
                     dest_dialect, conn, catalog_ns, dest_table
@@ -249,7 +250,7 @@ def carry_foreign_keys(
                     table_kind = read_snowflake_table_kind(
                         conn, catalog_ns, dest_table
                     )
-                    index_status = read_snowflake_index_status(
+                    index_status, index_detail = read_snowflake_index_proof(
                         conn, catalog_ns, dest_table
                     )
             settled = verify_foreign_keys(
@@ -257,6 +258,7 @@ def carry_foreign_keys(
                 dest_keys,
                 table_kind=table_kind,
                 index_status=index_status,
+                index_detail=index_detail,
             )
         decisions.extend(settled)
 

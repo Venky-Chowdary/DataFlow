@@ -342,6 +342,16 @@ def test_measured_hybrid_foreign_key_is_carried():
     assert failed[0].status == "unsupported"
     assert "BUILD VALIDATION FAILURE" in failed[0].reason
 
+    explained = verify_foreign_keys(
+        plan.decisions,
+        dest,
+        table_kind="YES",
+        index_status="BUILD VALIDATION FAILURE",
+        index_detail="team_id 9 has no parent",
+    )
+    assert explained[0].status == "unsupported"
+    assert "team_id 9 has no parent" in explained[0].reason
+
     standard = verify_foreign_keys(plan.decisions, dest, table_kind="NO")
     assert standard[0].status == "unsupported"
     assert "IS_HYBRID" in standard[0].reason

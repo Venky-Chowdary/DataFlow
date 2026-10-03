@@ -320,9 +320,15 @@ class PhysicalState:
     #: this read did not ask, or the command did not return a status.
     #: ``INFORMATION_SCHEMA`` enforcement is not this field.
     index_status: str = ""
+    #: ``SHOW INDEXES.status_info`` for the worst index. Empty when the
+    #: command did not return that cell, or every index is ``ACTIVE``.
+    index_detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        from services.foreign_key_metadata import normalize_snowflake_index_status
+        from services.foreign_key_metadata import (
+            normalize_snowflake_index_status,
+            snowflake_index_detail,
+        )
 
         return {
             "readable": self.readable,
@@ -331,6 +337,7 @@ class PhysicalState:
             "dialect": self.dialect,
             "table_kind": _reported_table_kind(self.table_kind),
             "index_status": normalize_snowflake_index_status(self.index_status),
+            "index_detail": snowflake_index_detail(self.index_detail),
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
@@ -836,11 +843,14 @@ def read_physical_state(
 
         table_kind = ""
         index_status = ""
+        index_detail = ""
         if _dialect_key(db_type) == "snowflake":
-            from services.foreign_key_metadata import read_snowflake_index_status
+            from services.foreign_key_metadata import read_snowflake_index_proof
 
             table_kind = _read_snowflake_table_kind(conn, schema, name)
-            index_status = read_snowflake_index_status(conn, schema, name)
+            index_status, index_detail = read_snowflake_index_proof(
+                conn, schema, name
+            )
         (
             fk_sets,
             fk_facts,
@@ -908,6 +918,7 @@ def read_physical_state(
         dialect=str(db_type or ""),
         table_kind=table_kind,
         index_status=index_status,
+        index_detail=index_detail,
     )
 
 
@@ -1594,6 +1605,7 @@ def _diff_foreign_keys(
     source_deferral: tuple[str, ...] = (),
     destination_deferral: tuple[str, ...] = (),
     destination_table_kind: str = "",
+    index_detail: str = "",
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves the source rule.
 
@@ -1629,7 +1641,11 @@ def _diff_foreign_keys(
     does not keep a source that cannot.
     """
     from services.foreign_key_carry import referential_action_disagreement
-    from services.foreign_key_metadata import deferral_disagreement, row_proof_reason
+    from services.foreign_key_metadata import (
+        deferral_disagreement,
+        row_proof_reason,
+        with_snowflake_index_detail,
+    )
 
     def _as_mapping(fact: tuple[tuple[str, ...], str, str, tuple[str, ...]]) -> dict[str, Any]:
         child, schema, table, parent = fact
@@ -1662,8 +1678,13 @@ def _diff_foreign_keys(
             tagged.append(
                 (
                     "proof",
-                    row_proof_reason(
-                        gap, destination_dialect, table_kind=destination_table_kind
+                    with_snowflake_index_detail(
+                        row_proof_reason(
+                            gap,
+                            destination_dialect,
+                            table_kind=destination_table_kind,
+                        ),
+                        index_detail,
                     ),
                 )
             )
@@ -1747,6 +1768,7 @@ def _diff_uniqueness(
     destination_dialect: str = "",
     table_kind: str = "",
     index_status: str = "",
+    index_detail: str = "",
 ) -> dict[str, Any]:
     """Carried when the column sets match and existing rows were checked.
 
@@ -1763,6 +1785,7 @@ def _diff_uniqueness(
     from services.foreign_key_metadata import (
         uniqueness_proof_gap,
         uniqueness_proof_reason,
+        with_snowflake_index_detail,
     )
 
     def _sets(groups: frozenset[tuple[str, ...]]) -> set[frozenset[str]]:
@@ -1788,10 +1811,13 @@ def _diff_uniqueness(
     unchecked = matched if gap and matched else []
     reasons = (
         [
-            uniqueness_proof_reason(
-                destination_dialect,
-                table_kind=table_kind,
-                index_status=index_status,
+            with_snowflake_index_detail(
+                uniqueness_proof_reason(
+                    destination_dialect,
+                    table_kind=table_kind,
+                    index_status=index_status,
+                ),
+                index_detail,
             )
         ]
         if unchecked
@@ -1907,6 +1933,7 @@ def compare_physical_state(
             destination_dialect=destination.dialect,
             table_kind=destination.table_kind,
             index_status=destination.index_status,
+            index_detail=destination.index_detail,
         ),
         "unique_constraints": _diff_uniqueness(
             source.unique_constraints,
@@ -1914,6 +1941,7 @@ def compare_physical_state(
             destination_dialect=destination.dialect,
             table_kind=destination.table_kind,
             index_status=destination.index_status,
+            index_detail=destination.index_detail,
         ),
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,
@@ -1921,6 +1949,7 @@ def compare_physical_state(
             destination_proof=destination.foreign_key_proof,
             destination_dialect=destination.dialect,
             destination_table_kind=destination.table_kind,
+            index_detail=destination.index_detail,
             source_match=source.foreign_key_match,
             destination_match=destination.foreign_key_match,
             source_on_delete=source.foreign_key_on_delete,

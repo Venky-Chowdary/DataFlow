@@ -59,6 +59,7 @@ from services.foreign_key_metadata import (
     normalize_action,
     row_proof_gap,
     row_proof_reason,
+    with_snowflake_index_detail,
 )
 
 logger = logging.getLogger(__name__)
@@ -1020,6 +1021,7 @@ def verify_foreign_keys(
     *,
     table_kind: str = "",
     index_status: str = "",
+    index_detail: str = "",
 ) -> list[ForeignKeyDecision]:
     """Settle planned keys against the destination catalog.
 
@@ -1123,12 +1125,16 @@ def verify_foreign_keys(
                 index_status=index_status,
             )
             status = "unsupported"
-            reason = row_proof_reason(
-                gap,
-                dest_dialect,
-                table_kind=table_kind,
-                index_status=index_status,
-            ) or row_proof_reason("not_checked")
+            reason = with_snowflake_index_detail(
+                row_proof_reason(
+                    gap,
+                    dest_dialect,
+                    table_kind=table_kind,
+                    index_status=index_status,
+                )
+                or row_proof_reason("not_checked"),
+                index_detail,
+            )
         elif same_actions:
             got = same_actions[0]
             status = "unsupported"

@@ -652,7 +652,9 @@ def test_show_indexes_active_is_the_existing_row_proof():
     in-progress build stay open. The identifier is quoted.
     """
     from services.foreign_key_metadata import (
+        read_snowflake_index_proof,
         read_snowflake_index_status,
+        summarize_snowflake_index_proof,
         summarize_snowflake_index_statuses,
     )
 
@@ -669,6 +671,21 @@ def test_show_indexes_active_is_the_existing_row_proof():
     ) == "failed"
     assert summarize_snowflake_index_statuses([], columns) == ""
     assert summarize_snowflake_index_statuses([("pk", "Y")], ["name", "is_unique"]) == ""
+    detailed = ["name", "status", "status_info"]
+    assert summarize_snowflake_index_proof(
+        [
+            ("pk", "ACTIVE", "ready"),
+            ("fk", "BUILD VALIDATION FAILURE", "existing\ncustomer row 4"),
+        ],
+        detailed,
+    ) == ("failed", "existing customer row 4")
+    assert summarize_snowflake_index_proof(
+        [("pk", "ACTIVE", "ready")], detailed
+    ) == ("active", "")
+    long_note = "x" * 400
+    assert len(summarize_snowflake_index_proof(
+        [("fk", "BUILD FAILURE", long_note)], detailed
+    )[1]) == 180
 
     class _IndexCursor:
         def __init__(self, rows, description, error: Exception | None = None):
@@ -698,6 +715,14 @@ def test_show_indexes_active_is_the_existing_row_proof():
 
     failed = _IndexCursor([], [("status",)], error=RuntimeError("show indexes unavailable"))
     assert read_snowflake_index_status(failed, "PUBLIC", "ORDERS") == ""
+    noted = _IndexCursor(
+        [("fk_player", "BUILD VALIDATION FAILURE", "team_id 9 has no parent")],
+        [("name",), ("status",), ("status_info",)],
+    )
+    assert read_snowflake_index_proof(noted, "PUBLIC", "PLAYER") == (
+        "failed",
+        "team_id 9 has no parent",
+    )
 
 
 def test_snowflake_foreign_key_probe_reads_enforced_match_and_deferral():

@@ -1436,20 +1436,43 @@ def _quote_snowflake_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def summarize_snowflake_index_statuses(rows: Any, columns: list[str]) -> str:
-    """Worst ``SHOW INDEXES`` status on this table.
+def snowflake_index_detail(value: Any) -> str:
+    """One line of ``SHOW INDEXES.status_info``. Empty when the cell was blank.
 
-    Empty when no status column or no index row was returned. ``active``
-    only when every reported index is ``ACTIVE``. A secondary index that is
-    still building or failed validation keeps the table unproven, because
-    ``TABLE_CONSTRAINTS`` does not say which index failed.
+    The warehouse writes the reason a build failed. Control characters and
+    extra blanks are removed, and the text is capped so a catalog sentence
+    stays one line.
+    """
+    text = " ".join(str(value or "").split())
+    return text[:180]
+
+
+def with_snowflake_index_detail(sentence: str, detail: str) -> str:
+    """Append a measured ``status_info`` to an existing-row sentence."""
+    cleaned = snowflake_index_detail(detail)
+    if not sentence or not cleaned:
+        return sentence
+    return f"{sentence} SHOW INDEXES status_info: {cleaned}."
+
+
+def summarize_snowflake_index_proof(rows: Any, columns: list[str]) -> tuple[str, str]:
+    """Worst ``SHOW INDEXES`` status, and that row's ``status_info``.
+
+    Empty status when no status column or no index row was returned.
+    ``active`` only when every reported index is ``ACTIVE``. A secondary
+    index that is still building or failed validation keeps the table
+    unproven, because ``TABLE_CONSTRAINTS`` does not say which index failed.
+    ``status_info`` is kept from the worst row, and dropped when the table
+    is ``active``.
     """
     names = [str(name).strip().lower() for name in columns]
     if "status" not in names:
-        return ""
+        return "", ""
     status_at = names.index("status")
+    info_at = names.index("status_info") if "status_info" in names else -1
     rank = {"": 1, "active": 0, "building": 2, "suspended": 3, "failed": 4}
     worst = ""
+    worst_info = ""
     worst_rank = -1
     saw = False
     for row in rows or []:
@@ -1458,28 +1481,39 @@ def summarize_snowflake_index_statuses(rows: Any, columns: list[str]) -> str:
             continue
         saw = True
         status = normalize_snowflake_index_status(cells[status_at])
+        info = ""
+        if info_at >= 0 and info_at < len(cells):
+            info = snowflake_index_detail(cells[info_at])
         score = rank.get(status, 1)
         if score > worst_rank:
             worst = status
             worst_rank = score
+            worst_info = info
     if not saw:
-        return ""
-    return worst
+        return "", ""
+    if worst == "active":
+        return "active", ""
+    return worst, worst_info
 
 
-def read_snowflake_index_status(
+def summarize_snowflake_index_statuses(rows: Any, columns: list[str]) -> str:
+    """Worst ``SHOW INDEXES`` status on this table."""
+    return summarize_snowflake_index_proof(rows, columns)[0]
+
+
+def read_snowflake_index_proof(
     cursor_or_connection: Any, schema: str, table: str
-) -> str:
-    """Summarized ``SHOW INDEXES`` status. Empty when the command was not read.
+) -> tuple[str, str]:
+    """``(status, status_info)``. Both empty when ``SHOW INDEXES`` was not read.
 
     A failed read stays unreported. It does not invent ``ACTIVE``.
     """
     if not str(table or "").strip():
-        return ""
+        return "", ""
     try:
         cursor = as_driver_cursor(cursor_or_connection)
     except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
-        return ""
+        return "", ""
     ident = _quote_snowflake_ident(table)
     if str(schema or "").strip():
         ident = f"{_quote_snowflake_ident(schema)}.{ident}"
@@ -1487,7 +1521,7 @@ def read_snowflake_index_status(
         cursor.execute(f"SHOW INDEXES IN TABLE {ident}")
         rows = list(cursor.fetchall() or [])
     except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
-        return ""
+        return "", ""
     description = getattr(cursor, "description", None) or []
     columns: list[str] = []
     for col in description:
@@ -1495,7 +1529,14 @@ def read_snowflake_index_status(
             columns.append(str(col[0]))
         else:
             columns.append(str(getattr(col, "name", col)))
-    return summarize_snowflake_index_statuses(rows, columns)
+    return summarize_snowflake_index_proof(rows, columns)
+
+
+def read_snowflake_index_status(
+    cursor_or_connection: Any, schema: str, table: str
+) -> str:
+    """Summarized ``SHOW INDEXES`` status. Empty when the command was not read."""
+    return read_snowflake_index_proof(cursor_or_connection, schema, table)[0]
 
 
 _SNOWFLAKE_FK_SQL = """
