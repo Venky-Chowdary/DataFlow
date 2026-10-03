@@ -13,11 +13,14 @@ from services.foreign_key_metadata import (
     ForeignKeys,
     covers_existing_rows,
     enforced_relationship_identities,
+    informational_key_engine,
     inspector_row_proof_gaps,
     row_proof_gap,
     foreign_keys_from_payload,
     normalize_action,
     probe_foreign_keys,
+    uniqueness_proof_gap,
+    uniqueness_proof_reason,
 )
 
 
@@ -313,6 +316,64 @@ def test_informational_warehouse_foreign_key_does_not_prove_existing_rows():
         assert inspector_row_proof_gaps(dialect, inspector, None) == ["unenforced"]
     assert covers_existing_rows("postgresql", True) is True
     assert covers_existing_rows("sqlite", None) is True
+
+
+def test_informational_warehouse_unique_key_is_not_row_proof():
+    """The same engines that store an unenforced foreign key store an unenforced key.
+
+    A primary key and a unique constraint on these engines are planner
+    metadata. Hive, Spark, and Flink are not in that set. These are dialect
+    names, not a live warehouse.
+    """
+    unenforced = (
+        "snowflake",
+        "snowflake_aws",
+        "snowflake_azure",
+        "snowflake_gcp",
+        "snowflake_standard",
+        "snowflake_enterprise",
+        "bigquery",
+        "google_bigquery",
+        "bq",
+        "bigquery_us",
+        "bigquery_eu",
+        "databricks",
+        "databricks_sql",
+        "databricks_azure",
+        "databricks_aws",
+        "databricks_gcp",
+        "unity_catalog",
+        "redshift",
+        "amazon_redshift",
+        "redshift_serverless",
+    )
+    for dialect in unenforced:
+        assert informational_key_engine(dialect) is True, dialect
+        assert uniqueness_proof_gap(dialect) == "unenforced", dialect
+        reason = uniqueness_proof_reason(dialect)
+        assert "does not enforce" in reason, dialect
+    assert "NOT ENFORCED" in uniqueness_proof_reason("bigquery")
+    assert "BigQuery" in uniqueness_proof_reason("google_bigquery")
+    snowflake = uniqueness_proof_reason("snowflake_aws")
+    assert "Snowflake" in snowflake
+    assert "standard table" in snowflake
+    assert "hybrid" in snowflake
+    assert "planner" in uniqueness_proof_reason("amazon_redshift")
+    assert "informational" in uniqueness_proof_reason("databricks_sql")
+    for dialect in (
+        "postgresql",
+        "sqlite",
+        "mysql",
+        "sqlserver",
+        "oracle",
+        "hive",
+        "spark",
+        "flink",
+        "",
+    ):
+        assert informational_key_engine(dialect) is False, dialect
+        assert uniqueness_proof_gap(dialect) == "", dialect
+        assert uniqueness_proof_reason(dialect) == "", dialect
 
 
 def test_payload_keeps_an_explicit_validation_bit():

@@ -239,18 +239,34 @@ def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
             "rows the source would have rejected."
         )
     aspects = _dict(schema_objects.get("aspects"))
-    fk = _dict(aspects.get("foreign_keys"))
     unchecked = [str(a) for a in schema_objects.get("unchecked") or []]
-    if "foreign_keys" in unchecked or fk.get("unchecked") or fk.get("status") == "unchecked":
-        reasons = [str(reason) for reason in (fk.get("reasons") or []) if reason]
-        detail = "; ".join(reasons) if reasons else (
-            "the relationship is stored and the catalog does not prove "
-            "existing rows were checked"
-        )
-        out.append(
+    proof_lines = {
+        "foreign_keys": (
             "Destination foreign key is present and is not proof existing "
-            f"rows were checked: {detail}"
-        )
+            "rows were checked",
+            "the relationship is stored and the catalog does not prove "
+            "existing rows were checked",
+        ),
+        "primary_key": (
+            "Destination primary key is present and is not proof the loaded "
+            "rows are unique",
+            "the primary key is stored and the catalog does not prove the "
+            "rows are unique",
+        ),
+        "unique_constraints": (
+            "Destination unique constraint is present and is not proof the "
+            "loaded rows are unique",
+            "the unique constraint is stored and the catalog does not prove "
+            "the rows are unique",
+        ),
+    }
+    for aspect, (headline, fallback) in proof_lines.items():
+        info = _dict(aspects.get(aspect))
+        if aspect not in unchecked and not info.get("unchecked") and info.get("status") != "unchecked":
+            continue
+        reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+        detail = "; ".join(reasons) if reasons else fallback
+        out.append(f"{headline}: {detail}")
     return out
 
 

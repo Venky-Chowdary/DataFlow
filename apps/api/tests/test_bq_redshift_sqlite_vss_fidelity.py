@@ -94,6 +94,25 @@ def test_integrity_skips_bigquery_advisory_pk_on_append():
     assert "duplicate" in warnings.lower()
 
 
+def test_informational_engine_ignores_a_stray_enforced_flag():
+    """The engine rule wins. A catalog bit that says True cannot override it."""
+    from services.data_integrity import _unique_constraint_enforced
+
+    key = {"name": "PRIMARY", "columns": ["id"], "primary": True, "enforced": True}
+    assert _unique_constraint_enforced(key, dest_kind="bigquery") is False
+    assert _unique_constraint_enforced(key, dest_kind="snowflake_aws") is False
+    assert _unique_constraint_enforced(key, dest_kind="amazon_redshift") is False
+    assert _unique_constraint_enforced(key, dest_kind="databricks_sql") is False
+    assert _unique_constraint_enforced(key, dest_kind="sqlite") is True
+    assert (
+        _unique_constraint_enforced(
+            {"name": "uq", "columns": ["email"], "enforced": False},
+            dest_kind="postgresql",
+        )
+        is False
+    )
+
+
 def test_integrity_blocks_sqlite_enforced_unique():
     from services.data_integrity import _check_duplicate_keys
 

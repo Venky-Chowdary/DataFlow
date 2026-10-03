@@ -603,11 +603,16 @@ def _destination_constraints_advisory(
     dest_kind: str,
     destination_unique_keys: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """True when dest PK/UNIQUE are optimizer/metadata-only (BQ / Redshift / SF NOT ENFORCED)."""
-    kind = normalize_dest_kind(dest_kind or "")
-    if kind in {"bigquery", "redshift"}:
+    """True when dest PK/UNIQUE are optimizer metadata, not a write rule.
+
+    Redshift, BigQuery, Databricks, and Snowflake standard tables share
+    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A key dict
+    that says ``enforced`` false on any other engine is the same answer.
+    """
+    from services.foreign_key_metadata import uniqueness_proof_gap
+
+    if uniqueness_proof_gap(dest_kind) == "unenforced":
         return True
-    # Snowflake hybrid may mix; only advisory when every covering key says so.
     keys = list(destination_unique_keys or [])
     if keys and all(uk.get("enforced") is False for uk in keys):
         return True
@@ -619,6 +624,10 @@ def _unique_constraint_enforced(
     *,
     dest_kind: str = "",
 ) -> bool:
+    from services.foreign_key_metadata import uniqueness_proof_gap
+
+    if uniqueness_proof_gap(dest_kind) == "unenforced":
+        return False
     if uk is not None and uk.get("enforced") is False:
         return False
     if uk is not None and uk.get("enforced") is True:

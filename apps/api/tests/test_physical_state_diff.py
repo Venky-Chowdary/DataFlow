@@ -490,6 +490,95 @@ def test_uniqueness_is_the_column_set_not_the_catalog_order() -> None:
     assert "unique_constraints" not in result["absent"]
 
 
+def test_informational_warehouse_primary_key_is_not_carried_row_proof() -> None:
+    """A matching key on an engine that accepts duplicates is unchecked.
+
+    Column order still matches first. An empty dialect and Postgres stay
+    carried, because those callers did not name an informational engine.
+    These are catalog-shaped states, not a live warehouse.
+    """
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("code", "id"),
+        unique_constraints=frozenset({("b", "a")}),
+    )
+    bigquery = PhysicalState(
+        found=True,
+        readable=True,
+        dialect="bigquery",
+        primary_key=("id", "code"),
+        unique_constraints=frozenset({("a", "b")}),
+    )
+    result = compare_physical_state(src, bigquery)
+    assert result["verified"] is False
+    assert result["absent"] == []
+    assert "primary_key" in result["unchecked"]
+    assert "unique_constraints" in result["unchecked"]
+    assert "foreign_keys" not in result["unchecked"]
+    pk = result["aspects"]["primary_key"]
+    assert pk["status"] == "unchecked"
+    assert pk["missing"] == []
+    assert pk["unchecked"] == ["code+id"]
+    assert "does not enforce" in pk["reasons"][0]
+    assert "BigQuery" in pk["reasons"][0]
+    assert "NOT ENFORCED" in pk["reasons"][0]
+    unique = result["aspects"]["unique_constraints"]
+    assert unique["status"] == "unchecked"
+    assert unique["unchecked"] == ["a+b"]
+
+    snowflake = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake_aws",
+            primary_key=("id", "code"),
+            unique_constraints=frozenset({("a", "b")}),
+        ),
+    )
+    reason = snowflake["aspects"]["primary_key"]["reasons"][0]
+    assert "Snowflake" in reason
+    assert "standard table" in reason
+    assert "hybrid" in reason
+    assert snowflake["aspects"]["primary_key"]["status"] == "unchecked"
+
+    for dialect in ("", "postgresql", "sqlite"):
+        carried = compare_physical_state(
+            src,
+            PhysicalState(
+                found=True,
+                readable=True,
+                dialect=dialect,
+                primary_key=("id", "code"),
+                unique_constraints=frozenset({("a", "b")}),
+            ),
+        )
+        assert carried["aspects"]["primary_key"]["status"] == "carried", dialect
+        assert carried["aspects"]["unique_constraints"]["status"] == "carried", dialect
+        assert carried["aspects"]["primary_key"]["unchecked"] == [], dialect
+        assert "primary_key" not in carried["unchecked"], dialect
+
+
+def test_a_missing_unique_stays_absent_on_an_informational_engine() -> None:
+    """The object that never arrived is absent. The gap does not hide that."""
+    src = PhysicalState(
+        found=True, readable=True, unique_constraints=frozenset({("a", "b")})
+    )
+    dst = PhysicalState(
+        found=True,
+        readable=True,
+        dialect="bigquery",
+        unique_constraints=frozenset({("a",)}),
+    )
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["unique_constraints"]["status"] == "absent"
+    assert result["aspects"]["unique_constraints"]["missing"] == ["a+b"]
+    assert result["aspects"]["unique_constraints"]["extra"] == ["a"]
+    assert result["aspects"]["unique_constraints"]["unchecked"] == []
+    assert "unique_constraints" in result["absent"]
+
+
 def test_a_different_unique_column_set_is_absent() -> None:
     src = PhysicalState(
         found=True, readable=True, unique_constraints=frozenset({("a", "b")})

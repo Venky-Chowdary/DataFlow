@@ -152,18 +152,20 @@ _VALIDATION_BIT_DIALECTS = frozenset(
     {"postgresql", "sqlserver", "mssql", "oracle"}
 )
 
-# These engines accept a foreign key and do not check rows against it.
-# The constraint is planner metadata. A stored bit cannot override that:
-# there is no check to report.
+# These engines store a primary key, a unique constraint, and a foreign key
+# and do not check rows against them. The object is planner metadata.
+# A stored bit cannot override that: there is no check to report.
 # Redshift: never enforced.
 # BigQuery: only NOT ENFORCED is supported.
 # Databricks: primary, foreign, and unique keys are informational.
 # Snowflake: not enforced on a standard table. A hybrid table does enforce
-# a foreign key. This dialect string does not say which table kind it is,
-# so a Snowflake catalog hit is not row proof. The orphan scan still runs.
-_UNENFORCED_FK_DIALECTS = frozenset(
+# them. This dialect string does not say which table kind it is, so a
+# Snowflake catalog hit is not row proof. The orphan scan still runs, and
+# a carried unique is not a duplicate-row count.
+_INFORMATIONAL_KEY_DIALECTS = frozenset(
     {"redshift", "snowflake", "bigquery", "databricks"}
 )
+_UNENFORCED_FK_DIALECTS = _INFORMATIONAL_KEY_DIALECTS
 
 # Hosted Databricks names that are this engine. Hive, Spark, and Flink are
 # not in this set. ``databricks_sql`` is already folded by normalize_driver.
@@ -195,6 +197,71 @@ def _dialect_key(dialect: str) -> str:
     if key in _DATABRICKS_FAMILY:
         return "databricks"
     return key
+
+
+def informational_key_engine(dialect: str) -> bool:
+    """True when this engine stores PK, UNIQUE, and FK and does not check rows.
+
+    Snowflake hybrid tables do enforce those keys. The dialect name does not
+    say the table is hybrid, so the catalog object is not that proof.
+    """
+    return _dialect_key(dialect) in _INFORMATIONAL_KEY_DIALECTS
+
+
+def uniqueness_proof_gap(dialect: str) -> str:
+    """Why a catalog primary key or unique constraint does not prove the rows.
+
+    Empty when the engine rejects a duplicate. ``unenforced`` when the
+    catalog object is planner metadata. A stray ``enforced=True`` on the
+    key dict cannot override this.
+    """
+    if informational_key_engine(dialect):
+        return "unenforced"
+    return ""
+
+
+def uniqueness_proof_reason(dialect: str) -> str:
+    """Operator sentence for a non-empty :func:`uniqueness_proof_gap`.
+
+    Empty when this engine rejects a duplicate. The sentence is not emitted
+    for Postgres, SQL Server, or an unnamed dialect.
+    """
+    if uniqueness_proof_gap(dialect) != "unenforced":
+        return ""
+    key = _dialect_key(dialect)
+    if key == "redshift":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Redshift key is visible to the planner "
+            "and is not proof the loaded rows are unique."
+        )
+    if key == "bigquery":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. BigQuery accepts only NOT ENFORCED, so "
+            "the catalog object is not proof the loaded rows are unique."
+        )
+    if key == "databricks":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Databricks primary key or unique "
+            "constraint is informational and is not proof the loaded rows "
+            "are unique."
+        )
+    if key == "snowflake":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Snowflake key on a standard table is "
+            "not proof the loaded rows are unique. A hybrid table does "
+            "enforce the key; this dialect name does not say the table "
+            "is hybrid."
+        )
+    return (
+        "Destination stores this primary key or unique constraint and does "
+        "not enforce it. Redshift, BigQuery, and Databricks keep the key "
+        "for the planner. Snowflake does the same on a standard table. "
+        "This catalog object is not proof the loaded rows are unique."
+    )
 
 
 def row_proof_gap(dialect: str, validated: bool | None) -> str:

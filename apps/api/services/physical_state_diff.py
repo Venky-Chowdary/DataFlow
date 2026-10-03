@@ -9,9 +9,11 @@ connection of this module's own, never from writer bookkeeping.
 
 Every aspect answers one of these honest states:
 
-``carried``       present on both sides. A foreign key also proves existing rows.
+``carried``       present on both sides. A measured foreign key, primary
+                  key, or unique constraint also proves the engine checks rows.
 ``absent``        present on the source, missing on the destination
-``unchecked``     the foreign key object is present and does not prove the rows
+``unchecked``     the object is present and does not prove the rows
+                  (foreign key, primary key, or unique constraint)
 ``extra``         present on the destination only (informational, never a pass)
 ``unreadable``    the catalog could not be read — never counted as carried
 
@@ -261,8 +263,8 @@ class PhysicalState:
     views: frozenset[str] = frozenset()
     routines: frozenset[str] = frozenset()
     errors: tuple[str, ...] = ()
-    #: Engine this catalog was read from. The foreign-key row-proof sentence
-    #: names this engine. Empty when the caller built the state by hand.
+    #: Engine this catalog was read from. Foreign-key and uniqueness sentences
+    #: name this engine. Empty when the caller built the state by hand.
     dialect: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -1370,25 +1372,48 @@ def _diff_foreign_keys(
 def _diff_uniqueness(
     source: frozenset[tuple[str, ...]],
     destination: frozenset[tuple[str, ...]],
+    *,
+    destination_dialect: str = "",
 ) -> dict[str, Any]:
-    """Carried when the column sets match.
+    """Carried when the column sets match and the engine rejects a duplicate.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,
-    uniqueness, and the partial predicate stay on the indexes aspect.
+    uniqueness, and the partial predicate stay on the indexes aspect. On an
+    engine that stores the key and does not check rows, a match stays listed
+    as ``unchecked``. The object is present. It is not a duplicate-row count.
     """
+    from services.foreign_key_metadata import (
+        uniqueness_proof_gap,
+        uniqueness_proof_reason,
+    )
 
     def _sets(groups: frozenset[tuple[str, ...]]) -> set[frozenset[str]]:
         return {frozenset(group) for group in groups if group}
 
+    def _wire(group: frozenset[str]) -> str:
+        return "+".join(sorted(group))
+
     src = _sets(source)
     dst = _sets(destination)
-    missing = sorted("+".join(sorted(group)) for group in src - dst)
-    extra = sorted("+".join(sorted(group)) for group in dst - src)
+    missing = sorted(_wire(group) for group in src - dst)
+    extra = sorted(_wire(group) for group in dst - src)
+    gap = uniqueness_proof_gap(destination_dialect) if destination_dialect else ""
+    matched = sorted(_wire(group) for group in src & dst)
+    unchecked = matched if gap == "unenforced" and matched else []
+    reasons = [uniqueness_proof_reason(destination_dialect)] if unchecked else []
+    if missing:
+        status = "absent"
+    elif unchecked:
+        status = "unchecked"
+    else:
+        status = "carried"
     return {
-        "status": "carried" if not missing else "absent",
+        "status": status,
         "missing": missing,
         "extra": extra,
+        "unchecked": unchecked,
+        "reasons": reasons,
         "source_count": len(src),
         "destination_count": len(dst),
     }
@@ -1484,9 +1509,12 @@ def compare_physical_state(
         "primary_key": _diff_uniqueness(
             frozenset({source.primary_key} if source.primary_key else set()),
             frozenset({destination.primary_key} if destination.primary_key else set()),
+            destination_dialect=destination.dialect,
         ),
         "unique_constraints": _diff_uniqueness(
-            source.unique_constraints, destination.unique_constraints
+            source.unique_constraints,
+            destination.unique_constraints,
+            destination_dialect=destination.dialect,
         ),
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,

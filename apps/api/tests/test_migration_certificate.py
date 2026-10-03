@@ -352,6 +352,53 @@ def test_unchecked_foreign_key_blocks_without_calling_the_object_absent() -> Non
     assert "foreign keys | unchecked" in page
 
 
+def test_unchecked_primary_key_blocks_without_calling_the_object_absent() -> None:
+    """A stored key that does not reject duplicates is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["primary_key", "unique_constraints"],
+            "aspects": {
+                "primary_key": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["id"],
+                    "reasons": [
+                        "Destination stores this primary key or unique constraint "
+                        "and does not enforce it. BigQuery accepts only NOT "
+                        "ENFORCED, so the catalog object is not proof the loaded "
+                        "rows are unique."
+                    ],
+                },
+                "unique_constraints": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["email"],
+                    "reasons": [
+                        "Destination stores this primary key or unique constraint "
+                        "and does not enforce it. A Snowflake key on a standard "
+                        "table is not proof the loaded rows are unique."
+                    ],
+                },
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert verdict["headline"] == "NOT PROVEN"
+    blockers = " ".join(verdict["blockers"])
+    assert "does not enforce" in blockers
+    assert "NOT ENFORCED" in blockers
+    assert "standard table" in blockers
+    assert "did not survive" not in blockers
+    page = render_certificate_markdown(build_migration_certificate(job))
+    assert "| primary key | unchecked |" in page
+    assert "| unique constraints | unchecked |" in page
+    assert "does not enforce" in page
+
+
 def test_unreadable_constraint_catalog_is_unknown_not_a_violation() -> None:
     """Unknown must never be reported as absent."""
     job = _proven_job()
