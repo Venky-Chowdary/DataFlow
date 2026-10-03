@@ -65,14 +65,24 @@ def build_migration_proof_pack(
     """Compose an explainable proof pack from kernel authorities.
 
     ``migration_proven`` is True only when: job succeeded, artifact hash present,
-    full 256-bit checksum present and matched, and validation proof class is clear.
+    full 256-bit checksum present and matched, validation proof class is clear,
+    connector versions name a release, the source digest is an independent
+    re-read (or engine/remapped population), and identity hashes align.
     """
+    from services.connector_versions import versions_include_release
+    from services.reconcile_coverage import INDEPENDENT_SOURCE_DIGESTS
+
     art = dict(decision_artifact or {})
     art_hash = str(art.get("content_hash") or "").strip().lower()
     ddl_hash = str((art.get("ddl") or {}).get("ddl_identity_hash") or "").strip()
-    checksum = extract_population_checksum(reconciliation)
+    recon = dict(reconciliation or {})
+    checksum = extract_population_checksum(recon)
     val = dict(validation_summary or {})
     proof_blocked = _proof_class_blocked(val)
+    versions_ok = versions_include_release(connector_versions)
+    provenance = str(recon.get("source_checksum_provenance") or "")
+    identity_ok = recon.get("identity_hash_aligned") is True
+    independent_source = provenance in INDEPENDENT_SOURCE_DIGESTS
 
     migration_proven = bool(
         job_success
@@ -80,6 +90,9 @@ def build_migration_proof_pack(
         and checksum.get("full_digest")
         and checksum.get("checksum_matched")
         and not proof_blocked
+        and versions_ok
+        and identity_ok
+        and independent_source
     )
 
     return {
@@ -105,6 +118,9 @@ def build_migration_proof_pack(
                 checksum=checksum,
                 job_success=job_success,
                 proof_blocked=proof_blocked,
+                versions_ok=versions_ok,
+                identity_ok=identity_ok,
+                independent_source=independent_source,
             ),
         },
     }
@@ -125,6 +141,9 @@ def _incomplete_reasons(
     checksum: Mapping[str, Any],
     job_success: bool,
     proof_blocked: bool,
+    versions_ok: bool = True,
+    identity_ok: bool = True,
+    independent_source: bool = True,
 ) -> list[str]:
     reasons: list[str] = []
     if not job_success:
@@ -137,6 +156,12 @@ def _incomplete_reasons(
         reasons.append("population_checksum_mismatch")
     if proof_blocked:
         reasons.append("validation_proof_class_blocked")
+    if not versions_ok:
+        reasons.append("connector_versions_not_captured")
+    if not independent_source:
+        reasons.append("source_not_independently_reread")
+    if not identity_ok:
+        reasons.append("identity_hash_not_aligned")
     return reasons
 
 

@@ -22,6 +22,26 @@ from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES
 #: Destinations that can independently SELECT the written population.
 WAREHOUSE_VERIFY_DESTS: Final[frozenset[str]] = SNAPSHOT_SCAN_SOURCES
 
+#: File sources a second parse can fingerprint. Excel/CSV/JSON is the product
+#: route; the warehouse set above does not include them, so file→Postgres used
+#: to keep the write-pass digest and could not earn ``migration_proven``.
+FILE_REREAD_SOURCES: Final[frozenset[str]] = frozenset(
+    {
+        "csv",
+        "tsv",
+        "json",
+        "jsonl",
+        "ndjson",
+        "excel",
+        "parquet",
+        "avro",
+        "orc",
+        "xml",
+        "yaml",
+        "fixed_width",
+    }
+)
+
 #: Sources the Gate-8 re-read loop knows how to page. A source outside this set
 #: keeps the write-pass digest even when ``should_reread_source`` says yes, so
 #: the write pass must not skip its inline fingerprints for those routes.
@@ -107,6 +127,120 @@ def should_reread_source(
     if dest_type not in WAREHOUSE_VERIFY_DESTS:
         return False
     return True
+
+
+def should_reread_file_source(
+    *,
+    file_type: str,
+    dest_type: str,
+    incremental: bool = False,
+    partial_write_pass: bool = False,
+) -> bool:
+    """True when a file load must parse the source a second time.
+
+    Same policy as :func:`should_reread_source`: a partial write-pass always
+    re-reads, ``RECONCILE_SOURCE_REREAD=0`` cannot suppress that, and ``=1``
+    forces the second parse. Auto re-reads a full file refresh into a
+    warehouse that can be SELECTed back. File→file and incremental file
+    loads keep the write-pass digest.
+    """
+    if partial_write_pass:
+        return True
+    mode = _env_reread_mode()
+    if mode == "off":
+        return False
+    if mode == "on":
+        return True
+    if incremental:
+        return False
+    kind = (file_type or "").strip().lower()
+    if kind not in FILE_REREAD_SOURCES:
+        return False
+    if (dest_type or "").strip().lower() not in WAREHOUSE_VERIFY_DESTS:
+        return False
+    return True
+
+
+def align_source_populations(write_pass: Any, reread: Any) -> dict[str, Any]:
+    """Identity alignment of a write-pass fingerprint set and a second source read.
+
+    Both arguments are fingerprint accumulators. Alignment is equality of the
+    ``(row key, fingerprint)`` multisets — same keys, same cell hashes, same
+    cardinality. The value digest ignores keys, so this check is what stops a
+    second parse of the same cells under different identities from looking proven.
+
+    Call before ``digest()``. ``identity_digest`` does not consume the accumulator.
+    """
+    write_rows = int(getattr(write_pass, "total", 0) or 0)
+    reread_rows = int(getattr(reread, "total", 0) or 0)
+    write_id = str(write_pass.identity_digest())
+    reread_id = str(reread.identity_digest())
+    aligned = bool(write_rows > 0 and write_rows == reread_rows and write_id == reread_id)
+    if aligned:
+        reason = "write_pass_and_reread_identity_digests_match"
+    elif write_rows == 0 or reread_rows == 0:
+        reason = "empty_population"
+    elif write_rows != reread_rows:
+        reason = "row_count_differs"
+    else:
+        reason = "identity_digest_differs"
+    return {
+        "identity_hash_aligned": aligned,
+        "write_pass_rows": write_rows,
+        "reread_rows": reread_rows,
+        "write_pass_identity_digest": write_id,
+        "reread_identity_digest": reread_id,
+        "reason": reason,
+    }
+
+
+def align_identity_digests(
+    *,
+    write_pass_identity_digest: str,
+    reread_identity_digest: str,
+    write_pass_rows: int,
+    reread_rows: int,
+    write_pass_value_digest: str = "",
+    reread_value_digest: str = "",
+) -> dict[str, Any]:
+    """Same alignment when the write-pass pairs were already digested.
+
+    The CSV COPY fast path fingerprints while it maps, then closes the
+    accumulator. It keeps the identity digest. A later re-read compares that
+    stored digest, the row counts, and the value digests.
+    """
+    write_id = str(write_pass_identity_digest or "").strip()
+    reread_id = str(reread_identity_digest or "").strip()
+    write_n = int(write_pass_rows or 0)
+    reread_n = int(reread_rows or 0)
+    value_write = str(write_pass_value_digest or "").strip()
+    value_reread = str(reread_value_digest or "").strip()
+    values_agree = (not value_write or not value_reread) or value_write == value_reread
+    aligned = bool(
+        write_n > 0
+        and write_n == reread_n
+        and write_id
+        and write_id == reread_id
+        and values_agree
+    )
+    if aligned:
+        reason = "write_pass_and_reread_identity_digests_match"
+    elif not write_id or not reread_id:
+        reason = "identity_digest_missing"
+    elif write_n != reread_n:
+        reason = "row_count_differs"
+    elif not values_agree:
+        reason = "value_digest_differs"
+    else:
+        reason = "identity_digest_differs"
+    return {
+        "identity_hash_aligned": aligned,
+        "write_pass_rows": write_n,
+        "reread_rows": reread_n,
+        "write_pass_identity_digest": write_id,
+        "reread_identity_digest": reread_id,
+        "reason": reason,
+    }
 
 
 def reread_pagination_plan(

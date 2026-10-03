@@ -65,6 +65,16 @@ def _finalize_reconcile(
     out = stamp_post_write_phase(payload)
     snap = None
     if isinstance(dest_summary, dict):
+        if "identity_hash_aligned" in dest_summary:
+            out["identity_hash_aligned"] = bool(dest_summary.get("identity_hash_aligned"))
+        alignment = dest_summary.get("identity_alignment")
+        if isinstance(alignment, dict):
+            out["identity_alignment"] = dict(alignment)
+        versions = dest_summary.get("connector_versions")
+        if isinstance(versions, dict) and versions:
+            out["connector_versions"] = dict(versions)
+        if dest_summary.get("source_independently_reread") is True:
+            out["source_independently_reread"] = True
         snap = dest_summary.get("source_snapshot")
         raw_before = dest_summary.get(PRECOUNT_KEY)
         if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):

@@ -196,6 +196,84 @@ def test_preflight_bundle_approve_never_means_migration_proven():
     ].get("preview")
 
 
+def test_source_reread_without_identity_alignment_is_not_migration_proven():
+    pack = build_signed_proof_pack(
+        job_id="reread-unaligned",
+        reconciliation={
+            "passed": True,
+            "phase": "post_write_verified",
+            "coverage": "full_checksum",
+            "checksum_match": True,
+            "source_checksum": "abc",
+            "target_checksum": "abc",
+            "source_checksum_provenance": "independent_source_reread",
+            "identity_hash_aligned": False,
+        },
+        ddl_hash="ddl-abc",
+        mapping_hash="map-abc",
+        connector_versions={
+            "source": "openpyxl 3.1.5",
+            "destination": "psycopg2 2.9.9 / server 16.2",
+        },
+        job_success=True,
+    )
+    assert pack["assurance"]["migration_proven"] is False
+    reasons = " ".join(pack.get("proof_incomplete_reasons") or [])
+    assert "identity/hash alignment" in reasons
+
+
+def test_source_reread_with_identity_and_versions_is_migration_proven():
+    """Named bar: independent re-read + identity alignment + release strings."""
+    pack = build_signed_proof_pack(
+        job_id="reread-aligned",
+        reconciliation={
+            "passed": True,
+            "phase": "post_write_verified",
+            "coverage": "full_checksum",
+            "checksum_match": True,
+            "source_checksum": "a" * 64,
+            "target_checksum": "a" * 64,
+            "source_rows": 10,
+            "target_rows": 10,
+            "source_checksum_provenance": "independent_source_reread",
+            "source_independently_reread": True,
+            "identity_hash_aligned": True,
+        },
+        ddl_hash="ddl-abc",
+        mapping_hash="map-abc",
+        connector_versions={
+            "source": "openpyxl 3.1.5",
+            "destination": "postgresql 16.2 / psycopg2 2.9.9",
+        },
+        job_success=True,
+    )
+    assert pack["assurance"]["migration_proven"] is True
+    assert pack["connector_versions_honesty"] == "provided"
+    assert_pack_may_claim_migration_proven(pack)
+
+
+def test_format_only_versions_cannot_keep_migration_proven():
+    pack = build_signed_proof_pack(
+        job_id="fmt-proven",
+        reconciliation={
+            "passed": True,
+            "phase": "post_write_verified",
+            "coverage": "full_checksum",
+            "checksum_match": True,
+            "source_checksum": "abc",
+            "target_checksum": "abc",
+        },
+        ddl_hash="ddl-abc",
+        mapping_hash="map-abc",
+        connector_versions={"source": "postgresql", "destination": "snowflake"},
+        job_success=True,
+    )
+    assert pack["assurance"]["migration_proven"] is False
+    assert pack["connector_versions_honesty"] == "format_or_kind_only"
+    reasons = " ".join(pack.get("proof_incomplete_reasons") or [])
+    assert "captured release" in reasons
+
+
 def test_append_delta_is_not_migration_proven():
     a = classify_post_write_assurance(
         {

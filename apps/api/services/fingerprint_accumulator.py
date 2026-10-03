@@ -102,6 +102,42 @@ class FingerprintAccumulator:
         streams = [self._read_chunk(p) for p in self.chunk_files]
         yield from heapq.merge(*streams, key=lambda x: x[1])
 
+    def _identity_stream(self) -> Iterable[tuple[str, str]]:
+        """(key, fingerprint) pairs sorted by identity, without consuming the buffer.
+
+        The value digest sorts by fingerprint alone so a destination re-read
+        (empty key) can match a source re-read. Identity alignment is the other
+        question: the same cells under a different key are not the same row.
+        """
+        parts: list[Iterable[tuple[str, str]]] = []
+        for path in self.chunk_files:
+            chunk = list(self._read_chunk(path))
+            chunk.sort(key=lambda pair: (pair[0], pair[1]))
+            parts.append(chunk)
+        if self.buffer:
+            parts.append(sorted(self.buffer, key=lambda pair: (pair[0], pair[1])))
+        if not parts:
+            return
+        if len(parts) == 1:
+            yield from parts[0]
+            return
+        yield from heapq.merge(*parts, key=lambda pair: (pair[0], pair[1]))
+
+    def identity_digest(self) -> str:
+        """Order-independent SHA-256 of ``key`` and fingerprint. Does not close.
+
+        Call this before :meth:`digest`. The value digest hashes fingerprints
+        only; this one also hashes the row key, so two populations with the
+        same cells and different identities do not align.
+        """
+        h = hashlib.sha256()
+        for key, fp in self._identity_stream():
+            h.update(key.encode("utf-8"))
+            h.update(b"\0")
+            h.update(fp.encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
+
     def digest(self) -> str:
         """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
         h = hashlib.sha256()

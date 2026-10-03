@@ -39,6 +39,7 @@ from services.dest_precount import (
 from services.dialect_profiles import schema_from_cfg
 from services.source_reread import (
     REREAD_SCAN_SOURCES,
+    align_source_populations,
     reread_pagination_plan,
     should_reread_source,
 )
@@ -3416,6 +3417,7 @@ def _stream_database_transfer_impl(
         )
         dest_summary["checksum_mode"] = "inline_write_pass"
         dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
             "no second source scan. Heterogeneous warehouse routes re-read by "
@@ -3544,6 +3546,20 @@ def _stream_database_transfer_impl(
         )
         dest_summary["reread_pagination"] = reread_plan.get("mode")
         if fp_accumulator.total:
+            if write_pass_fp.total:
+                alignment = align_source_populations(write_pass_fp, fp_accumulator)
+                dest_summary["write_pass_checksum"] = write_pass_fp.digest()
+            else:
+                alignment = {
+                    "identity_hash_aligned": False,
+                    "write_pass_rows": 0,
+                    "reread_rows": int(fp_accumulator.total),
+                    "reason": "write_pass_empty",
+                }
+            dest_summary["identity_alignment"] = alignment
+            dest_summary["identity_hash_aligned"] = bool(
+                alignment.get("identity_hash_aligned")
+            )
             final_checksum = fp_accumulator.digest()
             dest_summary["checksum_mode"] = "source_reread"
             dest_summary["source_independently_reread"] = True
@@ -3563,6 +3579,7 @@ def _stream_database_transfer_impl(
             final_checksum = ""
             dest_summary["checksum_mode"] = "source_reread_unavailable"
             dest_summary["source_independently_reread"] = False
+            dest_summary["identity_hash_aligned"] = False
             dest_summary["checksum_note"] = (
                 "Independent source re-read produced no comparable fingerprints "
                 f"({checksum_rows_read:,} row(s) read, "
@@ -3574,12 +3591,20 @@ def _stream_database_transfer_impl(
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
         dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
 
     dest_summary["checksum"] = (
         final_checksum
         if dest_summary.get("checksum_mode") == "source_reread_unavailable"
         else (final_checksum or last_checksum)
     )
+    if not isinstance(dest_summary.get("connector_versions"), dict):
+        from services.connector_versions import capture_route_versions
+
+        dest_summary["connector_versions"] = capture_route_versions(
+            source_engine=src_type,
+            dest_type=dest_type,
+        )
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
     if decision.resume_fallback:

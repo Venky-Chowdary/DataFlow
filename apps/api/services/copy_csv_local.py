@@ -1831,7 +1831,13 @@ def try_copy_local_csv(
                         replace_destination=replace_destination,
                         declared_types=declared_types,
                     )
+            identity_digest = write_pass.identity_digest()
+            fingerprint_rows = int(write_pass.total)
             result = _with_source_digest(result, write_pass.digest())
+            snap = dict(result.source_snapshot or {})
+            snap["write_pass_identity_digest"] = identity_digest
+            snap["write_pass_fingerprint_rows"] = fingerprint_rows
+            result = result._replace(source_snapshot=snap)
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None
