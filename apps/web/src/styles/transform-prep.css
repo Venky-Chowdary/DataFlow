@@ -70,12 +70,80 @@
 
 .df2-xform-head {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--df-border, #e4e8ee);
+}
+
+.df2-xform-head-row {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--df-border, #e4e8ee);
+}
+
+.df2-xform .df2-xform-panes {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+.df2-xform .df2-xform-panes .df2-tab {
+  flex: 1 1 0;
+  gap: 8px;
+}
+
+.df2-xform-pane-count {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  color: var(--df-text-tertiary, #94a3b8);
+}
+
+.df2-tab.active .df2-xform-pane-count,
+.df2-tab[aria-selected="true"] .df2-xform-pane-count {
+  color: inherit;
+}
+
+.df2-xform-pane-count.is-refused {
+  color: var(--df-danger, #dc2626);
+}
+
+.df2-xform-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.df2-xform-panel[hidden] {
+  display: none !important;
+}
+
+.df2-xform-preview-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-xform .df2-rule-import-detail {
+  margin-top: 6px;
+}
+
+.df2-xform .df2-rule-import-detail > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform .df2-rule-import-detail > p {
+  margin: 6px 0 0;
 }
 
 .df2-xform-head-copy { min-width: 0; }
@@ -1244,9 +1312,18 @@
 .df2-rule-analysis-head,
 .df2-rule-line-hit {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1.3fr) minmax(0, 1fr) 48px;
+  grid-template-columns: minmax(108px, 150px) minmax(0, 1.6fr) minmax(0, 1fr) 44px auto;
   gap: 6px 10px;
-  align-items: start;
+  align-items: center;
+}
+
+.df2-rule-id {
+  display: inline-block;
+  margin-right: 6px;
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--df-text-secondary, #475569);
 }
 
 .df2-rule-analysis-head {
@@ -1335,19 +1412,19 @@
   word-break: break-word;
 }
 .df2-rule-line-tags {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(3, 10rem);
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   width: max-content;
   max-width: 100%;
+  justify-content: flex-end;
 }
 .df2-rule-tag {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  width: 100%;
+  width: auto;
   min-height: 22px;
   padding: 0 8px;
   border-radius: 999px;
@@ -1381,20 +1458,42 @@
 .df2-rule-ledger-census {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin: 10px 0 0;
   padding: 0;
 }
+.df2-rule-ledger-census > button,
 .df2-rule-ledger-census > div {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 7.5rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: 999px;
   border: 1px solid var(--df-border, #e4e8ee);
-  background: var(--df-surface-muted, #f8fafc);
+  background: var(--df-surface, #ffffff);
+  color: var(--df-text-secondary, #475569);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.df2-rule-ledger-census > button strong,
+.df2-rule-ledger-census dd {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-primary, #0f172a);
+}
+.df2-rule-ledger-census > button.is-on {
+  border-color: var(--df-border-brand, rgba(15, 118, 110, 0.45));
+  background: var(--df-brand-subtle, #f0fdfa);
+  color: var(--df-text-primary, #0f172a);
+}
+.df2-rule-census-note {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-secondary, #475569);
 }
 .df2-rule-ledger-census dt {
   margin: 0;
@@ -1403,13 +1502,6 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--df-text-tertiary, #94a3b8);
-}
-.df2-rule-ledger-census dd {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  color: var(--df-text-primary, #0f172a);
 }
 .df2-rule-ledger-unused {
   margin: 8px 0 0;
@@ -1478,7 +1570,7 @@
   }
 
   .df2-rule-line-text { grid-column: auto; }
-  .df2-rule-line-tags { grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
+  .df2-rule-line-tags { width: 100%; justify-content: flex-start; }
   .df2-rule-provenance { grid-template-columns: 1fr; }
   .df2-rule-provenance > div { grid-template-columns: 7rem minmax(0, 1fr); }
 

@@ -229,6 +229,9 @@ describe("Transfer Studio chrome contracts", () => {
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(studio, /df2-xform-step/);
     assert.match(step, /isTransportTimeout/);
+    assert.match(step, /role="tablist"/);
+    assert.match(step, /Rules & transforms/);
+    assert.match(step, /Review result/);
     assert.match(step, /Upload rules/);
     assert.match(step, /importBusinessRules/);
     assert.match(step, /destTypes/);
@@ -386,8 +389,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
     assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*scroll/);
     assert.match(studio, /df2-rule-map-banner\[open\]::-webkit-scrollbar/);
-    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*grid-template-columns:\s*repeat\(3, 10rem\)/);
-    assert.match(ledgerCss, /df2-rule-tag[\s\S]*width:\s*100%/);
+    assert.match(ledgerCss, /df2-rule-line-tags[\s\S]*display:\s*flex/);
+    assert.match(ledgerCss, /df2-rule-tag[\s\S]*width:\s*auto/);
     assert.doesNotMatch(mapStep, /footerAction=/);
     assert.doesNotMatch(review, /footerAction/);
     assert.match(review, /pages > 1 &&/);

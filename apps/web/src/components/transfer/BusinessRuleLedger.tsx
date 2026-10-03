@@ -88,6 +88,10 @@ export function BusinessRuleLedger({
     ?? (report.buckets.needs_confirmation > 0 || report.buckets.conflict > 0);
   const census = ruleCensus(report);
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "executable" | "needs_confirmation" | "conflict">("all");
+  const listed = report.rules
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) => filter === "all" || rule.status === filter);
 
   const body = (
     <>
@@ -101,43 +105,56 @@ export function BusinessRuleLedger({
           leftover bound rename as Direct here — Map is where you remap the rest.
         </p>
       ) : null}
-      <dl className="df2-rule-ledger-census" aria-label="Rule census">
-        <div><dt>Total</dt><dd>{census.total}</dd></div>
-        <div><dt>Mapping</dt><dd>{census.mapping}</dd></div>
-        <div><dt>Validation</dt><dd>{census.validation}</dd></div>
-        <div><dt>named mapping</dt><dd>{census.namedMapping}</dd></div>
-        <div><dt>named validation</dt><dd>{census.namedValidation}</dd></div>
-        <div><dt>Executable</dt><dd>{census.executable}</dd></div>
-        <div><dt>Review</dt><dd>{census.review}</dd></div>
-        <div><dt>Conflict</dt><dd>{census.conflict}</dd></div>
-        <div><dt>rule coverage</dt><dd>{census.coveragePercent}%</dd></div>
-      </dl>
+      <div className="df2-rule-ledger-census" role="group" aria-label="Rule census">
+        {([
+          ["all", "Total", census.total],
+          ["executable", "Executable", census.executable],
+          ["needs_confirmation", "Review", census.review],
+          ["conflict", "Conflict", census.conflict],
+        ] as const).map(([id, label, value]) => (
+          <button
+            key={id}
+            type="button"
+            className={filter === id ? "is-on" : ""}
+            aria-pressed={filter === id}
+            onClick={() => setFilter(id)}
+          >
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </button>
+        ))}
+        <span className="df2-rule-census-note">rule coverage {census.coveragePercent}%</span>
+      </div>
       <p className="df2-rule-ledger-how">
+        {census.mapping} mapping · {census.validation} validation · {census.namedMapping} named mapping · {census.namedValidation} named validation.
+        {" "}
         {census.review || census.conflict
           ? "Executed and validated counts land on Proof after the run."
           : `Proof will say: ${proofRuleClaim(report)}. Executed and validated counts land on Proof after the run.`}
       </p>
-      {report.sheet_kinds?.length ? (
-        <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
-          {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
-          {report.matcher ? ` · matcher ${report.matcher}` : ""}
-          {report.lookup_coverage?.length
-            ? ` · ${report.lookup_coverage.reduce((sum, item) => sum + item.pairs, 0)} lookup pair(s)`
-            : ""}
-        </p>
-      ) : null}
-      {report.header_roles?.length ? (
+      {(report.sheet_kinds?.length || report.header_roles?.length) ? (
         <details className="df2-rule-roles-fold">
           <summary>How this file was read</summary>
-          <ul className="df2-rule-ledger-roles" aria-label="How this file was read">
-            {report.header_roles.map((item) => (
-              <li key={`${item.sheet || ""}-${item.header}-${item.role}`}>
-                <strong>{item.header}</strong>
-                <span> → {item.role.replace(/_/g, " ")}</span>
-                {item.reason ? <span> · {item.reason}</span> : null}
-              </li>
-            ))}
-          </ul>
+          {report.sheet_kinds?.length ? (
+            <p className="df2-rule-ledger-unused" aria-label="Workbook sheets">
+              {report.sheet_kinds.map((item) => `${item.sheet || "sheet"}: ${item.kind} (${item.rows})`).join(" · ")}
+              {report.matcher ? ` · matcher ${report.matcher}` : ""}
+              {report.lookup_coverage?.length
+                ? ` · ${report.lookup_coverage.reduce((sum, item) => sum + item.pairs, 0)} lookup pair(s)`
+                : ""}
+            </p>
+          ) : null}
+          {report.header_roles?.length ? (
+            <ul className="df2-rule-ledger-roles" aria-label="How this file was read">
+              {report.header_roles.map((item) => (
+                <li key={`${item.sheet || ""}-${item.header}-${item.role}`}>
+                  <strong>{item.header}</strong>
+                  <span> → {item.role.replace(/_/g, " ")}</span>
+                  {item.reason ? <span> · {item.reason}</span> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </details>
       ) : null}
       <div className="df2-rule-analysis-head">
@@ -145,9 +162,13 @@ export function BusinessRuleLedger({
         <span>Rule</span>
         <span>Interpretation</span>
         <span>Conf.</span>
+        <span>Status</span>
       </div>
       <ol className="df2-rule-ledger-list">
-        {report.rules.map((rule, index) => {
+        {listed.length === 0 ? (
+          <li className="df2-rule-line">No rules in this set.</li>
+        ) : null}
+        {listed.map(({ rule, index }) => {
           const key = ruleKey(rule, index);
           const shown = openKey === key;
           return (
@@ -159,17 +180,16 @@ export function BusinessRuleLedger({
                 onClick={() => setOpenKey(shown ? null : key)}
               >
                 <span className="df2-rule-line-meta">{provenance(rule) || `line ${index + 1}`}</span>
-                <span className="df2-rule-line-edge">{edgeLabel(rule)}</span>
+                <span className="df2-rule-line-edge" title={rule.resolved_rule || namedRuleDisplay(rule)}>
+                  {rule.named_rule ? <span className="df2-rule-id">{rule.named_rule}</span> : null}
+                  {edgeLabel(rule)}
+                </span>
                 <span className="df2-rule-line-read">
                   {rule.interpretation || rule.kind_label}
                 </span>
                 <span className="df2-rule-line-confidence">{ruleConfidenceLabel(rule.confidence)}</span>
-                <span className="df2-rule-line-text" title={rule.resolved_rule || rule.rule_text}>
-                  {namedRuleDisplay(rule)}
-                </span>
                 <span className="df2-rule-line-tags" aria-label="Rule tags">
                   <span className={`df2-rule-tag ${lineClass(rule.status)}`}>{planeLabel(rule.plane)}</span>
-                  <span className={`df2-rule-tag ${lineClass(rule.status)}`}>{rule.kind_label}</span>
                   <span className={`df2-rule-tag ${lineClass(rule.status)}`}>{ruleStatusLabel(rule.status)}</span>
                 </span>
               </button>
