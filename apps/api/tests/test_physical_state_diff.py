@@ -579,35 +579,33 @@ def test_snowflake_catalog_read_asks_is_hybrid() -> None:
     """The certificate read uses INFORMATION_SCHEMA.TABLES.IS_HYBRID."""
     from services.physical_state_diff import _read_snowflake_table_kind
 
-    class _Result:
-        def __init__(self, row):
-            self._row = row
-
-        def fetchone(self):
-            return self._row
-
-    class _Conn:
-        def __init__(self, row):
-            self.row = row
+    class _Cur:
+        def __init__(self, rows):
+            self.rows = rows
             self.sql = ""
-            self.params: dict = {}
+            self.params: tuple = ()
 
-        def execute(self, stmt, params):
-            self.sql = str(stmt)
-            self.params = dict(params)
-            return _Result(self.row)
+        def execute(self, sql, params=()):
+            self.sql = str(sql)
+            self.params = tuple(params)
 
-    yes = _Conn(("YES",))
+        def fetchall(self):
+            return list(self.rows)
+
+    yes = _Cur([("YES",)])
     assert _read_snowflake_table_kind(yes, "PUBLIC", "ORDERS") == "hybrid"
     assert "is_hybrid" in yes.sql
     assert "information_schema.tables" in yes.sql
-    assert yes.params == {"schema": "PUBLIC", "table": "ORDERS"}
-    assert _read_snowflake_table_kind(_Conn(("NO",)), "PUBLIC", "ORDERS") == "standard"
-    assert _read_snowflake_table_kind(_Conn(None), "PUBLIC", "ORDERS") == ""
+    assert yes.params == ("PUBLIC", "ORDERS")
+    assert _read_snowflake_table_kind(_Cur([("NO",)]), "PUBLIC", "ORDERS") == "standard"
+    assert _read_snowflake_table_kind(_Cur([]), "PUBLIC", "ORDERS") == ""
 
     class _Broken:
-        def execute(self, stmt, params):
+        def execute(self, sql, params=()):
             raise RuntimeError("column is_hybrid does not exist")
+
+        def fetchall(self):
+            return []
 
     assert _read_snowflake_table_kind(_Broken(), "PUBLIC", "ORDERS") == ""
 

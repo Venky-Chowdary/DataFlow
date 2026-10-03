@@ -14,9 +14,9 @@ module separates, which a catalog diff alone cannot:
                do not check rows against it, so a catalog hit is not this
                proof either. A Snowflake hybrid table does enforce a foreign
                key when ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``
-               and ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``. This scan does
-               not read that pair, so a Snowflake catalog hit stays unenforced
-               until those two facts are measured.
+               and ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``. Those two
+               reads are what this scan trusts. A standard table, or a
+               hybrid table whose enforced bit was not read, is still scanned.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
@@ -169,12 +169,27 @@ def verify_destination_referential_integrity(
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
         measured = None
-        catalog_dialect = validation_catalog_dialect(db_type)
-        if catalog_dialect:
-            measured = probe_foreign_keys(
-                catalog_dialect, conn, schema_arg or "", child_name
+        table_kind = ""
+        from services.foreign_key_metadata import _dialect_key
+
+        if _dialect_key(db_type) == "snowflake":
+            from services.physical_state_diff import _read_snowflake_table_kind
+
+            table_kind = _read_snowflake_table_kind(
+                conn, schema_arg or "", child_name
             )
-        enforced = enforced_relationship_identities(db_type, dest_fks, measured)
+            measured = probe_foreign_keys(
+                "snowflake", conn, schema_arg or "", child_name
+            )
+        else:
+            catalog_dialect = validation_catalog_dialect(db_type)
+            if catalog_dialect:
+                measured = probe_foreign_keys(
+                    catalog_dialect, conn, schema_arg or "", child_name
+                )
+        enforced = enforced_relationship_identities(
+            db_type, dest_fks, measured, table_kind=table_kind
+        )
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:
             return {

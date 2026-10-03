@@ -763,6 +763,7 @@ _DEFAULT_NAMESPACE_SQL = {
     "mysql": "SELECT DATABASE()",
     "sqlserver": "SELECT SCHEMA_NAME()",
     "oracle": "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM dual",
+    "snowflake": "SELECT CURRENT_SCHEMA()",
 }
 
 
@@ -1193,6 +1194,113 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
     )
 
 
+_SNOWFLAKE_IS_HYBRID_SQL = """
+SELECT is_hybrid
+  FROM information_schema.tables
+ WHERE UPPER(table_schema) = UPPER(%s)
+   AND table_name = %s
+"""
+
+
+def read_snowflake_table_kind(cursor_or_connection: Any, schema: str, table: str) -> str:
+    """``INFORMATION_SCHEMA.TABLES.IS_HYBRID``. Empty when the catalog did not answer.
+
+    Documented values are ``YES`` and ``NO``. A failed read stays unreported.
+    """
+    try:
+        cursor = as_driver_cursor(cursor_or_connection)
+        rows = _rows(cursor, _SNOWFLAKE_IS_HYBRID_SQL, (schema or "", table))
+    except Exception:  # noqa: BLE001 — an unread kind is not a standard table
+        return ""
+    if not rows or rows[0] is None:
+        return ""
+    row = rows[0]
+    cell = row[0] if isinstance(row, (tuple, list)) else row
+    return normalize_snowflake_table_kind(cell)
+
+
+_SNOWFLAKE_FK_SQL = """
+SELECT tc.constraint_name,
+       kcu.column_name,
+       rc.unique_constraint_schema,
+       pk_tc.table_name,
+       pk_kcu.column_name,
+       rc.delete_rule,
+       rc.update_rule,
+       tc.enforced,
+       rc.match_option,
+       tc.is_deferrable,
+       tc.initially_deferred
+  FROM information_schema.table_constraints tc
+  JOIN information_schema.referential_constraints rc
+    ON tc.constraint_catalog = rc.constraint_catalog
+   AND tc.constraint_schema = rc.constraint_schema
+   AND tc.constraint_name = rc.constraint_name
+  JOIN information_schema.key_column_usage kcu
+    ON tc.constraint_catalog = kcu.constraint_catalog
+   AND tc.constraint_schema = kcu.constraint_schema
+   AND tc.constraint_name = kcu.constraint_name
+   AND tc.table_schema = kcu.table_schema
+   AND tc.table_name = kcu.table_name
+  JOIN information_schema.table_constraints pk_tc
+    ON rc.unique_constraint_catalog = pk_tc.constraint_catalog
+   AND rc.unique_constraint_schema = pk_tc.constraint_schema
+   AND rc.unique_constraint_name = pk_tc.constraint_name
+  JOIN information_schema.key_column_usage pk_kcu
+    ON pk_tc.constraint_catalog = pk_kcu.constraint_catalog
+   AND pk_tc.constraint_schema = pk_kcu.constraint_schema
+   AND pk_tc.constraint_name = pk_kcu.constraint_name
+   AND pk_tc.table_schema = pk_kcu.table_schema
+   AND pk_tc.table_name = pk_kcu.table_name
+   AND pk_kcu.ordinal_position = kcu.position_in_unique_constraint
+ WHERE UPPER(tc.table_schema) = UPPER(%s)
+   AND tc.table_name = %s
+   AND tc.constraint_type = 'FOREIGN KEY'
+ ORDER BY tc.constraint_name, kcu.ordinal_position
+"""
+
+
+def _probe_snowflake(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    """Foreign keys from Snowflake information_schema.
+
+    ``ENFORCED`` is the existing-row bit. Hybrid tables record ``YES``.
+    A standard table records ``NO``. ``MATCH_OPTION`` and the deferral pair
+    are the rule the catalog stored. This probe does not read ``IS_HYBRID``;
+    the table kind is a separate measurement.
+    """
+    schema = _resolve_namespace(cursor, "snowflake", schema)
+    rows = _rows(cursor, _SNOWFLAKE_FK_SQL, (schema, table))
+    mapped: list[tuple] = []
+    for row in rows:
+        name, col, ref_schema, ref_table, ref_col, on_del, on_upd = row[:7]
+        enforced = row[7] if len(row) > 7 else None
+        match = row[8] if len(row) > 8 else ""
+        deferral = (
+            normalize_deferral(row[9], row[10]) if len(row) > 10 else ""
+        )
+        mapped.append(
+            (
+                name,
+                col,
+                ref_schema,
+                ref_table,
+                ref_col,
+                on_del,
+                on_upd,
+                enforced,
+                match,
+                deferral,
+            )
+        )
+    return ForeignKeys(
+        dialect="snowflake",
+        status="measured",
+        schema=schema,
+        table=table,
+        items=_collect(mapped),
+    )
+
+
 _PROBES = {
     "postgresql": _probe_postgres,
     "mysql": _probe_mysql,
@@ -1202,6 +1310,7 @@ _PROBES = {
     "oracle": _probe_oracle,
     "redshift": _probe_redshift,
     "sqlite": _probe_sqlite,
+    "snowflake": _probe_snowflake,
 }
 
 

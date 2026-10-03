@@ -654,32 +654,10 @@ def foreign_keys_from_catalog_state(
 
 
 def _read_snowflake_table_kind(conn: Any, schema: str, table: str) -> str:
-    """``IS_HYBRID`` for one table. Empty when the catalog did not answer.
+    """``IS_HYBRID`` for one table. Empty when the catalog did not answer."""
+    from services.foreign_key_metadata import read_snowflake_table_kind
 
-    Snowflake documents ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` as ``YES``
-    or ``NO``. A failed read stays unreported so a standard-table rule is
-    not invented from a missing column.
-    """
-    from services.foreign_key_metadata import normalize_snowflake_table_kind
-
-    try:
-        row = conn.execute(
-            sa.text(
-                "SELECT is_hybrid FROM information_schema.tables "
-                "WHERE UPPER(table_schema) = UPPER(:schema) "
-                "AND table_name = :table"
-            ),
-            {"schema": schema or "", "table": table},
-        ).fetchone()
-    except Exception:  # noqa: BLE001 — an unread kind is not a standard table
-        return ""
-    if row is None:
-        return ""
-    try:
-        cell = row[0]
-    except (TypeError, KeyError, IndexError):
-        cell = getattr(row, "is_hybrid", None)
-    return normalize_snowflake_table_kind(cell)
+    return read_snowflake_table_kind(conn, schema, table)
 
 
 def _reflect_foreign_keys(

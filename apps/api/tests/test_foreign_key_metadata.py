@@ -608,6 +608,108 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
     ) == ["not_checked"]
 
 
+def test_snowflake_foreign_key_probe_reads_enforced_match_and_deferral():
+    """Joined information_schema rows. A live Snowflake account was not used.
+
+    ENFORCED YES is the validation bit. MATCH FULL and the deferral pair are
+    the rule. IS_HYBRID is not in this result: without that measurement the
+    same YES stays unenforced.
+    """
+    cur = _cursor(
+        [
+            (
+                "fk_orders",
+                "customer_id",
+                "PUBLIC",
+                "CUSTOMERS",
+                "ID",
+                "CASCADE",
+                "NO ACTION",
+                "YES",
+                "FULL",
+                "NO",
+                "NO",
+            ),
+            (
+                "fk_orders",
+                "region_id",
+                "PUBLIC",
+                "CUSTOMERS",
+                "REGION_ID",
+                "CASCADE",
+                "NO ACTION",
+                "YES",
+                "FULL",
+                "NO",
+                "NO",
+            ),
+        ]
+    )
+    measured = probe_foreign_keys("snowflake", cur, "PUBLIC", "ORDERS")
+    assert measured.status == "measured"
+    assert "referential_constraints" in cur.calls[0][0]
+    assert "position_in_unique_constraint" in cur.calls[0][0]
+    item = measured.items[0]
+    assert item.columns == ["customer_id", "region_id"]
+    assert item.referenced_columns == ["ID", "REGION_ID"]
+    assert item.referenced_table == "CUSTOMERS"
+    assert item.on_delete == "CASCADE"
+    assert item.on_update == "NO ACTION"
+    assert item.validated is True
+    assert item.match == "full"
+    assert item.deferral == "not_deferrable"
+
+    inspector = [
+        {
+            "constrained_columns": ["customer_id", "region_id"],
+            "referred_schema": "PUBLIC",
+            "referred_table": "CUSTOMERS",
+            "referred_columns": ["ID", "REGION_ID"],
+        }
+    ]
+    assert inspector_row_proof_gaps(
+        "snowflake_aws", inspector, measured, table_kind="YES"
+    ) == [""]
+    assert len(
+        enforced_relationship_identities(
+            "snowflake", inspector, measured, table_kind="YES"
+        )
+    ) == 1
+    assert enforced_relationship_identities("snowflake", inspector, measured) == []
+
+    standard_cur = _cursor(
+        [
+            (
+                "fk_orders",
+                "customer_id",
+                "PUBLIC",
+                "CUSTOMERS",
+                "ID",
+                "NO ACTION",
+                "NO ACTION",
+                "NO",
+                "FULL",
+                "YES",
+                "NO",
+            )
+        ]
+    )
+    standard = probe_foreign_keys("snowflake", standard_cur, "PUBLIC", "ORDERS")
+    assert standard.items[0].validated is False
+    assert standard.items[0].deferral == "immediate"
+    single = [
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "PUBLIC",
+            "referred_table": "CUSTOMERS",
+            "referred_columns": ["ID"],
+        }
+    ]
+    assert inspector_row_proof_gaps(
+        "snowflake", single, standard, table_kind="YES"
+    ) == ["not_checked"]
+
+
 def test_payload_keeps_an_explicit_validation_bit():
     keys = foreign_keys_from_payload(
         [{"name": "fk", "columns": ["a"], "referenced_table": "t", "referenced_columns": ["b"], "validated": False}]
