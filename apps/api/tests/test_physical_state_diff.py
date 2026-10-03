@@ -1672,3 +1672,65 @@ def test_oracle_not_validated_key_is_not_existing_row_proof() -> None:
     failed = _oracle_uniqueness_proof("oracle", ("id",), {("email",)}, None)
     assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
     assert _oracle_uniqueness_proof("postgresql", ("id",), {("email",)}, rows) == ()
+
+
+def test_sqlserver_disabled_unique_index_is_not_row_proof() -> None:
+    """``is_disabled = 1`` is not a write rule and not existing-row proof.
+
+    A hand-built SQL Server state with an empty proof tuple did not measure
+    the column, so it stays on the older carried verdict.
+    """
+    from services.physical_state_diff import _measured_uniqueness_proof
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id",),
+        unique_constraints=frozenset({("email",)}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="mssql",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert unmeasured["aspects"]["primary_key"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    disabled = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="sqlserver",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "not_checked")),
+        ),
+    )
+    unique = disabled["aspects"]["unique_constraints"]
+    assert unique["status"] == "unchecked"
+    assert unique["missing"] == []
+    assert "email" in unique["unchecked"]
+    assert "is_disabled" in unique["reasons"][0]
+    assert disabled["aspects"]["primary_key"]["status"] == "carried"
+    assert disabled["verified"] is False
+    assert "unique_constraints" not in disabled["absent"]
+
+    rows = [
+        ("PK_ID", True, "ID", 1, None, None, 0),
+        ("UQ_EMAIL", False, "EMAIL", 1, None, None, 1),
+    ]
+    proof = _measured_uniqueness_proof(
+        "azure_sql", ("id",), {("email",)}, None, rows
+    )
+    assert dict(proof) == {("email",): "not_checked", ("id",): ""}
+    failed = _measured_uniqueness_proof(
+        "mssql", ("id",), {("email",)}, None, None
+    )
+    assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
+    assert _measured_uniqueness_proof("sqlite", ("id",), {("email",)}, rows, rows) == ()

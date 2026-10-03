@@ -133,6 +133,73 @@ def test_sqlserver_fetch_unique_keys():
     assert names["UQ_email_ci"]["filter_predicate"] == "([active]=(1))"
 
 
+def test_sqlserver_disabled_unique_index_does_not_block():
+    """``is_disabled`` is not invented for a six-column row. 1 is not a write block."""
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        read_sqlserver_uniqueness_rows,
+        sqlserver_uniqueness_proof,
+    )
+
+    assert sqlserver_uniqueness_proof(
+        [("UQ_EMAIL", False, "EMAIL", 1, None, None, 1)]
+    ) == {frozenset({"email"}): "not_checked"}
+    assert sqlserver_uniqueness_proof(
+        [("PK_users", True, "id", 1, None, None, 0)]
+    ) == {frozenset({"id"}): ""}
+    assert sqlserver_uniqueness_proof(
+        [("PK_users", True, "id", 1, None, None)]
+    ) == {frozenset({"id"}): "unreported"}
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 1),
+    ]
+    meta = _sqlserver_fetch_unique_keys(conn, "dbo", "users")
+    key = meta["unique_keys"][0]
+    assert key["disabled"] is True
+    assert key["enforced"] is False
+    assert "is_disabled" in str(conn.execute.call_args.args[0]).lower()
+
+    enabled = MagicMock()
+    enabled.execute.return_value.fetchall.return_value = [
+        ("PK_users", True, "id", 1, None, None),
+    ]
+    plain = _sqlserver_fetch_unique_keys(enabled, "dbo", "users")
+    assert "disabled" not in plain["unique_keys"][0]
+    assert "enforced" not in plain["unique_keys"][0]
+
+    class _Broken:
+        def execute(self, sql, params=()):
+            raise RuntimeError("is_disabled unavailable")
+
+    assert read_sqlserver_uniqueness_rows(_Broken(), "dbo", "users") is None
+    assert _sqlserver_fetch_unique_keys(_Broken(), "dbo", "users") == {
+        "primary_key_columns": [],
+        "unique_keys": [],
+    }
+
+    assert _unique_constraint_enforced(
+        {"name": "UQ_EMAIL", "columns": ["email"], "disabled": True},
+        dest_kind="sqlserver",
+    ) is False
+    warned = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="mssql",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {"name": "UQ_EMAIL", "columns": ["EMAIL"], "disabled": True}
+        ],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert warned["passed"] is True
+    assert warned["blocks_transfer"] is False
+    assert any("disabled" in warning for warning in warned["warnings"])
+
+
 def test_oracle_fetch_unique_keys():
     conn = MagicMock()
     conn.execute.return_value.fetchall.side_effect = [

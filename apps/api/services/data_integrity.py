@@ -639,6 +639,9 @@ def _unique_constraint_enforced(
     from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
 
     kind = _key_table_kind(uk)
+    if uk is not None and uk.get("disabled") is True:
+        # SQL Server DISABLE. The index does not reject a new duplicate.
+        return False
     if uniqueness_proof_gap(dest_kind, table_kind=kind) == "unenforced":
         return False
     if _dialect_key(dest_kind) == "snowflake":
@@ -689,6 +692,11 @@ def _advisory_unique_key_warnings(
             warnings.append(
                 f"{kind} RELY is an optimizer hint. It does not prove the "
                 "loaded rows are unique."
+            )
+        if any(uk.get("disabled") is True for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is disabled. It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
             )
     elif _destination_constraints_advisory(dest_kind, keys):
         warnings.append(

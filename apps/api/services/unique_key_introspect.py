@@ -188,54 +188,122 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
+def _sqlserver_index_disabled(value: Any) -> bool | None:
+    """``sys.indexes.is_disabled``. None when this cell did not say."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from ``sys.indexes.is_disabled``.
+
+    Columns are folded. Disabled wins across the column rows of one index.
+    A row that omits the cell is ``unreported`` for that set.
+    """
+    from services.foreign_key_metadata import sqlserver_disabled_unique_gap
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 3 or not fields[0] or not fields[2]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(name, {"columns": [], "disabled": None})
+        bucket["columns"].append(str(fields[2]).strip().casefold())
+        if len(fields) > 6:
+            disabled = _sqlserver_index_disabled(fields[6])
+            if disabled is True:
+                bucket["disabled"] = True
+            elif disabled is False and bucket["disabled"] is not True:
+                bucket["disabled"] = False
+    proof: dict[frozenset[str], str] = {}
+    rank = {"": 0, "unreported": 1, "not_checked": 2}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = sqlserver_disabled_unique_gap(bucket["disabled"])
+        if columns not in proof or rank[gap] > rank[proof[columns]]:
+            proof[columns] = gap
+    return proof
+
+
+def read_sqlserver_uniqueness_rows(
+    conn: Any, schema: str, table: str
+) -> list[Any] | None:
+    """Unique-index rows, or None when ``is_disabled`` was not read.
+
+    An empty list is a successful read of no unique index.
+    """
+    import sqlalchemy as sa
+
+    try:
+        return list(
+            conn.execute(
+                sa.text(
+                    """
+                    SELECT
+                      i.name AS index_name,
+                      i.is_primary_key,
+                      c.name AS column_name,
+                      ic.key_ordinal,
+                      CONVERT(nvarchar(4000), cc.definition) AS computed_def,
+                      CONVERT(nvarchar(4000), i.filter_definition) AS filter_def,
+                      i.is_disabled
+                    FROM sys.indexes i
+                    JOIN sys.index_columns ic
+                      ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                    JOIN sys.columns c
+                      ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                    LEFT JOIN sys.computed_columns cc
+                      ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+                    JOIN sys.tables t ON t.object_id = i.object_id
+                    JOIN sys.schemas s ON s.schema_id = t.schema_id
+                    WHERE s.name = :schema
+                      AND t.name = :table
+                      AND i.is_unique = 1
+                      AND ic.is_included_column = 0
+                      AND i.is_hypothetical = 0
+                    ORDER BY i.name, ic.key_ordinal
+                    """
+                ),
+                {"schema": schema, "table": table},
+            ).fetchall()
+        )
+    except Exception:
+        return None
+
+
 def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:
     """Return PRIMARY KEY + UNIQUE indexes from ``sys.indexes``.
 
     Also resolves computed-column definitions (``LOWER(email)``) so Validate
     casefolds like the engine when uniqueness is on a computed CI column.
     """
-    import sqlalchemy as sa
     from services.type_system import parse_case_insensitive_index_expression
 
     pk: list[str] = []
     unique_keys: list[dict[str, Any]] = []
-    try:
-        rows = conn.execute(
-            sa.text(
-                """
-                SELECT
-                  i.name AS index_name,
-                  i.is_primary_key,
-                  c.name AS column_name,
-                  ic.key_ordinal,
-                  CONVERT(nvarchar(4000), cc.definition) AS computed_def,
-                  CONVERT(nvarchar(4000), i.filter_definition) AS filter_def
-                FROM sys.indexes i
-                JOIN sys.index_columns ic
-                  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                JOIN sys.columns c
-                  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                LEFT JOIN sys.computed_columns cc
-                  ON cc.object_id = c.object_id AND cc.column_id = c.column_id
-                JOIN sys.tables t ON t.object_id = i.object_id
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = :schema
-                  AND t.name = :table
-                  AND i.is_unique = 1
-                  AND ic.is_included_column = 0
-                  AND i.is_hypothetical = 0
-                ORDER BY i.name, ic.key_ordinal
-                """
-            ),
-            {"schema": schema, "table": table},
-        ).fetchall()
-    except Exception:
+    rows = read_sqlserver_uniqueness_rows(conn, schema, table)
+    if rows is None:
         return {"primary_key_columns": [], "unique_keys": []}
 
     grouped: dict[str, dict[str, Any]] = {}
-    for idx_name, is_pk, col, _ord, computed_def, filter_def in rows or []:
-        if not idx_name:
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 6 or not fields[0]:
             continue
+        idx_name, is_pk, col, _ord, computed_def, filter_def = fields[:6]
         key = str(idx_name)
         bucket = grouped.setdefault(
             key,
@@ -251,6 +319,10 @@ def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str
         )
         bucket["primary"] = bool(is_pk) or bool(bucket.get("primary"))
         bucket["columns"].append(str(col))
+        # A six-column fixture did not ask. Do not invent is_disabled.
+        if len(fields) > 6 and _sqlserver_index_disabled(fields[6]) is True:
+            bucket["disabled"] = True
+            bucket["enforced"] = False
         if filter_def and not bucket.get("filter_predicate"):
             bucket["filter_predicate"] = str(filter_def).strip()
         expr = str(computed_def or "").strip()

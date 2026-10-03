@@ -323,12 +323,13 @@ class PhysicalState:
     #: ``SHOW INDEXES.status_info`` for the worst index. Empty when the
     #: command did not return that cell, or every index is ``ACTIVE``.
     index_detail: str = ""
-    #: Oracle existing-row gap for each primary-key or unique column set.
-    #: ``(folded columns, gap)``. ``""`` is ``VALIDATED``. ``not_checked`` is
-    #: ``NOT VALIDATED``. ``unreported`` means this read did not see the bit.
-    #: An empty tuple means this comparison did not measure
-    #: ``ALL_CONSTRAINTS.VALIDATED``. A live Oracle read attaches one entry
-    #: for each reflected key.
+    #: Existing-row gap for each primary-key or unique column set.
+    #: ``(folded columns, gap)``. Oracle ``""`` is ``VALIDATED`` and
+    #: ``not_checked`` is ``NOT VALIDATED``. SQL Server ``""`` is an enabled
+    #: unique index and ``not_checked`` is ``is_disabled = 1``. ``unreported``
+    #: means this read did not see the bit. An empty tuple means this
+    #: comparison did not measure it. A live read attaches one entry for
+    #: each reflected key.
     uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -863,10 +864,17 @@ def read_physical_state(
                 conn, schema, name
             )
         oracle_rows: list[Any] | None = None
+        sqlserver_rows: list[Any] | None = None
         if _dialect_key(db_type) == "oracle":
             from services.unique_key_introspect import read_oracle_uniqueness_rows
 
             oracle_rows = read_oracle_uniqueness_rows(conn, schema, name)
+        from services.dialect_profiles import is_sqlserver_like
+
+        if is_sqlserver_like(db_type):
+            from services.unique_key_introspect import read_sqlserver_uniqueness_rows
+
+            sqlserver_rows = read_sqlserver_uniqueness_rows(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -935,13 +943,72 @@ def read_physical_state(
         table_kind=table_kind,
         index_status=index_status,
         index_detail=index_detail,
-        uniqueness_proof=_oracle_uniqueness_proof(
+        uniqueness_proof=_measured_uniqueness_proof(
             db_type,
             _cols((pk or {}).get("constrained_columns")),
             unique_sets,
             oracle_rows,
+            sqlserver_rows,
         ),
     )
+
+
+def _measured_uniqueness_proof(
+    db_type: str,
+    primary_key: tuple[str, ...],
+    unique_sets: set[tuple[str, ...]],
+    oracle_rows: list[Any] | None,
+    sqlserver_rows: list[Any] | None,
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    """Oracle ``VALIDATED`` or SQL Server ``is_disabled``. Empty for other engines."""
+    from services.dialect_profiles import is_sqlserver_like
+    from services.foreign_key_metadata import _dialect_key
+
+    if _dialect_key(db_type) == "oracle":
+        return _oracle_uniqueness_proof(db_type, primary_key, unique_sets, oracle_rows)
+    if is_sqlserver_like(db_type):
+        return _sqlserver_uniqueness_proof(primary_key, unique_sets, sqlserver_rows)
+    return ()
+
+
+def _sqlserver_uniqueness_proof(
+    primary_key: tuple[str, ...],
+    unique_sets: set[tuple[str, ...]],
+    rows: list[Any] | None,
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    """One gap per reflected SQL Server key.
+
+    ``rows is None`` means ``is_disabled`` was not read. Each reflected key
+    stays ``unreported``. ``is_disabled = 1`` is ``not_checked``. An enabled
+    index is an empty gap.
+    """
+    from services.unique_key_introspect import sqlserver_uniqueness_proof
+
+    measured = sqlserver_uniqueness_proof(rows) if rows is not None else {}
+    return _gaps_for_reflected_keys(primary_key, unique_sets, measured, rows is None)
+
+
+def _gaps_for_reflected_keys(
+    primary_key: tuple[str, ...],
+    unique_sets: set[tuple[str, ...]],
+    measured: dict[frozenset[str], str],
+    unread: bool,
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    reflected = [primary_key] if primary_key else []
+    reflected.extend(cols for cols in unique_sets if cols)
+    proof: list[tuple[tuple[str, ...], str]] = []
+    seen: set[frozenset[str]] = set()
+    for cols in reflected:
+        key = frozenset(cols)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if unread or key not in measured:
+            gap = "unreported"
+        else:
+            gap = measured[key]
+        proof.append((tuple(sorted(key)), gap))
+    return tuple(proof)
 
 
 def _oracle_uniqueness_proof(
@@ -963,21 +1030,7 @@ def _oracle_uniqueness_proof(
     if _dialect_key(db_type) != "oracle":
         return ()
     measured = oracle_uniqueness_proof(rows) if rows is not None else {}
-    reflected = [primary_key] if primary_key else []
-    reflected.extend(cols for cols in unique_sets if cols)
-    proof: list[tuple[tuple[str, ...], str]] = []
-    seen: set[frozenset[str]] = set()
-    for cols in reflected:
-        key = frozenset(cols)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        if rows is None or key not in measured:
-            gap = "unreported"
-        else:
-            gap = measured[key]
-        proof.append((tuple(sorted(key)), gap))
-    return tuple(proof)
+    return _gaps_for_reflected_keys(primary_key, unique_sets, measured, rows is None)
 
 
 def _strip_outer_parens(text: str) -> str:
@@ -1837,8 +1890,10 @@ def _diff_uniqueness(
 
     An Oracle ``ENABLED`` key rejects a new duplicate. That write rule is
     not this verdict. Existing rows are carried only when
-    ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. An empty proof tuple
-    means this comparison did not measure that column.
+    ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. A SQL Server unique
+    index with ``is_disabled = 1`` does not reject a new duplicate and is
+    not existing-row proof. An empty proof tuple means this comparison
+    did not measure that column.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,
@@ -1846,9 +1901,11 @@ def _diff_uniqueness(
     engine that stores the key and does not check rows, a match stays listed
     as ``unchecked``. The object is present. It is not a duplicate-row count.
     """
+    from services.dialect_profiles import is_sqlserver_like
     from services.foreign_key_metadata import (
         _dialect_key,
         oracle_uniqueness_validation_reason,
+        sqlserver_disabled_unique_reason,
         uniqueness_proof_gap,
         uniqueness_proof_reason,
         with_snowflake_index_detail,
@@ -1873,12 +1930,13 @@ def _diff_uniqueness(
         if destination_dialect
         else ""
     )
-    use_oracle_proof = bool(uniqueness_proof) and _dialect_key(destination_dialect) == (
-        "oracle"
+    family = _dialect_key(destination_dialect)
+    use_measured_proof = bool(uniqueness_proof) and (
+        family == "oracle" or is_sqlserver_like(destination_dialect)
     )
 
     def _item_gap(group: frozenset[str]) -> str:
-        if not use_oracle_proof:
+        if not use_measured_proof:
             return dialect_gap
         for columns, item_gap in uniqueness_proof:
             if frozenset(columns) == group:
@@ -1893,8 +1951,10 @@ def _diff_uniqueness(
         if not item_gap:
             continue
         unchecked.append(_wire(group))
-        if use_oracle_proof:
+        if use_measured_proof and family == "oracle":
             reason = oracle_uniqueness_validation_reason(item_gap)
+        elif use_measured_proof and is_sqlserver_like(destination_dialect):
+            reason = sqlserver_disabled_unique_reason(item_gap)
         else:
             reason = with_snowflake_index_detail(
                 uniqueness_proof_reason(

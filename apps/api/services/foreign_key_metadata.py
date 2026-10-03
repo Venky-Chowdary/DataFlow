@@ -550,6 +550,39 @@ def _snowflake_index_status_reason(index_status: str, *, foreign_key: bool) -> s
     )
 
 
+def sqlserver_disabled_unique_gap(disabled: bool | None) -> str:
+    """Existing-row gap from ``sys.indexes.is_disabled``.
+
+    An enabled unique index is the check SQL Server reports. A disabled
+    index was measured and is not that proof, and it does not reject a new
+    duplicate. A missing cell stays unreported.
+    """
+    if disabled is False:
+        return ""
+    if disabled is True:
+        return "not_checked"
+    return "unreported"
+
+
+def sqlserver_disabled_unique_reason(gap: str) -> str:
+    """Operator sentence for a non-empty SQL Server disabled-index gap."""
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.is_disabled is 1. The index does not reject a "
+            "new duplicate and does not prove the rows already stored "
+            "are unique."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.is_disabled was not read. A disabled unique "
+            "index does not reject a new duplicate, so this catalog "
+            "object is not proof the rows already stored are unique."
+        )
+    return ""
+
+
 def oracle_uniqueness_validation_gap(validated: bool | None) -> str:
     """Existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
 
