@@ -20,6 +20,7 @@ from services.foreign_key_carry import (
     plan_foreign_keys,
     verify_foreign_keys,
 )
+from services.foreign_key_orchestration import dependency_order
 from services.foreign_key_metadata import ForeignKey, ForeignKeys
 
 MEASURED = {
@@ -340,6 +341,83 @@ def test_classify_cycle_unresolved_when_detected_but_no_edges():
     resolution = classify_cycle_resolution(["a", "b"], [])
     assert resolution["resolved"] is False
     assert resolution["edge_count"] == 0
+
+
+def _measured(table: str, items: list[ForeignKey], schema: str = "public") -> ForeignKeys:
+    return ForeignKeys(
+        dialect="postgresql", status="measured", schema=schema, table=table, items=items
+    )
+
+
+def _fk(schema: str, table: str, *, child: str = "customer_id", parent: str = "id") -> ForeignKey:
+    return ForeignKey(
+        name="fk",
+        columns=[child],
+        referenced_schema=schema,
+        referenced_table=table,
+        referenced_columns=[parent],
+    )
+
+
+def test_unqualified_parent_still_loads_first():
+    tables = ["order_lines", "orders", "customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("public", "customers")]),
+            "order_lines": _measured("order_lines", [_fk("", "orders", child="order_id")]),
+        },
+    )
+    assert ordered == ["customers", "orders", "order_lines"]
+    assert cycle == []
+
+
+def test_qualified_parent_in_the_job_loads_first():
+    """archive.customers is the parent even though the catalog leaf is customers."""
+    tables = ["orders", "archive.customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("archive", "customers")]),
+            "archive.customers": _measured("archive.customers", []),
+        },
+    )
+    assert ordered == ["archive.customers", "orders"]
+    assert cycle == []
+
+
+def test_archive_parent_is_not_the_local_customers_table():
+    """A local customers→orders edge must not become a cycle with archive.customers."""
+    tables = ["orders", "customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("archive", "customers")]),
+            "customers": _measured("customers", [_fk("public", "orders", child="order_id")]),
+        },
+    )
+    assert cycle == []
+    assert ordered.index("orders") < ordered.index("customers")
+
+
+def test_ambiguous_leaf_does_not_invent_a_parent():
+    tables = ["orders", "sales.customers", "archive.customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {"orders": _measured("orders", [_fk("", "customers")])},
+    )
+    assert ordered == tables
+    assert cycle == []
+
+
+def test_qualified_self_reference_is_not_an_edge_to_another_table():
+    tables = ["public.emp", "emp"]
+    ordered, cycle = dependency_order(
+        tables,
+        {"public.emp": _measured("public.emp", [_fk("public", "emp", child="mgr_id")])},
+    )
+    assert ordered == ["public.emp", "emp"]
+    assert cycle == []
 
 
 def test_references_outside_the_job_do_not_affect_ordering():

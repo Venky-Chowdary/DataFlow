@@ -25,6 +25,7 @@ from services.foreign_key_carry import (
     plan_foreign_keys,
     verify_foreign_keys,
 )
+from services.foreign_key_identity import same_parent_table, select_job_table
 from services.foreign_key_metadata import (
     SUPPORTED_DIALECTS,
     ForeignKeys,
@@ -85,15 +86,28 @@ def measure_source_foreign_keys(
 def dependency_order(
     tables: list[str], source_keys: dict[str, ForeignKeys]
 ) -> tuple[list[str], list[str]]:
-    """Order the selected tables parents-first. Returns (order, cycle members)."""
-    dependencies = {
-        table: {
-            fk.referenced_table
-            for fk in keys.items
-            if fk.referenced_table and fk.referenced_table.lower() != table.lower()
-        }
-        for table, keys in source_keys.items()
-    }
+    """Order the selected tables parents-first. Returns (order, cycle members).
+
+    An edge is the selected stream :func:`select_job_table` resolves, not the
+    parent's leaf name. ``archive.customers`` is not the local ``customers``
+    table. A self-reference is not an edge to a second table. An unqualified
+    name that matches two selected relations is left unordered rather than
+    bound to one of them.
+    """
+    dependencies: dict[str, set[str]] = {}
+    for table, keys in source_keys.items():
+        deps: set[str] = set()
+        for fk in keys.items:
+            parent = select_job_table(
+                fk.referenced_schema,
+                fk.referenced_table,
+                tables,
+                job_schema=keys.schema,
+            )
+            if parent is None or same_parent_table(parent, table):
+                continue
+            deps.add(parent)
+        dependencies[table] = deps
     return order_tables_by_dependency(tables, dependencies)
 
 

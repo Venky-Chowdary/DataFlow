@@ -1,14 +1,15 @@
-"""One identity for a foreign key, shared by the catalog diff and the orphan scan.
+"""One identity for a foreign key, shared by catalog diff, orphan scan, and load order.
 
 A relationship is the parent relation plus the set of (child column, parent
 column) pairs. DDL order is not a second relationship. Two schema-qualified
 names with different schemas are not the same table. An unqualified name
 matches one qualified name, because many engines omit the default schema.
 
-The catalog diff and Gate-8 must not each invent a comparison. A diff that
-ignores schema will call ``sales.parent`` carried when the destination
-constraint points at ``archive.parent``, and the orphan scan will then refuse
-that same pair.
+The catalog diff, Gate-8, and parents-first ordering must not each invent a
+comparison. A diff that ignores schema will call ``sales.parent`` carried
+when the destination constraint points at ``archive.parent``. A load order
+that ignores schema will wait on the local ``customers`` table when the
+foreign key points at ``archive.customers``.
 """
 
 from __future__ import annotations
@@ -81,6 +82,51 @@ def parent_label(schema: str, table: str) -> str:
     if schema and table:
         return f"{schema}.{table}"
     return table
+
+
+def select_job_table(
+    schema: str,
+    table: str,
+    selected: list[str],
+    *,
+    job_schema: str = "",
+) -> str | None:
+    """The one selected stream this catalog parent refers to.
+
+    Unqualified stream names are tables in ``job_schema``. A parent the catalog
+    placed in another schema matches only a selected name that carries that
+    schema. ``None`` when the parent is outside the job. Binding ``archive.customers``
+    to a local ``customers`` stream would order the wrong parent first.
+    """
+    leaf = fold(table)
+    if not leaf:
+        return None
+    parent_schema = fold(schema)
+    job = fold(job_schema)
+    effective = parent_schema or job
+    qualified = parent_label(effective, leaf) if effective else leaf
+    exact = [name for name in selected if name and fold(name) == qualified]
+    if len(exact) == 1:
+        return exact[0]
+    # A different schema never borrows an unqualified stream of the same leaf.
+    if parent_schema and job and parent_schema != job:
+        return None
+    if parent_schema and not job:
+        return None
+    bare = [
+        name
+        for name in selected
+        if name and table_parts(name)[0] is None and fold(name) == leaf
+    ]
+    if len(bare) == 1:
+        return bare[0]
+    if job:
+        in_job = [
+            name for name in selected if name and fold(name) == parent_label(job, leaf)
+        ]
+        if len(in_job) == 1:
+            return in_job[0]
+    return None
 
 
 def fk_identity(fk: Mapping[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]] | None:
