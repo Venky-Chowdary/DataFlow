@@ -15,6 +15,7 @@ from services.physical_state_diff import (
     ADVISORY_ASPECTS,
     ASPECTS,
     PhysicalState,
+    catalog_default_fact,
     compare_physical_state,
     foreign_keys_from_catalog_state,
     _has_catalog_supplied_value,
@@ -126,7 +127,7 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
         }
     ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
-    assert result["aspects"]["defaults"]["missing"] == ["note"]
+    assert result["aspects"]["defaults"]["missing"] == ["note=n"]
 
 
 def test_missing_primary_key_alone_fails(tmp_path: Path) -> None:
@@ -190,7 +191,7 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert state.primary_key == ("id",)
     assert ("code",) in state.unique_constraints
     assert state.not_null >= {"code"}
-    assert "note" in state.defaults
+    assert ("note", "n") in state.defaults
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -571,3 +572,103 @@ def test_a_carried_generator_is_not_reported_as_a_dropped_default() -> None:
     assert _has_catalog_supplied_value(mysql_auto)
     assert _has_catalog_supplied_value(pg_serial)
     assert not _has_catalog_supplied_value(plain)
+    serial = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset({catalog_default_fact(pg_serial)}),
+    )
+    identity = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset({catalog_default_fact(pg_identity)}),
+    )
+    auto = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset({catalog_default_fact(mysql_auto)}),
+    )
+    assert compare_physical_state(serial, auto)["aspects"]["defaults"]["status"] == "carried"
+    assert compare_physical_state(identity, auto)["aspects"]["defaults"]["status"] == "carried"
+    literal = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset({catalog_default_fact({"name": "id", "default": "'n'"})}),
+    )
+    drifted = compare_physical_state(literal, auto)
+    assert drifted["aspects"]["defaults"]["status"] == "absent"
+    assert drifted["aspects"]["defaults"]["missing"] == ["id=n"]
+    # DEFAULT NULL is the literal null, not an empty string and not "no default".
+    assert catalog_default_fact({"name": "note", "default": "NULL"}) == ("note", "null")
+    assert catalog_default_fact({"name": "note", "default": "''"}) == ("note", "")
+
+
+def test_a_different_default_expression_is_absent(tmp_path: Path) -> None:
+    """DEFAULT 'n' is not DEFAULT 'x'. The column name alone is not the rule."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, note TEXT DEFAULT 'n')",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, note TEXT DEFAULT 'x')",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert result["aspects"]["defaults"]["status"] == "absent"
+    assert result["aspects"]["defaults"]["missing"] == ["note=n"]
+    assert result["aspects"]["defaults"]["extra"] == ["note=x"]
+
+
+def test_equivalent_default_spellings_are_the_same_rule(tmp_path: Path) -> None:
+    """Case, wrapping parens and numeric scale are one rule in the live catalog."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src ("
+        "id INTEGER PRIMARY KEY, "
+        "note TEXT DEFAULT 'N', "
+        "qty NUMERIC DEFAULT 1.0"
+        ")",
+        "CREATE TABLE dst ("
+        "id INTEGER PRIMARY KEY, "
+        "note TEXT DEFAULT ('n'), "
+        "qty NUMERIC DEFAULT 1"
+        ")",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["defaults"]["status"] == "carried"
+    assert result["aspects"]["defaults"]["missing"] == []
+    assert result["verified"] is True
+
+
+def test_clock_and_cast_spellings_are_the_same_default_rule() -> None:
+    """The catalog diff uses the shared expression rule, not a second copy of it.
+
+    ``CURRENT_TIMESTAMP(6)`` and ``now()`` are one clock. A cast and a national
+    string are one literal. SQLite will not store ``now()`` as a default, so
+    these are the texts the inspector returns on the engines that do.
+    """
+    source = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset(
+            {
+                catalog_default_fact(
+                    {"name": "ts", "default": "CURRENT_TIMESTAMP(6)"}
+                ),
+                catalog_default_fact(
+                    {"name": "status", "default": "('active'::character varying)"}
+                ),
+            }
+        ),
+    )
+    destination = PhysicalState(
+        found=True,
+        readable=True,
+        defaults=frozenset(
+            {
+                catalog_default_fact({"name": "ts", "default": "now()"}),
+                catalog_default_fact({"name": "status", "default": "N'active'"}),
+            }
+        ),
+    )
+    result = compare_physical_state(source, destination)
+    assert result["aspects"]["defaults"]["status"] == "carried"
+    assert result["aspects"]["defaults"]["missing"] == []
+    assert result["verified"] is True

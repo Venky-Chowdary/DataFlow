@@ -3,9 +3,9 @@
 A migration can move every row and still hand the client a broken database:
 the primary key never made it, a unique constraint was dropped, a foreign key
 is missing, an index the application depends on was never created, a NOT NULL
-became nullable, or a column default was lost. None of that is visible to a
-row-level checksum, so it is read here from the *catalog* — on a connection of
-this module's own, never from writer bookkeeping.
+became nullable, or a column default was lost or rewritten. None of that is
+visible to a row-level checksum, so it is read here from the *catalog* — on a
+connection of this module's own, never from writer bookkeeping.
 
 Every aspect answers one of four honest states:
 
@@ -243,7 +243,9 @@ class PhysicalState:
     ] = ()
     indexes: frozenset[tuple[str, ...]] = frozenset()
     not_null: frozenset[str] = frozenset()
-    defaults: frozenset[str] = frozenset()
+    #: ``(column, normalized expression)``. A sequence or identity with no
+    #: literal is the fill-in sentinel, not a second copy of some other default.
+    defaults: frozenset[tuple[str, str]] = frozenset()
     check_constraints: frozenset[str] = frozenset()
     triggers: frozenset[tuple[str, ...]] = frozenset()
     views: frozenset[str] = frozenset()
@@ -269,7 +271,9 @@ class PhysicalState:
             ],
             "indexes": sorted("+".join(i) for i in self.indexes),
             "not_null": sorted(self.not_null),
-            "defaults": sorted(self.defaults),
+            "defaults": sorted(
+                _render_default(column, expr) for column, expr in self.defaults
+            ),
             "check_constraints": sorted(self.check_constraints),
             "triggers": sorted(_render_trigger(t) for t in self.triggers),
             "views": sorted(self.views),
@@ -303,6 +307,65 @@ def _catalog_dialect(db_type: str) -> str:
     return _DIALECT_ALIASES.get(key, key)
 
 
+# A catalog that fills the column without a literal (identity, AUTO_INCREMENT,
+# computed). Not a string a DEFAULT clause can normalize to.
+_GENERATED_DEFAULT = "\x00generated"
+
+
+def _default_sql(value: Any) -> str:
+    """The SQL text of a reflected default, without the driver's wrapper object."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    text = getattr(value, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    arg = getattr(value, "arg", None)
+    if arg is not None and arg is not value:
+        return _default_sql(arg)
+    return str(value).strip()
+
+
+def _is_sequence_default(expr: str) -> bool:
+    return expr.startswith("nextval(")
+
+
+def _is_fill_in(expr: str) -> bool:
+    """Sequence, identity, or AUTO_INCREMENT: the column is filled, not a literal."""
+    return expr == _GENERATED_DEFAULT or _is_sequence_default(expr)
+
+
+def catalog_default_fact(col: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(column, expression)`` the catalog stored, or None when it stores nothing.
+
+    A literal is the normalized expression, so ``'N'`` and ``('n')`` are one
+    fact. A generator with no literal is one fill-in fact: PostgreSQL identity
+    and MySQL AUTO_INCREMENT both record that the engine supplies the value.
+    The sequence name and the computed expression are not this fact.
+    """
+    name = _fold(col.get("name"))
+    if not name:
+        return None
+    if col.get("default") is not None:
+        from services.default_expression import normalize_default_expr
+
+        return name, normalize_default_expr(_default_sql(col.get("default")))
+    if col.get("identity") or col.get("autoincrement") is True or col.get("computed"):
+        return name, _GENERATED_DEFAULT
+    return None
+
+
+def _render_default(column: str, expr: str) -> str:
+    if expr == _GENERATED_DEFAULT:
+        shown = "generated"
+    elif expr == "":
+        shown = "''"
+    else:
+        shown = expr
+    return f"{column}={shown}"
+
+
 def _has_catalog_supplied_value(col: Any) -> bool:
     """Does the catalog supply this column's value when the writer sends none?
 
@@ -311,15 +374,10 @@ def _has_catalog_supplied_value(col: Any) -> bool:
     all. Reading only ``default`` therefore reported a faithfully carried
     generator as a dropped default on every PostgreSQL→MySQL move. The counter's
     own health (next value past the migrated maximum) is proven separately by
-    ``services.identity_watermark``; this aspect answers only whether the
-    destination still fills the column in for the application.
+    ``services.identity_watermark``. Whether two literals are the same rule is
+    :func:`catalog_default_fact`.
     """
-    return bool(
-        col.get("default") is not None
-        or col.get("computed")
-        or col.get("identity")
-        or col.get("autoincrement") is True
-    )
+    return catalog_default_fact(col) is not None
 
 
 def _cols(values: Any) -> tuple[str, ...]:
@@ -452,15 +510,16 @@ def read_physical_state(
         )
 
     not_null: set[str] = set()
-    defaults: set[str] = set()
+    defaults: set[tuple[str, str]] = set()
     for col in columns or []:
         col_name = _fold(col.get("name"))
         if not col_name:
             continue
         if col.get("nullable") is False:
             not_null.add(col_name)
-        if _has_catalog_supplied_value(col):
-            defaults.add(col_name)
+        fact = catalog_default_fact(col)
+        if fact is not None:
+            defaults.add(fact)
 
     unique_sets = {
         _cols(u.get("column_names")) for u in uniques or [] if u.get("column_names")
@@ -955,6 +1014,56 @@ def _diff_uniqueness(
     }
 
 
+def _defaults_equivalent(left: str, right: str) -> bool:
+    """Same literal rule, or both sides still fill the column in."""
+    if left == right or (_is_fill_in(left) and _is_fill_in(right)):
+        return True
+    from services.default_expression import default_exprs_equivalent
+
+    return default_exprs_equivalent(left, right)
+
+
+def _diff_defaults(
+    source: frozenset[tuple[str, str]],
+    destination: frozenset[tuple[str, str]],
+) -> dict[str, Any]:
+    """Carried when each source default has the same rule on that column.
+
+    ``DEFAULT 'n'`` is not ``DEFAULT 'x'``. ``'N'``, ``('n')`` and ``n`` are
+    one literal. ``CURRENT_TIMESTAMP`` and ``now()`` are one clock. A
+    ``nextval`` default and an AUTO_INCREMENT with no literal are one fill-in:
+    both engines supply the value. A literal replaced by that fill-in is absent.
+    """
+    src = list(source)
+    dst = list(destination)
+    used: set[int] = set()
+    missing: list[str] = []
+    for column, expr in src:
+        match = None
+        for index, (other_column, other_expr) in enumerate(dst):
+            if index in used or other_column != column:
+                continue
+            if _defaults_equivalent(expr, other_expr):
+                match = index
+                break
+        if match is None:
+            missing.append(_render_default(column, expr))
+        else:
+            used.add(match)
+    extra = [
+        _render_default(column, expr)
+        for index, (column, expr) in enumerate(dst)
+        if index not in used
+    ]
+    return {
+        "status": "carried" if not missing else "absent",
+        "missing": sorted(missing),
+        "extra": sorted(extra),
+        "source_count": len(src),
+        "destination_count": len(dst),
+    }
+
+
 def _diff_sets(source: frozenset, dest: frozenset) -> dict[str, Any]:
     missing = sorted(_render(v) for v in source - dest)
     extra = sorted(_render(v) for v in dest - source)
@@ -1004,7 +1113,7 @@ def compare_physical_state(
         ),
         "indexes": _diff_sets(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
-        "defaults": _diff_sets(source.defaults, destination.defaults),
+        "defaults": _diff_defaults(source.defaults, destination.defaults),
         "check_constraints": _diff_sets(
             source.check_constraints, destination.check_constraints
         ),
