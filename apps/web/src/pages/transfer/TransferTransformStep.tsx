@@ -797,7 +797,13 @@ export function TransferTransformStep({
             <h4>Pre-load image — source names plus derived columns. Map renames to destination names.</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
-                {steps.length ? "No rows survive the recipe on this sample." : "Nothing transformed yet."}
+                {previewError
+                  ? "The preview did not run. The recipe was refused before any row was removed."
+                  : busy
+                    ? "Checking this recipe against the sample."
+                    : steps.length
+                      ? "No rows survive the recipe on this sample."
+                      : "Nothing transformed yet."}
               </p>
             ) : (
               <div className="df2-xform-scroll">

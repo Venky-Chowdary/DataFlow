@@ -1760,6 +1760,70 @@ def parse_to_number(text: str) -> dict[str, Any] | None:
     return None
 
 
+_SHORTHAND_FACTOR = re.compile(
+    r"^(?P<lit>[A-Za-z_][\w.]*)\s*\*\s*(?P<factor>-?\d+(?:\.\d+)?)$"
+)
+_ARITH_FACTOR = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s*\*\s*(?P<factor>-?\d+(?:\.\d+)?)$"
+)
+_EQ_BARE = re.compile(
+    r"^(?P<col>[A-Za-z_][\w.]*)\s*=\s*(?P<val>[A-Za-z_][\w.]*)$"
+)
+_EXTRACT_DOMAIN = re.compile(
+    r"\bextract\s+(?:the\s+)?(?:email\s+)?domain\b|"
+    r"\b(?:extract|take)\s+(?:the\s+)?(?:domain|part)\s+after\s+@",
+    re.I,
+)
+
+
+def _split_unquoted_semi(text: str) -> list[str]:
+    """Split on ``;`` that are not inside quotes."""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    for ch in text or "":
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch == ";":
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            continue
+        buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _value_expr(text: str) -> str:
+    """THEN/ELSE payload: a number, a shape expression, or a text literal.
+
+    ``monthly_salary * 5`` is arithmetic. Quoting that whole clause stored
+    the sentence as credit_limit. ``'VIP'`` stays a literal.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    assigned = re.match(r"^[A-Za-z_][\w.]*\s*=\s*(.+)$", raw)
+    value = (assigned.group(1) if assigned else raw).strip()
+    if re.fullmatch(r"-?[\d.]+", value):
+        return value
+    if re.search(r"\b(?:if|is_null|is_not_null|coalesce)\s*\(", value, re.I):
+        return value
+    if re.search(r"[A-Za-z_][\w.]*\s*[*+\-/]\s*-?[\d.]+", value):
+        return re.sub(r"\s+", " ", value.replace("×", "*"))
+    return _quote_lit(value)
+
+
 def parse_spoken_if(text: str) -> dict[str, Any] | None:
     """Spoken IF cond THEN value ELSE value → shape if(), or review."""
     raw = (text or "").strip()
@@ -1778,9 +1842,51 @@ def parse_spoken_if(text: str) -> dict[str, Any] | None:
                 "This compiler will not invent it."
             ),
         }
+    clauses = _split_unquoted_semi(match.group("then") or "")
+    if not clauses:
+        return None
     cond = _rewrite_spoken_pred(match.group("cond") or "")
-    then_ = _assignment_or_value(match.group("then") or "")
-    else_ = _assignment_or_value(match.group("else") or "")
+    first = clauses[0]
+    rest = clauses[1:]
+    eq = _EQ_BARE.match(cond.strip())
+    arith = _ARITH_FACTOR.match(first.strip())
+    shorthand: list[tuple[str, str]] = []
+    if rest and eq and arith:
+        for clause in rest:
+            factor = _SHORTHAND_FACTOR.match(clause.strip())
+            if not factor:
+                shorthand = []
+                break
+            shorthand.append((factor.group("lit"), factor.group("factor")))
+    if rest and not shorthand:
+        return {
+            "kind": "unknown",
+            "plane": "review",
+            "confidence": 0.4,
+            "reason": (
+                "Conditional branches after ';' did not bind. Each extra "
+                "branch is a value times a factor (Silver*3), using the same "
+                "column as the first comparison. It was not applied."
+            ),
+        }
+    if shorthand and eq and arith:
+        subject = eq.group("col")
+        first_lit = eq.group("val")
+        col = arith.group("col")
+        factor = arith.group("factor")
+        expr = "null"
+        for lit, fac in reversed(shorthand):
+            expr = f"if({subject} = {lit}, {col} * {fac}, {expr})"
+        expr = f"if({subject} = {first_lit}, {col} * {factor}, {expr})"
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.93,
+            "interpretation": "Conditional",
+            "expression": expr,
+        }
+    then_ = _value_expr(first)
+    else_ = _value_expr(match.group("else") or "")
     if not cond or not then_:
         return None
     null_only = re.fullmatch(r"is_null\(([A-Za-z_][\w.]*)\)", cond)
@@ -1894,6 +2000,59 @@ def _quote_lit(value: str) -> str:
 def json_escape(value: str) -> str:
     """Shape-expr text literal. The tokenizer accepts SQL single quotes."""
     return "'" + (value or "").replace("'", "''") + "'"
+
+
+_COMPARE_OPS = {"=", "==", "!=", "<>", "<", "<=", ">", ">="}
+
+
+def bind_comparison_literals(expr: str, known_columns: list[str]) -> str:
+    """Quote a comparison's right-hand word when it is not a source column.
+
+    ``tier = Gold`` means the value Gold on column tier. Leaving Gold bare
+    makes the recipe engine look for a column named Gold and refuse the load.
+    A word that is a real column stays a column (``amount > salary``).
+    A case-only mismatch stays bare so the recipe check can name the spelling.
+    """
+    from services.shape_expr import ExpressionError, _tokenize
+
+    text = (expr or "").strip()
+    if not text or not known_columns:
+        return text
+    try:
+        tokens = _tokenize(text)
+    except ExpressionError:
+        return text
+    known = set(known_columns)
+    folded = {col.casefold() for col in known_columns}
+    pieces: list[str] = []
+    quoted = False
+    for index, token in enumerate(tokens):
+        if token.kind == "end":
+            break
+        prev = tokens[index - 1] if index else None
+        nxt = tokens[index + 1]
+        rhs_word = (
+            token.kind == "name"
+            and prev is not None
+            and prev.kind == "punct"
+            and prev.text in _COMPARE_OPS
+            and not (nxt.kind == "punct" and nxt.text == "(")
+            and token.text not in known
+            and token.text.casefold() not in folded
+        )
+        if rhs_word:
+            pieces.append(json_escape(token.text))
+            quoted = True
+        elif token.kind == "string":
+            pieces.append(json_escape(token.text))
+        else:
+            pieces.append(token.text)
+    # An expression with no value-literal stays byte-for-byte. Rewriting
+    # ``concat('US-', code)`` into spaced tokens would change a recipe that
+    # already checked.
+    if not quoted:
+        return text
+    return " ".join(pieces)
 
 
 def _condition(col: str, op: str, val: str) -> str:
@@ -2301,14 +2460,33 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
     if padded:
         padded.update(flags)
         return padded
+    if _EXTRACT_DOMAIN.search(raw):
+        return {
+            "kind": "derive",
+            "plane": "shape",
+            "confidence": 0.94,
+            "interpretation": "Email domain",
+            "expression": "split_part({source}, '@', 2)",
+            **flags,
+        }
     if _DATE_ARITH.search(raw):
+        year = bool(re.search(r"\byear\b", raw, re.I)) and not re.search(
+            r"\b(?:dateadd|datediff|date_add|date_sub|date_part|datepart|timestampadd|timestampdiff)\b",
+            raw,
+            re.I,
+        )
         return {
             "kind": "unknown",
             "plane": "review",
             "confidence": 0.4,
             "reason": (
-                "EXTRACT / DATEADD / DATEDIFF is not parse_date. Name a "
-                "row-local derive — a year extract stored as a date is silent loss."
+                "A 4-digit year extract is not parse_date. Name the year as a "
+                "number derive — storing a year in a date column is silent loss."
+                if year
+                else (
+                    "EXTRACT / DATEADD / DATEDIFF is not parse_date. Name a "
+                    "row-local derive — a year extract stored as a date is silent loss."
+                )
             ),
             **flags,
         }

@@ -2193,3 +2193,217 @@ def test_validation_severity_is_not_a_source_column():
     expr = step["shape_step"]["options"]["expression"]
     compile_expression(expr)
     assert expr.startswith("concat('")
+
+
+def test_comparison_literals_are_values_not_columns():
+    """tier = Gold is the value Gold. A real column named Gold stays a column."""
+    from services.rule_compiler.classify import bind_comparison_literals
+
+    assert bind_comparison_literals(
+        "tier = Gold", ["tier", "monthly_salary"],
+    ) == "tier = 'Gold'"
+    assert bind_comparison_literals("amount > salary", ["amount", "salary"]) == "amount > salary"
+    assert bind_comparison_literals("concat('US-', code)", ["code"]) == "concat('US-', code)"
+    # Case-only mismatch stays bare so the recipe check can name the spelling.
+    assert bind_comparison_literals("tier = Gold", ["tier", "gold"]) == "tier = Gold"
+
+
+def test_credit_limit_gold_is_a_literal_and_domain_is_not_a_date():
+    """Critical workbook: executable means the recipe checks, then the row matches.
+
+    Gold / Silver / Bronze are values of tier. Extract-domain is split_part.
+    A year extract stays in review. Join stays in review. Coverage is not the goal.
+    """
+    from decimal import Decimal
+
+    from services.rule_compiler.apply import apply_compiled_projection
+    from services.shape_expr import compile_expression
+
+    src = [
+        "customer_id", "first_name", "last_name", "email", "status", "state",
+        "monthly_salary", "dob", "marketing_opt_in", "signup_date",
+        "orders_count", "tier", "phone",
+    ]
+    dst = [
+        "annual_salary", "credit_limit", "email_domain", "signup_year",
+        "customer_master_id",
+    ]
+    csv = (
+        "Source_Column,Destination_Column,Business_Rule\n"
+        "monthly_salary,annual_salary,monthly_salary * 12\n"
+        "monthly_salary,credit_limit,"
+        "If tier=Gold then monthly_salary*5; Silver*3; Bronze*1\n"
+        "email,email_domain,Extract domain after @\n"
+        "signup_date,signup_year,Extract 4-digit year from signup_date\n"
+        "customer_id,customer_master_id,"
+        "Join customer_id to master table and use surviving master ID\n"
+    )
+    report = compile_rule_workbook(
+        "critical.csv",
+        csv.encode(),
+        source_columns=src,
+        dest_columns=dst,
+    )
+    by_dest = {
+        r["dest_column"]: r
+        for r in report["rules"]
+        if r.get("dest_column")
+    }
+    credit = by_dest["credit_limit"]
+    assert credit["status"] == "executable"
+    assert credit["kind"] == "derive"
+    expr = credit["shape_step"]["options"]["expression"]
+    assert "'Gold'" in expr and "'Silver'" in expr and "'Bronze'" in expr
+    assert "monthly_salary * 5" in expr
+    compiled = compile_expression(expr, known_columns=src)
+    assert "Gold" not in compiled.columns
+    assert compiled.evaluate({"tier": "Gold", "monthly_salary": 5000}) == Decimal(25000)
+    assert compiled.evaluate({"tier": "Silver", "monthly_salary": 7200}) == Decimal(21600)
+    assert compiled.evaluate({"tier": "Bronze", "monthly_salary": 4500}) == Decimal(4500)
+    assert compiled.evaluate({"tier": "Platinum", "monthly_salary": 1000}) is None
+
+    domain = by_dest["email_domain"]
+    assert domain["status"] == "executable"
+    domain_expr = domain["shape_step"]["options"]["expression"]
+    assert domain_expr == "split_part(email, '@', 2)"
+    assert "EXTRACT / DATEADD" not in " ".join(domain.get("issues") or [])
+    assert compile_expression(domain_expr, known_columns=src).evaluate(
+        {"email": "john.smith@example.com"}
+    ) == "example.com"
+
+    year = by_dest["signup_year"]
+    assert year["status"] == "needs_confirmation"
+    assert year.get("shape_step") is None
+    year_issues = " ".join(year.get("issues") or [])
+    assert "year" in year_issues.lower()
+    assert "EXTRACT / DATEADD" not in year_issues
+
+    join = by_dest["customer_master_id"]
+    assert join["status"] == "needs_confirmation"
+    assert join.get("shape_step") is None
+
+    assert "last_name" in report["unmapped_source_columns"]
+    for rule in report["rules"]:
+        if rule.get("status") != "executable":
+            continue
+        step = rule.get("shape_step") or {}
+        if step.get("op") != "derive_column":
+            continue
+        compile_expression(
+            step["options"]["expression"],
+            known_columns=src + ["annual_salary", "credit_limit", "email_domain"],
+        )
+
+    applied = apply_compiled_projection(
+        report,
+        source_table="",
+        rows=[
+            {"tier": "Gold", "monthly_salary": 5000, "email": "john.smith@example.com"},
+            {"tier": "Silver", "monthly_salary": 7200, "email": "MARIA.G@EXAMPLE.COM"},
+            {"tier": "Bronze", "monthly_salary": 4500, "email": "pat@example.com"},
+            {"tier": "Platinum", "monthly_salary": 1000, "email": ""},
+        ],
+        source_columns=src,
+    )
+    dest = applied["destinations"][0]
+    assert dest["written"] == 4
+    assert dest["refused"] == 0
+    images = dest["rows"]
+    assert int(images[0]["credit_limit"]) == 25000
+    assert int(images[0]["annual_salary"]) == 60000
+    assert images[0]["email_domain"] == "example.com"
+    assert int(images[1]["credit_limit"]) == 21600
+    assert images[1]["email_domain"] == "EXAMPLE.COM"
+    assert int(images[2]["credit_limit"]) == 4500
+    assert images[3]["credit_limit"] is None
+    assert "signup_year" not in images[0]
+    assert "customer_master_id" not in images[0]
+
+
+def test_a_real_column_named_gold_is_not_quoted():
+    csv = (
+        "Source_Column,Destination_Column,Business_Rule\n"
+        "monthly_salary,credit_limit,If tier=Gold then monthly_salary*5\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "gold-column.csv",
+        csv,
+        source_columns=["tier", "monthly_salary", "Gold"],
+        dest_columns=["credit_limit"],
+    )
+    rule = next(r for r in report["rules"] if r.get("dest_column") == "credit_limit")
+    assert rule["status"] == "executable"
+    expr = rule["shape_step"]["options"]["expression"]
+    assert "'Gold'" not in expr
+    from services.shape_expr import compile_expression
+
+    compiled = compile_expression(
+        expr, known_columns=["tier", "monthly_salary", "Gold"],
+    )
+    assert "Gold" in compiled.columns
+    # Column-to-column: tier equals the Gold column, not the word Gold.
+    assert compiled.evaluate(
+        {"tier": "Gold", "monthly_salary": 5000, "Gold": "nope"}
+    ) is None
+    assert int(compiled.evaluate(
+        {"tier": "Gold", "monthly_salary": 5000, "Gold": "Gold"}
+    )) == 25000
+
+
+def test_case_only_column_spelling_is_review_not_a_silent_literal():
+    csv = (
+        "Source_Column,Destination_Column,Business_Rule\n"
+        "monthly_salary,credit_limit,If tier=Gold then monthly_salary*5\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "gold-case.csv",
+        csv,
+        source_columns=["tier", "monthly_salary", "gold"],
+        dest_columns=["credit_limit"],
+    )
+    rule = next(r for r in report["rules"] if r.get("dest_column") == "credit_limit")
+    assert rule["status"] == "needs_confirmation"
+    assert rule.get("shape_step") is None
+    assert "gold" in " ".join(rule.get("issues") or []).lower()
+
+
+def test_unbound_derive_is_not_called_executable():
+    csv = (
+        "Source_Column,Destination_Column,Business_Rule\n"
+        "monthly_salary,bonus,phantom * 2\n"
+    ).encode()
+    report = compile_rule_workbook(
+        "phantom.csv",
+        csv,
+        source_columns=["monthly_salary"],
+        dest_columns=["bonus"],
+    )
+    rule = next(r for r in report["rules"] if r.get("dest_column") == "bonus")
+    assert rule["status"] == "needs_confirmation"
+    assert rule.get("shape_step") is None
+    assert "phantom" in " ".join(rule.get("issues") or [])
+    assert not any(
+        (step.get("options") or {}).get("expression", "").startswith("phantom")
+        for step in report["shape_steps"]
+    )
+
+
+def test_arithmetic_without_a_schema_stays_executable():
+    """No column list means the prove gate cannot name a literal. Do not demote."""
+    bare = compile_rule_workbook(
+        "arith.csv",
+        b"Source_Column,Destination_Column,Business_Rule\nsalary,annual,salary * 12\n",
+    )
+    rule = bare["rules"][0]
+    assert rule["status"] == "executable"
+    assert "salary * 12" in rule["shape_step"]["options"]["expression"]
+
+    checked = compile_rule_workbook(
+        "arith.csv",
+        b"Source_Column,Destination_Column,Business_Rule\nsalary,annual,salary * 12\n",
+        source_columns=["salary"],
+        dest_columns=["annual"],
+    )
+    proven = checked["rules"][0]
+    assert proven["status"] == "executable"
+    assert proven["shape_step"]["options"]["expression"] == "salary * 12"

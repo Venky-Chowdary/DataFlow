@@ -489,8 +489,6 @@ def compile_rule_workbook(
             _mark_edge_conflicts(item, seen_edges, seen_dest)
             _refresh_status_fields(item)
             compiled.append(item)
-            for step in _item_shape_steps(item):
-                shape_steps.append(step)
             join_item = _join_review_item(work, source_table, dest_table)
             if join_item:
                 key = (
@@ -564,6 +562,11 @@ def compile_rule_workbook(
         )
         _refresh_status_fields(item)
         compiled.append(item)
+
+    _prove_executable_recipes(compiled, src_cols)
+    shape_steps = []
+    for item in compiled:
+        shape_steps.extend(_item_shape_steps(item))
 
     overflow_steps: list[dict[str, Any]] = []
     if len(shape_steps) > _MAX_SHAPE_STEPS:
@@ -686,6 +689,10 @@ def compile_rule_workbook(
             "and identity/generated dest writes. LPAD/RPAD use a named fill "
             "(space unless written). MD5/SHA is hash_pii, not email/phone. "
             "TO_CHAR number masks and EXTRACT/DATEADD stay in review. "
+            "A comparison word that is not a column is a literal: tier = Gold "
+            "is the value Gold. Executable means that derive checks against "
+            "the columns present when the step runs — a recipe the engine "
+            "would refuse stays in review. "
             "Lookup payloads must match "
             "the dest type family; leading-zero codes onto a number dest stay "
             "in review. NOW/TODAY/UUID/RAND are not deterministic. "
@@ -1672,15 +1679,19 @@ def _compile_row(
         }
         transform = "none"
     elif kind == "derive" and dest_column and status == "executable":
-        expr = str(classified.get("expression") or "")
-        shape_step = {
-            "op": "derive_column",
-            "column": "",
-            "enabled": True,
-            "on_error": "refuse",
-            "label": f"{spoken_src or source_column}: {rule_text}"[:80],
-            "options": {"to": dest_column, "expression": _bind_expression(expr, source_column)},
-        }
+        expr = _bind_expression(str(classified.get("expression") or ""), source_column)
+        if not expr:
+            issues.append("This derive names no source column to bind.")
+            status = "needs_confirmation"
+        else:
+            shape_step = {
+                "op": "derive_column",
+                "column": "",
+                "enabled": True,
+                "on_error": "refuse",
+                "label": f"{spoken_src or source_column}: {rule_text}"[:80],
+                "options": {"to": dest_column, "expression": expr},
+            }
         map_source = dest_column
         transform = "none"
     elif kind == "substr" and dest_column and status == "executable":
@@ -2232,11 +2243,82 @@ def _join_review_item(
 
 
 def _bind_expression(expr: str, source_column: str) -> str:
-    """Use the bound column name inside a derived expression when possible."""
+    """Substitute the bound source column. Literals are quoted later, once
+    every prior derive has been added to the column set.
+    """
     text = (expr or "").strip()
     if not text:
         return source_column
+    if "{source}" in text:
+        if not source_column:
+            return ""
+        text = text.replace("{source}", source_column)
     return text
+
+
+def _step_output_name(step: dict[str, Any]) -> str:
+    options = step.get("options") if isinstance(step.get("options"), dict) else {}
+    return str((options or {}).get("to") or step.get("column") or "").strip()
+
+
+def _demote_unproven(item: dict[str, Any], reason: str) -> None:
+    """An executable rule whose recipe does not check is not executable."""
+    item["status"] = "needs_confirmation"
+    issues = [str(issue) for issue in (item.get("issues") or [])]
+    if reason and reason not in issues:
+        issues.append(reason)
+    item["issues"] = issues
+    item["shape_step"] = None
+    item["shape_steps"] = []
+    _refresh_status_fields(item)
+
+
+def _prove_executable_recipes(compiled: list[dict[str, Any]], source_columns: list[str]) -> None:
+    """Quote value literals, then refuse any derive the recipe engine would.
+
+    Executable means the expression checks against the columns that exist
+    when that step runs. A counted file that later says column 'Gold' is
+    missing was marked executable too early.
+    """
+    if not source_columns:
+        return
+    from services.rule_compiler.classify import bind_comparison_literals
+    from services.shape_expr import ExpressionError, compile_expression
+
+    known = [col for col in source_columns if col]
+    for item in compiled:
+        if item.get("status") != "executable":
+            continue
+        steps: list[dict[str, Any]] = []
+        primary = item.get("shape_step")
+        if isinstance(primary, dict):
+            steps.append(primary)
+        steps.extend(
+            step for step in (item.get("shape_steps") or []) if isinstance(step, dict)
+        )
+        failed = ""
+        added: list[str] = []
+        for step in steps:
+            if str(step.get("op") or "") == "derive_column":
+                options = step.get("options") if isinstance(step.get("options"), dict) else {}
+                expr = str((options or {}).get("expression") or "")
+                bound = bind_comparison_literals(expr, known)
+                try:
+                    compile_expression(bound, known_columns=known, label="step expression")
+                except ExpressionError as exc:
+                    failed = str(exc)
+                    break
+                options["expression"] = bound
+                step["options"] = options
+            produced = _step_output_name(step)
+            if produced and produced not in known:
+                known.append(produced)
+                added.append(produced)
+        if failed:
+            for name in added:
+                if name in known:
+                    known.remove(name)
+            _demote_unproven(item, failed)
 
 
 def compile_or_error(filename: str, payload: bytes, **kwargs: Any) -> dict[str, Any]:
