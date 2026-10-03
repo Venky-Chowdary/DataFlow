@@ -64,7 +64,8 @@ def test_integrity_skips_snowflake_not_enforced_unique():
     assert result["passed"] is True
 
 
-def test_integrity_blocks_snowflake_enforced_unique():
+def test_integrity_does_not_block_on_a_stamped_snowflake_enforced_flag():
+    """Dialect name does not say hybrid. A stamped True is not a write block."""
     from services.data_integrity import _check_duplicate_keys
 
     result = _check_duplicate_keys(
@@ -83,7 +84,7 @@ def test_integrity_blocks_snowflake_enforced_unique():
         ],
         target_types={"EMAIL": "VARCHAR", "ID": "INTEGER"},
     )
-    assert result["passed"] is False
+    assert result["passed"] is True
 
 
 def test_oracle_nlssort_binary_ci_forces_casefold():

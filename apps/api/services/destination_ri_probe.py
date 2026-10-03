@@ -58,6 +58,7 @@ from services.foreign_key_identity import (
     parent_label as _parent_label,
     parse_foreign_key,
     relationship_identity,
+    relocated_parent_schema,
     same_relationship as _same_relationship,
 )
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
@@ -129,6 +130,7 @@ def verify_destination_referential_integrity(
     schema: str = "",
     table: str,
     foreign_keys: list[dict[str, Any]] | None = None,
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Prove every source relationship still holds in the destination data.
 
@@ -189,6 +191,17 @@ def verify_destination_referential_integrity(
             parent_cols = list(parsed.parent_columns)
             parent_schema = _fold(parsed.parent_schema)
             parent_table = _fold(parsed.parent_table)
+            relocated = relocated_parent_schema(
+                parsed.parent_schema,
+                source_schema=source_schema,
+                dest_schema=schema,
+                in_job=False,
+            )
+            if relocated:
+                # The catalog still names the schema the rows were copied from.
+                # An enforced key aimed at that table is not proof the destination
+                # schema's parent holds these rows.
+                parent_schema = _fold(relocated)
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,

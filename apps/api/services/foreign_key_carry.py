@@ -45,7 +45,13 @@ from typing import Any
 from connectors.sql_identifiers import quote_sql_identifier
 from services.fk_tuple_scan import match_rule_label, match_rules_agree, normalize_match
 from services.dialect_profiles import quote_char_for
-from services.foreign_key_identity import fk_identity, fold, same_relationship, select_job_table
+from services.foreign_key_identity import (
+    fk_identity,
+    fold,
+    relocated_parent_schema,
+    same_relationship,
+    select_job_table,
+)
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
@@ -656,12 +662,74 @@ def plan_foreign_keys(
         parent_stream = resolve_parent_stream(fk, table_map, source_schema)
         in_job = parent_stream is not None
         ref_dest = tmap.get(fold(parent_stream), parent_stream) if parent_stream else ref_source
-        parent_schema = parent_relation_schema(
+        relocated = relocated_parent_schema(
+            fk.referenced_schema,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+            in_job=in_job,
+        )
+        parent_schema = relocated or parent_relation_schema(
             source_schema=fk.referenced_schema,
             dest_schema=dest_schema,
             in_job=in_job,
         )
-        if not in_job:
+        if not in_job and relocated:
+            present = parent_table_on_destination(
+                schema="",
+                table=ref_dest,
+                job_schema=dest_schema,
+                in_job=False,
+                job_tables=known_tables,
+                tables_by_schema=None,
+            )
+            qualified = (
+                f"{fk.referenced_schema}.{ref_source}"
+                if fk.referenced_schema
+                else ref_source
+            )
+            if present is None:
+                plan.decisions.append(
+                    ForeignKeyDecision(
+                        name=fk.name,
+                        status="unknown",
+                        reason=(
+                            f"Referenced table '{qualified}' is the schema the rows "
+                            "were copied from, and the destination schema "
+                            f"{dest_schema or '(default)'} could not be listed, so "
+                            "the key is unverified. The source table is not the "
+                            "destination parent."
+                        ),
+                        source_detail=detail,
+                        dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
+                        referenced_table=ref_dest,
+                        referenced_stream="",
+                    )
+                )
+                continue
+            if not present:
+                plan.decisions.append(
+                    ForeignKeyDecision(
+                        name=fk.name,
+                        status="unsupported",
+                        reason=(
+                            f"Referenced table '{qualified}' is not in this job and "
+                            f"{ref_source} is not in destination schema "
+                            f"{dest_schema or '(default)'}. A foreign key back to "
+                            "the source schema would hide orphans in the destination "
+                            "parent."
+                        ),
+                        source_detail=detail,
+                        dest_table=dest_table,
+                        source_table=child_stream,
+                        referenced_schema=parent_schema,
+                        referenced_table=ref_dest,
+                        referenced_stream="",
+                    )
+                )
+                continue
+        elif not in_job:
             present = parent_table_on_destination(
                 schema=fk.referenced_schema,
                 table=ref_dest,

@@ -877,6 +877,7 @@ def _referential_integrity_evidence(
     schema: str,
     table: str,
     schema_state: dict[str, Any],
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Orphan proof for every source relationship the destination does not enforce."""
     foreign_keys, unparsed = _source_foreign_keys(schema_state)
@@ -906,6 +907,7 @@ def _referential_integrity_evidence(
         schema=schema,
         table=table,
         foreign_keys=foreign_keys,
+        source_schema=source_schema,
     )
     evidence["asked"] = True
     if unparsed:
@@ -1893,12 +1895,24 @@ def run_reconciliation(
         }
 
     try:
+        ri_source_schema = ""
+        if source_endpoint is not None and source_endpoint.kind == "database":
+            from services.dialect_profiles import schema_from_cfg
+
+            from .connector_capabilities import resolve_driver_type
+
+            ri_src_cfg = resolve_connector_config(source_endpoint)
+            ri_src_type = resolve_driver_type(
+                str(ri_src_cfg.get("type") or source_endpoint.format or "")
+            ).lower()
+            ri_source_schema = str(schema_from_cfg(ri_src_type, ri_src_cfg) or "")
         ri_state = _referential_integrity_evidence(
             db_type=db_type,
             cfg=cfg,
             schema=str(schema or ""),
             table=str(table_name or ""),
             schema_state=schema_state,
+            source_schema=ri_source_schema,
         )
         physical_state["referential_integrity"] = ri_state
         n5_ctx["source_has_fks"] = bool(

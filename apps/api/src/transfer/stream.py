@@ -78,8 +78,7 @@ from .stream_row_accounting import (
     stamp_source_row_count,
 )
 from .stream_foreign_keys import (
-    carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
-    foreign_key_context as _foreign_key_context,
+    carry_single_table_foreign_keys as _carry_single_table_foreign_keys,
 )
 
 from services.phase_profile import (  # noqa: E402
@@ -3794,44 +3793,6 @@ def _stream_database_transfer_impl(
         source, destination, table, dest_table, mappings, dest_summary, ddl_log
     )
     return written, ddl_log, dest_summary, columns
-
-
-def _carry_single_table_foreign_keys(
-    source: EndpointConfig,
-    destination: EndpointConfig,
-    table: str,
-    dest_table: str,
-    mappings: list[dict] | None,
-    dest_summary: dict[str, Any],
-    ddl_log: list[str],
-) -> None:
-    """Carry the single table's references onto the destination after the load.
-
-    The parent is already on the destination instead of arriving in this run,
-    so without this the child lands with its foreign keys silently dropped and
-    the run still goes green — on the row path and the COPY fast path alike.
-    """
-    fk_context = _foreign_key_context(source, [table])
-    if not fk_context.source_keys:
-        return
-    fk_context.column_maps[table] = {
-        str(m.get("source") or ""): str(m.get("target") or "")
-        for m in (mappings or [])
-        if m.get("source") and m.get("target")
-    }
-    fk_summary = _carry_foreign_keys_after_load(
-        destination, fk_context, {table: dest_table}
-    )
-    if fk_summary is None:
-        return
-    dest_summary["foreign_keys"] = fk_summary
-    for decision in fk_summary.get("decisions") or []:
-        if decision.get("status") in {"carried", "unsupported"} and decision.get(
-            "dest_ddl"
-        ):
-            ddl_log.append(f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}")
-
-
 
 
 class _NoOpCheckpointService:

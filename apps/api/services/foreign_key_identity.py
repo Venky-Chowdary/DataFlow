@@ -318,6 +318,32 @@ def parent_label(schema: str, table: str) -> str:
     return table
 
 
+def relocated_parent_schema(
+    referenced_schema: str,
+    *,
+    source_schema: str,
+    dest_schema: str,
+    in_job: bool = False,
+) -> str:
+    """Destination schema for a parent that still lives in the schema we copied from.
+
+    Empty when the existing rule stands: the parent is in this job, the
+    catalogs did not name a schema, or the foreign key points at a different
+    schema (``archive.customers`` is not the local table). When the key names
+    the source schema and the rows landed in another schema, the source table
+    is not the destination parent. Pointing the new child at it hides orphans
+    in the destination schema's parent of the same name.
+    """
+    if in_job:
+        return ""
+    ref = fold(referenced_schema)
+    src = fold(source_schema)
+    dest = fold(dest_schema)
+    if ref and src and dest and ref == src and ref != dest:
+        return dest_schema
+    return ""
+
+
 def select_job_table(
     schema: str,
     table: str,

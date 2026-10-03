@@ -880,6 +880,35 @@ def test_listed_other_schema_without_the_parent_is_refused():
     assert plan.statements == []
 
 
+def test_source_schema_parent_is_sought_in_the_destination_schema():
+    """public.customers on the source server is not the analytics parent."""
+    plan = _plan(
+        source_schema="public",
+        dest_schema="analytics",
+        table_map={},
+        dest_existing_tables={"customers", "orders"},
+        dest_tables_by_schema={"public": {"customers"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert 'REFERENCES "analytics"."customers"' in decision.dest_ddl
+    assert "public" not in decision.dest_ddl.split("REFERENCES", 1)[1]
+
+
+def test_source_schema_parent_absent_from_dest_is_not_wired_back():
+    plan = _plan(
+        source_schema="public",
+        dest_schema="analytics",
+        table_map={},
+        dest_existing_tables={"orders"},
+        dest_tables_by_schema={"public": {"customers"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "unsupported"
+    assert plan.statements == []
+    assert "source schema" in decision.reason
+
+
 def test_parent_moved_by_the_job_lands_in_the_job_schema():
     plan = _plan(
         source_foreign_keys=_archive_customer(),
@@ -1016,3 +1045,19 @@ def test_a_name_too_long_for_oracle_is_shortened_without_colliding():
     name = _only(plan).name
     assert len(name) <= 30
     assert name.startswith("fk_ORDERS_FACT_TABLE")
+
+
+def test_multi_stream_defers_the_per_table_foreign_key_carry(monkeypatch):
+    from src.transfer import stream_foreign_keys as fk_mod
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("per-table carry measured the source")
+
+    monkeypatch.setattr(fk_mod, "foreign_key_context", _boom)
+    token = fk_mod.push_deferred_single_table_foreign_keys()
+    try:
+        fk_mod.carry_single_table_foreign_keys(
+            None, None, "orders", "orders", [], {}, []
+        )
+    finally:
+        fk_mod.pop_deferred_single_table_foreign_keys(token)
