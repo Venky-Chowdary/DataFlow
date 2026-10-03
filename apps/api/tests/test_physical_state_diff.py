@@ -125,6 +125,7 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
             "referred_schema": "",
             "referred_table": "parent",
             "referred_columns": ["id"],
+            "row_proof_gap": "",
         }
     ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
@@ -193,6 +194,7 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert ("code",) in state.unique_constraints
     assert state.not_null >= {"code"}
     assert ("note", "n") in state.defaults
+    assert state.foreign_key_proof == ("",)
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -454,8 +456,14 @@ def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
 
 def _fk_state(
     *facts: tuple[tuple[str, ...], str, str, tuple[str, ...]],
+    proof: tuple[str, ...] = (),
 ) -> PhysicalState:
-    return PhysicalState(found=True, readable=True, foreign_key_facts=tuple(facts))
+    return PhysicalState(
+        found=True,
+        readable=True,
+        foreign_key_facts=tuple(facts),
+        foreign_key_proof=proof,
+    )
 
 
 def test_uniqueness_is_the_column_set_not_the_catalog_order() -> None:
@@ -779,6 +787,62 @@ def test_catalog_diff_uses_the_orphan_scan_relationship_identity() -> None:
     incomplete = ((), "", "parent", ())
     blank = compare_physical_state(_fk_state(incomplete), _fk_state(incomplete))
     assert blank["aspects"]["foreign_keys"]["status"] == "absent"
+
+
+def test_catalog_diff_does_not_treat_an_unchecked_foreign_key_as_carried() -> None:
+    """A matching relationship is not row proof when the destination gap is open.
+
+    PostgreSQL NOT VALID, an unreported validation bit, and a Redshift
+    constraint all leave the object in place. The diff lists it and does not
+    call it carried, and it does not call the object absent. The source gap
+    does not veto a destination that recorded the check. These facts are
+    catalog-shaped; a live Postgres or Redshift server was not used.
+    """
+    fact = (("parent_id",), "public", "parent", ("id",))
+    not_valid = compare_physical_state(
+        _fk_state(fact, proof=("",)),
+        _fk_state(fact, proof=("not_checked",)),
+    )
+    fk = not_valid["aspects"]["foreign_keys"]
+    assert fk["status"] == "unchecked"
+    assert fk["missing"] == []
+    assert fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert "NOT VALID" in fk["reasons"][0]
+    assert not_valid["verified"] is False
+    assert not_valid["unchecked"] == ["foreign_keys"]
+    assert "foreign_keys" not in not_valid["absent"]
+
+    redshift = compare_physical_state(
+        _fk_state(fact, proof=("",)),
+        _fk_state(fact, proof=("unenforced",)),
+    )
+    reason = redshift["aspects"]["foreign_keys"]["reasons"][0]
+    assert redshift["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "does not enforce" in reason
+    assert "Redshift" in reason
+    assert redshift["verified"] is False
+    assert "foreign_keys" not in redshift["absent"]
+
+    checked = compare_physical_state(
+        _fk_state(fact, proof=("unreported",)),
+        _fk_state(fact, proof=("",)),
+    )
+    assert checked["aspects"]["foreign_keys"]["status"] == "carried"
+    assert checked["verified"] is True
+
+    unreported = compare_physical_state(
+        _fk_state(fact),
+        _fk_state(fact, proof=("unreported",)),
+    )
+    assert unreported["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "did not say" in unreported["aspects"]["foreign_keys"]["reasons"][0]
+
+    misaligned = compare_physical_state(
+        _fk_state(fact),
+        _fk_state(fact, proof=("not_checked", "extra")),
+    )
+    assert misaligned["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert misaligned["verified"] is False
 
 
 def test_arrow_in_a_column_name_stays_one_wire_tuple(tmp_path: Path) -> None:

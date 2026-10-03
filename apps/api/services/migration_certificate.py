@@ -173,6 +173,7 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "verified": bool(schema_objects.get("verified")),
             "reason": str(schema_objects.get("reason") or ""),
             "absent": list(schema_objects.get("absent") or []),
+            "unchecked": list(schema_objects.get("unchecked") or []),
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
             "advisory": _dict(schema_objects.get("advisory")),
@@ -217,24 +218,40 @@ _SCHEMA_ASPECT_LABEL = {
 
 
 def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
-    """Structure the source enforced and the destination demonstrably lacks.
+    """Structure the source enforced and the destination did not prove.
 
     Matching checksums prove the rows, not the database around them: a load
     that lands every byte into a table whose foreign keys, uniqueness or CHECK
     constraints were never created leaves the destination accepting data the
-    source would have rejected. Only *absent* aspects block — an aspect the
-    catalog could not be read for stays unknown, and unknown is reported as
-    unproven rather than as a violation.
+    source would have rejected. Absent aspects block. A foreign key that is
+    stored and does not prove existing rows also blocks, and that sentence
+    does not call the object missing. An aspect the catalog could not be read
+    for stays unknown, and unknown is reported as unproven rather than as a
+    violation.
     """
     schema_objects = _dict(physical.get("schema_objects"))
     absent = [str(a) for a in schema_objects.get("absent") or []]
-    if not absent:
-        return []
-    named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
-    return [
-        f"Source {named} did not survive the move - the destination accepts "
-        "rows the source would have rejected."
-    ]
+    out: list[str] = []
+    if absent:
+        named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
+        out.append(
+            f"Source {named} did not survive the move - the destination accepts "
+            "rows the source would have rejected."
+        )
+    aspects = _dict(schema_objects.get("aspects"))
+    fk = _dict(aspects.get("foreign_keys"))
+    unchecked = [str(a) for a in schema_objects.get("unchecked") or []]
+    if "foreign_keys" in unchecked or fk.get("unchecked") or fk.get("status") == "unchecked":
+        reasons = [str(reason) for reason in (fk.get("reasons") or []) if reason]
+        detail = "; ".join(reasons) if reasons else (
+            "the relationship is stored and the catalog does not prove "
+            "existing rows were checked"
+        )
+        out.append(
+            "Destination foreign key is present and is not proof existing "
+            f"rows were checked: {detail}"
+        )
+    return out
 
 
 def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
@@ -637,6 +654,18 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                     f"| {label} | {info.get('status', '')} | {missing} |"
                 )
             lines.append("")
+            for aspect, detail in aspects.items():
+                info = _dict(detail)
+                reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+                if info.get("status") != "unchecked" and not reasons:
+                    continue
+                for reason in reasons:
+                    lines.append(f"- {aspect.replace('_', ' ')}: {reason}")
+            if any(
+                _dict(detail).get("reasons")
+                for detail in aspects.values()
+            ):
+                lines.append("")
             recreate = list(objects.get("cutover_recreate") or [])
             if not recreate:
                 for aspect, detail in aspects.items():

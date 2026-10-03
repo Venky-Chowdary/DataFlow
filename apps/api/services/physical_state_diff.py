@@ -7,10 +7,11 @@ became nullable, or a column default was lost or rewritten. None of that is
 visible to a row-level checksum, so it is read here from the *catalog* — on a
 connection of this module's own, never from writer bookkeeping.
 
-Every aspect answers one of four honest states:
+Every aspect answers one of these honest states:
 
-``carried``       present on both sides
+``carried``       present on both sides. A foreign key also proves existing rows.
 ``absent``        present on the source, missing on the destination
+``unchecked``     the foreign key object is present and does not prove the rows
 ``extra``         present on the destination only (informational, never a pass)
 ``unreadable``    the catalog could not be read — never counted as carried
 
@@ -241,6 +242,12 @@ class PhysicalState:
     foreign_key_facts: tuple[
         tuple[tuple[str, ...], str, str, tuple[str, ...]], ...
     ] = ()
+    #: Row-proof gap for each fact, same order as ``foreign_key_facts``.
+    #: Empty string means this catalog fact proves existing rows. ``unenforced``,
+    #: ``not_checked``, and ``unreported`` mean the relationship object may be
+    #: present and is not that proof. An empty tuple means this read did not
+    #: attach a gap; the diff then compares relationship identity only.
+    foreign_key_proof: tuple[str, ...] = ()
     #: Ordered key, uniqueness, predicate, covering columns, and access method.
     #: See :class:`CatalogIndex`. A unique, partial, covering, or gin index is
     #: not the plain column list.
@@ -264,13 +271,17 @@ class PhysicalState:
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
             "foreign_key_facts": [
-                {
-                    "constrained_columns": list(child),
-                    "referred_schema": schema,
-                    "referred_table": table,
-                    "referred_columns": list(parent),
-                }
-                for child, schema, table, parent in self.foreign_key_facts
+                _foreign_key_fact_dict(
+                    child,
+                    schema,
+                    table,
+                    parent,
+                    self._proof_at(index),
+                    measured=bool(self.foreign_key_proof),
+                )
+                for index, (child, schema, table, parent) in enumerate(
+                    self.foreign_key_facts
+                )
             ],
             "indexes": sorted(_render_index(i) for i in self.indexes),
             "not_null": sorted(self.not_null),
@@ -283,6 +294,14 @@ class PhysicalState:
             "routines": sorted(self.routines),
             "errors": list(self.errors),
         }
+
+    def _proof_at(self, index: int) -> str:
+        """Gap attached to fact ``index``, or "" when this read did not measure one."""
+        if not self.foreign_key_proof:
+            return ""
+        if len(self.foreign_key_proof) != len(self.foreign_key_facts):
+            return "unreported"
+        return self.foreign_key_proof[index] or ""
 
 
 @dataclass
@@ -389,6 +408,27 @@ def _cols(values: Any) -> tuple[str, ...]:
     return tuple(_fold(v) for v in values if str(v or "").strip())
 
 
+def _foreign_key_fact_dict(
+    child: tuple[str, ...],
+    schema: str,
+    table: str,
+    parent: tuple[str, ...],
+    gap: str,
+    *,
+    measured: bool,
+) -> dict[str, Any]:
+    """Report wire for one relationship. The gap is present only when measured."""
+    item = {
+        "constrained_columns": list(child),
+        "referred_schema": schema,
+        "referred_table": table,
+        "referred_columns": list(parent),
+    }
+    if measured:
+        item["row_proof_gap"] = gap
+    return item
+
+
 def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
     """One catalog relationship, plus an error when the token cannot be read.
 
@@ -460,6 +500,66 @@ def foreign_keys_from_catalog_state(
     return keys, unparsed
 
 
+def _reflect_foreign_keys(
+    db_type: str,
+    conn: Any,
+    schema: str,
+    table: str,
+    inspector_fks: Any,
+) -> tuple[
+    set[tuple[str, str, str]],
+    list[tuple[tuple[str, ...], str, str, tuple[str, ...]]],
+    tuple[str, ...],
+]:
+    """Relationship facts plus the row-proof gap for each one.
+
+    The gap is :func:`services.foreign_key_metadata.inspector_row_proof_gaps`.
+    Bit dialects read it from the metadata probe on this connection. Redshift
+    is unenforced without that query. MySQL and SQLite record an empty gap:
+    the constraint itself is the check those engines report.
+    """
+    from services.foreign_key_metadata import (
+        inspector_row_proof_gaps,
+        probe_foreign_keys,
+        validation_catalog_dialect,
+    )
+
+    kept: list[dict[str, Any]] = []
+    fk_sets: set[tuple[str, str, str]] = set()
+    fk_facts: list[tuple[tuple[str, ...], str, str, tuple[str, ...]]] = []
+    for fk in inspector_fks or []:
+        if not isinstance(fk, Mapping) or not fk.get("constrained_columns"):
+            continue
+        child_cols = _cols(fk.get("constrained_columns"))
+        parent_cols = _cols(fk.get("referred_columns"))
+        parent_table = _fold(fk.get("referred_table"))
+        parent_schema = _fold(fk.get("referred_schema"))
+        kept.append(
+            {
+                "constrained_columns": list(child_cols),
+                "referred_schema": parent_schema,
+                "referred_table": parent_table,
+                "referred_columns": list(parent_cols),
+            }
+        )
+        fk_sets.add(
+            foreign_key_wire(child_cols, parent_schema, parent_table, parent_cols)
+        )
+        fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
+    if not fk_facts:
+        return fk_sets, fk_facts, ()
+    catalog_dialect = validation_catalog_dialect(db_type)
+    measured = (
+        probe_foreign_keys(catalog_dialect, conn, schema or "", table)
+        if catalog_dialect is not None
+        else None
+    )
+    gaps = inspector_row_proof_gaps(db_type, kept, measured)
+    if len(gaps) != len(fk_facts):
+        gaps = ["unreported"] * len(fk_facts)
+    return fk_sets, fk_facts, tuple(gaps)
+
+
 def read_physical_state(
     db_type: str,
     cfg: dict[str, Any],
@@ -519,6 +619,9 @@ def read_physical_state(
         routines = collector.run(
             "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
         )
+        fk_sets, fk_facts, fk_proof = _reflect_foreign_keys(
+            db_type, conn, schema, name, fks
+        )
 
     not_null: set[str] = set()
     defaults: set[tuple[str, str]] = set()
@@ -535,19 +638,6 @@ def read_physical_state(
     unique_sets = {
         _cols(u.get("column_names")) for u in uniques or [] if u.get("column_names")
     }
-    fk_sets: set[tuple[str, str, str]] = set()
-    fk_facts: list[tuple[tuple[str, ...], str, str, tuple[str, ...]]] = []
-    for fk in fks or []:
-        if not fk.get("constrained_columns"):
-            continue
-        child_cols = _cols(fk.get("constrained_columns"))
-        parent_cols = _cols(fk.get("referred_columns"))
-        parent_table = _fold(fk.get("referred_table"))
-        parent_schema = _fold(fk.get("referred_schema"))
-        fk_sets.add(
-            foreign_key_wire(child_cols, parent_schema, parent_table, parent_cols)
-        )
-        fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     index_sets = {
         fact
         for i in indexes or []
@@ -562,6 +652,7 @@ def read_physical_state(
         unique_constraints=frozenset(unique_sets),
         foreign_keys=frozenset(fk_sets),
         foreign_key_facts=tuple(fk_facts),
+        foreign_key_proof=fk_proof,
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),
@@ -1183,16 +1274,36 @@ def _resolve_table_name(inspector: Any, table: str, schema: str | None) -> str |
     return resolve_stored_name(inspector.get_table_names(schema=schema), table)
 
 
+def _dest_row_proof_gap(proof: tuple[str, ...], index: int, count: int) -> str:
+    """Gap on one destination fact.
+
+    An empty proof tuple means the reader did not attach a gap, so identity
+    comparison stays as it was. A proof tuple that does not line up with the
+    facts is ``unreported``: a mis-attached bit is not a yes.
+    """
+    if not proof:
+        return ""
+    if len(proof) != count:
+        return "unreported"
+    return proof[index] or ""
+
+
 def _diff_foreign_keys(
     source: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
+    *,
+    destination_proof: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Carried only when :func:`same_relationship` matches a destination fact.
+    """Carried only when the destination relationship proves existing rows.
 
     Set subtraction on the rendered string treats ``sales.parent`` and
     ``archive.parent`` as one key, and treats reversed column order as a
-    different key. The orphan scan does neither.
+    different key. The orphan scan does neither. A match whose destination
+    gap is ``unenforced``, ``not_checked``, or ``unreported`` stays listed:
+    the object is present, and it is not row proof. That is ``unchecked``,
+    not ``absent``.
     """
+    from services.foreign_key_metadata import row_proof_reason
 
     def _as_mapping(fact: tuple[tuple[str, ...], str, str, tuple[str, ...]]) -> dict[str, Any]:
         child, schema, table, parent = fact
@@ -1205,6 +1316,7 @@ def _diff_foreign_keys(
 
     used: set[int] = set()
     missing: list[str] = []
+    unchecked: list[tuple[str, str]] = []
     for fact in source:
         ident = fk_identity(_as_mapping(fact))
         match = None
@@ -1216,17 +1328,29 @@ def _diff_foreign_keys(
                 break
         if match is None:
             missing.append(render_foreign_key_fact(*fact))
-        else:
-            used.add(match)
+            continue
+        used.add(match)
+        gap = _dest_row_proof_gap(destination_proof, match, len(destination))
+        if gap:
+            unchecked.append((render_foreign_key_fact(*fact), row_proof_reason(gap)))
     extra = [
         render_foreign_key_fact(*fact)
         for index, fact in enumerate(destination)
         if index not in used
     ]
+    pairs = sorted(unchecked)
+    if missing:
+        status = "absent"
+    elif pairs:
+        status = "unchecked"
+    else:
+        status = "carried"
     return {
-        "status": "carried" if not missing else "absent",
+        "status": status,
         "missing": sorted(missing),
         "extra": sorted(extra),
+        "unchecked": [wire for wire, _reason in pairs],
+        "reasons": [reason for _wire, reason in pairs],
         "source_count": len(source),
         "destination_count": len(destination),
     }
@@ -1354,7 +1478,9 @@ def compare_physical_state(
             source.unique_constraints, destination.unique_constraints
         ),
         "foreign_keys": _diff_foreign_keys(
-            source.foreign_key_facts, destination.foreign_key_facts
+            source.foreign_key_facts,
+            destination.foreign_key_facts,
+            destination_proof=destination.foreign_key_proof,
         ),
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
@@ -1394,11 +1520,13 @@ def compare_physical_state(
         if aspect in advisory:
             advisory[aspect]["status"] = "unreadable"
     absent = [a for a, v in aspects.items() if v["status"] == "absent"]
+    unchecked = [a for a, v in aspects.items() if v.get("unchecked")]
     blocking_unreadable = [a for a in unreadable if a not in advisory]
     return {
-        "verified": not absent and not blocking_unreadable,
+        "verified": not absent and not unchecked and not blocking_unreadable,
         "aspects": {**aspects, **advisory},
         "absent": absent,
+        "unchecked": unchecked,
         "unreadable": blocking_unreadable,
         "advisory": {
             a: v["status"] for a, v in advisory.items() if v["status"] != "carried"

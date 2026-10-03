@@ -191,6 +191,35 @@ def covers_existing_rows(dialect: str, validated: bool | None) -> bool:
     return row_proof_gap(dialect, validated) == ""
 
 
+def row_proof_reason(gap: str) -> str:
+    """Operator sentence for a non-empty :func:`row_proof_gap`.
+
+    Empty when the catalog fact proves the rows. Carry and the catalog diff
+    share this sentence, so one relationship is not described two ways.
+    """
+    if gap == "unenforced":
+        return (
+            "Destination stores this foreign key and does not enforce "
+            "it. A Redshift constraint is visible to the planner and "
+            "is not proof the loaded rows match."
+        )
+    if gap == "unreported":
+        return (
+            "Destination reports this relationship, and the catalog did "
+            "not say whether existing rows were checked. The constraint "
+            "is not that proof."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination reports this relationship, and the catalog records "
+            "that existing rows were not checked. A PostgreSQL NOT VALID "
+            "constraint, a SQL Server foreign key that is untrusted or "
+            "disabled, or an Oracle NOT VALIDATED constraint does not prove "
+            "the loaded rows."
+        )
+    return ""
+
+
 def validation_catalog_dialect(dialect: str) -> str | None:
     """Probe dialect for the validation bit, or None when no probe is required.
 
@@ -579,30 +608,27 @@ _PROBES = {
 }
 
 
-def enforced_relationship_identities(
+def inspector_row_proof_gaps(
     dialect: str,
     inspector_fks: list[Any],
     measured: ForeignKeys | None,
-) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
-    """Inspector foreign keys that prove the rows already stored.
+) -> list[str]:
+    """One :func:`row_proof_gap` per inspector foreign key, in that order.
 
-    On PostgreSQL, SQL Server, and Oracle the proof is the catalog validation
-    bit, matched to the inspector row by relationship identity. SQLAlchemy's
-    PostgreSQL reflection omits ``NOT VALID``, so an inspector hit alone is
-    not that proof. An unreadable validation catalog yields no enforced
-    identity: the caller scans. Redshift stores the constraint and does not
-    enforce it, so none of its inspector hits are enforced. MySQL and
-    SQLite keep the inspector identity.
+    Carry, the destination scan, and the catalog diff all read this list.
+    Redshift is ``unenforced`` without a validation query. PostgreSQL, SQL
+    Server, and Oracle match the metadata probe by relationship identity.
+    SQLAlchemy's PostgreSQL reflection omits ``NOT VALID``, so an inspector
+    hit alone is ``unreported``, not a yes. An unreadable probe is the same.
+    MySQL and SQLite have no separate bit: the constraint itself is the check.
     """
     from services.foreign_key_identity import fk_identity, same_relationship
 
     if row_proof_gap(dialect, True) == "unenforced":
-        return []
+        return ["unenforced"] * len(inspector_fks)
     requires_bit = validation_catalog_dialect(dialect) is not None
-    if requires_bit and (measured is None or not measured.measured):
-        return []
     flags: list[tuple[Any, bool | None]] = []
-    if measured is not None and measured.measured:
+    if requires_bit and measured is not None and measured.measured:
         for item in measured.items:
             ident = fk_identity(
                 {
@@ -614,20 +640,49 @@ def enforced_relationship_identities(
             )
             if ident is not None:
                 flags.append((ident, item.validated))
-    enforced: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    gaps: list[str] = []
     for fk in inspector_fks:
-        if not isinstance(fk, dict):
+        if not requires_bit:
+            gaps.append("")
+            continue
+        if measured is None or not measured.measured or not isinstance(fk, dict):
+            gaps.append("unreported")
             continue
         ident = fk_identity(fk)
         if ident is None:
+            gaps.append("unreported")
             continue
-        if requires_bit:
-            matched = [flag for known, flag in flags if same_relationship(ident, known)]
-            if not matched or any(flag is False for flag in matched):
-                continue
-            if not any(flag is True for flag in matched):
-                continue
-        enforced.append(ident)
+        matched = [flag for known, flag in flags if same_relationship(ident, known)]
+        if any(flag is False for flag in matched):
+            gaps.append("not_checked")
+        elif any(flag is True for flag in matched):
+            gaps.append("")
+        else:
+            gaps.append("unreported")
+    return gaps
+
+
+def enforced_relationship_identities(
+    dialect: str,
+    inspector_fks: list[Any],
+    measured: ForeignKeys | None,
+) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+    """Inspector foreign keys that prove the rows already stored.
+
+    The gap comes from :func:`inspector_row_proof_gaps`. An empty gap is the
+    proof. Anything else is scanned by the caller.
+    """
+    from services.foreign_key_identity import fk_identity
+
+    enforced: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    for fk, gap in zip(
+        inspector_fks, inspector_row_proof_gaps(dialect, inspector_fks, measured)
+    ):
+        if gap or not isinstance(fk, dict):
+            continue
+        ident = fk_identity(fk)
+        if ident is not None:
+            enforced.append(ident)
     return enforced
 
 

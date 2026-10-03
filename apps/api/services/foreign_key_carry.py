@@ -51,6 +51,7 @@ from services.foreign_key_metadata import (
     foreign_keys_from_payload,
     normalize_action,
     row_proof_gap,
+    row_proof_reason,
 )
 
 logger = logging.getLogger(__name__)
@@ -970,26 +971,7 @@ def verify_foreign_keys(
         elif faithful:
             gap = row_proof_gap(dest_dialect, faithful[0].validated)
             status = "unsupported"
-            if gap == "unenforced":
-                reason = (
-                    "Destination stores this foreign key and does not enforce "
-                    "it. A Redshift constraint is visible to the planner and "
-                    "is not proof the loaded rows match."
-                )
-            elif gap == "unreported":
-                reason = (
-                    "Destination reports this relationship, and the catalog did "
-                    "not say whether existing rows were checked. The constraint "
-                    "is not that proof."
-                )
-            else:
-                reason = (
-                    "Destination reports this relationship, and the catalog records "
-                    "that existing rows were not checked. A PostgreSQL NOT VALID "
-                    "constraint, a SQL Server foreign key that is untrusted or "
-                    "disabled, or an Oracle NOT VALIDATED constraint does not prove "
-                    "the loaded rows."
-                )
+            reason = row_proof_reason(gap) or row_proof_reason("not_checked")
         elif matches:
             got = matches[0]
             status = "unsupported"

@@ -13,6 +13,7 @@ from services.foreign_key_metadata import (
     ForeignKeys,
     covers_existing_rows,
     enforced_relationship_identities,
+    inspector_row_proof_gaps,
     row_proof_gap,
     foreign_keys_from_payload,
     normalize_action,
@@ -233,6 +234,7 @@ def test_not_valid_inspector_fk_is_not_an_enforced_identity():
         ],
     )
     assert enforced_relationship_identities("postgresql", inspector, unvalidated) == []
+    assert inspector_row_proof_gaps("postgresql", inspector, unvalidated) == ["not_checked"]
     checked = ForeignKeys(
         dialect="postgresql",
         status="measured",
@@ -248,7 +250,9 @@ def test_not_valid_inspector_fk_is_not_an_enforced_identity():
         ],
     )
     assert len(enforced_relationship_identities("postgresql", inspector, checked)) == 1
+    assert inspector_row_proof_gaps("postgresql", inspector, checked) == [""]
     assert enforced_relationship_identities("postgresql", inspector, None) == []
+    assert inspector_row_proof_gaps("postgresql", inspector, None) == ["unreported"]
     assert len(enforced_relationship_identities("sqlite", inspector, None)) == 1
 
 
@@ -270,6 +274,8 @@ def test_redshift_foreign_key_does_not_prove_existing_rows():
     assert enforced_relationship_identities("amazon_redshift", inspector, None) == []
     assert covers_existing_rows("sqlite", None) is True
     assert len(enforced_relationship_identities("sqlite", inspector, None)) == 1
+    assert inspector_row_proof_gaps("redshift", inspector, None) == ["unenforced"]
+    assert inspector_row_proof_gaps("sqlite", inspector, None) == [""]
 
 
 def test_payload_keeps_an_explicit_validation_bit():

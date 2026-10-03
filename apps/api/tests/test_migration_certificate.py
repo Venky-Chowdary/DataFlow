@@ -320,6 +320,38 @@ def test_absent_destination_constraints_block_the_proven_claim() -> None:
     assert any("foreign key(s)" in b and "CHECK" in b for b in verdict["blockers"])
 
 
+def test_unchecked_foreign_key_blocks_without_calling_the_object_absent() -> None:
+    """A stored constraint that did not check rows is not a missing constraint."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination stores this foreign key and does not enforce "
+                        "it. A Redshift constraint is visible to the planner and "
+                        "is not proof the loaded rows match."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert verdict["headline"] == "NOT PROVEN"
+    assert any("does not enforce" in b and "Redshift" in b for b in verdict["blockers"])
+    assert not any("did not survive" in b for b in verdict["blockers"])
+    page = render_certificate_markdown(build_migration_certificate(job))
+    assert "does not enforce" in page
+    assert "foreign keys | unchecked" in page
+
+
 def test_unreadable_constraint_catalog_is_unknown_not_a_violation() -> None:
     """Unknown must never be reported as absent."""
     job = _proven_job()
