@@ -13141,6 +13141,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-warning-bg);
 }
 
+.df2-app .df2-column-review-alert.df2-column-review-alert-info {
+  background: var(--df-brand-subtle, #f0fdfa);
+  border-color: color-mix(in srgb, var(--df-brand, #0f766e) 28%, transparent);
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-app .df2-column-review-alert.df2-column-review-alert-info strong {
+  color: var(--df-brand, #0f766e);
+}
+
 .df2-app .df2-map-proof-pair.is-aligned,
 .df2-app .df2-badge.fidelity-ok,
 .df2-app .df2-mapping-pairs-bridge,
