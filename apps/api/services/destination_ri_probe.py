@@ -4,14 +4,34 @@ A carried foreign key is a *promise*; it is only worth anything if the engine
 was enforcing it while the rows landed. Two real migration outcomes this
 module separates, which a catalog diff alone cannot:
 
-``enforced``   the destination carries the FK, so the engine itself refused
-               orphans as they were written — no scan needed
+``enforced``   the destination carries a foreign key the catalog says was
+               checked against existing rows — no scan needed. PostgreSQL
+               NOT VALID, a SQL Server untrusted or disabled key, and an
+               Oracle NOT VALIDATED key are not this proof; those rows are
+               scanned. SQLAlchemy's PostgreSQL reflection omits NOT VALID,
+               so the validation bit is read from the catalog probe. Redshift,
+               Snowflake, BigQuery, and Databricks store the constraint and
+               do not check rows against it, so a catalog hit is not this
+               proof either. A Snowflake hybrid table skips the scan only when
+               ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``,
+               ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``, and ``SHOW INDEXES``
+               status is ``ACTIVE``. ``ENFORCED YES`` during
+               ``BUILD VALIDATION FAILURE`` still rejects new writes and does
+               not prove rows already stored, so those rows are scanned.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
 
-Composite keys are scanned as a tuple under SQL ``MATCH SIMPLE``: a child row
-with any NULL in the key is unconstrained and is not an orphan.
+Composite keys are scanned as a tuple under the catalog match type. Unreported
+is SQL ``MATCH SIMPLE``: a child row with any NULL in the key is unconstrained
+and is not an orphan. A source ``MATCH FULL`` is that scan, including when the
+destination constraint is enforced as ``MATCH SIMPLE``. ``MATCH PARTIAL`` is
+not a completed scan.
+
+An enforced catalog FK counts only when it is the same relationship: the same
+parent table and the same (child column, parent column) pairs. A constraint on
+the same child columns that points at a different parent column is not that
+promise, and the child rows are scanned.
 
 Anything else — parent table missing, unreadable catalog, failed scan — is
 reported unavailable with a reason. An unproven relationship never counts as
@@ -28,8 +48,22 @@ from typing import Any
 import sqlalchemy as sa
 
 from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
+from services.foreign_key_metadata import (
+    enforced_relationship_identities,
+    probe_foreign_keys,
+    relationship_match_type,
+    validation_catalog_dialect,
+)
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
-from services.fk_tuple_scan import scan_orphan_anti_join
+from services.fk_tuple_scan import match_scan_refusal, normalize_match, scan_orphan_anti_join
+from services.foreign_key_identity import (
+    fold as _fold,
+    parent_label as _parent_label,
+    parse_foreign_key,
+    relationship_identity,
+    relocated_parent_schema,
+    same_relationship as _same_relationship,
+)
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
 logger = logging.getLogger(__name__)
@@ -40,6 +74,7 @@ _PROVEN_STATUSES = frozenset({"enforced", "scanned"})
 
 __all__ = [
     "verify_destination_referential_integrity",
+    "relationship_identity",
     "referential_integrity_proven",
     "build_dest_ri_gate",
     "build_dest_ri_validate_gate",
@@ -48,8 +83,18 @@ __all__ = [
 ]
 
 
-def _fold(name: Any) -> str:
-    return str(name or "").strip().casefold()
+def _destination_match(
+    identity: tuple[str, tuple[tuple[str, str], ...]] | None,
+    measured: Any,
+    inspector_fks: list[Any],
+) -> str:
+    """Match type the destination catalog recorded for this relationship.
+
+    Owner is :func:`services.foreign_key_metadata.relationship_match_type`.
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback.
+    Empty means unreported.
+    """
+    return relationship_match_type(identity, measured, inspector_fks)
 
 
 def _orphan_scan(
@@ -59,8 +104,9 @@ def _orphan_scan(
     child_columns: list[str],
     parent: Any,
     parent_columns: list[str],
+    match: str = "",
 ) -> dict[str, Any]:
-    """Anti-join via ``fk_tuple_scan`` — MATCH SIMPLE composite tuples."""
+    """Anti-join via ``fk_tuple_scan`` using the catalog match type."""
     try:
         c_cols = [_table_col(child, name) for name in child_columns]
         p_cols = [_table_col(parent, name) for name in parent_columns]
@@ -72,6 +118,7 @@ def _orphan_scan(
         child_columns=c_cols,
         parent=parent,
         parent_columns=p_cols,
+        match=match,
     )
 
 
@@ -86,6 +133,7 @@ def verify_destination_referential_integrity(
     schema: str = "",
     table: str,
     foreign_keys: list[dict[str, Any]] | None = None,
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Prove every source relationship still holds in the destination data.
 
@@ -121,14 +169,37 @@ def verify_destination_referential_integrity(
             }
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
-        enforced = {
-            (
-                "+".join(_fold(c) for c in fk.get("constrained_columns") or ()),
-                _fold(fk.get("referred_table")),
+        measured = None
+        table_kind = ""
+        from services.foreign_key_metadata import _dialect_key
+
+        index_status = ""
+        if _dialect_key(db_type) == "snowflake":
+            from services.foreign_key_metadata import read_snowflake_index_status
+            from services.physical_state_diff import _read_snowflake_table_kind
+
+            table_kind = _read_snowflake_table_kind(
+                conn, schema_arg or "", child_name
             )
-            for fk in dest_fks
-            if fk.get("constrained_columns")
-        }
+            index_status = read_snowflake_index_status(
+                conn, schema_arg or "", child_name
+            )
+            measured = probe_foreign_keys(
+                "snowflake", conn, schema_arg or "", child_name
+            )
+        else:
+            catalog_dialect = validation_catalog_dialect(db_type)
+            if catalog_dialect:
+                measured = probe_foreign_keys(
+                    catalog_dialect, conn, schema_arg or "", child_name
+                )
+        enforced = enforced_relationship_identities(
+            db_type,
+            dest_fks,
+            measured,
+            table_kind=table_kind,
+            index_status=index_status,
+        )
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:
             return {
@@ -142,19 +213,56 @@ def verify_destination_referential_integrity(
             inspector, schema_arg, conn=conn, dialect=str(db_type)
         )
         for fk in wanted:
-            child_cols = [str(c) for c in fk.get("constrained_columns") or () if c]
-            parent_cols = [str(c) for c in fk.get("referred_columns") or () if c]
-            parent_table = str(fk.get("referred_table") or "")
-            key = (
-                "+".join(_fold(c) for c in child_cols),
-                _fold(parent_table),
+            parsed = parse_foreign_key(fk)
+            child_cols = list(parsed.child_columns)
+            parent_cols = list(parsed.parent_columns)
+            parent_schema = _fold(parsed.parent_schema)
+            parent_table = _fold(parsed.parent_table)
+            relocated = relocated_parent_schema(
+                parsed.parent_schema,
+                source_schema=source_schema,
+                dest_schema=schema,
+                in_job=False,
             )
+            if relocated:
+                # The catalog still names the schema the rows were copied from.
+                # An enforced key aimed at that table is not proof the destination
+                # schema's parent holds these rows.
+                parent_schema = _fold(relocated)
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,
                 "referred_columns": parent_cols,
             }
-            if key in enforced:
+            if parsed.conflict:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    reason=parsed.conflict,
+                )
+                relations.append(rel)
+                continue
+            key = relationship_identity(
+                child_cols, _parent_label(parent_schema, parent_table), parent_cols
+            )
+            source_match = normalize_match(parsed.match)
+            refusal = match_scan_refusal(source_match)
+            if refusal:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    match=source_match,
+                    reason=refusal,
+                )
+                relations.append(rel)
+                continue
+            # An enforced MATCH SIMPLE constraint does not prove MATCH FULL.
+            # A partial NULL is legal there and is an orphan under the source rule.
+            dest_match = _destination_match(key, measured, dest_fks)
+            simple_promise = source_match != "full"
+            if any(_same_relationship(key, known) for known in enforced) and (
+                simple_promise or dest_match == "full"
+            ):
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)
                 continue
@@ -166,19 +274,36 @@ def verify_destination_referential_integrity(
                 )
                 relations.append(rel)
                 continue
-            stored_parent = resolve_stored_name(table_names, parent_table)
+            parent_lookup_schema = parent_schema or None
+            if parent_schema and _fold(parent_schema) != _fold(schema_arg or ""):
+                parent_names = catalog_table_names(
+                    inspector,
+                    parent_lookup_schema,
+                    conn=conn,
+                    dialect=str(db_type),
+                )
+            else:
+                parent_names = table_names
+            stored_parent = resolve_stored_name(parent_names, parent_table)
             if stored_parent is None:
+                qualified = _parent_label(parent_schema, parent_table) or parent_table
                 rel.update(
                     status="unavailable",
                     available=False,
-                    reason=f"parent table {parent_table} absent from destination",
+                    reason=f"parent table {qualified} absent from destination",
                 )
                 relations.append(rel)
                 continue
             try:
                 child_tbl = _reflect(conn, meta, child_name, schema_arg)
                 parent_tbl = alias_parent_if_self_ref(
-                    child_tbl, _reflect(conn, meta, stored_parent, schema_arg)
+                    child_tbl,
+                    _reflect(
+                        conn,
+                        meta,
+                        stored_parent,
+                        parent_lookup_schema or schema_arg,
+                    ),
                 )
                 resolved_child = [
                     resolve_stored_name([c.name for c in child_tbl.columns], name)
@@ -198,6 +323,7 @@ def verify_destination_referential_integrity(
                     child_columns=[str(c) for c in resolved_child],
                     parent=parent_tbl,
                     parent_columns=[str(p) for p in resolved_parent],
+                    match=source_match,
                 )
             except Exception as exc:  # noqa: BLE001 — a failed scan is evidence
                 logger.warning("destination RI scan failed: %s", exc)

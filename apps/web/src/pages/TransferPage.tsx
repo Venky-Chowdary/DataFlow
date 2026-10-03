@@ -254,6 +254,13 @@ import {
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
+import {
+  acceptRuleAsDirect,
+  mergeBusinessRules,
+  mergeCompiledShapeSteps,
+  ruleReportSummary,
+  type RuleCompileReport,
+} from "../lib/businessRules";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
@@ -319,6 +326,9 @@ export function TransferPage({
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
   const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
+  const [businessRuleReport, setBusinessRuleReport] = useState<RuleCompileReport | null>(null);
+  const businessRuleReportRef = useRef<RuleCompileReport | null>(null);
+  businessRuleReportRef.current = businessRuleReport;
   /**
    * Read inside `applyPipelineMappings` without making the transformed image a
    * dependency of it: Map must ask about the transformed image, but re-running
@@ -1474,6 +1484,18 @@ export function TransferPage({
     }>) | null
   >(null);
 
+  /** Rematch invents identity dests. Stamp compiled workbook names after every commit. */
+  const stampCompiledWorkbookMappings = useCallback(
+    (mappings: EditableMapping[], sourceTable?: string) => {
+      const report = businessRuleReportRef.current;
+      if (!report || !mappings.length) return mappings;
+      return mergeBusinessRules(mappings, report, {
+        sourceTable: sourceTable || primarySourceStream || undefined,
+      });
+    },
+    [primarySourceStream],
+  );
+
   const applyPipelineMappings = useCallback(
     async (
       targetCols?: string[],
@@ -1548,9 +1570,11 @@ export function TransferPage({
         if (gen !== mappingGenRef.current) return next;
         const prior = columnMappingsRef.current;
         if (!next.length && sourceCols.length) {
-          const identity = carryOperatorDecisions(
-            buildMappingsFromSource(analysisCols, targetCols),
-            prior,
+          const identity = stampCompiledWorkbookMappings(
+            carryOperatorDecisions(
+              buildMappingsFromSource(analysisCols, targetCols),
+              prior,
+            ),
           );
           if (identity.length) {
             setColumnMappings(identity);
@@ -1559,7 +1583,7 @@ export function TransferPage({
             return identity;
           }
         }
-        const carried = carryOperatorDecisions(next, prior);
+        const carried = stampCompiledWorkbookMappings(carryOperatorDecisions(next, prior));
         setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
@@ -1705,6 +1729,7 @@ export function TransferPage({
       destColumns,
       connectorId,
       targetCollection,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -1739,25 +1764,31 @@ export function TransferPage({
               ? (destTableExists ?? destTableExistsRef.current)
               : false,
         });
-        return editableFromPipelineMappings(
-          result.mappings,
-          rows,
-          targetCols,
-          threshold,
-          targetSchema,
+        return stampCompiledWorkbookMappings(
+          editableFromPipelineMappings(
+            result.mappings,
+            rows,
+            targetCols,
+            threshold,
+            targetSchema,
+          ),
+          streamName,
         );
       } catch (e) {
         console.error(`Stream mapping failed for ${streamName}:`, e);
-        return sourceCols.map((col) => ({
-          source: col,
-          target: col,
-          confidence: 0.5,
-          approved: false,
-          requiresReview: true,
-          existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
-          reason: "Fallback identity mapping (stream rematch unavailable)",
-          transform: "none" as const,
-        }));
+        return stampCompiledWorkbookMappings(
+          sourceCols.map((col) => ({
+            source: col,
+            target: col,
+            confidence: 0.5,
+            approved: false,
+            requiresReview: true,
+            existsInDestination: (targetCols || []).some((t) => t.toLowerCase() === col.toLowerCase()),
+            reason: "Fallback identity mapping (stream rematch unavailable)",
+            transform: "none" as const,
+          })),
+          streamName,
+        );
       }
     },
     [
@@ -1772,6 +1803,7 @@ export function TransferPage({
       destType,
       syncMode,
       destTableExists,
+      stampCompiledWorkbookMappings,
     ],
   );
 
@@ -2002,6 +2034,8 @@ export function TransferPage({
     ) {
       return;
     }
+    // Rematch is identity on CREATE. commitMappings stamps compiled dest names
+    // so this effect cannot wipe fname → first_name back to fname → fname.
     void applyPipelineMappings(destColumns.length ? destColumns : undefined, destSchemaMap);
   }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 
@@ -3275,6 +3309,29 @@ export function TransferPage({
     setStep(STEP_DESTINATION);
   };
 
+  const acceptWorkbookRuleAsDirect = (index: number) => {
+    const current = businessRuleReportRef.current;
+    if (!current) return;
+    const next = acceptRuleAsDirect(current, index);
+    if (next === current) return;
+    setBusinessRuleReport(next);
+    const primary = primarySourceStream || sourceTable || undefined;
+    setColumnMappings((prev) => mergeBusinessRules(prev, next, { sourceTable: primary }));
+    setStreamMappings((prev) => {
+      const copy = { ...prev };
+      for (const name of multiStreamNames) {
+        copy[name] = mergeBusinessRules(copy[name] || [], next, { sourceTable: name });
+      }
+      return copy;
+    });
+    const rule = next.rules[index];
+    toast({
+      title: "Accepted as Direct map",
+      message: rule ? `${rule.source_column} → ${rule.dest_column} is on Map` : "Rule accepted",
+      tone: "success",
+    });
+  };
+
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
@@ -3443,6 +3500,19 @@ export function TransferPage({
         if (seeded[primary]?.length) {
           setColumnMappings(seeded[primary]);
         }
+      }
+
+      if (businessRuleReportRef.current) {
+        setColumnMappings((prev) => mergeBusinessRules(prev, businessRuleReportRef.current, {
+          sourceTable: primarySourceStream || undefined,
+        }));
+        setStreamMappings((prev) => {
+          const next: Record<string, EditableMapping[]> = {};
+          for (const [name, rows] of Object.entries(prev || {})) {
+            next[name] = mergeBusinessRules(rows, businessRuleReportRef.current, { sourceTable: name });
+          }
+          return next;
+        });
       }
 
       bump(100, "Mapping ready");
@@ -6038,6 +6108,8 @@ export function TransferPage({
           columnMappings={columnMappings}
           analysis={analysis}
           destColumns={destColumns}
+          ruleReport={businessRuleReport}
+          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destCatalogExists(destKindMode, destTableExists)}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
@@ -7344,6 +7416,40 @@ export function TransferPage({
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
+          ruleReport={businessRuleReport}
+          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
+          sourceTable={primarySourceStream || sourceTable}
+          destTable={targetCollection}
+          sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
+          sourceCatalog={Object.keys(sourceColumnsByStream).length ? sourceColumnsByStream : undefined}
+          destTables={targetCollection ? [targetCollection] : undefined}
+          destCatalog={
+            targetCollection && destSchemaMap && Object.keys(destSchemaMap).length
+              ? { [targetCollection]: Object.keys(destSchemaMap) }
+              : undefined
+          }
+          onApplyRules={(report) => {
+            setBusinessRuleReport(report);
+            const primary = primarySourceStream || sourceTable || undefined;
+            if (report.shape_steps.length) {
+              setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
+                sourceTable: primary,
+              }));
+            }
+            setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
+            setStreamMappings((prev) => {
+              const next = { ...prev };
+              for (const name of multiStreamNames) {
+                next[name] = mergeBusinessRules(next[name] || [], report, { sourceTable: name });
+              }
+              return next;
+            });
+            toast({
+              title: "Business rules compiled",
+              message: ruleReportSummary(report),
+              tone: report.buckets.needs_confirmation || report.buckets.conflict ? "warning" : "success",
+            });
+          }}
         />
         </div>
       )}

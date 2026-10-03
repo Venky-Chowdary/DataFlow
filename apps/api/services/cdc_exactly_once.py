@@ -2,8 +2,14 @@
 
 Honesty
 -------
-Platform-wide CDC remains **at-least-once upsert** until a route opts in
-*and* the dest can commit apply + watermark in one transaction.
+Platform-wide CDC is not exactly-once. ``EXACTLY_ONCE_CLAIMED`` stays False.
+
+When the operator leaves delivery on ``auto`` (the product default), an
+eligible CDC route — primary key, durable LSN, transactional dest that
+can commit apply and the watermark together — selects dest-owned
+exactly-once. An ineligible route stays at-least-once and records why.
+An explicit ``at_least_once`` pin is never upgraded. An explicit
+``exactly_once`` on an ineligible route fails closed.
 
 This is not Kafka transactional-id EOS and not XA across heterogeneous
 sinks. It is dest-authoritative fenced materialization — Estuary Open
@@ -94,6 +100,9 @@ WATERMARK_TABLE = "_df_cdc_eos_watermarks"
 WATERMARK_TABLE_ORACLE = "df_cdc_eos_watermarks"
 DELIVERY_SEMANTICS_EOS = "exactly_once_dest_owned_watermark_txn"
 DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
+# Operator did not pin a guarantee. Eligible CDC resolves to dest-owned EOS.
+DELIVERY_AUTO = "auto"
+_AUTO_TOKENS = frozenset({"", "auto", "default"})
 
 # Destinations that can host a transactional watermark table in principle.
 # Aliases stay listed so classify never invents a miss on catalog ids.
@@ -1306,7 +1315,7 @@ def classify_exactly_once_route(
     callable_source: bool = False,
     source_type: str = "",
 ) -> EosEligibility:
-    """Fail-closed eligibility. Default CDC path does not call this for ALO."""
+    """Fail-closed eligibility. ``auto`` calls this; an explicit at-least-once pin does not."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
     if dest == "postgres":
         dest = "postgresql"
@@ -1361,6 +1370,12 @@ def classify_exactly_once_route(
     if dest not in EOS_TRANSACTIONAL_DESTS:
         return EosEligibility(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
+        )
+    # False is a measured absence. None/True means the caller already
+    # established a log position (or is proving the algorithm with one).
+    if has_lsn_column is False:
+        return EosEligibility(
+            False, REASON_NO_LSN, dest, None, False, tuple(notes)
         )
     sink = classify_sink_delivery(
         dest_type=sink_dest,
@@ -1446,6 +1461,55 @@ def assert_requested_cdc_delivery(
             reason=eligibility.reason,
         )
     return raw
+
+
+def select_route_delivery(
+    requested: str | None,
+    *,
+    sync_mode: str = "",
+    dest_type: str = "",
+    source_type: str = "",
+    has_primary_key: bool = False,
+    write_mode: str = "upsert",
+    allow_append_only: bool = False,
+    callable_source: bool = False,
+    has_lsn_column: bool | None = True,
+) -> str:
+    """Resolve delivery for one route.
+
+    ``auto`` (and an empty token) selects dest-owned exactly-once when the
+    route can commit apply and the watermark in one transaction. Otherwise
+    it stays at-least-once. An explicit pin is not rewritten. Exactly-once
+    on an ineligible route still fails closed.
+    """
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            allow_append_only=allow_append_only,
+            has_lsn_column=has_lsn_column,
+            callable_source=callable_source,
+            source_type=source_type,
+        )
+        if eligibility.eligible:
+            return DELIVERY_CLASS_EXACTLY_ONCE
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    return assert_requested_cdc_delivery(
+        raw,
+        sync_mode=sync_mode,
+        dest_type=dest_type,
+        source_type=source_type,
+        has_primary_key=has_primary_key,
+        write_mode=write_mode,
+        allow_append_only=allow_append_only,
+        callable_source=callable_source,
+        has_lsn_column=has_lsn_column,
+    )
 
 
 def require_batch_lsn(resume_token: Any) -> str:
@@ -1621,6 +1685,32 @@ def chaos_crash_after_commit_redelivery(
     return store
 
 
+def route_declares_log_position(stream_contracts: list[Any] | None) -> bool:
+    """True only when every selected contract declares a change-stream position.
+
+    ``modification_timestamp``, ``monotonic_sequence``, ``insert_only``, and a
+    blank declaration are not an LSN/GTID/SCN. Exactly-once compares those
+    positions. A route that has not declared ``cdc_position`` stays
+    at-least-once. One non-log stream keeps the whole route there: the
+    request carries one delivery guarantee.
+    """
+    saw = False
+    for raw in stream_contracts or []:
+        if isinstance(raw, dict):
+            if raw.get("selected", True) is False:
+                continue
+            semantics = raw.get("cursor_semantics") or ""
+        else:
+            if getattr(raw, "selected", True) is False:
+                continue
+            semantics = getattr(raw, "cursor_semantics", "") or ""
+        saw = True
+        token = str(semantics).strip().lower().replace("-", "_").replace(" ", "_")
+        if token != "cdc_position":
+            return False
+    return saw
+
+
 def route_has_cdc_pk(stream_contracts: list[Any] | None, primary_key: str = "") -> bool:
     if (primary_key or "").strip():
         return True
@@ -1657,11 +1747,57 @@ def preflight_delivery_gate(
     allow_append_only: bool = False,
     callable_source: bool = False,
     source_type: str = "",
+    has_lsn_column: bool | None = True,
 ) -> dict[str, Any] | None:
     """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
-    requested = normalize_delivery_guarantee(delivery_guarantee)
+    raw = (delivery_guarantee or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     is_cdc = mode in {"cdc", "cdc_incremental"}
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            allow_append_only=allow_append_only,
+            callable_source=callable_source,
+            source_type=source_type,
+            has_lsn_column=has_lsn_column,
+        )
+        if eligibility.eligible:
+            details = eligibility.to_dict()
+            details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE
+            details["selected_by"] = "route_default"
+            return {
+                "id": "g16_cdc_delivery",
+                "status": "pass",
+                "message": (
+                    "Eligible CDC selects dest-owned exactly-once "
+                    "(apply and watermark commit together). "
+                    "The platform does not claim this for every route."
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+        if not is_cdc:
+            return None
+        details = eligibility.to_dict()
+        details["delivery_guarantee"] = DELIVERY_CLASS_AT_LEAST_ONCE
+        details["selected_by"] = "route_default"
+        return {
+            "id": "g16_cdc_delivery",
+            "status": "pass",
+            "message": (
+                "CDC stays at-least-once upsert "
+                f"({eligibility.reason}). Dest-owned exactly-once is the "
+                "default only when this route can commit apply and the "
+                "watermark together."
+            ),
+            "duration_ms": 0,
+            "details": details,
+        }
+    requested = raw or DELIVERY_CLASS_AT_LEAST_ONCE
     if requested != DELIVERY_CLASS_EXACTLY_ONCE and not is_cdc:
         return None
     if requested != DELIVERY_CLASS_EXACTLY_ONCE:
@@ -1669,14 +1805,16 @@ def preflight_delivery_gate(
             "id": "g16_cdc_delivery",
             "status": "pass",
             "message": (
-                "CDC delivery default is at-least-once upsert — "
-                "exactly-once is opt-in dest-owned watermark, not platform-wide"
+                "Operator pinned at-least-once upsert. Dest-owned exactly-once "
+                "stays available when this route can commit apply and the "
+                "watermark together. The platform does not claim it for every route."
             ),
             "duration_ms": 0,
             "details": {
                 "delivery_guarantee": DELIVERY_CLASS_AT_LEAST_ONCE,
                 "platform_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
                 "algorithm": ALGORITHM,
+                "selected_by": "operator_pin",
             },
         }
     eligibility = classify_exactly_once_route(
@@ -1686,6 +1824,7 @@ def preflight_delivery_gate(
         allow_append_only=allow_append_only,
         callable_source=callable_source,
         source_type=source_type,
+        has_lsn_column=has_lsn_column,
     )
     details = eligibility.to_dict()
     details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE

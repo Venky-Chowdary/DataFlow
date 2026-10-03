@@ -295,7 +295,7 @@ def test_cdc_exactly_once_passes_on_wired_sql_dest():
     assert g16["details"]["platform_claimed"] is False
 
 
-def test_cdc_default_delivery_gate_is_at_least_once():
+def test_cdc_auto_selects_exactly_once_on_an_eligible_route():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",
         schema_policy="manual_review",
@@ -314,7 +314,104 @@ def test_cdc_default_delivery_gate_is_at_least_once():
     )
     g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
     assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "exactly_once"
+    assert g16["details"]["selected_by"] == "route_default"
+    assert g16["details"]["platform_claimed"] is False
+
+
+def test_cdc_auto_stays_at_least_once_when_the_dest_cannot_commit():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="csv",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
     assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["selected_by"] == "route_default"
+    assert g16["details"]["reason"] == "exactly_once_dest_not_transactional"
+
+
+def test_cdc_timestamp_cursor_does_not_select_exactly_once():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "modification_timestamp",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["reason"] == "exactly_once_requires_durable_lsn"
+    assert g16["details"]["platform_claimed"] is False
+
+
+def test_cdc_explicit_exactly_once_without_a_log_position_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "modification_timestamp",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+        delivery_guarantee="exactly_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "block"
+    assert g16["details"]["reason"] == "exactly_once_requires_durable_lsn"
+
+
+def test_cdc_explicit_at_least_once_pin_is_not_upgraded():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+        delivery_guarantee="at_least_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["selected_by"] == "operator_pin"
 
 
 def test_full_refresh_omits_cdc_delivery_gate():

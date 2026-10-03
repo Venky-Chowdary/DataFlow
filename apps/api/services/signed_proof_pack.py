@@ -672,6 +672,27 @@ def proof_pack_evidence_completeness_errors(
     versions = connector_versions if isinstance(connector_versions, dict) else {}
     if claim_migration_proven and not versions:
         errors.append("migration_proven refused: connector_versions absent")
+    elif claim_migration_proven:
+        from services.connector_versions import versions_include_release
+
+        if not versions_include_release(versions):
+            errors.append(
+                "migration_proven refused: connector_versions lack a captured "
+                "release (format or kind is not a version)"
+            )
+    if claim_migration_proven:
+        recon = reconciliation if isinstance(reconciliation, dict) else {}
+        provenance = str(recon.get("source_checksum_provenance") or "")
+        independent_reread = (
+            provenance == "independent_source_reread"
+            or recon.get("source_independently_reread") is True
+            or str(recon.get("checksum_mode") or "") == "source_reread"
+        )
+        if independent_reread and recon.get("identity_hash_aligned") is not True:
+            errors.append(
+                "migration_proven refused: source re-read identity/hash "
+                "alignment is required"
+            )
     return errors
 
 
@@ -697,6 +718,7 @@ def build_signed_proof_pack(
     require_risk_completeness: bool | None = None,
     anchor_in_chain: bool = False,
     governance_operations: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -788,14 +810,17 @@ def build_signed_proof_pack(
             else None,
         },
         "prev_audit_hash": prev_audit_hash,
+        "timing": timing if isinstance(timing, dict) else {},
         "delivery_semantics": {
-            "cdc_default": "at_least_once",
+            "cdc_default": "auto",
             "exactly_once": False,
             "at_least_once": True,
             "at_most_once": False,
             "note": (
-                "Destinations must upsert with PK/LSN guards under at-least-once capture; "
-                "exactly-once and at-most-once are not claimed."
+                "auto selects dest-owned exactly-once when the route can commit "
+                "apply and the watermark together. exactly_once here is the "
+                "platform-wide claim and stays false. A run's resolved guarantee "
+                "is on the job. At-most-once is not offered."
             ),
         },
         "governance_operations": _governance_operations_for_pack(governance_operations),
@@ -882,6 +907,22 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
 
 
+def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
+    """Elapsed and phase split from the run. Empty when the engine did not measure."""
+    summary = dest if isinstance(dest, dict) else {}
+    timing: dict[str, Any] = {}
+    elapsed = summary.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        timing["elapsed_seconds"] = elapsed
+    rate = summary.get("records_per_second")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        timing["records_per_second"] = rate
+    profile = summary.get("phase_profile")
+    if isinstance(profile, dict) and profile.get("phases"):
+        timing["phase_profile"] = profile
+    return timing
+
+
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
     """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
     from services.audit_log import latest_event_hash
@@ -903,10 +944,28 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
     rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
     if not rollback and isinstance(job.get("rollback_plan"), dict):
         rollback = job["rollback_plan"]
-    connector_versions = {}
-    if isinstance(job.get("connector_versions"), dict):
-        connector_versions = dict(job["connector_versions"])
-    else:
+    from services.connector_versions import versions_include_release
+
+    connector_versions: dict[str, Any] = {}
+    candidates: list[Any] = [
+        job.get("connector_versions"),
+        dest.get("connector_versions"),
+        (job.get("reconciliation") or {}).get("connector_versions")
+        if isinstance(job.get("reconciliation"), dict)
+        else None,
+    ]
+    fallback: dict[str, Any] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if versions_include_release(candidate):
+            connector_versions = dict(candidate)
+            break
+        if not fallback:
+            fallback = dict(candidate)
+    if not connector_versions:
+        connector_versions = fallback
+    if not connector_versions:
         for key in ("source_connector_version", "destination_connector_version"):
             if job.get(key):
                 connector_versions[key] = job[key]
@@ -934,9 +993,25 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         "success",
         "succeeded",
     }
+    reconciliation = (
+        dict(job["reconciliation"]) if isinstance(job.get("reconciliation"), dict) else None
+    )
+    if reconciliation is not None:
+        if (
+            "identity_hash_aligned" not in reconciliation
+            and "identity_hash_aligned" in dest
+        ):
+            reconciliation["identity_hash_aligned"] = bool(dest.get("identity_hash_aligned"))
+        if dest.get("source_independently_reread") is True:
+            reconciliation.setdefault("source_independently_reread", True)
+        if (
+            not reconciliation.get("source_checksum_provenance")
+            and str(dest.get("checksum_mode") or "") == "source_reread"
+        ):
+            reconciliation["source_checksum_provenance"] = "independent_source_reread"
     return build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
-        reconciliation=job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else None,
+        reconciliation=reconciliation,
         mapping_proof=mapping_proof or None,
         preflight_summary=(
             {
@@ -990,4 +1065,5 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         or bool(job_success and not accepted and expected_risks),
         anchor_in_chain=True,
         governance_operations=_collect_governance_for_pack(job),
+        timing=_timing_for_pack(dest),
     )

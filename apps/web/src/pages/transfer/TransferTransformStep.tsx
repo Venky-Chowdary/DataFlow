@@ -4,7 +4,10 @@ import { TransformColumnCatalog } from "../../components/transfer/TransformColum
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
-import { fetchShapeCatalog, previewShapeRecipe, profileShapeSource } from "../../lib/api";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import { Dialog } from "../../components/ui/Dialog";
+import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
+import type { RuleCompileReport } from "../../lib/businessRules";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import {
   changedCellIndex,
@@ -55,11 +58,23 @@ interface TransferTransformStepProps {
   onContinue: () => void;
   /** CDC / SCD2 / mirror refuse pre-load — history was not written by this recipe. */
   syncMode?: string;
+  /**
+   * Compiled workbook applied onto this transfer. Transform owns the upload
+   * because both schemas exist here; Map owns the per-column evidence.
+   */
+  onApplyRules?: (report: RuleCompileReport) => void;
+  onAcceptRuleDirect?: (index: number) => void;
+  ruleReport?: RuleCompileReport | null;
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
 }
 
 const PREVIEW_ROWS = 12;
 const PREVIEW_DEBOUNCE_MS = 250;
-const GUIDE_KEY = "df.transform.guide.dismissed";
 
 function isTransportTimeout(message: string): boolean {
   return /timed out|abort|504|network/i.test(message);
@@ -80,16 +95,12 @@ function cellText(value: unknown): string {
 }
 
 /**
- * Transform (pre-load) — repair the source on the read, before Map and the write.
+ * Transform — repair the source on the read, before Map and the write.
  *
- * Three panels in the order the decision is made: what the sample holds (charted
- * per column, with profile-driven suggestions), the ordered steps to apply, and
- * the before/after the recipe produces. Nothing here mutates the source; the
- * recipe travels with the plan under an identity Execute is held to, and every
- * step states what it did — cells changed, nulls introduced, rows removed.
- *
- * The step is named for the operator, not for the engine: post-load SQL
- * transforms are a different plane, and this one is explicitly *pre-load*.
+ * Two workspaces: rules and steps, then the sample result. Nothing here mutates
+ * the source. The recipe travels with the plan under an identity Execute is held
+ * to, and every step states what it did — cells changed, nulls introduced, rows
+ * removed. How the step works opens in its own window, off this page.
  */
 export function TransferTransformStep({
   sampleRows,
@@ -105,6 +116,15 @@ export function TransferTransformStep({
   onBack,
   onContinue,
   syncMode,
+  onApplyRules,
+  onAcceptRuleDirect,
+  ruleReport,
+  sourceTable = "",
+  destTable = "",
+  sourceTables = [],
+  sourceCatalog = {},
+  destTables = [],
+  destCatalog = {},
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -114,17 +134,16 @@ export function TransferTransformStep({
   const [preview, setPreview] = useState<ShapePreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showGuide, setShowGuide] = useState(() => {
-    try {
-      return window.localStorage.getItem(GUIDE_KEY) !== "1";
-    } catch {
-      return true;
-    }
-  });
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [pane, setPane] = useState<"prepare" | "result">("prepare");
+  const [showEveryResultColumn, setShowEveryResultColumn] = useState(false);
   const [showAllColumns, setShowAllColumns] = useState(false);
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
   const [previewRetry, setPreviewRetry] = useState(0);
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [ruleError, setRuleError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [previewedStepsKey, setPreviewedStepsKey] = useState("");
   const stepsListRef = useRef<HTMLOListElement | null>(null);
 
@@ -138,17 +157,37 @@ export function TransferTransformStep({
     [preview],
   );
 
-  const toggleGuide = useCallback(() => {
-    setShowGuide((open) => {
-      const next = !open;
-      try {
-        window.localStorage.setItem(GUIDE_KEY, next ? "0" : "1");
-      } catch {
-        /* a private-mode browser simply shows the guide every visit */
-      }
-      return next;
-    });
-  }, []);
+  const onPickRules = useCallback(async (file: File | undefined) => {
+    if (!file || !onApplyRules) return;
+    if (!plan.allowed) {
+      setRuleError("Planning a transfer is required to import rules.");
+      return;
+    }
+    setRuleBusy(true);
+    setRuleError("");
+    try {
+      const report = await importBusinessRules({
+        file,
+        sourceColumns,
+        destColumns: Object.keys(targetSchema || {}),
+        sourceTable,
+        destTable,
+        sourceTables,
+        sourceCatalog,
+        destTables,
+        destCatalog,
+        sourceTypes: sourceSchema,
+        destTypes: targetSchema,
+        syncMode,
+      });
+      onApplyRules(report);
+    } catch (err) {
+      setRuleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRuleBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, destTables, destCatalog, syncMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -292,37 +331,84 @@ export function TransferTransformStep({
   const selectedSamples = selectedProfile
     ? kitchenSampleValues(selectedProfile.name, sampleRows, kitchenRows, kitchen.from)
     : [];
+  const changedColumnNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const key of changed) {
+      const column = key.slice(key.indexOf(":") + 1);
+      if (column) names.add(column);
+    }
+    for (const column of columnsAfter) {
+      if (!columnsBefore.includes(column)) names.add(column);
+    }
+    return columnsAfter.filter((column) => names.has(column));
+  }, [changed, columnsAfter, columnsBefore]);
+  const resultColumns = showEveryResultColumn || changedColumnNames.length === 0
+    ? columnsAfter
+    : changedColumnNames;
+  const sourceResultColumns = showEveryResultColumn
+    ? columnsBefore
+    : resultColumns.filter((column) => columnsBefore.includes(column));
+  const resultRefused = Boolean(previewError || preview?.refusal);
 
   return (
     <section className="df2-xform" aria-labelledby="xform-title">
       <header className="df2-xform-head">
-        <div className="df2-xform-head-copy">
-          <p className="df2-xform-eyebrow">Before the load · the source is never modified</p>
-          <h2 className="df2-xform-title" id="xform-title">Transform (pre-load)</h2>
-          <p className="df2-xform-route">
-            <span>{sourceLabel}</span>
-            <DtIcon name="transfer" size={14} />
-            <span>{destRouteLabel}</span>
-          </p>
+        <div className="df2-xform-head-row">
+          <div className="df2-xform-head-copy">
+            <h2 className="df2-xform-title" id="xform-title">Transform</h2>
+            <p className="df2-xform-route">
+              <span>{sourceLabel}</span>
+              <DtIcon name="transfer" size={14} />
+              <span>{destRouteLabel}</span>
+            </p>
+          </div>
+          <div className="df2-xform-head-side">
+            {preview ? (
+              <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
+                <DtIcon name="shield" size={14} />
+                recipe {preview.recipe.recipe_hash}
+              </span>
+            ) : (
+              <span className="df2-xform-identity is-empty">
+                {busy ? "Previewing…" : "No transform declared"}
+              </span>
+            )}
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm df2-xform-help"
+              aria-haspopup="dialog"
+              onClick={() => setGuideOpen(true)}
+            >
+              <DtIcon name="info" size={14} /> How it works
+            </button>
+          </div>
         </div>
-        <div className="df2-xform-head-side">
-          {preview ? (
-            <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
-              <DtIcon name="shield" size={14} />
-              recipe {preview.recipe.recipe_hash}
-            </span>
-          ) : (
-            <span className="df2-xform-identity is-empty">
-              {busy ? "Previewing…" : "No transform declared"}
-            </span>
-          )}
+        <div className="df2-tabs df2-xform-panes" role="tablist" aria-label="Transform workspace">
           <button
             type="button"
-            className="df2-btn df2-btn-ghost df2-btn-sm"
-            aria-expanded={showGuide}
-            onClick={toggleGuide}
+            role="tab"
+            id="xform-tab-prepare"
+            className={`df2-tab${pane === "prepare" ? " active" : ""}`}
+            aria-selected={pane === "prepare"}
+            aria-controls="xform-panel-prepare"
+            onClick={() => setPane("prepare")}
           >
-            <DtIcon name="book" size={14} /> {showGuide ? "Hide how this works" : "How this works"}
+            Rules & transforms
+            {ruleReport ? <span className="df2-xform-pane-count">{ruleReport.rule_count}</span> : null}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="xform-tab-result"
+            className={`df2-tab${pane === "result" ? " active" : ""}`}
+            aria-selected={pane === "result"}
+            aria-controls="xform-panel-result"
+            onClick={() => setPane("result")}
+          >
+            Result
+            <span className={`df2-xform-pane-count${resultRefused ? " is-refused" : ""}`}>
+              {resultRefused ? "Refused" : steps.length ? `${steps.length} steps` : "Sample"}
+            </span>
           </button>
         </div>
       </header>
@@ -337,37 +423,21 @@ export function TransferTransformStep({
         </div>
       )}
 
-      {showGuide && (
+      <Dialog
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+        title="How Transform works"
+        subtitle="The recipe runs while the data is read. The source file or table is never modified."
+        size="xl"
+        className="df2-xform-guide-dialog"
+        footer={(
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => setGuideOpen(false)}>
+            Close
+          </button>
+        )}
+      >
         <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
-      )}
-
-      <dl className="df2-xform-stats">
-        <div>
-          <dt>Sampled rows</dt>
-          <dd>
-            {(profile?.sampled_rows ?? sampleRows.length).toLocaleString()}
-            {rowCount ? <small> of {rowCount.toLocaleString()}</small> : null}
-          </dd>
-        </div>
-        <div>
-          <dt>Columns</dt>
-          <dd>
-            {(profiledColumns.length || sourceColumns.length).toLocaleString()}
-            {kitchen.from === "shaped" ? <small> after transform</small> : null}
-          </dd>
-        </div>
-        <div className={attention ? "is-attention" : ""}>
-          <dt>Columns with findings</dt>
-          <dd>{attention.toLocaleString()}</dd>
-        </div>
-        <div>
-          <dt>Steps applied</dt>
-          <dd>
-            {steps.length.toLocaleString()}
-            {catalog ? <small> of {catalog.max_steps} allowed</small> : null}
-          </dd>
-        </div>
-      </dl>
+      </Dialog>
 
       {!plan.allowed && (
         <div className="df2-alert df2-alert-info" role="status">
@@ -436,8 +506,9 @@ export function TransferTransformStep({
               type="button"
               className="df2-btn df2-btn-sm"
               onClick={() => {
+                setPane("prepare");
                 const node = document.getElementById(`xform-step-${preview.refusal?.step}`);
-                node?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                window.setTimeout(() => node?.scrollIntoView({ block: "nearest", behavior: "smooth" }), 0);
               }}
             >
               Jump to step {preview.refusal.step}
@@ -446,59 +517,63 @@ export function TransferTransformStep({
         </div>
       )}
 
-      {profiledColumns.length > 0 && (
-        <section className="df2-xform-card df2-xform-kitchen-card" aria-labelledby="xform-profile-title">
-          <header className="df2-xform-card-head">
-            <h3 id="xform-profile-title">
-              <span className="df2-xform-card-num">1</span> Column catalog
-            </h3>
-            <button
-              type="button"
-              className="df2-btn df2-btn-ghost df2-btn-sm"
-              onClick={() => setShowAllColumns((all) => !all)}
-            >
-              {showAllColumns || attention === 0
-                ? (attention ? "Only columns with findings" : `All ${profiledColumns.length} columns`)
-                : `All ${profiledColumns.length} columns`}
-            </button>
-          </header>
-          {kitchen.from === "shaped" ? (
-            <p className="df2-xform-note">
-              These columns are the transformed image — what Map and the writer will see, including
-              columns an unnest or flatten just produced.
+      <div
+        role="tabpanel"
+        id="xform-panel-prepare"
+        aria-labelledby="xform-tab-prepare"
+        hidden={pane !== "prepare"}
+        className="df2-xform-panel"
+      >
+      {onApplyRules ? <div className="df2-rule-import">
+        <div className="df2-rule-import-copy">
+          <strong>Business rules</strong>
+          <p>
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Closed-form
+            rows land on this recipe. Anything else stays in review.
+          </p>
+          <details className="df2-rule-import-detail">
+            <summary>What this upload does</summary>
+            <p>
+              Headers are inferred from the file and the schemas you already
+              selected — not a fixed column list. Closed-form rows compile onto
+              this recipe and Map. Destination names land on Map — this catalog
+              stays the pre-load image (source names plus derived columns).
+              Anything we cannot execute stays in review — unused destination
+              columns are not written. Applied rows land on this recipe and Map
+              immediately. Closed-form Validate checks compile as destination
+              contracts — they never write. Review is for sentences that are
+              not a closed form or did not bind. Accept as Direct on a leftover
+              bound rename, or continue to Map to remap.
+              {sourceTables.length > 1
+                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
+                : ""}
             </p>
-          ) : profile?.sample_notice ? (
-            <p className="df2-xform-note">{profile.sample_notice}</p>
-          ) : null}
-          <div className="df2-xform-kitchen">
-            <TransformColumnCatalog
-              columns={visibleColumns}
-              selected={selectedProfile?.name ?? ""}
-              onSelect={setSelectedColumn}
-            />
-            {selectedProfile ? (
-              <TransformColumnChart
-                profile={selectedProfile}
-                targetType={targetSchema[selectedProfile.name]}
-                sampleValues={selectedSamples}
-                suggestion={selectedSuggestion}
-                canApply={plan.allowed && !preloadRefused}
-                applyReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
-                onApplySuggestion={applySuggestion}
-              />
-            ) : (
-              <p className="df2-xform-empty">Select a column to inspect its profile.</p>
-            )}
-          </div>
-        </section>
-      )}
-
+          </details>
+          {ruleReport ? <p className="df2-rule-import-summary">{ruleReport.filename}</p> : null}
+          {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}
+        </div>
+        <div className="df2-rule-import-actions">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            hidden
+            onChange={(event) => void onPickRules(event.target.files?.[0])}
+          />
+          <button
+            type="button"
+            className="df2-btn df2-btn-secondary df2-btn-sm"
+            disabled={ruleBusy || !plan.allowed}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {ruleBusy ? "Reading…" : ruleReport ? "Replace rules file" : "Upload rules"}
+          </button>
+        </div>
+      </div> : null}
       <div className="df2-xform-grid">
         <section className="df2-xform-card" aria-labelledby="xform-decisions-title">
           <header className="df2-xform-card-head">
-            <h3 id="xform-decisions-title">
-              <span className="df2-xform-card-num">1b</span> Suggested repairs
-            </h3>
+            <h3 id="xform-decisions-title">Suggested repairs</h3>
           </header>
           {openSuggestions.length > 0 ? (
             <ul className="df2-xform-suggestions">
@@ -534,9 +609,7 @@ export function TransferTransformStep({
 
         <section className="df2-xform-card" aria-labelledby="xform-recipe-title">
           <header className="df2-xform-card-head">
-            <h3 id="xform-recipe-title">
-              <span className="df2-xform-card-num">2</span> Steps to apply, in order
-            </h3>
+            <h3 id="xform-recipe-title">Steps, in order</h3>
             {/* A viewer opens the same panel read-only: the operations are what the
                 refusal text says are readable, and nothing in it can be applied. */}
             <button
@@ -654,18 +727,126 @@ export function TransferTransformStep({
             />
           )}
         </section>
+      {ruleReport ? (
+        <BusinessRuleLedger
+          report={ruleReport}
+          embedded
+          onAcceptDirect={onAcceptRuleDirect}
+        />
+      ) : null}
       </div>
+
+      </div>
+
+      <div
+        role="tabpanel"
+        id="xform-panel-result"
+        aria-labelledby="xform-tab-result"
+        hidden={pane !== "result"}
+        className="df2-xform-panel"
+      >
+      <dl className="df2-xform-stats">
+        <div>
+          <dt>Sampled rows</dt>
+          <dd>
+            {(profile?.sampled_rows ?? sampleRows.length).toLocaleString()}
+            {rowCount ? <small> of {rowCount.toLocaleString()}</small> : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Columns</dt>
+          <dd>
+            {(profiledColumns.length || sourceColumns.length).toLocaleString()}
+            {kitchen.from === "shaped" ? <small> after transform</small> : null}
+          </dd>
+        </div>
+        <div className={attention ? "is-attention" : ""}>
+          <dt>Columns with findings</dt>
+          <dd>{attention.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Steps applied</dt>
+          <dd>
+            {steps.length.toLocaleString()}
+            {catalog ? <small> of {catalog.max_steps} allowed</small> : null}
+          </dd>
+        </div>
+      </dl>
+
+      {profiledColumns.length > 0 && (
+        <section className="df2-xform-card df2-xform-kitchen-card" aria-labelledby="xform-profile-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-profile-title">Columns</h3>
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm"
+              onClick={() => setShowAllColumns((all) => !all)}
+            >
+              {showAllColumns || attention === 0
+                ? (attention ? "Only columns with findings" : `All ${profiledColumns.length} columns`)
+                : `All ${profiledColumns.length} columns`}
+            </button>
+          </header>
+          {kitchen.from === "shaped" ? (
+            <p className="df2-xform-note">
+              Source names, plus columns this recipe derived. Map chooses the destination names.
+            </p>
+          ) : profile?.sample_notice ? (
+            <p className="df2-xform-note">{profile.sample_notice}</p>
+          ) : null}
+          <div className="df2-xform-kitchen">
+            <TransformColumnCatalog
+              columns={visibleColumns}
+              selected={selectedProfile?.name ?? ""}
+              onSelect={setSelectedColumn}
+            />
+            {selectedProfile ? (
+              <TransformColumnChart
+                profile={selectedProfile}
+                targetType={targetSchema[selectedProfile.name]}
+                sampleValues={selectedSamples}
+                suggestion={selectedSuggestion}
+                canApply={plan.allowed && !preloadRefused}
+                applyReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
+                onApplySuggestion={applySuggestion}
+              />
+            ) : (
+              <p className="df2-xform-empty">Select a column to inspect its profile.</p>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="df2-xform-card df2-xform-preview" aria-labelledby="xform-preview-title">
         <header className="df2-xform-card-head">
-          <h3 id="xform-preview-title">
-            <span className="df2-xform-card-num">3</span> Before and after
-          </h3>
-          <span className="df2-xform-note">
-            {busy
-              ? "Previewing…"
-              : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
-          </span>
+          <h3 id="xform-preview-title">Sample</h3>
+          <div className="df2-xform-preview-tools">
+            {changedColumnNames.length > 0 ? (
+              <div className="df2-segment" role="group" aria-label="Sample columns">
+                <button
+                  type="button"
+                  className={showEveryResultColumn ? "" : "active"}
+                  aria-pressed={!showEveryResultColumn}
+                  onClick={() => setShowEveryResultColumn(false)}
+                >
+                  What changed
+                </button>
+                <button
+                  type="button"
+                  className={showEveryResultColumn ? "active" : ""}
+                  aria-pressed={showEveryResultColumn}
+                  onClick={() => setShowEveryResultColumn(true)}
+                >
+                  All columns
+                </button>
+              </div>
+            ) : null}
+            <span className="df2-xform-note">
+              {busy
+                ? "Previewing…"
+                : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
+            </span>
+          </div>
         </header>
         <div className="df2-xform-grids">
           <div className="df2-xform-gridpane">
@@ -673,12 +854,12 @@ export function TransferTransformStep({
             <div className="df2-xform-scroll">
               <table className="df2-table df2-table-compact">
                 <thead>
-                  <tr>{columnsBefore.map((column) => <th key={column}>{column}</th>)}</tr>
+                  <tr>{sourceResultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
                 </thead>
                 <tbody>
                   {beforeRows.map((row, index) => (
                     <tr key={index}>
-                      {columnsBefore.map((column) => <td key={column}>{cellText(row[column])}</td>)}
+                      {sourceResultColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}
                     </tr>
                   ))}
                 </tbody>
@@ -686,21 +867,27 @@ export function TransferTransformStep({
             </div>
           </div>
           <div className="df2-xform-gridpane">
-            <h4>Transformed — what Map and the writer will see</h4>
+            <h4>After the recipe</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
-                {steps.length ? "No rows survive the recipe on this sample." : "Nothing transformed yet."}
+                {previewError
+                  ? "The preview did not run. The recipe was refused before any row was removed."
+                  : busy
+                    ? "Checking this recipe against the sample."
+                    : steps.length
+                      ? "No rows survive the recipe on this sample."
+                      : "Nothing transformed yet."}
               </p>
             ) : (
               <div className="df2-xform-scroll">
                 <table className="df2-table df2-table-compact">
                   <thead>
-                    <tr>{columnsAfter.map((column) => <th key={column}>{column}</th>)}</tr>
+                    <tr>{resultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
                   </thead>
                   <tbody>
                     {afterRows.map((row, index) => (
                       <tr key={index}>
-                        {columnsAfter.map((column) => (
+                        {resultColumns.map((column) => (
                           <td
                             key={column}
                             className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
@@ -728,19 +915,31 @@ export function TransferTransformStep({
         )}
       </section>
 
+      </div>
+
       <footer className="df2-xform-actions">
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
           Back to Destination
         </button>
-        <button
-          type="button"
-          className="df2-btn df2-btn-primary"
-          disabled={!continueState.enabled}
-          title={continueState.reason}
-          onClick={onContinue}
-        >
-          {continueState.label}
-        </button>
+        {pane === "prepare" ? (
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            onClick={() => setPane("result")}
+          >
+            Review result
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="df2-btn df2-btn-primary"
+            disabled={!continueState.enabled}
+            title={continueState.reason}
+            onClick={onContinue}
+          >
+            {continueState.label}
+          </button>
+        )}
       </footer>
     </section>
   );

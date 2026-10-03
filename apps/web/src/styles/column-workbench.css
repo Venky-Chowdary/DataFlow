@@ -654,6 +654,25 @@
   border-bottom: 1px solid #f1f5f9;
 }
 
+/* Status strip shares the mapping card's width. Chrome padding must not inset it. */
+.df2-column-review-editor > .df2-column-review-notices {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-column-review-editor > .df2-column-review-notices .df2-column-review-alert,
+.df2-column-review-editor > .df2-map-band-bar {
+  margin: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
 .df2-column-review.is-compact .df2-column-review-chrome {
   padding: 6px 8px;
 }
@@ -793,6 +812,13 @@
   -webkit-overflow-scrolling: touch;
   border: 1px solid #e2e8f0;
   border-radius: 10px;
+}
+
+/* One card: the notice, the filters, and the rows share the editor edge. */
+.df2-column-review.is-editor .df2-column-review-editor > .df2-column-review-scroll,
+.df2-column-review.is-editor .df2-column-review-editor > .df2-column-review-table-wrap {
+  border: none;
+  border-radius: 0;
 }
 
 .df2-column-review-footer {
@@ -1363,8 +1389,24 @@
 
 .df2-column-review-empty-row {
   text-align: center;
-  padding: 24px 16px !important;
-  color: #64748b;
+  padding: 28px 20px !important;
+  color: var(--df-text-secondary, #64748b);
+}
+
+.df2-column-review-folded {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.df2-column-review-folded p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--df-text-primary, #0f172a);
 }
 
 .df2-column-row.is-focused td {

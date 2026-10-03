@@ -5,6 +5,7 @@ import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import type { RuleCompileReport } from "./businessRules";
 import type {
   ShapeCatalog,
   ShapePreviewResponse,
@@ -615,6 +616,42 @@ export async function previewShapeRecipe(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
+  return res.json();
+}
+
+export async function importBusinessRules(payload: {
+  file: File;
+  sourceColumns?: string[];
+  destColumns?: string[];
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
+  sourceTypes?: Record<string, string>;
+  destTypes?: Record<string, string>;
+  syncMode?: string;
+}): Promise<RuleCompileReport> {
+  const form = new FormData();
+  form.append("file", payload.file);
+  form.append("source_columns", JSON.stringify(payload.sourceColumns ?? []));
+  form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
+  form.append("source_table", payload.sourceTable ?? "");
+  form.append("dest_table", payload.destTable ?? "");
+  form.append("source_tables", JSON.stringify(payload.sourceTables ?? []));
+  form.append("source_catalog", JSON.stringify(payload.sourceCatalog ?? {}));
+  form.append("dest_tables", JSON.stringify(payload.destTables ?? []));
+  form.append("dest_catalog", JSON.stringify(payload.destCatalog ?? {}));
+  form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
+  form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
+  form.append("sync_mode", payload.syncMode ?? "");
+  const res = await apiFetch(`${API_BASE}/transfer/rules/import`, {
+    method: "POST",
+    body: form,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not read the rule file");
   return res.json();
 }
 
@@ -1645,6 +1682,7 @@ export function streamJobProgress(
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
     const es = new EventSource(streamUrl);
+    let closedTerminal = false;
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
@@ -1656,6 +1694,7 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
+          closedTerminal = true;
           es.close();
         }
       } catch {
@@ -1664,6 +1703,9 @@ export function streamJobProgress(
     };
     es.onerror = () => {
       es.close();
+      // Closing a completed stream fires onerror in some browsers. Do not
+      // reconnect — that re-appends the last log line and makes it jump.
+      if (stopped || closedTerminal) return;
       startPolling();
     };
     return () => {

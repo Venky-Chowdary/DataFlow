@@ -1331,6 +1331,8 @@ export interface TransferResult {
     chunk_size?: number;
     batches?: number;
     records_per_second?: number;
+    /** Engine monotonic seconds for this execute, the denominator of rows/s. */
+    elapsed_seconds?: number;
     load_history_report?: LoadHistoryReport;
     phase_profile?: PhaseProfileReport;
     transformations?: TransformationsReport;

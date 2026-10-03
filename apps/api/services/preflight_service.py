@@ -48,7 +48,8 @@ from services.transform_engine import (
     ambiguous_date_columns,
     ambiguous_number_columns,
     assumed_number_locale,
-    infer_date_locale,
+    canonical_date_locale,
+    canonical_number_locale,
     infer_number_locale,
     reset_active_date_locale,
     reset_active_number_locale,
@@ -100,8 +101,12 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_status: str = "",
         source_duplicate_probe_message: str = "",
         source_duplicate_probe_expected: bool = False,
+        empty_cells_as_null: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        # Spreadsheet blanks are absence. Only file sources opt in — the same
+        # flag the file writer uses. Database extracts keep it off.
+        self.empty_cells_as_null = bool(empty_cells_as_null)
         self.destination_collision = destination_collision
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
@@ -169,6 +174,10 @@ class FilePreflightContext(PreflightContext):
             "code_crosswalk_system": getattr(m, "code_crosswalk_system", None),
         }
 
+    def _dest_nullability(self) -> dict[str, bool]:
+        from services.preflight_source_kind import destination_nullability
+        return destination_nullability(getattr(self.plan.destination, "target_columns", None))
+
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
             return False, [
@@ -208,6 +217,8 @@ class FilePreflightContext(PreflightContext):
                 sample_rows=rows,
                 mappings=mapping_dicts,
                 column_types=column_types,
+                empty_cells_as_null=self.empty_cells_as_null,
+                dest_nullability=self._dest_nullability(),
             )
         except Exception as exc:
             logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -258,6 +269,8 @@ class FilePreflightContext(PreflightContext):
                 dest_db_type=self.plan.destination.db_type,
                 table_exists=getattr(self.plan.destination, "table_exists", None),
                 validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
+                empty_cells_as_null=self.empty_cells_as_null,
+                dest_nullability=self._dest_nullability(),
             )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
@@ -397,6 +410,8 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
+            empty_cells_as_null=self.empty_cells_as_null,
+            dest_nullability=self._dest_nullability(),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -496,7 +511,7 @@ def run_transfer_policy_gates(
     source_kind: str = "file",
     write_via_staging: bool = False,
     source_read_mode: str = "",
-    delivery_guarantee: str = "at_least_once",
+    delivery_guarantee: str = "auto",
     allow_append_only: bool = False,
     read_scope: Any = None,
     priority_column: str = "",
@@ -660,8 +675,8 @@ def run_transfer_policy_gates(
             }
         )
 
-
-    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+    from services.cdc_exactly_once import (
+        preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 
     eos_gate = preflight_delivery_gate(
         sync_mode=sync,
@@ -671,6 +686,7 @@ def run_transfer_policy_gates(
         has_primary_key=route_has_cdc_pk(contracts),
         allow_append_only=allow_append_only,
         callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+        has_lsn_column=route_declares_log_position(contracts),
     )
     if eos_gate:
         gates.append(eos_gate)
@@ -827,6 +843,9 @@ from services.preflight_policy_gates import (  # noqa: E402
 )
 
 
+from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
+
+
 @_with_date_locale
 def run_file_preflight(
     *,
@@ -971,15 +990,20 @@ def run_file_preflight(
     mappings = hydrated_mappings
     _unstamped_additive: list[str] = []
 
-    # If the operator did not specify a locale for ambiguous day/month dates,
-    # scan the sample for an unambiguous majority before any date coercion.
-    if sample_rows and columns:
-        inferred_locale = infer_date_locale(
-            sample_rows, columns, existing_locale=date_locale
-        )
-        if inferred_locale and not date_locale:
-            date_locale = inferred_locale
+    # Only the allowlisted tokens are locales. Anything else is Auto, so a
+    # typo or a non-locale string cannot skip inference or land on the report.
+    date_locale = canonical_date_locale(date_locale)
+    number_locale = canonical_number_locale(number_locale)
+    # Operator locale wins. Otherwise adopt one inferred order only when
+    # every date column agrees.
+    if sample_rows and columns and not date_locale:
+        from services.preflight_source_kind import agreed_sample_date_locale
+
+        agreed = agreed_sample_date_locale(sample_rows, columns)
+        if agreed:
+            date_locale = agreed
             set_active_date_locale(date_locale)
+    if sample_rows and columns:
         inferred_numbers = infer_number_locale(
             sample_rows, columns, existing_locale=number_locale
         )
@@ -1207,12 +1231,20 @@ def run_file_preflight(
         dest_cols.append(
             ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
+
+    from services.transform_resolver import write_plan_transform
+
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
             target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
-            transform=m.get("transform"),
+            transform=write_plan_transform(
+                m if isinstance(m, dict) else {},
+                column_types=column_types,
+                dest_types=dest_types,
+                destination_table_exists=destination_table_exists,
+            ),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
@@ -1519,6 +1551,7 @@ def run_file_preflight(
     ctx = FilePreflightContext(
         plan,
         sample_rows,
+        empty_cells_as_null=is_file_source,
         destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
@@ -2313,6 +2346,7 @@ def run_file_preflight(
         and observed_codes is None
         and (population_seq is not None or population_rows is None),
         observed_codes=observed_codes,
+        row_count=row_count,
     )
     if scan_method:
         code_crosswalk["scan_method"] = scan_method

@@ -26,15 +26,22 @@ def test_engine_family_collapses_postgres_aliases():
     assert engine_family("mysql") != engine_family("postgresql")
 
 
-def test_auto_reread_only_heterogeneous_warehouse(monkeypatch):
+def test_auto_reread_full_refresh_includes_same_engine(monkeypatch):
+    """HVR bulk compare re-reads source and target, including same-engine refresh."""
     monkeypatch.delenv("DATAFLOW_RECONCILE_SOURCE_REREAD", raising=False)
     monkeypatch.delenv("DATAWRAP_RECONCILE_SOURCE_REREAD", raising=False)
     monkeypatch.delenv("RECONCILE_SOURCE_REREAD", raising=False)
     assert should_reread_source(src_type="snowflake", dest_type="postgresql") is True
     assert should_reread_source(src_type="mysql", dest_type="postgresql") is True
-    assert should_reread_source(src_type="postgresql", dest_type="postgresql") is False
-    assert should_reread_source(src_type="sqlite", dest_type="sqlite") is False
+    assert should_reread_source(src_type="postgresql", dest_type="postgresql") is True
+    assert should_reread_source(src_type="postgres", dest_type="postgres") is True
+    assert should_reread_source(src_type="sqlite", dest_type="sqlite") is True
+    assert should_reread_source(src_type="mssql", dest_type="postgresql") is True
+    assert should_reread_source(src_type="s3", dest_type="postgresql") is False
     assert should_reread_source(src_type="snowflake", dest_type="kafka") is False
+    assert should_reread_source(
+        src_type="postgresql", dest_type="postgresql", incremental=True
+    ) is False
     assert should_reread_source(
         src_type="snowflake", dest_type="postgresql", incremental=True
     ) is False
@@ -76,6 +83,61 @@ def test_reread_plan_incremental_keeps_cursor_path():
     plan = reread_pagination_plan(src_type="snowflake", incremental=True)
     assert plan["mode"] == "cursor_or_offset"
     assert plan["scan_state"] is None
+
+
+def test_file_auto_reread_into_warehouse_not_same_file(monkeypatch):
+    from services.source_reread import should_reread_file_source
+
+    monkeypatch.delenv("DATAFLOW_RECONCILE_SOURCE_REREAD", raising=False)
+    monkeypatch.delenv("DATAWRAP_RECONCILE_SOURCE_REREAD", raising=False)
+    monkeypatch.delenv("RECONCILE_SOURCE_REREAD", raising=False)
+    assert should_reread_file_source(file_type="excel", dest_type="postgresql") is True
+    assert should_reread_file_source(file_type="csv", dest_type="sqlite") is True
+    assert should_reread_file_source(file_type="csv", dest_type="s3") is False
+    assert should_reread_file_source(
+        file_type="excel", dest_type="postgresql", incremental=True
+    ) is False
+
+
+def test_file_reread_off_cannot_suppress_partial_resume(monkeypatch):
+    from services.source_reread import should_reread_file_source
+
+    monkeypatch.setenv("DATAFLOW_RECONCILE_SOURCE_REREAD", "0")
+    assert should_reread_file_source(file_type="excel", dest_type="postgresql") is False
+    assert should_reread_file_source(
+        file_type="csv",
+        dest_type="sqlite",
+        partial_write_pass=True,
+    ) is True
+
+
+def test_identity_alignment_requires_the_same_keys():
+    """Same cell hashes under different keys are not an aligned population.
+
+    The value digest ignores the row key so a destination re-read can match.
+    Identity alignment is the separate proof that the second source parse
+    named the same rows.
+    """
+    from services.fingerprint_accumulator import FingerprintAccumulator
+    from services.source_reread import align_source_populations
+
+    left = FingerprintAccumulator()
+    right = FingerprintAccumulator()
+    left.add_many([("id:1", "fp-a"), ("id:2", "fp-b")])
+    right.add_many([("id:2", "fp-b"), ("id:1", "fp-a")])
+    aligned = align_source_populations(left, right)
+    assert aligned["identity_hash_aligned"] is True
+    assert left.digest() == right.digest()
+
+    shifted = FingerprintAccumulator()
+    shifted.add_many([("id:9", "fp-a"), ("id:8", "fp-b")])
+    again = FingerprintAccumulator()
+    again.add_many([("id:1", "fp-a"), ("id:2", "fp-b")])
+    # Value digests match — keys do not.
+    assert shifted.identity_digest() != again.identity_digest()
+    mismatch = align_source_populations(shifted, again)
+    assert mismatch["identity_hash_aligned"] is False
+    assert mismatch["reason"] == "identity_digest_differs"
 
 
 def test_source_reread_checksum_mode_earns_full_checksum(monkeypatch):

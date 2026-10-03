@@ -84,7 +84,8 @@ def _tokenize(source: str) -> list[_Token]:
         if ch.isspace():
             i += 1
             continue
-        if ch == "'":
+        if ch in {"'", '"'}:
+            quote = ch
             j = i + 1
             buf: list[str] = []
             while True:
@@ -92,9 +93,9 @@ def _tokenize(source: str) -> list[_Token]:
                     raise ExpressionError(
                         f"unterminated text literal starting at position {i + 1}"
                     )
-                if source[j] == "'":
-                    if j + 1 < n and source[j + 1] == "'":
-                        buf.append("'")
+                if source[j] == quote:
+                    if j + 1 < n and source[j + 1] == quote:
+                        buf.append(quote)
                         j += 2
                         continue
                     j += 1

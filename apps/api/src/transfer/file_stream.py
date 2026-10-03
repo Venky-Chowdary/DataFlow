@@ -13,6 +13,7 @@ import itertools
 import json
 import logging
 import os
+import time
 from services.brand_env import getenv_brand
 import sys
 import tempfile
@@ -992,6 +993,205 @@ def _stash_file_reconcile_sample(
         )
 
 
+def fingerprint_parsed_file(
+    *,
+    file_type: str,
+    content: bytes | str | os.PathLike,
+    filename: str,
+    batch_size: int,
+    read_options: ReadOptions | None,
+    columns: list[str],
+    mappings: list[dict],
+    target_cols: list[str],
+    column_types: dict[str, str],
+    fingerprint_dest_types: dict[str, str],
+    dest_type: str,
+    error_policy: str,
+    pk_target_cols: list[str] | None,
+    source_filter: dict[str, Any] | None = None,
+    incremental: bool = False,
+    cursor_source_col: str = "",
+    watermark: str | None = None,
+    cursor_pk_source: str = "",
+    shape_recipe: Any = None,
+    use_source_spool: bool = False,
+    dest_extra: dict[str, Any] | None = None,
+) -> tuple[FingerprintAccumulator, int]:
+    """Second parse of a file the writer already consumed.
+
+    Same filter, watermark, recipe, and remap as the write. The accumulator
+    is not digested here — the caller aligns identity, then digests.
+    """
+    full_iter = _batch_iterator_for_type(
+        file_type, content, batch_size, read_options, declared_name=filename
+    )
+    if source_filter:
+        full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
+    if incremental and cursor_source_col:
+        from services.sync_cursor import records_after_watermark
+
+        full_iter = (
+            records_after_watermark(
+                list(batch or []),
+                cursor_source_col,
+                watermark,
+                primary_key=cursor_pk_source,
+            )[0]
+            for batch in full_iter
+        )
+    if shape_recipe is not None:
+        from services.shape_apply import ShapeRunner
+
+        full_iter = ShapeRunner(shape_recipe).batches(full_iter)
+
+    accumulator = FingerprintAccumulator()
+    source_rows = 0
+    pk_cols = list(pk_target_cols or [])
+    for batch in full_iter:
+        if not batch:
+            continue
+        if use_source_spool:
+            from connectors.engine_record_spill import (
+                fingerprints_from_spool,
+                spill_engine_write_records,
+            )
+
+            headers = columns or (list(batch[0].keys()) if batch else [])
+            spill = spill_engine_write_records(
+                batch,
+                headers,
+                mappings,
+                extra=dest_extra or {},
+                clear_records=True,
+            )
+            try:
+                source_rows += spill.unexpanded_row_count
+                fps = fingerprints_from_spool(
+                    spill.spool,
+                    mappings,
+                    target_cols,
+                    headers=list(getattr(spill.spool, "headers", None) or columns or []),
+                    column_types=column_types,
+                    dest_db_type=dest_type,
+                    dest_types=fingerprint_dest_types,
+                    error_policy=error_policy,
+                    destination_pk_columns=pk_cols or None,
+                    empty_cells_as_null=True,
+                )
+                if fps:
+                    accumulator.add_many(fps)
+            finally:
+                spill.close()
+        else:
+            headers, data_rows = records_to_matrix(batch, columns)
+            source_rows += len(data_rows)
+            mapped_rows, _rejected = map_rows_for_fingerprint(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy=error_policy,
+                dest_types=fingerprint_dest_types,
+                preserve_case=True,
+                dest_kind=dest_type,
+                destination_pk_columns=pk_cols or None,
+                empty_cells_as_null=True,
+            )
+            if mapped_rows:
+                accumulator.add_many(
+                    row_fingerprints(
+                        mapped_rows,
+                        target_cols,
+                        dest_db_type=dest_type,
+                        dest_types=fingerprint_dest_types,
+                    )
+                )
+    return accumulator, source_rows
+
+
+def _file_route_versions(
+    *,
+    file_type: str,
+    dest_type: str,
+    dest_server: str = "",
+) -> dict[str, str]:
+    from services.connector_versions import capture_route_versions
+
+    return capture_route_versions(
+        source_file_type=file_type,
+        dest_type=dest_type,
+        dest_server=dest_server,
+    )
+
+
+def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any) -> None:
+    """Second parse for the CSV COPY fast path.
+
+    COPY already fingerprinted mapped rows and closed that accumulator. The
+    identity digest rides on ``source_snapshot``. Upgrade to ``source_reread``
+    only when the second parse's identity and value digests match. A
+    disagreement leaves the write-pass digest in place so Gate-8 still
+    compares the bytes COPY hashed, and records why alignment failed.
+    """
+    from services.source_reread import align_identity_digests, should_reread_file_source
+
+    if not should_reread_file_source(
+        file_type=str(scan_kwargs.get("file_type") or ""),
+        dest_type=str(scan_kwargs.get("dest_type") or ""),
+        incremental=bool(scan_kwargs.get("incremental")),
+        partial_write_pass=False,
+    ):
+        dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
+        return
+    snapshot = dest_summary.get("source_snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    stored_identity = str(snapshot.get("write_pass_identity_digest") or "")
+    stored_rows = int(snapshot.get("write_pass_fingerprint_rows") or 0)
+    write_pass_value = str(dest_summary.get("checksum") or "")
+    if not stored_identity or stored_rows <= 0 or not write_pass_value:
+        dest_summary["identity_hash_aligned"] = False
+        dest_summary["identity_alignment"] = {"reason": "identity_digest_missing"}
+        return
+    try:
+        reread, _rows = fingerprint_parsed_file(**scan_kwargs)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "CSV COPY source re-read failed: %s", exc, exc_info=exc
+        )
+        dest_summary["identity_hash_aligned"] = False
+        dest_summary["identity_alignment"] = {"reason": "reread_failed"}
+        return
+    reread_identity = reread.identity_digest()
+    reread_rows = int(reread.total)
+    reread_value = reread.digest() if reread.total else ""
+    alignment = align_identity_digests(
+        write_pass_identity_digest=stored_identity,
+        reread_identity_digest=reread_identity,
+        write_pass_rows=stored_rows,
+        reread_rows=reread_rows,
+        write_pass_value_digest=write_pass_value,
+        reread_value_digest=reread_value,
+    )
+    dest_summary["identity_alignment"] = alignment
+    dest_summary["identity_hash_aligned"] = bool(alignment["identity_hash_aligned"])
+    if alignment["identity_hash_aligned"] and reread_value:
+        dest_summary["checksum"] = reread_value
+        dest_summary["checksum_mode"] = "source_reread"
+        dest_summary["source_independently_reread"] = True
+        dest_summary["checksum_note"] = (
+            "Independent file re-read after CSV COPY. "
+            "Identity and value digests match the write-pass fingerprints."
+        )
+        return
+    dest_summary["source_independently_reread"] = False
+    dest_summary["checksum_note"] = (
+        "File re-read did not align with the COPY write-pass fingerprints "
+        f"({alignment.get('reason')}). Write-pass digest kept."
+    )
+
+
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -1337,6 +1537,15 @@ def stream_file_to_database(
         from services.copy_csv_local import try_copy_local_csv
     except ImportError:
         from src.services.copy_csv_local import try_copy_local_csv  # type: ignore
+    from services.phase_profile import (
+        PHASE_BULK_COPY,
+        PHASE_CHECKSUM,
+        PHASE_TRANSFORM_WRITE,
+        PhaseProfile,
+    )
+
+    phase_profile = PhaseProfile()
+    copy_started = time.perf_counter()
     csv_fast = try_copy_local_csv(
         content=content,
         filename=filename,
@@ -1364,6 +1573,51 @@ def stream_file_to_database(
         dest_summary["copy_fast_path"] = "used"
         if rows_before_copy is not None:
             dest_summary.setdefault(PRECOUNT_KEY, int(rows_before_copy))
+        dest_summary["connector_versions"] = _file_route_versions(
+            file_type=file_type,
+            dest_type=dest_type,
+        )
+        phase_profile.add(
+            PHASE_BULK_COPY,
+            time.perf_counter() - copy_started,
+            rows=int(rows_copied or 0),
+        )
+        reread_started = time.perf_counter()
+        _maybe_upgrade_copy_reread(
+            dest_summary,
+            file_type=file_type,
+            content=content,
+            filename=filename,
+            batch_size=batch_size,
+            read_options=read_options,
+            columns=columns,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            fingerprint_dest_types=fingerprint_dest_types,
+            dest_type=dest_type,
+            error_policy=stream_error_policy,
+            pk_target_cols=list(pk_target_cols or []),
+            source_filter=source_filter,
+            incremental=incremental,
+            cursor_source_col=cursor_source_col,
+            watermark=watermark,
+            cursor_pk_source=cursor_pk_source,
+            shape_recipe=getattr(shape_runner, "recipe", None) if shape_runner is not None else None,
+        )
+        if dest_summary.get("source_independently_reread") is True or isinstance(
+            dest_summary.get("identity_alignment"), dict
+        ):
+            phase_profile.add(
+                PHASE_CHECKSUM,
+                time.perf_counter() - reread_started,
+                rows=int(
+                    (dest_summary.get("identity_alignment") or {}).get("reread_rows")
+                    or rows_copied
+                    or 0
+                ),
+            )
+        dest_summary["phase_profile"] = phase_profile.snapshot()
         if incremental:
             dest_summary["sync_mode"] = effective_sync
             dest_summary["cursor_key"] = cursor_key
@@ -1510,6 +1764,7 @@ def stream_file_to_database(
             max_workers = 1
 
     pg_conn_state: dict[str, Any] = {"conn": None}
+    dest_server_version = ""
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
 
     def _ensure_snowflake_conn() -> Any:
@@ -1923,6 +2178,7 @@ def stream_file_to_database(
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
+    write_started = time.perf_counter()
     try:
         first_idx, first_batch = next(batch_enum)
     except StopIteration:
@@ -1950,6 +2206,10 @@ def stream_file_to_database(
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
             if conn is not None:
+                if state is pg_conn_state and not dest_server_version:
+                    from services.connector_versions import server_version_from_connection
+
+                    dest_server_version = server_version_from_connection(conn)
                 try:
                     conn.close()
                 except Exception as exc:
@@ -1958,78 +2218,116 @@ def stream_file_to_database(
                     )
                 state["conn"] = None
 
+    phase_profile.add(
+        PHASE_TRANSFORM_WRITE,
+        time.perf_counter() - write_started,
+        rows=int(written or 0),
+    )
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
     # All rows may be quarantined (written == 0) — that is a real transfer with
     # DLQ proof, not an empty file. Continue so rejected_details / checksum land.
 
-    # The source checksum has been accumulated incrementally from each batch's
-    # mapped fingerprints, so we do not need to parse the entire file a second
-    # time.  The FingerprintAccumulator spills to disk above the threshold, so
-    # even billion-row transfers stay memory-bounded by a single batch.
-    # If the job resumed, we must re-scan the whole file so the fingerprint
-    # covers all source rows, not only the ones processed after the checkpoint.
-    if resumed and fp_accumulator.total < total_rows:
-        full_iter = _batch_iterator_for_type(
-            file_type, content, batch_size, read_options, declared_name=filename
-        )
-        # Match the main write path (source_filter applied at read time): count and
-        # fingerprint the FILTERED population, or a filtered resume overstates the
-        # source count and mis-hashes the checksum against the filtered load.
-        if source_filter:
-            full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
-        if incremental and cursor_key:
-            # The re-scan must fingerprint the same bounded delta the writer
-            # wrote; the whole file would hash rows this run never carried.
-            full_iter = (
-                records_after_watermark(
-                    list(batch or []),
-                    cursor_source_col,
-                    watermark,
-                    primary_key=cursor_pk_source,
-                )[0]
-                for batch in full_iter
-            )
-        if shape_runner is not None:
-            # The re-scan must fingerprint the same shaped rows the writer wrote,
-            # or a resumed run compares a shaped destination against a raw source
-            # checksum. Its own runner: this pass re-reads rows the main runner
-            # already accounted for, and counting them twice would unbalance the
-            # recipe's own arithmetic.
-            from services.shape_apply import ShapeRunner as _ShapeRunner
+    # Write-pass fingerprints hash the rows just sent. A second parse is a
+    # different read: identity alignment is that parse's (key, hash) multiset
+    # matching the write pass. Resume still re-scans when this process only
+    # fingerprinted the tail — a tail digest against a full destination is a
+    # false mismatch. ``RECONCILE_SOURCE_REREAD=0`` cannot suppress that rescan.
+    from services.source_reread import align_source_populations, should_reread_file_source
 
-            full_iter = _ShapeRunner(shape_runner.recipe).batches(full_iter)
-        full_accumulator = FingerprintAccumulator()
-        full_source_rows = 0
-        for batch in full_iter:
-            if not batch:
-                continue
-            if use_source_spool:
-                headers = columns or (list(batch[0].keys()) if batch else [])
-                spill = spill_engine_write_records(
-                    batch,
-                    headers,
-                    mappings,
-                    extra=dest_extra,
-                    clear_records=True,
-                )
-                try:
-                    full_source_rows += spill.unexpanded_row_count
-                    fps = _spool_fingerprints(spill.spool)
-                    if fps:
-                        full_accumulator.add_many(fps)
-                finally:
-                    spill.close()
+    partial_write_pass = bool(resumed and int(fp_accumulator.total) < int(total_rows or 0))
+    want_reread = should_reread_file_source(
+        file_type=file_type,
+        dest_type=dest_type,
+        incremental=incremental,
+        partial_write_pass=partial_write_pass,
+    )
+    full_source_rows = 0
+    final_checksum = ""
+    checksum_started = time.perf_counter()
+    if want_reread:
+        try:
+            reread_acc, full_source_rows = fingerprint_parsed_file(
+                file_type=file_type,
+                content=content,
+                filename=filename,
+                batch_size=batch_size,
+                read_options=read_options,
+                columns=columns,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                fingerprint_dest_types=fingerprint_dest_types,
+                dest_type=dest_type,
+                error_policy=stream_error_policy,
+                pk_target_cols=list(pk_target_cols or []),
+                source_filter=source_filter,
+                incremental=bool(incremental and cursor_key),
+                cursor_source_col=cursor_source_col,
+                watermark=watermark,
+                cursor_pk_source=cursor_pk_source,
+                shape_recipe=(
+                    getattr(shape_runner, "recipe", None) if shape_runner is not None else None
+                ),
+                use_source_spool=use_source_spool,
+                dest_extra=dest_extra,
+            )
+        except Exception:
+            if partial_write_pass:
+                raise
+            logging.getLogger(__name__).warning(
+                "independent file re-read failed", exc_info=True
+            )
+            reread_acc = None
+        if reread_acc is not None and reread_acc.total:
+            if fp_accumulator.total:
+                alignment = align_source_populations(fp_accumulator, reread_acc)
+                write_pass_checksum = fp_accumulator.digest()
             else:
-                headers, data_rows = records_to_matrix(batch, columns)
-                full_source_rows += len(data_rows)
-                fps = _matrix_fingerprints(headers, data_rows)
-                if fps:
-                    full_accumulator.add_many(fps)
-        final_checksum = full_accumulator.digest() if full_accumulator.total else last_checksum
+                alignment = {
+                    "identity_hash_aligned": False,
+                    "write_pass_rows": 0,
+                    "reread_rows": int(reread_acc.total),
+                    "reason": "write_pass_empty",
+                }
+                write_pass_checksum = ""
+            final_checksum = reread_acc.digest()
+            dest_summary["identity_alignment"] = alignment
+            dest_summary["identity_hash_aligned"] = bool(
+                alignment.get("identity_hash_aligned")
+            )
+            dest_summary["write_pass_checksum"] = write_pass_checksum
+            dest_summary["checksum_mode"] = "source_reread"
+            dest_summary["source_independently_reread"] = True
+            dest_summary["checksum_note"] = (
+                "Independent file re-read after the write. "
+                f"Identity alignment: {alignment.get('reason')}."
+            )
+        else:
+            final_checksum = (
+                fp_accumulator.digest() if fp_accumulator.total else last_checksum
+            )
+            dest_summary["source_independently_reread"] = False
+            dest_summary["identity_hash_aligned"] = False
+            dest_summary["checksum_mode"] = (
+                "inline_write_pass" if final_checksum else "source_reread_unavailable"
+            )
+            dest_summary["checksum_note"] = (
+                "Independent file re-read produced no fingerprints. "
+                "Write-pass digest kept; source was not independently re-read."
+            )
     else:
-        full_source_rows = 0
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
+        dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
+        if final_checksum:
+            dest_summary["checksum_mode"] = "inline_write_pass"
+    phase_profile.add(
+        PHASE_CHECKSUM,
+        time.perf_counter() - checksum_started,
+        rows=int(full_source_rows or getattr(fp_accumulator, "total", 0) or 0),
+    )
+    dest_summary["phase_profile"] = phase_profile.snapshot()
 
     if (
         incremental
@@ -2051,11 +2349,15 @@ def stream_file_to_database(
         dest_summary["incremental_watermark"] = running_cursor
 
     dest_summary["checksum"] = final_checksum or last_checksum
-    # Phase F1 — fingerprints are remapped source rows hashed during the write.
-    # Without this stamp, Gate-8 treats the digest as writer_ack even after a
-    # 1M-row dest read-back that matched (job 6a9060db: 3.5 min then writer_ack).
-    if dest_summary.get("checksum"):
+    # A checksum with no mode is the write-pass digest. Do not overwrite
+    # source_reread — that stamp is what Gate-8 uses to leave writer-ack.
+    if dest_summary.get("checksum") and not dest_summary.get("checksum_mode"):
         dest_summary["checksum_mode"] = "inline_write_pass"
+    dest_summary["connector_versions"] = _file_route_versions(
+        file_type=file_type,
+        dest_type=dest_type,
+        dest_server=dest_server_version,
+    )
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["rejected_details"] = list(rejected_details)

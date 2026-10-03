@@ -14,8 +14,9 @@
 @import "./tokens.css";
 @import "./dataflow-ui.css";
 @import "./jarvis-ui.css";
-@import "./landing.css";
-@import "./marketing-layout.css";
+/* landing.css and marketing-layout.css load from marketing-base.css (index.html)
+   so this workspace bundle stays within the CSS chunk budget. Later sheets here
+   still override that base. */
 @import "./enterprise-platform.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";
@@ -38,6 +39,8 @@
 @import "./responsive-shell-fixes.css";
 /* transfer-studio.css is exclusively namespaced; load before final layer. */
 @import "./transfer-studio.css";
+/* Searchable studio listbox (Transform step builder). */
+@import "./studio-picker.css";
 /* Transform (pre-load) step — sole authority for the .df2-xform namespace. */
 @import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */

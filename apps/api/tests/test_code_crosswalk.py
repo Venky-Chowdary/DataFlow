@@ -138,11 +138,53 @@ def test_covered_sample_is_not_population_proof() -> None:
         mappings=[_mapping()],
         sample_rows=_rows("A", "B", "C"),
         rows_are_population=False,
+        row_count=10_000,
     )
     assert report["evidence"] == EVIDENCE_SAMPLED
     assert gate["status"] == "block"
     assert gate["details"]["rule_id"] == f"{GATE_ID}.unproven"
     assert "sample" in gate["message"].lower()
+    assert "status" in gate["message"]
+
+
+def test_covered_sample_is_population_when_it_is_every_declared_row() -> None:
+    """A 5-row workbook whose sample is those 5 rows is the population."""
+    rows = _rows("A", "B", "C", "A", "B")
+    report, gate = build_code_crosswalk_evidence(
+        mappings=[_mapping()],
+        sample_rows=rows,
+        rows_are_population=False,
+        row_count=len(rows),
+    )
+    assert report["evidence"] == EVIDENCE_EXACT
+    assert report["scan_method"] == "sample_is_population"
+    assert gate["status"] == "pass"
+
+
+def test_reuse_validate_does_not_block_when_sample_is_the_file() -> None:
+    """Execute reuse_fit sends sample + row_count and no population iterator."""
+    pf = run_file_preflight(
+        columns=["id", "status"],
+        column_types={"id": "INTEGER", "status": "VARCHAR"},
+        row_count=5,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            _mapping(),
+        ],
+        sample_rows=_rows("A", "B", "C", "A", "B"),
+        source_kind="file",
+        source_format="xlsx",
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_connected=True,
+        rows_are_population=False,
+        skip_population_fit=True,
+    )
+    gate = next(g for g in pf["gates"] if g["id"] == GATE_ID)
+    assert gate["status"] == "pass"
+    assert pf["code_crosswalk"]["evidence"] == EVIDENCE_EXACT
 
 
 def test_observed_codes_are_population_evidence() -> None:

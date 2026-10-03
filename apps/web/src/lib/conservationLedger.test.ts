@@ -9,7 +9,9 @@ import {
   destMetricCompact,
   destMetricToneClass,
   formatJobRowMetric,
+  conservationKindLabel,
   isDestMeasured,
+  isWriteRefused,
   ledgerEquation,
   ledgerIdentityCells,
   conservationCompleteCopy,
@@ -649,5 +651,64 @@ describe("shaped rows are named, never drawn as silent loss", () => {
     const metric = destHeadline({ status: "completed", row_accounting: shapedLedger });
     assert.equal(metric.measured, true);
     assert.equal(metric.value, "2");
+  });
+});
+
+describe("write refused after a counted read", () => {
+  const refused = {
+    rows_read: 10,
+    rows_written: 0,
+    rows_quarantined: 3,
+    rows_skipped: 0,
+    rows_coerced_null: 0,
+    blank_cells_as_null: 0,
+    writer_ack: 0,
+    dest_count: null,
+    dest_count_before: null,
+    unaccounted: null,
+    balanced: false,
+    rows_read_source: "measured_read",
+    rows_written_source: "unmeasured",
+    conservation_kind: "write_refused",
+    note: "10 source row(s) were counted. Preflight refused the load before any destination write, so COUNT(*) was not taken. The read is measured. This is not a balance failure. No row was committed. Sync is full append.",
+  };
+
+  it("keeps the read measured and dest COUNT unproven", () => {
+    const ledger = readConservationLedger({ row_accounting: refused });
+    assert.ok(ledger);
+    assert.equal(isWriteRefused(ledger), true);
+    assert.equal(isDestMeasured(ledger), false);
+    assert.equal(ledger.rows_read, 10);
+    assert.equal(ledger.rows_coerced_null, 0);
+    assert.equal(conservationKindLabel(ledger.conservation_kind), "Write refused · read measured");
+    const headline = destHeadline({ status: "failed", row_accounting: refused });
+    assert.equal(headline.measured, false);
+    assert.equal(headline.value, "—");
+    assert.match(headline.title, /counted/i);
+    assert.match(ledgerEquation(ledger), /read 10 counted/);
+    assert.match(ledgerEquation(ledger), /written 0/);
+    assert.doesNotMatch(ledgerEquation(ledger), /unmeasured read/);
+    const labels = ledgerIdentityCells(ledger).map((cell) => cell.label);
+    assert.deepEqual(labels.slice(0, 4), ["Read", "Written", "Held out", "Dest COUNT(*)"]);
+    assert.equal(ledgerIdentityCells(ledger).find((cell) => cell.label === "Read")?.value, "10");
+    assert.equal(ledgerIdentityCells(ledger).find((cell) => cell.label === "Written")?.value, "0");
+    assert.ok(!labels.includes("Blank cells as NULL"));
+    assert.match(conservationCompleteCopy({ status: "failed", row_accounting: refused }), /write did not start/);
+    assert.doesNotMatch(
+      conservationCompleteCopy({ status: "failed", row_accounting: refused }),
+      /upsert|exactly-once|unmeasured read/i,
+    );
+  });
+
+  it("names blank cells as NULL apart from coerced loss", () => {
+    const ledger = readConservationLedger({
+      row_accounting: { ...refused, rows_quarantined: 0, blank_cells_as_null: 3 },
+    });
+    assert.ok(ledger);
+    assert.equal(ledger.blank_cells_as_null, 3);
+    assert.equal(ledger.rows_coerced_null, 0);
+    const cell = ledgerIdentityCells(ledger).find((item) => item.label === "Blank cells as NULL");
+    assert.equal(cell?.value, "3");
+    assert.match(ledgerEquation(ledger), /3 blank cell\(s\) as NULL/);
   });
 });

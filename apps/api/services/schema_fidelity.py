@@ -21,6 +21,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.default_expression import (
+    default_exprs_equivalent as _default_exprs_equivalent,
+    normalize_default_expr as _normalize_default_expr,
+)
 from services.decimal_identity import plan_decimal_identity_carry
 from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
@@ -1531,74 +1535,6 @@ def _fetch_not_null_columns(
         if flag_s in {"NO", "N", "FALSE", "0"}:
             not_null.add(str(name))
     return not_null
-
-
-# Clock/boolean default synonyms treated as equivalent across dialects so a
-# faithfully-carried default is not falsely downgraded on cosmetic differences.
-_CLOCK_DEFAULTS = {
-    "current_timestamp", "current_timestamp()", "now()", "now", "getdate()",
-    "getutcdate()", "sysdate", "systimestamp", "localtimestamp",
-    "localtimestamp()", "statement_timestamp()", "transaction_timestamp()",
-    "clock_timestamp()", "sysdatetime()",
-}
-_TRUE_DEFAULTS = {"true", "t", "1", "b'1'"}
-_FALSE_DEFAULTS = {"false", "f", "0", "b'0'"}
-
-
-def _normalize_default_expr(expr: Any) -> str:
-    """Fold a catalog/planned default into a comparable literal.
-
-    Iteratively strips wrapping parens, trailing type casts (``'x'::text``,
-    ``'x'::character varying``), national/escape/bit/hex string-literal prefixes
-    (``N'x'``, ``E'x'``, ``B'1'``), and surrounding quotes to a fixed point — so
-    ``('active'::character varying)``, ``N'active'`` and ``active`` all unify —
-    then collapses clock precision (``current_timestamp(6)`` -> ``()``) and
-    casefolds.
-    """
-    s = str(expr if expr is not None else "").strip()
-    prev: str | None = None
-    while s and s != prev:
-        prev = s
-        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-            s = s[1:-1].strip()
-            continue
-        stripped_cast = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+\s*$", "", s).strip()
-        if stripped_cast != s:
-            s = stripped_cast
-            continue
-        prefix = re.match(r"^(?:[NnEeBbXx]|[Uu]&)(['\"].*)$", s)
-        if prefix:
-            s = prefix.group(1).strip()
-            continue
-        if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
-            s = s[1:-1].strip()
-            continue
-    # current_timestamp(6) / localtimestamp(3) → drop precision for clock compare.
-    s = re.sub(r"\(\s*\d+\s*\)", "()", s)
-    return s.casefold()
-
-
-def _default_exprs_equivalent(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    if a in _CLOCK_DEFAULTS and b in _CLOCK_DEFAULTS:
-        return True
-    if a in _TRUE_DEFAULTS and b in _TRUE_DEFAULTS:
-        return True
-    if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
-        return True
-    try:
-        from decimal import Decimal
-
-        from services.decimal_identity import extract_decimal_identity
-
-        ia = extract_decimal_identity(a)
-        ib = extract_decimal_identity(b)
-    except ValueError:
-        return False
-    if ia is None or ib is None:
-        return False
-    return +Decimal(ia.to_canonical_text()) == +Decimal(ib.to_canonical_text())
 
 
 def _claimed_default_literal(item: Any) -> str:

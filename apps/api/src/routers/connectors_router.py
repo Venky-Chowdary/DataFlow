@@ -870,7 +870,10 @@ async def get_job_quarantine(job_id: str, request: Request):
     Includes write-time rejects and preflight integrity findings (encoding, etc.)
     so Inspect Quarantine is never empty when Validate/Run reported bad cells.
     """
-    from services.quarantine_from_preflight import merge_job_quarantine
+    from services.quarantine_from_preflight import (
+        merge_job_quarantine,
+        quarantine_evidence_source,
+    )
 
     mongo = get_mongodb_service()
     job = mongo.get_job(job_id)
@@ -907,11 +910,9 @@ async def get_job_quarantine(job_id: str, request: Request):
         or job.get("rejected_rows")
         or 0
     ) or finding_rows
-    has_write = bool(
-        job.get("rejected_details")
-        or (job.get("destination_summary") or {}).get("rejected_details")
-    )
-    source = "write" if has_write else ("preflight" if details else "none")
+    summary = job.get("destination_summary")
+    has_write = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
+    source = quarantine_evidence_source(job, details)
     # DLQ hydrate when job sample was truncated / incomplete.
     if details and (
         job.get("rejected_details_truncated")

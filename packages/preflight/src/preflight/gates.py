@@ -694,23 +694,42 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if objectid_text_domain:
             lossy = True
         # Coercion probe may block wire values even when declared types look
-        # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
+        # safe (naive DATETIME→TIMESTAMPTZ, empty cells, bad casts). Examine
+        # those columns. Do not relabel a safe widening (INTEGER→BIGINT) as
+        # "Lossy coercion" just because a sample cell failed — that sent
+        # operators to a fidelity Risk Contract for a nullability problem.
+        probe_only = False
         probe_early = by_source.get(m.source) if value_aware else None
         if not lossy and probe_early:
             sev = str(probe_early.get("severity") or "").lower()
             if sev == "block" or bool(probe_early.get("has_blocking_failures")):
-                lossy = True
+                probe_only = True
             elif int(probe_early.get("json_scalar_wraps") or 0) > 0:
                 # Bare scalar→JSON string is a domain change even when declared
                 # types are not lossy (e.g. INTEGER→VARIANT). Examine wrap path.
                 lossy = True
-        if not lossy:
+        if not lossy and not probe_only:
             continue
 
-        label = (
-            f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
-            f"{m.target} ({target.inferred_type})"
-        )
+        if probe_only and not (
+            declared_lossy
+            or platform_decimal_trunc
+            or nested_collapse
+            or objectid_text_domain
+        ):
+            fix = str((probe_early or {}).get("suggested_fix") or "").strip()
+            failures = (probe_early or {}).get("sample_failures") or []
+            reason = ""
+            if failures and isinstance(failures[0], dict):
+                reason = str(failures[0].get("reason") or "").strip()
+            label = fix or reason or (
+                f"Sample value does not fit {m.target} ({target.inferred_type})"
+            )
+        else:
+            label = (
+                f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
+                f"{m.target} ({target.inferred_type})"
+            )
         # Surface scale / vector annotations so operators see the real risk.
         if pair and len(pair) == 2 and "[" in str(pair[1]):
             note = str(pair[1]).split("[", 1)[-1].rstrip("]")
@@ -1169,7 +1188,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "contracted_holdout": bool(
                     risk_ack and int(probe.get("failed") or 0) > 0
                 ),
-                "declared_lossy": True,
+                "declared_lossy": bool(declared_lossy),
+                "probe_cast_only": bool(probe_only and not declared_lossy),
+                "fidelity_collapse": bool(
+                    declared_lossy and not probe_only
+                ),
             }
             issues_detail.append(detail)
             if force_block:
@@ -2176,6 +2199,90 @@ def _continue_policy_disposition(mapping: Any) -> str:
     return "holdout"
 
 
+def _spreadsheet_blank_is_sql_null(
+    ctx: PreflightContext,
+    raw: Any,
+    err: str | None,
+    mapping: Any,
+) -> bool:
+    """File blank → SQL NULL, same contract as the file writer and G5 dry-run.
+
+    Execute stamps a typed transform (``none`` → ``integer``) before this gate.
+    G5 already clears those blanks when the destination is not proven NOT NULL.
+    G8 used to keep the coerce error and fail the load with zero rows written.
+    """
+    if not bool(getattr(ctx, "empty_cells_as_null", False)):
+        return False
+    try:
+        from services.transform_engine import _blank_is_nullable_absence
+    except Exception:
+        return False
+    target = str(getattr(mapping, "target", "") or "")
+    dest_cols = list(getattr(ctx.plan.destination, "target_columns", None) or [])
+    dest_nullability = {
+        str(getattr(col, "name", "") or ""): bool(getattr(col, "nullable", True))
+        for col in dest_cols
+        if getattr(col, "name", None)
+    }
+    mapping_dict: dict[str, Any] = {
+        "source": getattr(mapping, "source", ""),
+        "target": target,
+        "create_new": bool(getattr(mapping, "create_new", False)),
+    }
+    dest_col = next(
+        (
+            col
+            for col in dest_cols
+            if str(getattr(col, "name", "") or "").lower() == target.lower()
+        ),
+        None,
+    )
+    if dest_col is not None and not bool(getattr(dest_col, "nullable", True)):
+        mapping_dict["target_nullable"] = False
+    return _blank_is_nullable_absence(
+        raw,
+        err,
+        mapping_dict,
+        empty_cells_as_null=True,
+        dest_nullability=dest_nullability,
+    )
+
+
+def _write_path_cell_issue(
+    row_idx: int,
+    mapping: Any,
+    err: str,
+    raw_s: str | None,
+    line: str,
+) -> dict[str, Any]:
+    """Structured quarantine payload for one write-path cell failure.
+
+    The prose line ``row N src→dst: reason`` is not enough — Inspect Quarantine
+    only rebuilds a finding when column and sample are stored.
+    """
+    blank = str(err).lower().startswith("empty value cannot coerce")
+    if blank and (raw_s is None or str(raw_s).strip() == ""):
+        sample: Any = ""
+    else:
+        sample = "" if raw_s is None else raw_s
+    issue: dict[str, Any] = {
+        "row": row_idx,
+        "source": getattr(mapping, "source", ""),
+        "column": getattr(mapping, "source", ""),
+        "target": getattr(mapping, "target", ""),
+        "sample": sample,
+        "reason": err,
+        "message": line,
+    }
+    if blank:
+        issue["suggested_fix"] = (
+            "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+            "A NOT NULL column needs a source value or a nullability change — "
+            "replay cannot invent a typed value from an empty cell."
+        )
+    return issue
+
+
 def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
     """Prefer the real write-path transform so G8 matches coerce/quarantine behavior."""
     try:
@@ -2251,15 +2358,17 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         if value is None:
             return None
         try:
-            from services.value_serializer import cell_to_string
+            from services.value_serializer import transform_input_cell
 
-            return cell_to_string(value)
+            return transform_input_cell(value)
         except Exception:
             return str(value)
 
     transform_errors: list[str] = []
+    transform_issue_details: list[dict[str, Any]] = []
     contracted_holdouts: list[str] = []
     contracted_null_cells: list[str] = []
+    file_blank_nulls: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
@@ -2277,8 +2386,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 mapped[m.target] = None
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
-            if err:
+            if err and _spreadsheet_blank_is_sql_null(ctx, raw_s, err, m):
+                # Same disposition as the file writer: absence, not a cast failure
+                # and not a quarantined reject. Proven NOT NULL stays in ``err``.
+                mapped[m.target] = None
+                file_blank_nulls.append(
+                    f"row {row_idx} {m.source}→{m.target}: blank cell stored as SQL NULL"
+                )
+            elif err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
+                transform_issue_details.append(
+                    _write_path_cell_issue(row_idx, m, err, raw_s, line)
+                )
                 # Continue-policy Risk Contract matches write disposition:
                 # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell
                 # (blocked when destination is NOT NULL — same as G3).
@@ -2317,6 +2436,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             start,
             {
                 "errors": transform_errors[:20],
+                "issues_detail": transform_issue_details[:20],
                 "contracted_holdouts": contracted_holdouts[:20],
                 "source_rows": source_count,
                 "preview_only": True,
@@ -2574,9 +2694,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 },
             )
 
+        blank_clause = ""
+        if file_blank_nulls:
+            word = "blank" if len(file_blank_nulls) == 1 else "blanks"
+            blank_clause = (
+                f"; {len(file_blank_nulls)} spreadsheet {word} stored as SQL NULL"
+            )
         return _pass(
             GateId.G8_RECONCILIATION,
-            f"Dry-run reconciliation passed — {source_count} row(s) (write-path sample)",
+            (
+                f"Dry-run reconciliation passed — {source_count} row(s) "
+                f"(write-path sample){blank_clause}"
+            ),
             start,
             _with_scope(
                 {
@@ -2587,8 +2716,11 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "contracted_holdout_count": len(contracted_holdouts),
                     "contracted_null_cells": contracted_null_cells[:20],
                     "contracted_null_cell_count": len(contracted_null_cells),
+                    "file_blank_nulls": file_blank_nulls[:20],
+                    "file_blank_null_count": len(file_blank_nulls),
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
+                        + blank_clause
                         + (
                             f"; {len(contracted_holdouts)} row(s) held out under "
                             "quarantine/skip continue-policy"

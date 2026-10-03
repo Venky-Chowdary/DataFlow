@@ -80,7 +80,7 @@ class ScheduleCreate(BaseModel):
     priority_column: str = ""
     priority_direction: str = "desc"
     row_limit: int = Field(default=0, ge=0)
-    delivery_guarantee: str = "at_least_once"
+    delivery_guarantee: str = "auto"
     snapshot_mode: str = ""
     allow_append_only: bool = False
     cdc_row_filter: str = ""

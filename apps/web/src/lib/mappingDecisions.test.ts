@@ -262,4 +262,27 @@ describe("holdOutRowsAndContinue", () => {
     const carried = carryOperatorDecisions(regenerated, prior);
     assert.equal(carried[0].controlTotal, true);
   });
+
+  it("replays compiled workbook dests onto rematch identity rows", () => {
+    const prior: EditableMapping[] = [
+      {
+        ...clean(),
+        source: "fname",
+        target: "first_name",
+        createNew: true,
+        businessRule: {
+          text: "Map fname to first_name",
+          kind: "direct",
+          kindLabel: "Direct map",
+          status: "executable",
+          confidence: 0.95,
+        },
+      },
+    ];
+    const rematch: EditableMapping[] = [
+      { ...clean(), source: "fname", target: "fname", createNew: true, approved: true },
+    ];
+    const carried = carryOperatorDecisions(rematch, prior);
+    assert.equal(carried[0].target, "first_name");
+  });
 });

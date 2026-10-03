@@ -165,6 +165,8 @@ def test_precedence_and_parentheses_behave_like_sql():
 def test_columns_are_reported_for_design_time_checking():
     expression = compile_expression("concat([first], ' ', upper([last]))")
     assert expression.columns == frozenset({"first", "last"})
+    quoted = compile_expression('concat([first], " ", upper([last]))')
+    assert quoted.columns == frozenset({"first", "last"})
 
 
 def test_the_canonical_form_ignores_spelling_so_a_reformat_is_not_a_new_recipe():

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from services.quarantine_from_preflight import merge_job_quarantine, quarantine_rows_from_preflight
+from services.quarantine_from_preflight import (
+    merge_job_quarantine,
+    quarantine_evidence_source,
+    quarantine_rows_from_preflight,
+)
 
 
 def test_encoding_findings_become_quarantine_rows():
@@ -200,6 +204,68 @@ def test_objectid_lossy_string_fills_column_and_dedupes_integrity():
     assert rows[0]["target"] == "user_id"
     assert "specialty polarity" in rows[0]["reason"].lower()
     assert rows[0]["suggested_transform"] is None
+
+
+def test_gate8_phone_blank_lines_keep_row_column_and_blank_cell():
+    """The live Theater rows: reason text was the only place phone appeared."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": False,
+        "gates": [{
+            "id": "g8_reconciliation",
+            "status": "block",
+            "message": "Dry-run reconciliation failed — transform errors",
+            "details": {
+                "errors": [
+                    "row 1 phone→phone: Empty value cannot coerce to integer",
+                    "row 5 phone→phone: Empty value cannot coerce to integer",
+                    "row 8 phone→phone: Empty value cannot coerce to integer",
+                ],
+            },
+        }],
+        "blockers": [{
+            "id": "g8_reconciliation",
+            "message": "Dry-run reconciliation failed — transform errors",
+            "details": {
+                "errors": [
+                    "row 1 phone→phone: Empty value cannot coerce to integer",
+                ],
+            },
+        }],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert [r["row"] for r in rows] == [1, 5, 8]
+    for row in rows:
+        assert row["column"] == "phone"
+        assert row["target"] == "phone"
+        assert row["value"] == ""
+        assert row["value"] != SQL_NULL_SENTINEL
+        assert row["values"]["phone"] == ""
+        assert row["reason"] == "Empty value cannot coerce to integer"
+        assert row["policy"] == "preflight_quarantine"
+
+
+def test_preflight_rows_are_not_labeled_write_rejects():
+    job = {
+        "rejected_details": [
+            {
+                "row": 1,
+                "column": "phone",
+                "value": "",
+                "policy": "preflight_quarantine",
+                "reason": "Empty value cannot coerce to integer",
+            }
+        ],
+        "rejected_rows": 1,
+        "phase": "failed",
+    }
+    assert quarantine_evidence_source(job, job["rejected_details"]) == "preflight"
+    write_job = {
+        "rejected_details": [{"row": 1, "column": "phone", "value": "x", "policy": "quarantine"}],
+        "destination_summary": {"rejected_details": [{"row": 1, "column": "phone"}]},
+    }
+    assert quarantine_evidence_source(write_job, write_job["rejected_details"]) == "write"
 
 
 def test_preflight_quarantine_preserves_sql_null_not_empty():

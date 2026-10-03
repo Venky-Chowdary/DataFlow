@@ -1079,6 +1079,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
         }
+        if "table_kind" in unique_meta:
+            out["table_kind"] = unique_meta.get("table_kind") or ""
         # Advisory (NOT ENFORCED) keys — do not invent write blockers, but tell the operator.
         advisory = [
             u.get("name")

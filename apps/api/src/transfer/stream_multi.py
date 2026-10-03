@@ -19,6 +19,8 @@ from .models import EndpointConfig
 from .stream_foreign_keys import (
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
     foreign_key_context as _foreign_key_context,
+    pop_deferred_single_table_foreign_keys,
+    push_deferred_single_table_foreign_keys,
 )
 from .stream_row_accounting import begin_table_population
 
@@ -165,6 +167,7 @@ def run_non_cdc_multi_stream_sequential(
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
+    defer_fk = push_deferred_single_table_foreign_keys()
     try:
         for contract in selected_list:
             if remaining_limit == 0 and limit > 0:
@@ -282,6 +285,7 @@ def run_non_cdc_multi_stream_sequential(
                 destination=destination,
             )
     finally:
+        pop_deferred_single_table_foreign_keys(defer_fk)
         if original_table is not None:
             source.table = original_table
         if original_collection is not None:

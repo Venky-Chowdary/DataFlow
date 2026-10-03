@@ -18,6 +18,7 @@ import pytest
 from services.destination_ri_probe import verify_destination_referential_integrity
 from services.population_orphan_probe import probe_population_fk_orphans
 from services.preflight_service import run_file_preflight
+from services.foreign_key_identity import fk_identity, parse_foreign_key
 from services.sample_orphan_probe import _fk_parts, probe_sample_fk_orphans
 
 
@@ -201,6 +202,207 @@ def test_sqlite_dest_shaped_payload_is_parsed():
     assert cols == ["tenant_id", "order_no"]
     assert table == "sales.orders"
     assert ref == ["tenant_id", "order_no"]
+
+
+def test_studio_ref_table_is_the_same_parser():
+    cols, table, ref = _fk_parts(
+        {"columns": ["org_id"], "ref_table": "orgs", "ref_columns": ["id"]}
+    )
+    assert cols == ["org_id"]
+    assert table == "orgs"
+    assert ref == ["id"]
+
+
+def test_quoted_dotted_table_stays_one_name():
+    parsed = parse_foreign_key(
+        {
+            "columns": ["id"],
+            "referenced_table": '"sales.customers"',
+            "referenced_columns": ["id"],
+        }
+    )
+    assert parsed.conflict == ""
+    assert parsed.parent_schema == ""
+    assert parsed.parent_table == "sales.customers"
+    assert parsed.scan_label == '"sales.customers"'
+
+
+def test_same_schema_qualifier_is_not_double_prefixed():
+    parsed = parse_foreign_key(
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "main",
+            "referred_table": "main.customers",
+            "referred_columns": ["id"],
+        }
+    )
+    assert parsed.conflict == ""
+    assert parsed.scan_label == "main.customers"
+    assert parsed.parent_table == "customers"
+
+
+def test_unqualified_alias_keeps_the_qualified_parent():
+    parsed = parse_foreign_key(
+        {
+            "columns": ["customer_id"],
+            "referenced_table": "customers",
+            "referenced_columns": ["id"],
+            "referred_table": "archive.customers",
+            "referred_columns": ["id"],
+        }
+    )
+    assert parsed.conflict == ""
+    assert parsed.scan_label == "archive.customers"
+
+
+def test_two_qualified_parents_are_a_conflict():
+    parsed = parse_foreign_key(
+        {
+            "columns": ["customer_id"],
+            "referenced_table": "sales.customers",
+            "referenced_columns": ["id"],
+            "referred_table": "archive.customers",
+            "referred_columns": ["id"],
+        }
+    )
+    assert "sales.customers" in parsed.conflict
+    assert "archive.customers" in parsed.conflict
+    assert fk_identity(
+        {
+            "columns": ["customer_id"],
+            "referenced_table": "sales.customers",
+            "referenced_columns": ["id"],
+            "referred_table": "archive.customers",
+            "referred_columns": ["id"],
+        }
+    ) is None
+    assert _fk_parts(
+        {
+            "columns": ["customer_id"],
+            "referenced_table": "sales.customers",
+            "referenced_columns": ["id"],
+            "referred_table": "archive.customers",
+            "referred_columns": ["id"],
+        }
+    ) == ([], "", [])
+
+
+def test_schema_disagrees_with_the_table_qualifier():
+    parsed = parse_foreign_key(
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "archive",
+            "referred_table": "sales.customers",
+            "referred_columns": ["id"],
+        }
+    )
+    assert "archive" in parsed.conflict
+    assert "sales" in parsed.conflict
+    assert parsed.scan_label == ""
+
+
+def test_two_parent_aliases_do_not_prove_the_table_that_holds_the_key(tmp_path: Path):
+    """customers contains 10; real_parent does not. Naming both must not prove RI.
+
+    The old parser kept ``referenced_table`` and ignored ``referred_table``,
+    so this child row scanned as clean against customers.
+    """
+    cfg = _sqlite_cfg(tmp_path)
+    _seed_sqlite(
+        cfg,
+        [
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY)",
+            "INSERT INTO customers VALUES (10)",
+            "CREATE TABLE real_parent (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER)",
+            "INSERT INTO orders VALUES (1, 10)",
+        ],
+    )
+    report = _pop(
+        cfg,
+        "orders",
+        [
+            {
+                "columns": ["customer_id"],
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+                "constrained_columns": ["customer_id"],
+                "referred_table": "real_parent",
+                "referred_columns": ["id"],
+            }
+        ],
+    )
+    assert report["ran"] is True
+    assert report["complete"] is False
+    assert report["population_proof"] is False
+    assert report["orphan_count"] == 0
+    assert report["findings"][0]["code"] == "foreign_key_alias_conflict"
+    message = report["findings"][0]["message"]
+    assert "customers" in message
+    assert "real_parent" in message
+
+
+def test_two_child_column_lists_are_not_scanned(tmp_path: Path):
+    """customer_id matches; other_id does not. Neither list may be scanned."""
+    cfg = _sqlite_cfg(tmp_path)
+    _seed_sqlite(
+        cfg,
+        [
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY)",
+            "INSERT INTO customers VALUES (10)",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER, other_id INTEGER)",
+            "INSERT INTO orders VALUES (1, 10, 999)",
+        ],
+    )
+    report = _pop(
+        cfg,
+        "orders",
+        [
+            {
+                "columns": ["customer_id"],
+                "constrained_columns": ["other_id"],
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+            }
+        ],
+    )
+    assert report["population_proof"] is False
+    assert report["complete"] is False
+    assert report["orphan_count"] == 0
+    assert report["findings"][0]["code"] == "foreign_key_alias_conflict"
+    message = report["findings"][0]["message"]
+    assert "customer_id" in message
+    assert "other_id" in message
+
+
+def test_agreeing_aliases_still_scan_the_named_parent(tmp_path: Path):
+    cfg = _sqlite_cfg(tmp_path)
+    _seed_sqlite(
+        cfg,
+        [
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY)",
+            "INSERT INTO customers VALUES (10)",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER)",
+            "INSERT INTO orders VALUES (1, 10)",
+        ],
+    )
+    report = _pop(
+        cfg,
+        "orders",
+        [
+            {
+                "columns": ["customer_id"],
+                "constrained_columns": ["Customer_Id"],
+                "referenced_table": "customers",
+                "referred_table": "customers",
+                "referenced_columns": ["id"],
+                "referred_columns": ["ID"],
+            }
+        ],
+    )
+    assert report["complete"] is True
+    assert report["population_proof"] is True
+    assert report["findings"] == []
 
 
 def test_sqlite_three_column_orphan_is_the_whole_tuple(tmp_path: Path):

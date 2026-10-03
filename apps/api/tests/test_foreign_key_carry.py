@@ -20,6 +20,7 @@ from services.foreign_key_carry import (
     plan_foreign_keys,
     verify_foreign_keys,
 )
+from services.foreign_key_orchestration import dependency_order
 from services.foreign_key_metadata import ForeignKey, ForeignKeys
 
 MEASURED = {
@@ -231,11 +232,305 @@ def test_carry_is_claimed_only_after_the_destination_catalog_agrees():
                 referenced_schema="public",
                 referenced_table="customers",
                 referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
             )
         ],
     )
     settled = verify_foreign_keys(plan.decisions, dest)
     assert settled[0].status == "carried"
+
+
+def test_redshift_catalog_foreign_key_does_not_prove_loaded_rows():
+    """A matching Redshift constraint is not the engine validating the load."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="redshift",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "does not enforce" in settled[0].reason
+    assert "Redshift" in settled[0].reason
+
+
+def test_informational_warehouse_catalog_foreign_key_does_not_prove_loaded_rows():
+    """A matching Snowflake, BigQuery, or Databricks key is not a checked load.
+
+    ``validated=True`` is ignored. The reason names each engine. Snowflake
+    hybrid tables do enforce a foreign key; this dialect string does not say
+    the table is hybrid, so the catalog fact stays unsupported.
+    """
+    for dialect, named in (
+        ("snowflake", "Snowflake"),
+        ("snowflake_enterprise", "Snowflake"),
+        ("bigquery", "BigQuery"),
+        ("google_bigquery", "BigQuery"),
+        ("databricks", "Databricks"),
+        ("databricks_gcp", "Databricks"),
+    ):
+        plan = _plan()
+        dest = ForeignKeys(
+            dialect=dialect,
+            status="measured",
+            items=[
+                ForeignKey(
+                    name="orders_customer_fk",
+                    columns=["customer_id"],
+                    referenced_schema="public",
+                    referenced_table="customers",
+                    referenced_columns=["id"],
+                    on_delete="CASCADE",
+                    validated=True,
+                )
+            ],
+        )
+        settled = verify_foreign_keys(plan.decisions, dest)
+        assert settled[0].status == "unsupported", dialect
+        assert "does not enforce" in settled[0].reason
+        assert named in settled[0].reason, settled[0].reason
+        if named == "Snowflake":
+            assert "standard table" in settled[0].reason
+            assert "hybrid" in settled[0].reason
+
+
+def test_measured_hybrid_foreign_key_is_carried():
+    """IS_HYBRID YES plus ENFORCED YES is the checked load. The dialect is not."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="snowflake_aws",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+            )
+        ],
+    )
+    carried = verify_foreign_keys(
+        plan.decisions, dest, table_kind="YES", index_status="ACTIVE"
+    )
+    assert carried[0].status == "carried"
+    assert "existing rows were checked" in carried[0].reason
+
+    unread = verify_foreign_keys(plan.decisions, dest, table_kind="YES")
+    assert unread[0].status == "unsupported"
+    assert "SHOW INDEXES" in unread[0].reason
+
+    failed = verify_foreign_keys(
+        plan.decisions,
+        dest,
+        table_kind="YES",
+        index_status="BUILD VALIDATION FAILURE",
+    )
+    assert failed[0].status == "unsupported"
+    assert "BUILD VALIDATION FAILURE" in failed[0].reason
+
+    explained = verify_foreign_keys(
+        plan.decisions,
+        dest,
+        table_kind="YES",
+        index_status="BUILD VALIDATION FAILURE",
+        index_detail="team_id 9 has no parent",
+    )
+    assert explained[0].status == "unsupported"
+    assert "team_id 9 has no parent" in explained[0].reason
+
+    standard = verify_foreign_keys(plan.decisions, dest, table_kind="NO")
+    assert standard[0].status == "unsupported"
+    assert "IS_HYBRID" in standard[0].reason
+
+    iceberg = verify_foreign_keys(plan.decisions, dest, table_kind="iceberg")
+    assert iceberg[0].status == "unsupported"
+    assert "IS_ICEBERG" in iceberg[0].reason
+
+    other = ForeignKeys(
+        dialect="bigquery",
+        status="measured",
+        items=list(dest.items),
+    )
+    assert verify_foreign_keys(plan.decisions, other, table_kind="YES")[0].status == (
+        "unsupported"
+    )
+
+
+def test_not_valid_catalog_bit_is_not_a_carried_foreign_key():
+    """The relationship matches. The catalog says existing rows were not checked."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=False,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "existing rows were not checked" in settled[0].reason
+
+
+def test_a_different_referential_action_is_not_the_source_rule():
+    """NO ACTION on the same columns is not the CASCADE rule the source declared."""
+    plan = _plan()
+    weaker = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk_old",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="NO ACTION",
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, weaker)
+    assert settled[0].status == "unsupported"
+    assert "ON DELETE NO ACTION" in settled[0].reason
+    assert "ON DELETE CASCADE" in settled[0].reason
+    stronger = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk_strict",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="SET NULL",
+            )
+        ],
+    )
+    drifted = verify_foreign_keys(plan.decisions, stronger)
+    assert drifted[0].status == "unsupported"
+    assert "SET NULL" in drifted[0].reason
+
+
+def test_match_full_is_emitted_on_postgresql_and_refused_elsewhere():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                **MEASURED["items"][0],
+                "match": "full",
+            }
+        ],
+    }
+    plan = _plan(source_foreign_keys=source)
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert "MATCH FULL" in decision.dest_ddl
+    assert decision.dest_ddl.index("MATCH FULL") < decision.dest_ddl.index("ON DELETE")
+    mysql = _plan(source_foreign_keys=source, dest_dialect="mysql")
+    refused = _only(mysql)
+    assert refused.status == "unsupported"
+    assert "MATCH FULL" in refused.reason
+    assert "does not enforce" in refused.reason
+    partial = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [{**MEASURED["items"][0], "match": "partial"}],
+        }
+    )
+    assert _only(partial).status == "unsupported"
+    assert "MATCH PARTIAL" in _only(partial).reason
+
+
+def test_match_full_reread_as_simple_is_not_carried():
+    source = {
+        "status": "measured",
+        "items": [{**MEASURED["items"][0], "match": "f"}],
+    }
+    plan = _plan(source_foreign_keys=source)
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+                match="simple",
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "MATCH SIMPLE" in settled[0].reason
+    assert "MATCH FULL" in settled[0].reason
+    dest.items[0] = ForeignKey(
+        name="orders_customer_fk",
+        columns=["customer_id"],
+        referenced_schema="public",
+        referenced_table="customers",
+        referenced_columns=["id"],
+        on_delete="CASCADE",
+        validated=True,
+        match="full",
+    )
+    assert verify_foreign_keys(plan.decisions, dest)[0].status == "carried"
+
+
+def test_unreported_action_matches_only_the_engine_default():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                "name": "orders_customer_fk",
+                "columns": ["customer_id"],
+                "referenced_schema": "public",
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+            }
+        ],
+    }
+    plan = _plan(source_foreign_keys=source)
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                validated=True,
+            )
+        ],
+    )
+    assert verify_foreign_keys(plan.decisions, dest)[0].status == "carried"
 
 
 def test_destination_without_the_reference_after_the_alter_is_not_carried():
@@ -268,6 +563,102 @@ def test_mutual_references_are_reported_rather_than_given_a_fake_order():
     assert set(ordered) == {"a", "b", "c"}
     assert ordered[0] == "c"
     assert cycle == ["a", "b"]
+
+
+def test_qualified_stream_in_the_job_is_not_an_outside_parent():
+    """archive.customers selected in this job is that stream, not a missing leaf."""
+    plan = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [
+                {
+                    "name": "orders_customer_fk",
+                    "columns": ["customer_id"],
+                    "referenced_schema": "archive",
+                    "referenced_table": "customers",
+                    "referenced_columns": ["id"],
+                }
+            ],
+        },
+        dest_schema="sales",
+        dest_table="orders",
+        source_table="sales.orders",
+        source_schema="sales",
+        table_map={"archive.customers": "dim_customer", "sales.orders": "orders"},
+        dest_existing_tables=set(),
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert decision.referenced_stream == "archive.customers"
+    assert 'REFERENCES "sales"."dim_customer"' in decision.dest_ddl
+
+
+def test_cross_schema_key_is_not_the_cycle_edge():
+    """archive.customers must not make the local customers↔orders cycle look carried."""
+    plan = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [
+                {
+                    "name": "orders_archive_fk",
+                    "columns": ["customer_id"],
+                    "referenced_schema": "archive",
+                    "referenced_table": "customers",
+                    "referenced_columns": ["id"],
+                }
+            ],
+        },
+        source_schema="public",
+        source_table="orders",
+        table_map={"orders": "orders", "customers": "customers"},
+        cycle_tables=["orders", "customers"],
+        dest_existing_tables={"customers", "orders"},
+    )
+    decision = _only(plan)
+    assert decision.referenced_stream == ""
+    assert "DEFERRABLE" not in decision.dest_ddl
+    missed = classify_cycle_resolution(["orders", "customers"], [decision.__dict__])
+    assert missed["edge_count"] == 0
+    assert missed["resolved"] is False
+    carried = classify_cycle_resolution(
+        ["orders", "customers"],
+        [
+            {
+                "source_table": "orders",
+                "dest_table": "orders",
+                "referenced_table": "customers",
+                "referenced_stream": "customers",
+                "status": "carried",
+            },
+            decision.__dict__,
+        ],
+    )
+    assert carried["resolved"] is True
+    assert carried["edge_count"] == 1
+
+
+def test_qualified_cycle_edges_resolve_by_stream_name():
+    resolution = classify_cycle_resolution(
+        ["archive.customers", "sales.orders"],
+        [
+            {
+                "source_table": "sales.orders",
+                "dest_table": "orders",
+                "referenced_stream": "archive.customers",
+                "referenced_table": "dim_customer",
+                "status": "carried",
+            },
+            {
+                "source_table": "archive.customers",
+                "dest_table": "dim_customer",
+                "referenced_stream": "sales.orders",
+                "referenced_table": "orders",
+                "status": "carried",
+            },
+        ],
+    )
+    assert resolution["resolved"] is True
+    assert resolution["edge_count"] == 2
 
 
 def test_cycle_edge_on_postgres_is_deferrable():
@@ -340,6 +731,83 @@ def test_classify_cycle_unresolved_when_detected_but_no_edges():
     resolution = classify_cycle_resolution(["a", "b"], [])
     assert resolution["resolved"] is False
     assert resolution["edge_count"] == 0
+
+
+def _measured(table: str, items: list[ForeignKey], schema: str = "public") -> ForeignKeys:
+    return ForeignKeys(
+        dialect="postgresql", status="measured", schema=schema, table=table, items=items
+    )
+
+
+def _fk(schema: str, table: str, *, child: str = "customer_id", parent: str = "id") -> ForeignKey:
+    return ForeignKey(
+        name="fk",
+        columns=[child],
+        referenced_schema=schema,
+        referenced_table=table,
+        referenced_columns=[parent],
+    )
+
+
+def test_unqualified_parent_still_loads_first():
+    tables = ["order_lines", "orders", "customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("public", "customers")]),
+            "order_lines": _measured("order_lines", [_fk("", "orders", child="order_id")]),
+        },
+    )
+    assert ordered == ["customers", "orders", "order_lines"]
+    assert cycle == []
+
+
+def test_qualified_parent_in_the_job_loads_first():
+    """archive.customers is the parent even though the catalog leaf is customers."""
+    tables = ["orders", "archive.customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("archive", "customers")]),
+            "archive.customers": _measured("archive.customers", []),
+        },
+    )
+    assert ordered == ["archive.customers", "orders"]
+    assert cycle == []
+
+
+def test_archive_parent_is_not_the_local_customers_table():
+    """A local customers→orders edge must not become a cycle with archive.customers."""
+    tables = ["orders", "customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {
+            "orders": _measured("orders", [_fk("archive", "customers")]),
+            "customers": _measured("customers", [_fk("public", "orders", child="order_id")]),
+        },
+    )
+    assert cycle == []
+    assert ordered.index("orders") < ordered.index("customers")
+
+
+def test_ambiguous_leaf_does_not_invent_a_parent():
+    tables = ["orders", "sales.customers", "archive.customers"]
+    ordered, cycle = dependency_order(
+        tables,
+        {"orders": _measured("orders", [_fk("", "customers")])},
+    )
+    assert ordered == tables
+    assert cycle == []
+
+
+def test_qualified_self_reference_is_not_an_edge_to_another_table():
+    tables = ["public.emp", "emp"]
+    ordered, cycle = dependency_order(
+        tables,
+        {"public.emp": _measured("public.emp", [_fk("public", "emp", child="mgr_id")])},
+    )
+    assert ordered == ["public.emp", "emp"]
+    assert cycle == []
 
 
 def test_references_outside_the_job_do_not_affect_ordering():
@@ -419,6 +887,202 @@ def test_mariadb_duplicate_fk_index_is_already_present_not_a_failure():
     assert settled[0].integrity_violation is False
 
 
+def _archive_customer():
+    return {
+        "status": "measured",
+        "items": [
+            {
+                "name": "orders_customer_fk",
+                "columns": ["customer_id"],
+                "referenced_schema": "archive",
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+            }
+        ],
+    }
+
+
+def test_parent_in_another_schema_is_not_the_local_table():
+    """sales.customers is not archive.customers, even when the leaf matches."""
+    plan = _plan(
+        source_foreign_keys=_archive_customer(),
+        dest_schema="sales",
+        table_map={},
+        dest_existing_tables={"customers", "orders"},
+    )
+    decision = _only(plan)
+    assert decision.status == "unknown"
+    assert plan.statements == []
+    assert "archive.customers" in decision.reason
+    assert "sales" in decision.reason
+
+
+def test_parent_in_another_schema_is_referenced_there_when_listed():
+    plan = _plan(
+        source_foreign_keys=_archive_customer(),
+        dest_schema="sales",
+        table_map={},
+        dest_existing_tables={"customers", "orders"},
+        dest_tables_by_schema={"Archive": {"Customers"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert 'REFERENCES "archive"."customers" ("id")' in decision.dest_ddl
+    assert decision.referenced_schema == "archive"
+
+
+def test_listed_other_schema_without_the_parent_is_refused():
+    plan = _plan(
+        source_foreign_keys=_archive_customer(),
+        dest_schema="sales",
+        table_map={},
+        dest_existing_tables={"customers"},
+        dest_tables_by_schema={"archive": set()},
+    )
+    decision = _only(plan)
+    assert decision.status == "unsupported"
+    assert "archive" in decision.reason
+    assert plan.statements == []
+
+
+def test_source_schema_parent_is_sought_in_the_destination_schema():
+    """public.customers on the source server is not the analytics parent."""
+    plan = _plan(
+        source_schema="public",
+        dest_schema="analytics",
+        table_map={},
+        dest_existing_tables={"customers", "orders"},
+        dest_tables_by_schema={"public": {"customers"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert 'REFERENCES "analytics"."customers"' in decision.dest_ddl
+    assert "public" not in decision.dest_ddl.split("REFERENCES", 1)[1]
+
+
+def test_source_schema_parent_absent_from_dest_is_not_wired_back():
+    plan = _plan(
+        source_schema="public",
+        dest_schema="analytics",
+        table_map={},
+        dest_existing_tables={"orders"},
+        dest_tables_by_schema={"public": {"customers"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "unsupported"
+    assert plan.statements == []
+    assert "source schema" in decision.reason
+
+
+def test_parent_moved_by_the_job_lands_in_the_job_schema():
+    plan = _plan(
+        source_foreign_keys=_archive_customer(),
+        dest_schema="sales",
+        table_map={"customers": "customers"},
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert 'REFERENCES "sales"."customers"' in decision.dest_ddl
+    assert decision.referenced_schema == "sales"
+
+
+def test_catalog_reread_rejects_a_different_parent_schema():
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="archive",
+                referenced_table="customers",
+                referenced_columns=["id"],
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+
+
+def test_catalog_reread_accepts_reversed_composite_pairs():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                "name": "line_fk",
+                "columns": ["a", "b"],
+                "referenced_schema": "public",
+                "referenced_table": "parent",
+                "referenced_columns": ["x", "y"],
+            }
+        ],
+    }
+    plan = _plan(
+        source_foreign_keys=source,
+        dest_columns=["a", "b"],
+        column_map={"a": "a", "b": "b"},
+        table_map={"parent": "parent"},
+    )
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="line_fk_dest",
+                columns=["b", "a"],
+                referenced_schema="public",
+                referenced_table="parent",
+                referenced_columns=["y", "x"],
+                validated=True,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "carried"
+
+
+def test_catalog_reread_rejects_a_different_parent_column():
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["legacy_id"],
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+
+
+def test_catalog_reread_matches_an_unqualified_parent_name():
+    """Engines that omit the default schema still match a qualified plan."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "carried"
+
+
 def test_a_name_too_long_for_oracle_is_shortened_without_colliding():
     long_col = "customer_reference_identifier_column"
     plan = plan_foreign_keys(
@@ -446,3 +1110,19 @@ def test_a_name_too_long_for_oracle_is_shortened_without_colliding():
     name = _only(plan).name
     assert len(name) <= 30
     assert name.startswith("fk_ORDERS_FACT_TABLE")
+
+
+def test_multi_stream_defers_the_per_table_foreign_key_carry(monkeypatch):
+    from src.transfer import stream_foreign_keys as fk_mod
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("per-table carry measured the source")
+
+    monkeypatch.setattr(fk_mod, "foreign_key_context", _boom)
+    token = fk_mod.push_deferred_single_table_foreign_keys()
+    try:
+        fk_mod.carry_single_table_foreign_keys(
+            None, None, "orders", "orders", [], {}, []
+        )
+    finally:
+        fk_mod.pop_deferred_single_table_foreign_keys(token)

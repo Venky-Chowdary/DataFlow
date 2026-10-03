@@ -19,7 +19,7 @@ def test_build_and_verify_roundtrip():
     )
     assert pack["content_sha256"]
     assert pack["signature"]["alg"] == "HMAC-SHA256"
-    assert pack["delivery_semantics"]["cdc_default"] == "at_least_once"
+    assert pack["delivery_semantics"]["cdc_default"] == "auto"
     assert pack["delivery_semantics"]["exactly_once"] is False
     assert pack["delivery_semantics"]["at_least_once"] is True
     assert pack["delivery_semantics"]["at_most_once"] is False

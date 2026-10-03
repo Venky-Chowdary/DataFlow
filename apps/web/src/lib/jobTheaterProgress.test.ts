@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import {
   earliestJobStartMs,
   jobAverageRowsPerSecond,
+  publishedEngineElapsedSeconds,
+  theaterElapsedMs,
   theaterProgressPct,
 } from "./jobTheaterProgress.js";
 
@@ -102,6 +104,43 @@ describe("earliestJobStartMs", () => {
     assert.equal(start, created);
     const elapsedMin = (resetStarted - start) / 60_000;
     assert.ok(elapsedMin > 25 && elapsedMin < 35);
+  });
+});
+
+describe("theaterElapsedMs", () => {
+  it("freezes after complete when completed_at is missing", () => {
+    const start = Date.parse("2026-09-25T02:09:51.000Z");
+    const done = start + 18_000;
+    const later = done + 239 * 60_000;
+    const frozen = theaterElapsedMs({
+      createdAt: "2026-09-25T02:09:51.000Z",
+      terminal: true,
+      frozenEndMs: done,
+      nowMs: later,
+    });
+    assert.equal(frozen, 18_000);
+    const live = theaterElapsedMs({
+      createdAt: "2026-09-25T02:09:51.000Z",
+      terminal: false,
+      nowMs: later,
+    });
+    assert.ok(live > 200 * 60_000);
+  });
+});
+
+describe("publishedEngineElapsedSeconds", () => {
+  it("keeps a measured sub-second execute", () => {
+    assert.equal(publishedEngineElapsedSeconds(1.25), 1.25);
+    assert.equal(publishedEngineElapsedSeconds("0.4"), 0.4);
+  });
+
+  it("refuses a missing or non-numeric clock", () => {
+    assert.equal(publishedEngineElapsedSeconds(undefined), null);
+    assert.equal(publishedEngineElapsedSeconds(null), null);
+    assert.equal(publishedEngineElapsedSeconds(""), null);
+    assert.equal(publishedEngineElapsedSeconds(false), null);
+    assert.equal(publishedEngineElapsedSeconds("n/a"), null);
+    assert.equal(publishedEngineElapsedSeconds(-1), null);
   });
 });
 

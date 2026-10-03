@@ -5,8 +5,12 @@ import {
   describeStep,
   fieldsFor,
   linesToList,
+  draftOptionsForWire,
+  isBlankOption,
   missingRequired,
   moveStep,
+  parseNumberOption,
+  settleExpressionCheck,
   operationsByFamily,
   previewSampleNote,
   continueTransformState,
@@ -115,6 +119,26 @@ test("a missing required option is named before the step can be added", () => {
   // Zero is a real answer: round to no decimal places.
   assert.equal(missingRequired(ROUND, "arr_time", { places: 0 }), "");
   assert.match(missingRequired(FILTER, "", { condition: "" }), /Condition is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: Number.NaN }), /Decimal places is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: Number.POSITIVE_INFINITY }), /Decimal places is required/);
+  assert.match(missingRequired(ROUND, "arr_time", { places: "abc" }), /Decimal places is required/);
+});
+
+test("number option drafts keep the typed text until they are a finite number", () => {
+  assert.equal(parseNumberOption(""), "");
+  assert.equal(parseNumberOption("  "), "");
+  assert.equal(parseNumberOption("8"), 8);
+  assert.equal(parseNumberOption("0"), 0);
+  assert.equal(parseNumberOption("abc"), "abc");
+  assert.equal(isBlankOption("places", "abc"), true);
+  assert.equal(isBlankOption("places", 0), false);
+  assert.deepEqual(draftOptionsForWire({ places: Number.NaN, mode: "upper" }), { mode: "upper" });
+});
+
+test("a stale expression compile must not settle over a newer keystroke", () => {
+  assert.equal(settleExpressionCheck(1, 2, { valid: false, error: "stale" }), undefined);
+  assert.equal(settleExpressionCheck(2, 2, { valid: true }), "");
+  assert.equal(settleExpressionCheck(2, 2, { valid: false, error: "bad token" }), "bad token");
 });
 
 test("a one-per-line list drops blank lines and surrounding space", () => {
@@ -320,7 +344,7 @@ test("recipe identity compares the program, so an approval survives a re-render"
   assert.ok(sameRecipe(null, { steps: [] }));
 });
 
-test("the operation picker groups nested JSON ahead of row-count and value work", () => {
+test("the operation picker leads with value work, then columns, rows, nested JSON", () => {
   const grouped = operationsByFamily([
     { ...TRIM, family: "cleanse" },
     { ...FILTER, family: "rows" },
@@ -336,8 +360,8 @@ test("the operation picker groups nested JSON ahead of row-count and value work"
       expression_option: null,
     },
   ]);
-  assert.deepEqual(grouped.map((g) => g.family), ["nested", "rows", "cleanse"]);
-  assert.equal(grouped[0].label, "Nested JSON");
+  assert.deepEqual(grouped.map((g) => g.family), ["cleanse", "rows", "nested"]);
+  assert.equal(grouped[0].label, "Values");
 });
 
 test("a blocking suggestion outranks a decision, and a decision outranks hygiene", () => {

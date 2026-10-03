@@ -14,6 +14,7 @@ from services.mapping_proof import build_mapping_proof  # noqa: E402
 from preflight.gates import gate_g3_schema_contract, gate_g6_target_ddl, gate_g7_capacity  # noqa: E402
 from preflight.models import (  # noqa: E402
     ColumnMapping,
+    ColumnSchema,
     DestinationConfig,
     PreflightContext,
     SourceConfig,
@@ -102,6 +103,107 @@ def test_g6_g7_g3_attach_evidence_scope() -> None:
     g7 = gate_g7_capacity(ctx)
     assert g7.details.get("evidence_scope", {}).get("kind") == "capacity"
     assert g7.status.value == "pass"
+
+
+def test_g8_sparse_missing_is_not_an_empty_typed_cell() -> None:
+    """A document that omits a field is not an empty string on a typed column.
+
+    The reader stores ``__DF_MISSING__``. Gate-8 must hand that sentinel to the
+    write-path transform. Flattening it to ``""`` first reported
+    EMPTY_VALUE_NOT_NULLABLE for nested_array, balance, active, and created on
+    every sparse Mongo collection.
+    """
+    from preflight.gates import gate_g8_reconciliation
+    from preflight.models import GateStatus
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="database",
+            db_type="mongodb",
+            connected=True,
+            columns=[
+                ColumnSchema(name="nested_array", inferred_type="ARRAY"),
+                ColumnSchema(name="balance", inferred_type="DECIMAL(5,2)"),
+                ColumnSchema(name="active", inferred_type="BOOLEAN"),
+                ColumnSchema(name="note", inferred_type="VARCHAR"),
+            ],
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            db_type="snowflake",
+            connected=True,
+            table_exists=False,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="nested_array", inferred_type="VARIANT"),
+                ColumnSchema(name="balance", inferred_type="NUMBER(38,10)"),
+                ColumnSchema(name="active", inferred_type="BOOLEAN"),
+                ColumnSchema(name="note", inferred_type="VARCHAR"),
+            ],
+        ),
+        mappings=[
+            ColumnMapping(
+                source="nested_array",
+                target="nested_array",
+                confidence=0.99,
+                transform="json",
+            ),
+            ColumnMapping(source="balance", target="balance", confidence=0.99, transform="decimal"),
+            ColumnMapping(source="active", target="active", confidence=0.99, transform="boolean"),
+            ColumnMapping(source="note", target="note", confidence=0.99, transform="none"),
+        ],
+        sync_mode="full_refresh_overwrite",
+    )
+    ctx = PreflightContext(
+        plan=plan,
+        sample_rows=[
+            {
+                "nested_array": DF_MISSING_SENTINEL,
+                "balance": "100.50",
+                "active": "true",
+                "note": "keep",
+            },
+            {
+                "nested_array": '[{"k":1}]',
+                "balance": DF_MISSING_SENTINEL,
+                "active": DF_MISSING_SENTINEL,
+                "note": DF_MISSING_SENTINEL,
+            },
+        ],
+    )
+    result = gate_g8_reconciliation(ctx)
+    assert result.status == GateStatus.PASS, result.message
+    assert "Empty value" not in (result.message or "")
+
+
+def test_g8_real_empty_string_on_a_typed_column_still_blocks() -> None:
+    """A stored empty string is not absence. Database extracts do not invent NULL."""
+    from preflight.gates import gate_g8_reconciliation
+    from preflight.models import GateStatus
+
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="database",
+            connected=True,
+            columns=[ColumnSchema(name="balance", inferred_type="DECIMAL(5,2)")],
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            db_type="snowflake",
+            connected=True,
+            table_exists=False,
+            target_columns=[ColumnSchema(name="balance", inferred_type="NUMBER(38,10)")],
+        ),
+        mappings=[
+            ColumnMapping(source="balance", target="balance", confidence=0.99, transform="decimal"),
+        ],
+    )
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"balance": ""}])
+    )
+    assert result.status == GateStatus.BLOCK
+    assert "Empty value cannot coerce" in (result.message or "")
 
 
 def test_g8_blocks_without_sample_attaches_evidence_scope() -> None:

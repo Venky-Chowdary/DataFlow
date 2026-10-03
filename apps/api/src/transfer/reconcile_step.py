@@ -65,6 +65,16 @@ def _finalize_reconcile(
     out = stamp_post_write_phase(payload)
     snap = None
     if isinstance(dest_summary, dict):
+        if "identity_hash_aligned" in dest_summary:
+            out["identity_hash_aligned"] = bool(dest_summary.get("identity_hash_aligned"))
+        alignment = dest_summary.get("identity_alignment")
+        if isinstance(alignment, dict):
+            out["identity_alignment"] = dict(alignment)
+        versions = dest_summary.get("connector_versions")
+        if isinstance(versions, dict) and versions:
+            out["connector_versions"] = dict(versions)
+        if dest_summary.get("source_independently_reread") is True:
+            out["source_independently_reread"] = True
         snap = dest_summary.get("source_snapshot")
         raw_before = dest_summary.get(PRECOUNT_KEY)
         if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):
@@ -845,23 +855,19 @@ def _schema_state_evidence(
     )
 
 
-def _source_foreign_keys(schema_state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Relationships the source guaranteed, from its own catalog read."""
-    rendered = ((schema_state.get("source") or {}).get("foreign_keys")) or []
-    keys: list[dict[str, Any]] = []
-    for item in rendered:
-        parts = str(item).split("->")
-        if len(parts) != 3:
-            continue
-        child, parent, parent_cols = parts
-        keys.append(
-            {
-                "constrained_columns": [c for c in child.split("+") if c],
-                "referred_table": parent,
-                "referred_columns": [c for c in parent_cols.split("+") if c],
-            }
-        )
-    return keys
+def _source_foreign_keys(
+    schema_state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Relationships the source guaranteed, and tokens that could not be read.
+
+    Structured catalog facts are the relationship. The rendered ``child->parent``
+    string is only a fallback. A token that does not parse is returned, not
+    dropped: dropping it would make Gate-8 say the source declared no foreign key.
+    """
+    from services.physical_state_diff import foreign_keys_from_catalog_state
+
+    source = schema_state.get("source") if isinstance(schema_state, dict) else None
+    return foreign_keys_from_catalog_state(source if isinstance(source, dict) else {})
 
 
 def _referential_integrity_evidence(
@@ -871,15 +877,25 @@ def _referential_integrity_evidence(
     schema: str,
     table: str,
     schema_state: dict[str, Any],
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Orphan proof for every source relationship the destination does not enforce."""
-    foreign_keys = _source_foreign_keys(schema_state)
-    if not foreign_keys:
+    foreign_keys, unparsed = _source_foreign_keys(schema_state)
+    if not foreign_keys and not unparsed:
         return {
             "verified": False,
             "asked": False,
             "reason": "source declares no foreign keys",
             "relations": [],
+            "orphan_rows": 0,
+        }
+    if not foreign_keys:
+        return {
+            "verified": False,
+            "asked": True,
+            "reason": "source foreign key could not be read",
+            "relations": [],
+            "unavailable_relations": list(unparsed),
             "orphan_rows": 0,
         }
 
@@ -891,8 +907,15 @@ def _referential_integrity_evidence(
         schema=schema,
         table=table,
         foreign_keys=foreign_keys,
+        source_schema=source_schema,
     )
     evidence["asked"] = True
+    if unparsed:
+        evidence["verified"] = False
+        unavailable = list(evidence.get("unavailable_relations") or [])
+        unavailable.extend(unparsed)
+        evidence["unavailable_relations"] = unavailable
+        evidence["unparsed_foreign_keys"] = list(unparsed)
     return evidence
 
 
@@ -1859,7 +1882,8 @@ def run_reconciliation(
         )
         if schema_state:
             physical_state["schema_objects"] = schema_state
-            n5_ctx["source_has_fks"] = bool(_source_foreign_keys(schema_state))
+            keys, unparsed = _source_foreign_keys(schema_state)
+            n5_ctx["source_has_fks"] = bool(keys or unparsed)
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "physical schema comparison skipped: %s", exc, exc_info=exc
@@ -1871,12 +1895,24 @@ def run_reconciliation(
         }
 
     try:
+        ri_source_schema = ""
+        if source_endpoint is not None and source_endpoint.kind == "database":
+            from services.dialect_profiles import schema_from_cfg
+
+            from .connector_capabilities import resolve_driver_type
+
+            ri_src_cfg = resolve_connector_config(source_endpoint)
+            ri_src_type = resolve_driver_type(
+                str(ri_src_cfg.get("type") or source_endpoint.format or "")
+            ).lower()
+            ri_source_schema = str(schema_from_cfg(ri_src_type, ri_src_cfg) or "")
         ri_state = _referential_integrity_evidence(
             db_type=db_type,
             cfg=cfg,
             schema=str(schema or ""),
             table=str(table_name or ""),
             schema_state=schema_state,
+            source_schema=ri_source_schema,
         )
         physical_state["referential_integrity"] = ri_state
         n5_ctx["source_has_fks"] = bool(

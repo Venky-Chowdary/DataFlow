@@ -185,6 +185,11 @@ KIND_MIRROR = "mirror"
 KIND_VECTOR = "vector"
 KIND_SCD2 = "scd2"
 KIND_JOB = "job_rollup"
+# Preflight refused the load after the source was counted and before any
+# destination write. Dest COUNT(*) was not taken. That is a measured read
+# with a refused write — not KIND_UNMEASURED, and not a balance failure.
+KIND_WRITE_REFUSED = "write_refused"
+READ_MEASURED = "measured_read"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
 DEST_CURRENT_READBACK = "current_readback"
 DEST_PER_STREAM = "per_stream"
@@ -1060,6 +1065,9 @@ class ConservationLedger:
     # Identity of the recipe that removed them, so "which program did this" is
     # answerable from the ledger the run shipped rather than from a re-derivation.
     shape_recipe_hash: str = ""
+    # Spreadsheet blanks stored as SQL NULL. Absence, not a present value
+    # destroyed — kept off ``rows_coerced_null``, which means lossy coerce.
+    blank_cells_as_null: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1072,6 +1080,7 @@ class ConservationLedger:
             "rows_source_filtered": self.rows_source_filtered,
             "shape_recipe_hash": self.shape_recipe_hash,
             "rows_coerced_null": self.rows_coerced_null,
+            "blank_cells_as_null": self.blank_cells_as_null,
             "writer_ack": self.writer_ack,
             "dest_count": self.dest_count,
             "dest_count_before": self.dest_count_before,
@@ -2241,13 +2250,136 @@ def _close_population(
     )
 
 
+def write_refused_ledger(
+    *,
+    rows_read: int,
+    quarantined_rows: int = 0,
+    blank_cells_as_null: int = 0,
+    sync_mode: str = "",
+) -> ConservationLedger:
+    """Counted source, zero writes, destination COUNT(*) not taken.
+
+    Fail-closed preflight stops the load before the writer opens the
+    destination. The file or batch was already counted, so the read is
+    measured. Calling that an unmeasured read is a false proof. Calling
+    ``balanced=False`` a ledger failure is also false: there is no dest
+    population to compare.
+
+    Spreadsheet blanks that the contract stores as SQL NULL stay on
+    ``blank_cells_as_null``. They are absence. ``rows_coerced_null`` means
+    a present value was destroyed, and that counter stays zero here.
+    """
+    read = max(int(rows_read), 0)
+    held = max(int(quarantined_rows or 0), 0)
+    blanks = max(int(blank_cells_as_null or 0), 0)
+    note = (
+        f"{read:,} source row(s) were counted. Preflight refused the load "
+        "before any destination write, so COUNT(*) was not taken. The read "
+        "is measured. This is not a balance failure. No row was committed."
+    )
+    if held:
+        note += f" {held:,} source row(s) are held out with a named cell finding."
+    if blanks:
+        word = "blank" if blanks == 1 else "blanks"
+        note += (
+            f" {blanks:,} spreadsheet {word} on nullable typed columns are "
+            "recorded as SQL NULL (absence), not as a value coerced away."
+        )
+    if is_append_sync(sync_mode):
+        note += (
+            " Sync is full append. A later successful re-run inserts another "
+            "copy of rows that do land. This run inserted nothing."
+        )
+    elif is_overwrite_sync(sync_mode):
+        note += " Sync is overwrite. This run replaced nothing."
+    else:
+        label = str(sync_mode or "").strip() or "unset"
+        note += f" Sync mode is {label}. This run wrote nothing."
+    return ConservationLedger(
+        rows_read=read,
+        rows_written=0,
+        rows_quarantined=held,
+        rows_skipped=0,
+        rows_coerced_null=0,
+        writer_ack=0,
+        dest_count=None,
+        dest_count_before=None,
+        unaccounted=None,
+        balanced=False,
+        rows_read_source=READ_MEASURED,
+        rows_written_source=DEST_UNMEASURED,
+        conservation_kind=KIND_WRITE_REFUSED,
+        note=note,
+        blank_cells_as_null=blanks,
+    )
+
+
+def conservation_ledger_from_mapping(
+    payload: Mapping[str, Any] | None,
+) -> ConservationLedger | None:
+    """Keep a stamped write-refused ledger. Do not recompute it as unmeasured.
+
+    ``account_job`` closes from dest COUNT(*) and ``source_rows``. A preflight
+    refusal has neither, so a recompute says the read was never counted.
+    """
+    data = dict(payload or {})
+    if str(data.get("conservation_kind") or "") != KIND_WRITE_REFUSED:
+        return None
+    read = _as_optional_int(data.get("rows_read"))
+    if read is None:
+        return None
+    return ConservationLedger(
+        rows_read=read,
+        rows_written=0,
+        rows_quarantined=_first_present_int(data.get("rows_quarantined")),
+        rows_skipped=_first_present_int(data.get("rows_skipped")),
+        rows_coerced_null=0,
+        writer_ack=0,
+        dest_count=None,
+        dest_count_before=None,
+        unaccounted=None,
+        balanced=False,
+        rows_read_source=str(data.get("rows_read_source") or READ_MEASURED),
+        rows_written_source=DEST_UNMEASURED,
+        conservation_kind=KIND_WRITE_REFUSED,
+        note=str(data.get("note") or ""),
+        blank_cells_as_null=_first_present_int(data.get("blank_cells_as_null")),
+    )
+
+
+def _write_refusal_still_current(job: Mapping[str, Any]) -> bool:
+    """True while this document is still the preflight refusal, not a later run.
+
+    Resume of the same job id must be allowed to close a real dest COUNT.
+    A completed reconciliation replaces the refusal stamp.
+    """
+    status = str(job.get("status") or "").strip().lower()
+    if status and status not in {"failed"}:
+        return False
+    recon = dict(job.get("reconciliation") or {})
+    if recon.get("source_rows") is not None or recon.get("target_rows") is not None:
+        return False
+    dest = dict(job.get("destination_summary") or {})
+    if dest.get("streams"):
+        return False
+    return True
+
+
 def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     """Conservation ledger for one job document.
 
     ``rows_written`` is dest COUNT(*), never ``records_processed``.
     Two or more streams replace last-table dest COUNT with the job rollup:
     the job is closed iff every stream ledger is closed.
+
+    A stamped write-refused ledger is kept while the job is still that
+    refusal. Recomputing it from a missing dest COUNT would report a
+    counted file as an unmeasured read. A later completed run closes
+    normally.
     """
+    kept = conservation_ledger_from_mapping(job.get("row_accounting"))
+    if kept is not None and _write_refusal_still_current(job):
+        return kept
     dest = dict(job.get("destination_summary") or {})
     streams = dest.get("streams")
     if streams is None:
@@ -2413,7 +2545,22 @@ def ledger_from_transfer_result(
     *,
     sync_mode: str = "",
 ) -> dict[str, Any]:
-    """Conservation ledger for a ``TransferResult`` (Studio sync response)."""
+    """Conservation ledger for a ``TransferResult`` (Studio sync response).
+
+    A write-refused stamp already on the result is the proof. Rebuilding
+    from ``records_transferred`` (unset on a preflight refusal) would
+    replace a counted read with an unmeasured one.
+    """
+    existing = getattr(result, "row_accounting", None)
+    if not isinstance(existing, Mapping):
+        details = getattr(result, "error_details", None)
+        if isinstance(details, Mapping):
+            existing = details.get("row_accounting")
+    kept = conservation_ledger_from_mapping(
+        existing if isinstance(existing, Mapping) else None
+    )
+    if kept is not None:
+        return kept.to_dict()
     dest = dict(getattr(result, "destination_summary", None) or {})
     recon = dict(getattr(result, "reconciliation", None) or {})
     return account_job(

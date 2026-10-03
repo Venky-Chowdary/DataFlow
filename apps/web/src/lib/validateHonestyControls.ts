@@ -263,6 +263,13 @@ export interface NumberLocaleValidateAction {
   message: string;
 }
 
+export interface DateLocaleValidateAction {
+  decision: "set_locale" | "settled";
+  columns: string[];
+  message: string;
+  locale?: "MDY" | "DMY";
+}
+
 /** Validate next action when grouping is ambiguous — refused, or read as US. */
 export function numberLocaleValidateAction(
   preflight: PreflightResult | null | undefined,
@@ -295,8 +302,6 @@ export function numberLocaleValidateAction(
   };
 }
 
-export type DateLocaleValidateAction = NumberLocaleValidateAction;
-
 export type AdvancedLocaleKind = "date" | "number";
 
 /** Stable ids for Destination → Advanced locale selects. One owner. */
@@ -326,7 +331,23 @@ export function dateLocaleValidateAction(
 ): DateLocaleValidateAction | null {
   const report = preflight?.date_locale_report;
   if (!report || typeof report !== "object") return null;
-  if (String(report.decision || "") !== "set_locale") return null;
+  const decision = String(report.decision || "");
+  if (decision === "ok") {
+    const locale = String(report.date_locale || preflight?.date_locale || "").trim().toUpperCase();
+    if (locale === "MDY" || locale === "DMY") {
+      return {
+        decision: "settled",
+        locale,
+        columns: [],
+        message:
+          locale === "DMY"
+            ? "Reading dates as DMY (day/month/year). A value in each date column fixed the order."
+            : "Reading dates as MDY (month/day/year). A value in each date column fixed the order.",
+      };
+    }
+    return null;
+  }
+  if (decision !== "set_locale") return null;
   const columns = (report.ambiguous_columns || [])
     .map((row) => String(row?.column || "").trim())
     .filter(Boolean);

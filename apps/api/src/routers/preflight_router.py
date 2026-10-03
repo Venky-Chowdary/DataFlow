@@ -23,6 +23,7 @@ from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
     inspect_destination_for_preflight,
+    resolve_preflight_source_kind,
     run_file_preflight,
     run_transfer_policy_gates,
 )
@@ -141,8 +142,8 @@ class PreflightRequest(BaseModel):
     row_limit: int = 0
     # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
     dest_extra: dict[str, Any] | None = None
-    # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
-    delivery_guarantee: str = "at_least_once"
+    # CDC delivery — auto selects dest-owned exactly-once on an eligible route.
+    delivery_guarantee: str = "auto"
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
     # gates must judge the transformed image, not the raw source.
     shape_recipe: dict[str, Any] | None = None
@@ -394,7 +395,11 @@ async def run_preflight(body: PreflightRequest):
             destination_error=dest_error,
             source_connected=source_connected,
             source_error=source_error,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=source_file_id,
+            ),
             source_format=body.source_type or body.source_kind,
             sync_mode=body.sync_mode,
             sample_rows=preflight_sample_rows,
@@ -512,7 +517,11 @@ async def run_preflight(body: PreflightRequest):
             dest_type=body.dest_type
             or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else None),
             source_type=body.source_type,
-            source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
+            source_kind=resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=body.source_connector_id,
+                source_file_id=str(body.source_file_id or ""),
+            ),
             write_via_staging=bool(body.write_via_staging),
             priority_column=str(body.priority_column or ""),
             priority_direction=str(body.priority_direction or "desc"),
@@ -539,7 +548,7 @@ async def run_preflight(body: PreflightRequest):
                 destination_config=dest_meta.get("_probe_cfg") or None,
                 destination_table=(body.dest_table or body.dest_collection or ""),
             ),
-            delivery_guarantee=body.delivery_guarantee or "at_least_once",
+            delivery_guarantee=body.delivery_guarantee or "auto",
             allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
         ),
         validation_mode=body.validation_mode,
@@ -720,12 +729,18 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                     [("" if row.get(h) is None else str(row.get(h))) for h in headers]
                     for row in (image.sample_rows or [])
                 ]
+            file_source = resolve_preflight_source_kind(
+                body.source_kind,
+                source_connector_id=getattr(body, "source_connector_id", None),
+                source_file_id=getattr(body, "source_file_id", None),
+            ) == "file"
             result = _preview(
                 headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
                 column_types=column_types,
                 sample_size=body.sample_size,
+                empty_cells_as_null=file_source,
             )
             if image.applied:
                 result["transform_image"] = {

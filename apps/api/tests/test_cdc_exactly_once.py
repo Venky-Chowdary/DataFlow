@@ -37,6 +37,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
+    REASON_NO_LSN,
     REASON_NOT_CDC,
     REASON_OK,
     REASON_STALE_REPLAY,
@@ -151,6 +152,94 @@ def test_classify_fail_closed_ineligible_routes() -> None:
     )
     assert duck.eligible is True
     assert duck.wired is True
+
+
+def test_auto_selects_exactly_once_only_when_the_route_can_commit() -> None:
+    from services.cdc_exactly_once import select_route_delivery
+
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "exactly_once"
+    )
+    assert (
+        select_route_delivery(
+            None,
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "at_least_once",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="full_refresh_overwrite",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        select_route_delivery(
+            "exactly_once",
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+    assert exc.value.reason == REASON_DEST_NOT_TXN
+
+
+def test_auto_refuses_exactly_once_without_a_log_position() -> None:
+    from services.cdc_exactly_once import route_declares_log_position, select_route_delivery
+
+    timestamp = [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": "id",
+        "cursor_semantics": "modification_timestamp",
+    }]
+    log = [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": "id",
+        "cursor_semantics": "cdc_position",
+    }]
+    assert route_declares_log_position(timestamp) is False
+    assert route_declares_log_position(log) is True
+    assert route_declares_log_position([]) is False
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+            has_lsn_column=False,
+        )
+        == "at_least_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        select_route_delivery(
+            "exactly_once",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+            has_lsn_column=False,
+        )
+    assert exc.value.reason == REASON_NO_LSN
 
 
 def test_assert_requested_refuses_ineligible_exactly_once() -> None:

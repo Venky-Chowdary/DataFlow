@@ -22,6 +22,7 @@ import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
 import { ConnectionReuseCard } from "./ConnectionReuseCard";
 import { PhaseProfileCard } from "./PhaseProfileCard";
+import { formatSeconds } from "../../lib/phaseProfile";
 import { ReplaySafetyCard } from "./ReplaySafetyCard";
 import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
@@ -303,7 +304,6 @@ export function TransferResultDashboard({
 
   const showMore =
     (result.reconciliation?.message && !hasIntegrityLoss)
-    || (ds?.warnings && ds.warnings.length > 0)
     || (result.ddl_executed && result.ddl_executed.length > 0)
     || Boolean(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum);
 
@@ -532,7 +532,14 @@ export function TransferResultDashboard({
 
       <TransformationsCard report={ds?.transformations} />
 
-      <PhaseProfileCard profile={ds?.phase_profile} />
+      <PhaseProfileCard
+        profile={ds?.phase_profile}
+        engineSeconds={
+          ds?.elapsed_seconds != null && Number.isFinite(Number(ds.elapsed_seconds))
+            ? Number(ds.elapsed_seconds)
+            : null
+        }
+      />
 
       <ReplaySafetyCard report={ds?.replay_safety} />
 
@@ -702,12 +709,21 @@ export function TransferResultDashboard({
                 <dt>Route</dt>
                 <dd>{sourceLabel} → {destLabel}</dd>
               </div>
+              {ds?.elapsed_seconds != null && Number.isFinite(Number(ds.elapsed_seconds)) && (
+                <div>
+                  <dt>Elapsed</dt>
+                  <dd>{formatSeconds(Number(ds.elapsed_seconds))} engine time</dd>
+                </div>
+              )}
               {throughput != null && (
                 <div>
                   <dt>Throughput</dt>
                   <dd>
                     {Math.round(Number(throughput)).toLocaleString()} rows/s
                     {" "}({sourceType} → {destType})
+                    {ds?.elapsed_seconds != null && Number(ds.elapsed_seconds) > 0
+                      ? ` over ${formatSeconds(Number(ds.elapsed_seconds))}`
+                      : ""}
                   </dd>
                 </div>
               )}
@@ -753,9 +769,24 @@ export function TransferResultDashboard({
           </section>
         )}
 
+        {ds?.warnings && ds.warnings.length > 0 && (
+          <section className="df2-result-warnings-block" role="status" aria-label="Writer warnings">
+            <p className="df2-result-warnings-note">
+              {ds.warnings.length} writer message{ds.warnings.length === 1 ? "" : "s"}
+              {ds.warnings_suppressed && ds.warnings_suppressed > 0
+                ? ` · ${ds.warnings_suppressed.toLocaleString()} more not listed`
+                : ""}
+              .
+            </p>
+            <ul className="df2-result-warnings">
+              {ds.warnings.map((w) => <li key={w}>{w}</li>)}
+            </ul>
+          </section>
+        )}
+
         {showMore && (
           <details className="df2-result-more">
-            <summary>Checksums, warnings &amp; DDL</summary>
+            <summary>Checksums &amp; DDL</summary>
             <div className="df2-result-more-body">
               <p className="df2-result-explain-body">
                 If reconciliation is <strong>Verified</strong>, source and destination fingerprints match.
@@ -795,21 +826,6 @@ export function TransferResultDashboard({
                 </dl>
               )}
               {result.reconciliation?.message && !hasIntegrityLoss && <p>{result.reconciliation.message}</p>}
-              {ds?.warnings && ds.warnings.length > 0 && (
-                <div className="df2-result-warnings-block">
-                  <p className="df2-result-warnings-note">
-                    Showing {ds.warnings.length} distinct writer message
-                    {ds.warnings.length === 1 ? "" : "s"}
-                    {ds.warnings_suppressed && ds.warnings_suppressed > 0
-                      ? ` · ${ds.warnings_suppressed.toLocaleString()} more suppressed`
-                      : " · display capped"}
-                    .
-                  </p>
-                  <ul className="df2-result-warnings">
-                    {ds.warnings.map((w) => <li key={w}>{w}</li>)}
-                  </ul>
-                </div>
-              )}
               {result.ddl_executed && result.ddl_executed.length > 0 && (
                 <ul className="df2-result-ddl">
                   {result.ddl_executed.map((d) => <li key={d}><code>{d}</code></li>)}

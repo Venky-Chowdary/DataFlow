@@ -39,6 +39,7 @@ from services.dest_precount import (
 from services.dialect_profiles import schema_from_cfg
 from services.source_reread import (
     REREAD_SCAN_SOURCES,
+    align_source_populations,
     reread_pagination_plan,
     should_reread_source,
 )
@@ -77,8 +78,7 @@ from .stream_row_accounting import (
     stamp_source_row_count,
 )
 from .stream_foreign_keys import (
-    carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
-    foreign_key_context as _foreign_key_context,
+    carry_single_table_foreign_keys as _carry_single_table_foreign_keys,
 )
 
 from services.phase_profile import (  # noqa: E402
@@ -3378,10 +3378,12 @@ def _stream_database_transfer_impl(
         )
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
-    # Heterogeneous warehouse routes auto-re-read (DATAFLOW_RECONCILE_SOURCE_REREAD=auto)
-    # so Snowflake→Postgres can earn independent_source_reread / full_checksum.
+    # Warehouse full refresh auto-re-reads, including same-engine
+    # (DATAFLOW_RECONCILE_SOURCE_REREAD=auto), so Gate-8 can earn
+    # independent_source_reread / full_checksum from a second source scan.
     # Force off with =0; force on with =1. Partial write-pass (resume tail) always
     # re-reads — a session digest vs a full destination is a false mismatch.
+    # Incremental and CDC stay on the write-pass.
     #
     # Resume: the write pass only fingerprints this session's rows while Gate-8
     # compares the full destination — force a source re-read. This holds for
@@ -3416,11 +3418,13 @@ def _stream_database_transfer_impl(
         )
         dest_summary["checksum_mode"] = "inline_write_pass"
         dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
-            "no second source scan. Heterogeneous warehouse routes re-read by "
-            "default; set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second "
-            "scan on same-engine routes (double I/O)."
+            "no second source scan. Full-refresh warehouse routes re-read by "
+            "default, including same-engine. This run stayed on the write-pass "
+            "(incremental, CDC, or DATAFLOW_RECONCILE_SOURCE_REREAD=0). "
+            "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
     elif src_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
@@ -3544,6 +3548,20 @@ def _stream_database_transfer_impl(
         )
         dest_summary["reread_pagination"] = reread_plan.get("mode")
         if fp_accumulator.total:
+            if write_pass_fp.total:
+                alignment = align_source_populations(write_pass_fp, fp_accumulator)
+                dest_summary["write_pass_checksum"] = write_pass_fp.digest()
+            else:
+                alignment = {
+                    "identity_hash_aligned": False,
+                    "write_pass_rows": 0,
+                    "reread_rows": int(fp_accumulator.total),
+                    "reason": "write_pass_empty",
+                }
+            dest_summary["identity_alignment"] = alignment
+            dest_summary["identity_hash_aligned"] = bool(
+                alignment.get("identity_hash_aligned")
+            )
             final_checksum = fp_accumulator.digest()
             dest_summary["checksum_mode"] = "source_reread"
             dest_summary["source_independently_reread"] = True
@@ -3563,6 +3581,7 @@ def _stream_database_transfer_impl(
             final_checksum = ""
             dest_summary["checksum_mode"] = "source_reread_unavailable"
             dest_summary["source_independently_reread"] = False
+            dest_summary["identity_hash_aligned"] = False
             dest_summary["checksum_note"] = (
                 "Independent source re-read produced no comparable fingerprints "
                 f"({checksum_rows_read:,} row(s) read, "
@@ -3574,12 +3593,20 @@ def _stream_database_transfer_impl(
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
         dest_summary["source_independently_reread"] = False
+        dest_summary["identity_hash_aligned"] = False
 
     dest_summary["checksum"] = (
         final_checksum
         if dest_summary.get("checksum_mode") == "source_reread_unavailable"
         else (final_checksum or last_checksum)
     )
+    if not isinstance(dest_summary.get("connector_versions"), dict):
+        from services.connector_versions import capture_route_versions
+
+        dest_summary["connector_versions"] = capture_route_versions(
+            source_engine=src_type,
+            dest_type=dest_type,
+        )
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
     if decision.resume_fallback:
@@ -3766,44 +3793,6 @@ def _stream_database_transfer_impl(
         source, destination, table, dest_table, mappings, dest_summary, ddl_log
     )
     return written, ddl_log, dest_summary, columns
-
-
-def _carry_single_table_foreign_keys(
-    source: EndpointConfig,
-    destination: EndpointConfig,
-    table: str,
-    dest_table: str,
-    mappings: list[dict] | None,
-    dest_summary: dict[str, Any],
-    ddl_log: list[str],
-) -> None:
-    """Carry the single table's references onto the destination after the load.
-
-    The parent is already on the destination instead of arriving in this run,
-    so without this the child lands with its foreign keys silently dropped and
-    the run still goes green — on the row path and the COPY fast path alike.
-    """
-    fk_context = _foreign_key_context(source, [table])
-    if not fk_context.source_keys:
-        return
-    fk_context.column_maps[table] = {
-        str(m.get("source") or ""): str(m.get("target") or "")
-        for m in (mappings or [])
-        if m.get("source") and m.get("target")
-    }
-    fk_summary = _carry_foreign_keys_after_load(
-        destination, fk_context, {table: dest_table}
-    )
-    if fk_summary is None:
-        return
-    dest_summary["foreign_keys"] = fk_summary
-    for decision in fk_summary.get("decisions") or []:
-        if decision.get("status") in {"carried", "unsupported"} and decision.get(
-            "dest_ddl"
-        ):
-            ddl_log.append(f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}")
-
-
 
 
 class _NoOpCheckpointService:

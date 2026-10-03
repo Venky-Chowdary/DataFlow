@@ -2390,7 +2390,7 @@ export function ValidateDashboard({
                       ? "Schema incomplete — reload destination columns"
                     : "Matched to destination schema"}
                 {" · "}
-                every pair has confidence evidence and fidelity risks
+                every pair carries confidence evidence
               </span>
             </div>
             <Button

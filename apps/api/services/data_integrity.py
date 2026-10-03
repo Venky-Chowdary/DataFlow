@@ -209,6 +209,8 @@ def _check_transform_dry_run(
     *,
     dest_kind: str = "",
     target_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -232,6 +234,8 @@ def _check_transform_dry_run(
         sample_rows=sample_rows,
         mappings=enriched,
         column_types=source_types,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -595,19 +599,36 @@ def _sample_unique_constraint_dupes(
     return [f"{label}: duplicate key values ({sample})"]
 
 
+def _key_table_kind(uk: dict[str, Any] | None) -> str:
+    """Table kind stamped on one catalog key, or empty when it was not measured."""
+    if not isinstance(uk, dict) or "table_kind" not in uk:
+        return ""
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    return normalize_snowflake_table_kind(uk.get("table_kind"))
+
+
 def _destination_constraints_advisory(
     dest_kind: str,
     destination_unique_keys: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """True when dest PK/UNIQUE are optimizer/metadata-only (BQ / Redshift / SF NOT ENFORCED)."""
-    kind = normalize_dest_kind(dest_kind or "")
-    if kind in {"bigquery", "redshift"}:
-        return True
-    # Snowflake hybrid may mix; only advisory when every covering key says so.
-    keys = list(destination_unique_keys or [])
-    if keys and all(uk.get("enforced") is False for uk in keys):
-        return True
-    return False
+    """True when dest PK/UNIQUE are optimizer metadata, not a write rule.
+
+    Redshift, BigQuery, Databricks, and Snowflake standard tables share
+    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A Snowflake
+    key becomes a write rule only when its measured table kind is hybrid
+    and ``enforced`` is true. A stamped ``enforced`` flag without that kind
+    stays advisory. A key dict that says ``enforced`` false on any other
+    engine is the same answer.
+    """
+    from services.foreign_key_metadata import uniqueness_proof_gap
+
+    keys = [uk for uk in (destination_unique_keys or []) if isinstance(uk, dict)]
+    if not keys:
+        return uniqueness_proof_gap(dest_kind) == "unenforced"
+    return all(
+        not _unique_constraint_enforced(uk, dest_kind=dest_kind) for uk in keys
+    )
 
 
 def _unique_constraint_enforced(
@@ -615,11 +636,26 @@ def _unique_constraint_enforced(
     *,
     dest_kind: str = "",
 ) -> bool:
+    from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
+
+    kind = _key_table_kind(uk)
+    if uk is not None and uk.get("index_ready") is False:
+        # PostgreSQL indisready is false. Inserts ignore the index.
+        return False
+    if uk is not None and uk.get("disabled") is True:
+        # SQL Server DISABLE. The index does not reject a new duplicate.
+        return False
+    if uniqueness_proof_gap(dest_kind, table_kind=kind) == "unenforced":
+        return False
+    if _dialect_key(dest_kind) == "snowflake":
+        # Hybrid tables enforce the key. The constraint row still has to say so.
+        return uk is not None and uk.get("enforced") is True
     if uk is not None and uk.get("enforced") is False:
         return False
     if uk is not None and uk.get("enforced") is True:
         return True
-    return not _destination_constraints_advisory(dest_kind, [uk] if uk else None)
+    # An enforcing engine with no separate bit treats the constraint as the check.
+    return True
 
 
 def _advisory_unique_key_warnings(
@@ -642,6 +678,15 @@ def _advisory_unique_key_warnings(
         uk for uk in keys if not _unique_constraint_enforced(uk, dest_kind=dest_kind)
     ]
     kind = normalize_dest_kind(dest_kind or "") or "destination"
+    if any(
+        uk.get("index_valid") is False and uk.get("index_ready") is not False
+        for uk in keys
+    ):
+        warnings.append(
+            f"{kind} unique index is invalid (pg_index.indisvalid is false). "
+            "New duplicates are still rejected while the index is ready for "
+            "inserts. Existing rows were not checked."
+        )
     if not advisory and not _destination_constraints_advisory(dest_kind, keys):
         return warnings
     if advisory:
@@ -655,6 +700,22 @@ def _advisory_unique_key_warnings(
             f"metadata): {', '.join(labels)} — Validate will not invent write "
             "blockers; prove uniqueness with pipeline tests before trusting merges."
         )
+        if any(uk.get("rely") is True for uk in advisory):
+            warnings.append(
+                f"{kind} RELY is an optimizer hint. It does not prove the "
+                "loaded rows are unique."
+            )
+        if any(uk.get("disabled") is True for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is disabled. It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
+            )
+        if any(uk.get("index_ready") is False for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is not ready for inserts "
+                "(pg_index.indisready is false). It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
+            )
     elif _destination_constraints_advisory(dest_kind, keys):
         warnings.append(
             f"{kind} PRIMARY KEY / UNIQUE constraints are informational "
@@ -1359,6 +1420,8 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     dest_table_exists: bool | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1447,6 +1510,8 @@ def run_integrity_audit(
                 rows,
                 dest_kind=dest_kind,
                 target_types=target_types,
+                empty_cells_as_null=empty_cells_as_null,
+                dest_nullability=dest_nullability,
             )
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))

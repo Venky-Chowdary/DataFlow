@@ -1697,6 +1697,7 @@ def build_mapped_rows_with_details(
     # — billions of them on a large transfer.
     # Risk Contract module is in-tree: hard-require it. Soft-import previously
     # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
     from services.migration_risk_contract import (
         disposition_for_execution_policy,
         resolve_write_action_for_mapping,
@@ -1732,19 +1733,15 @@ def build_mapped_rows_with_details(
                     converted, xwalk_err = apply_code_crosswalk(converted, mapping)
                     if xwalk_err:
                         err = xwalk_err
-                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols
-                # (Airbyte-class empty→null for non-string). Never invent NULL into
-                # proven NOT NULL destinations.
-                if (
-                    err
-                    and empty_cells_as_null
-                    and _is_empty_typed_coerce_error(err)
-                    and _is_blank_cell(val)
-                    and not _target_explicitly_not_null(
-                        mapping if isinstance(mapping, dict) else None,
-                        tgt_name,
-                        dest_nullability,
-                    )
+                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols.
+                # Same function Validate and Gate-8 use. Proven NOT NULL stays an error.
+                if blank_typed_cell_is_sql_null(
+                    val,
+                    err,
+                    mapping if isinstance(mapping, dict) else None,
+                    empty_cells_as_null=empty_cells_as_null,
+                    dest_nullability=dest_nullability,
+                    target=tgt_name,
                 ):
                     converted, err = None, None
             cell_policy = policy

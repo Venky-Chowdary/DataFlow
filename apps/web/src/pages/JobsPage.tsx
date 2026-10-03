@@ -1703,6 +1703,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 ? (destSummary.phase_profile as PhaseProfileReport)
                 : null
             }
+            engineSeconds={
+              typeof destSummary.elapsed_seconds === "number" && Number.isFinite(destSummary.elapsed_seconds)
+                ? destSummary.elapsed_seconds
+                : null
+            }
           />
           <ReplaySafetyCard
             report={

@@ -12,7 +12,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from services.destination_ri_probe import verify_destination_referential_integrity
+from services.destination_ri_probe import (
+    _same_relationship,
+    relationship_identity,
+    verify_destination_referential_integrity,
+)
 from services.migration_certificate import (
     _referential_blockers,
     physical_state_findings,
@@ -70,6 +74,20 @@ def test_orphan_rows_are_counted_and_exampled(tmp_path: Path) -> None:
     assert result["orphan_relations"] == ["parent_id->parent"]
 
 
+def test_relationship_identity_is_the_column_pairs() -> None:
+    """Order in the DDL is not a different promise. A different parent column is."""
+    forward = relationship_identity(["a", "b"], "public.parent", ["x", "y"])
+    reversed_pairs = relationship_identity(["b", "a"], "parent", ["y", "x"])
+    other_parent_column = relationship_identity(["a", "b"], "parent", ["y", "x"])
+    other_schema = relationship_identity(["a", "b"], "archive.parent", ["x", "y"])
+    assert forward is not None and reversed_pairs is not None
+    assert _same_relationship(forward, reversed_pairs) is True
+    assert other_parent_column is not None
+    assert _same_relationship(forward, other_parent_column) is False
+    assert other_schema is not None
+    assert _same_relationship(forward, other_schema) is False
+
+
 def test_enforced_fk_needs_no_scan(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,
@@ -80,6 +98,121 @@ def test_enforced_fk_needs_no_scan(tmp_path: Path) -> None:
     result = _probe(cfg)
     assert result["verified"] is True
     assert result["relations"][0]["status"] == "enforced"
+
+
+def test_enforced_fk_on_a_different_parent_column_is_scanned(tmp_path: Path) -> None:
+    """Same child column and parent table, different parent column, is not enforced.
+
+    ``parent_id → parent.legacy_id`` does not prove ``parent_id → parent.id``.
+    The row 10 is a real legacy key and an orphan of id.
+    """
+    path = str(tmp_path / "wrong_parent_col.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY, legacy_id INTEGER UNIQUE)"
+        )
+        conn.execute("INSERT INTO parent (id, legacy_id) VALUES (1, 10), (2, 20)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+            "parent_id INTEGER REFERENCES parent(legacy_id))"
+        )
+        conn.execute("INSERT INTO child (id, parent_id) VALUES (1, 10)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=SOURCE_FK,
+    )
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["orphan_rows"] == 1
+    assert result["verified"] is False
+
+
+def test_reversed_composite_pairs_still_count_as_enforced(tmp_path: Path) -> None:
+    """(b, a) → (y, x) is the same FK as (a, b) → (x, y)."""
+    path = str(tmp_path / "pair_order.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE parent (x INTEGER, y INTEGER, PRIMARY KEY (x, y))"
+        )
+        conn.execute("INSERT INTO parent (x, y) VALUES (1, 2)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, "
+            "FOREIGN KEY (a, b) REFERENCES parent (x, y))"
+        )
+        conn.execute("INSERT INTO child (id, a, b) VALUES (1, 1, 2)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["b", "a"],
+                "referred_table": "public.parent",
+                "referred_columns": ["y", "x"],
+            }
+        ],
+    )
+    assert result["verified"] is True
+    assert result["relations"][0]["status"] == "enforced"
+
+
+def test_two_parent_aliases_are_not_scanned_as_clean(tmp_path: Path) -> None:
+    """A local customers row must not prove a payload that also names real_parent."""
+    path = str(tmp_path / "two_parents.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO customers (id) VALUES (10)")
+        conn.execute("CREATE TABLE real_parent (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER)"
+        )
+        conn.execute("INSERT INTO orders (id, customer_id) VALUES (1, 10)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="orders",
+        foreign_keys=[
+            {
+                "columns": ["customer_id"],
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+                "referred_table": "real_parent",
+                "referred_columns": ["id"],
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert result["orphan_rows"] == 0
+    reason = result["relations"][0]["reason"]
+    assert "customers" in reason
+    assert "real_parent" in reason
+
+
+def test_parent_named_in_another_schema_is_not_the_local_table(tmp_path: Path) -> None:
+    """A local ``parent`` does not prove ``sales.parent``. The scan must not borrow it."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER)",
+        "INSERT INTO child (id, parent_id) VALUES (1, 1)",
+    )
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["parent_id"],
+                "referred_schema": "sales",
+                "referred_table": "parent",
+                "referred_columns": ["id"],
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert "sales.parent" in result["relations"][0]["reason"]
 
 
 def test_missing_parent_table_is_unavailable_never_clean(tmp_path: Path) -> None:
@@ -154,11 +287,90 @@ def test_composite_fk_with_intact_tuples_is_clean(tmp_path: Path) -> None:
 
 
 def test_composite_fk_partial_null_is_unconstrained_not_orphan(tmp_path: Path) -> None:
-    """MATCH SIMPLE: any NULL component means the key imposes no constraint."""
+    """Unreported match is MATCH SIMPLE: any NULL component imposes no constraint."""
     cfg = _composite_db(tmp_path, "(1, NULL, 999)", "(2, 9, NULL)")
     result = _composite_probe(cfg)
     assert result["verified"] is True
     assert result["orphan_rows"] == 0
+    assert result["relations"][0]["match"] == "simple"
+
+
+def test_match_full_partial_null_is_an_orphan_even_when_the_constraint_exists(
+    tmp_path: Path,
+) -> None:
+    """A stored MATCH SIMPLE foreign key does not prove a MATCH FULL source rule.
+
+    SQLite lists the constraint and has no match type. The old scan skipped
+    those rows. (NULL, 999) and (9, NULL) are orphans under MATCH FULL.
+    (NULL, NULL) is allowed.
+    """
+    path = str(tmp_path / "full.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE orders (tenant_id INTEGER, order_no INTEGER, "
+            "PRIMARY KEY (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO orders VALUES (1, 100)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, tenant_id INTEGER, "
+            "order_no INTEGER, FOREIGN KEY (tenant_id, order_no) "
+            "REFERENCES orders (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO child VALUES (1, NULL, 999)")
+        conn.execute("INSERT INTO child VALUES (2, 9, NULL)")
+        conn.execute("INSERT INTO child VALUES (3, NULL, NULL)")
+        conn.execute("INSERT INTO child VALUES (4, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["tenant_id", "order_no"],
+                "referred_table": "orders",
+                "referred_columns": ["tenant_id", "order_no"],
+                "match": "FULL",
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["relations"][0]["match"] == "full"
+    assert result["orphan_rows"] == 2
+    assert set(result["relations"][0]["examples"]) == {"+999", "9+"}
+
+
+def test_match_partial_is_not_a_completed_scan(tmp_path: Path) -> None:
+    cfg = _composite_db(tmp_path, "(1, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[{**COMPOSITE_FK[0], "match": "PARTIAL"}],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert result["orphan_rows"] == 0
+    assert "MATCH PARTIAL" in result["relations"][0]["reason"]
+    assert "not a completed scan" in result["relations"][0]["reason"]
+
+
+def test_two_match_spellings_do_not_scan(tmp_path: Path) -> None:
+    cfg = _composite_db(tmp_path, "(1, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[
+            {
+                **COMPOSITE_FK[0],
+                "match": "FULL",
+                "options": {"match": "SIMPLE"},
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert "two match types" in result["relations"][0]["reason"]
 
 
 def test_self_referential_composite_is_aliased_and_scanned(tmp_path: Path) -> None:
