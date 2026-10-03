@@ -450,6 +450,68 @@ def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
     )
 
 
+def _fk_state(
+    *facts: tuple[tuple[str, ...], str, str, tuple[str, ...]],
+) -> PhysicalState:
+    return PhysicalState(found=True, readable=True, foreign_key_facts=tuple(facts))
+
+
+def test_catalog_diff_uses_the_orphan_scan_relationship_identity() -> None:
+    """Schema, qualification, and column order follow one identity.
+
+    SQLite cannot store two schemas, so this comparison is pure. The live
+    catalog test still checks the empty-schema wire ``parent_id->parent->id``.
+    An unqualified name matches one qualified name: engines omit the default
+    schema, and the orphan scan uses that same rule. Two qualified names with
+    different schemas do not match.
+    """
+    sales = (("parent_id",), "sales", "parent", ("id",))
+    archive = (("parent_id",), "archive", "parent", ("id",))
+    drifted = compare_physical_state(_fk_state(sales), _fk_state(archive))
+    assert drifted["verified"] is False
+    assert drifted["aspects"]["foreign_keys"]["status"] == "absent"
+    assert drifted["aspects"]["foreign_keys"]["missing"] == [
+        "parent_id->sales.parent->id"
+    ]
+    assert drifted["aspects"]["foreign_keys"]["extra"] == [
+        "parent_id->archive.parent->id"
+    ]
+
+    public = (("parent_id",), "public", "parent", ("id",))
+    unqualified = (("Parent_Id",), "", "Parent", ("ID",))
+    carried = compare_physical_state(_fk_state(public), _fk_state(unqualified))
+    assert carried["aspects"]["foreign_keys"]["status"] == "carried"
+    assert carried["aspects"]["foreign_keys"]["missing"] == []
+
+    forward = (("a", "b"), "", "parent", ("x", "y"))
+    reversed_pairs = (("b", "a"), "", "parent", ("y", "x"))
+    order = compare_physical_state(_fk_state(forward), _fk_state(reversed_pairs))
+    assert order["aspects"]["foreign_keys"]["status"] == "carried"
+    assert order["verified"] is True
+
+    incomplete = ((), "", "parent", ())
+    blank = compare_physical_state(_fk_state(incomplete), _fk_state(incomplete))
+    assert blank["aspects"]["foreign_keys"]["status"] == "absent"
+
+
+def test_arrow_in_a_column_name_stays_one_wire_tuple(tmp_path: Path) -> None:
+    """The report wire is three parts even when a column name contains ``->``."""
+    path = str(tmp_path / "arrow.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE parent ("i->d" INTEGER PRIMARY KEY)')
+        conn.execute(
+            'CREATE TABLE child (id INTEGER, "a->b" INTEGER REFERENCES parent("i->d"))'
+        )
+    state = read_physical_state(
+        "sqlite", {"type": "sqlite", "database": path}, table="child"
+    )
+    assert state.found is True
+    wires = list(state.foreign_keys)
+    assert len(wires) == 1
+    assert len(wires[0]) == 3
+    assert wires[0] == ("a->b", "parent", "i->d")
+
+
 def test_a_carried_generator_is_not_reported_as_a_dropped_default() -> None:
     """MySQL exposes AUTO_INCREMENT with no column default at all.
 

@@ -28,6 +28,13 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from services.foreign_key_identity import (
+    fk_identity,
+    foreign_key_wire,
+    render_foreign_key_fact,
+    same_relationship,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -227,9 +234,10 @@ class PhysicalState:
     primary_key: tuple[str, ...] = ()
     unique_constraints: frozenset[tuple[str, ...]] = frozenset()
     foreign_keys: frozenset[tuple[str, ...]] = frozenset()
-    #: Structured relationships. The rendered ``foreign_keys`` strings are the
-    #: diff wire; this tuple keeps parent schema and column order for the
-    #: orphan scan. Each fact is ``(child columns, schema, table, parent columns)``.
+    #: Structured relationships. Catalog diff and the orphan scan both compare
+    #: these with :func:`services.foreign_key_identity.same_relationship`.
+    #: ``foreign_keys`` is the rendered report wire. Each fact is
+    #: ``(child columns, schema, table, parent columns)``.
     foreign_key_facts: tuple[
         tuple[tuple[str, ...], str, str, tuple[str, ...]], ...
     ] = ()
@@ -466,7 +474,9 @@ def read_physical_state(
         parent_cols = _cols(fk.get("referred_columns"))
         parent_table = _fold(fk.get("referred_table"))
         parent_schema = _fold(fk.get("referred_schema"))
-        fk_sets.add(("+".join(child_cols), parent_table, "+".join(parent_cols)))
+        fk_sets.add(
+            foreign_key_wire(child_cols, parent_schema, parent_table, parent_cols)
+        )
         fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     index_sets = {
         _cols(i.get("column_names")) for i in indexes or [] if i.get("column_names")
@@ -869,6 +879,55 @@ def _resolve_table_name(inspector: Any, table: str, schema: str | None) -> str |
     return resolve_stored_name(inspector.get_table_names(schema=schema), table)
 
 
+def _diff_foreign_keys(
+    source: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
+    destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
+) -> dict[str, Any]:
+    """Carried only when :func:`same_relationship` matches a destination fact.
+
+    Set subtraction on the rendered string treats ``sales.parent`` and
+    ``archive.parent`` as one key, and treats reversed column order as a
+    different key. The orphan scan does neither.
+    """
+
+    def _as_mapping(fact: tuple[tuple[str, ...], str, str, tuple[str, ...]]) -> dict[str, Any]:
+        child, schema, table, parent = fact
+        return {
+            "constrained_columns": list(child),
+            "referred_schema": schema,
+            "referred_table": table,
+            "referred_columns": list(parent),
+        }
+
+    used: set[int] = set()
+    missing: list[str] = []
+    for fact in source:
+        ident = fk_identity(_as_mapping(fact))
+        match = None
+        for index, other in enumerate(destination):
+            if index in used:
+                continue
+            if same_relationship(ident, fk_identity(_as_mapping(other))):
+                match = index
+                break
+        if match is None:
+            missing.append(render_foreign_key_fact(*fact))
+        else:
+            used.add(match)
+    extra = [
+        render_foreign_key_fact(*fact)
+        for index, fact in enumerate(destination)
+        if index not in used
+    ]
+    return {
+        "status": "carried" if not missing else "absent",
+        "missing": sorted(missing),
+        "extra": sorted(extra),
+        "source_count": len(source),
+        "destination_count": len(destination),
+    }
+
+
 def _diff_sets(source: frozenset, dest: frozenset) -> dict[str, Any]:
     missing = sorted(_render(v) for v in source - dest)
     extra = sorted(_render(v) for v in dest - source)
@@ -913,7 +972,9 @@ def compare_physical_state(
         "unique_constraints": _diff_sets(
             source.unique_constraints, destination.unique_constraints
         ),
-        "foreign_keys": _diff_sets(source.foreign_keys, destination.foreign_keys),
+        "foreign_keys": _diff_foreign_keys(
+            source.foreign_key_facts, destination.foreign_key_facts
+        ),
         "indexes": _diff_sets(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
         "defaults": _diff_sets(source.defaults, destination.defaults),

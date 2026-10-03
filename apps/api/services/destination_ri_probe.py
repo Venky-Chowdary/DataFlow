@@ -35,6 +35,14 @@ import sqlalchemy as sa
 from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
 from services.fk_tuple_scan import scan_orphan_anti_join
+from services.foreign_key_identity import (
+    fk_identity as _fk_identity,
+    fold as _fold,
+    parent_label as _parent_label,
+    qualified_parent as _qualified_parent,
+    relationship_identity,
+    same_relationship as _same_relationship,
+)
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
 logger = logging.getLogger(__name__)
@@ -52,95 +60,6 @@ __all__ = [
     "apply_dest_ri_to_reconcile",
     "GATE_ID",
 ]
-
-
-def _fold(name: Any) -> str:
-    return str(name or "").strip().casefold()
-
-
-def _table_parts(name: str) -> tuple[str | None, str]:
-    """``(schema, table)``. An unqualified name has no schema."""
-    folded = _fold(name)
-    if "." not in folded:
-        return None, folded
-    schema, table = folded.rsplit(".", 1)
-    if not schema or not table:
-        return None, folded
-    return schema, table
-
-
-def _same_parent_table(left: str, right: str) -> bool:
-    """True when both names are the same destination relation.
-
-    ``parent`` matches ``public.parent``. ``sales.parent`` does not match
-    ``archive.parent`` — those are two tables that share a leaf name.
-    """
-    if _fold(left) == _fold(right):
-        return True
-    left_schema, left_table = _table_parts(left)
-    right_schema, right_table = _table_parts(right)
-    if not left_table or left_table != right_table:
-        return False
-    if left_schema is None or right_schema is None:
-        return True
-    return left_schema == right_schema
-
-
-def relationship_identity(
-    child_columns: list[str] | tuple[str, ...],
-    parent_table: str,
-    parent_columns: list[str] | tuple[str, ...],
-) -> tuple[str, tuple[tuple[str, str], ...]] | None:
-    """Parent table plus the set of (child column, parent column) pairs.
-
-    DDL order is not part of the promise: ``(a, b) REFERENCES (x, y)`` is the
-    same relationship as ``(b, a) REFERENCES (y, x)``. A missing or uneven
-    pairing is not an identity — the caller must scan or refuse, not treat it
-    as enforced.
-    """
-    children = [str(c).strip() for c in child_columns]
-    parents = [str(c).strip() for c in parent_columns]
-    if not str(parent_table or "").strip() or not children or len(children) != len(parents):
-        return None
-    if any(not child or not parent for child, parent in zip(children, parents)):
-        return None
-    pairs = tuple(sorted((_fold(child), _fold(parent)) for child, parent in zip(children, parents)))
-    return (_fold(parent_table), pairs)
-
-
-def _qualified_parent(fk: Mapping[str, Any]) -> tuple[str, str]:
-    """``(schema, table)`` from a catalog fact or a rendered parent token."""
-    schema = _fold(fk.get("referred_schema") or fk.get("referenced_schema") or "")
-    table = _fold(fk.get("referred_table") or fk.get("referenced_table") or "")
-    if not schema and "." in table:
-        parsed_schema, parsed_table = _table_parts(table)
-        if parsed_schema and parsed_table:
-            return parsed_schema, parsed_table
-    return schema, table
-
-
-def _parent_label(schema: str, table: str) -> str:
-    if schema and table:
-        return f"{schema}.{table}"
-    return table
-
-
-def _fk_identity(fk: Mapping[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]] | None:
-    schema, table = _qualified_parent(fk)
-    return relationship_identity(
-        list(fk.get("constrained_columns") or fk.get("columns") or ()),
-        _parent_label(schema, table),
-        list(fk.get("referred_columns") or fk.get("referenced_columns") or ()),
-    )
-
-
-def _same_relationship(
-    left: tuple[str, tuple[tuple[str, str], ...]] | None,
-    right: tuple[str, tuple[tuple[str, str], ...]] | None,
-) -> bool:
-    if left is None or right is None:
-        return False
-    return left[1] == right[1] and _same_parent_table(left[0], right[0])
 
 
 def _orphan_scan(
