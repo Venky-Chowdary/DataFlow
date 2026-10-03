@@ -44,7 +44,7 @@ from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
 from services.dialect_profiles import quote_char_for
-from services.foreign_key_identity import fk_identity, fold, same_relationship
+from services.foreign_key_identity import fk_identity, fold, same_relationship, select_job_table
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
@@ -92,8 +92,15 @@ class ForeignKeyDecision:
     # Destination objects the statement touches, so a caller can order work and
     # a re-read knows what to look at.
     dest_table: str = ""
+    #: Selected source stream for this child. Empty on older decisions; the
+    #: cycle check then uses ``dest_table``.
+    source_table: str = ""
     referenced_schema: str = ""
     referenced_table: str = ""
+    #: Selected source stream this key points at. Empty means the parent is
+    #: outside the job, which is not a cycle edge even when the leaf name
+    #: matches a stream in the cycle.
+    referenced_stream: str = ""
     columns: tuple[str, ...] = ()
     referenced_columns: tuple[str, ...] = ()
     # True when the destination *rejected* the constraint because the loaded
@@ -209,13 +216,18 @@ def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     return base
 
 
-def _is_cycle_edge(dest_table: str, referenced_table: str, cycle_tables: set[str]) -> bool:
-    """Self-ref or both ends in the detected cycle → deferred / post-load edge."""
-    dest = (dest_table or "").strip().lower()
-    ref = (referenced_table or "").strip().lower()
-    if dest and ref and dest == ref:
+def _is_cycle_edge(child: str, parent_stream: str, cycle_tables: set[str]) -> bool:
+    """Self-ref or both selected streams sit in the detected cycle.
+
+    ``parent_stream`` is the stream :func:`resolve_parent_stream` chose. A
+    leaf name is not enough: ``customers`` in the cycle is not
+    ``archive.customers``.
+    """
+    child_l = fold(child)
+    parent_l = fold(parent_stream)
+    if child_l and parent_l and child_l == parent_l:
         return True
-    return bool(dest and ref and dest in cycle_tables and ref in cycle_tables)
+    return bool(child_l in cycle_tables and parent_l in cycle_tables)
 
 
 def classify_cycle_resolution(
@@ -247,8 +259,11 @@ def classify_cycle_resolution(
         d = raw if isinstance(raw, dict) else getattr(raw, "__dict__", {})
         if not isinstance(d, dict):
             continue
-        dest = str(d.get("dest_table") or "").strip()
-        ref = str(d.get("referenced_table") or "").strip()
+        dest = str(d.get("source_table") or d.get("dest_table") or "").strip()
+        if "referenced_stream" in d:
+            ref = str(d.get("referenced_stream") or "").strip()
+        else:
+            ref = str(d.get("referenced_table") or "").strip()
         if not dest or not ref:
             continue
         if dest.lower() not in cycle_l or ref.lower() not in cycle_l:
@@ -381,6 +396,37 @@ def parent_table_on_destination(
     return leaf in names or bool(source and f"{source}.{leaf}" in names)
 
 
+def resolve_parent_stream(
+    fk: ForeignKey,
+    table_map: Mapping[str, str] | None,
+    source_schema: str,
+) -> str | None:
+    """Selected source stream this foreign key points at, or None outside the job.
+
+    A known job schema uses :func:`select_job_table`, so ``archive.customers``
+    is not the local ``customers`` stream. When the job schema was not
+    measured, a single stream whose name is the parent leaf still matches.
+    That is the default-schema stamp (``public.customers`` → stream
+    ``customers``). Two qualified names are not guessed.
+    """
+    selected = [str(key) for key in (table_map or {})]
+    found = select_job_table(
+        fk.referenced_schema,
+        fk.referenced_table,
+        selected,
+        job_schema=source_schema,
+    )
+    if found:
+        return found
+    if fold(source_schema):
+        return None
+    leaf = fold(fk.referenced_table)
+    bare = [key for key in selected if fold(key) == leaf]
+    if len(bare) == 1:
+        return bare[0]
+    return None
+
+
 def plan_foreign_keys(
     *,
     source_foreign_keys: Any,
@@ -388,6 +434,8 @@ def plan_foreign_keys(
     dest_schema: str,
     dest_table: str,
     dest_columns: list[str],
+    source_table: str = "",
+    source_schema: str = "",
     column_map: dict[str, str] | None = None,
     table_map: dict[str, str] | None = None,
     dest_existing_tables: set[str] | None = None,
@@ -497,10 +545,10 @@ def plan_foreign_keys(
             continue
 
         ref_source = fk.referenced_table
-        ref_dest = tmap.get(ref_source.lower(), "")
-        in_job = bool(ref_dest)
-        if not ref_dest:
-            ref_dest = ref_source
+        child_stream = source_table or dest_table
+        parent_stream = resolve_parent_stream(fk, table_map, source_schema)
+        in_job = parent_stream is not None
+        ref_dest = tmap.get(fold(parent_stream), parent_stream) if parent_stream else ref_source
         parent_schema = parent_relation_schema(
             source_schema=fk.referenced_schema,
             dest_schema=dest_schema,
@@ -545,8 +593,10 @@ def plan_foreign_keys(
                         reason=reason,
                         source_detail=detail,
                         dest_table=dest_table,
+                        source_table=child_stream,
                         referenced_schema=parent_schema,
                         referenced_table=ref_dest,
+                        referenced_stream="",
                     )
                 )
                 continue
@@ -571,13 +621,17 @@ def plan_foreign_keys(
                         reason=reason,
                         source_detail=detail,
                         dest_table=dest_table,
+                        source_table=child_stream,
                         referenced_schema=parent_schema,
                         referenced_table=ref_dest,
+                        referenced_stream="",
                     )
                 )
                 continue
 
-        parent_cmap = _map_lookup(referenced_column_maps, fk.referenced_table)
+        parent_cmap = _map_lookup(
+            referenced_column_maps, parent_stream or fk.referenced_table
+        )
         ref_cols: list[str] = []
         missing_ref: list[str] = []
         for col in fk.referenced_columns:
@@ -599,8 +653,10 @@ def plan_foreign_keys(
                     ),
                     source_detail=detail,
                     dest_table=dest_table,
+                    source_table=child_stream,
                     referenced_schema=parent_schema,
                     referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
                 )
             )
             continue
@@ -616,8 +672,10 @@ def plan_foreign_keys(
                     ),
                     source_detail=detail,
                     dest_table=dest_table,
+                    source_table=child_stream,
                     referenced_schema=parent_schema,
                     referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
                 )
             )
             continue
@@ -631,8 +689,10 @@ def plan_foreign_keys(
                     reason=refusal,
                     source_detail=detail,
                     dest_table=dest_table,
+                    source_table=child_stream,
                     referenced_schema=parent_schema,
                     referenced_table=ref_dest,
+                    referenced_stream=parent_stream or "",
                 )
             )
             continue
@@ -641,7 +701,7 @@ def plan_foreign_keys(
         defer = (
             " DEFERRABLE INITIALLY DEFERRED"
             if dial in DEFERRABLE_DIALECTS
-            and _is_cycle_edge(dest_table, ref_dest, cycle_set)
+            and _is_cycle_edge(child_stream, parent_stream or "", cycle_set)
             else ""
         )
         statement = (
@@ -663,8 +723,10 @@ def plan_foreign_keys(
                 source_detail=detail,
                 dest_ddl=statement,
                 dest_table=dest_table,
+                source_table=child_stream,
                 referenced_schema=parent_schema,
                 referenced_table=ref_dest,
+                referenced_stream=parent_stream or "",
                 columns=tuple(child_cols),
                 referenced_columns=tuple(ref_cols),
             )
@@ -751,8 +813,10 @@ def apply_foreign_keys(
                     source_detail=decision.source_detail,
                     dest_ddl=decision.dest_ddl,
                     dest_table=decision.dest_table,
+                    source_table=decision.source_table,
                     referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
+                    referenced_stream=decision.referenced_stream,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
                     integrity_violation=violation,
@@ -826,8 +890,10 @@ def verify_foreign_keys(
                     source_detail=decision.source_detail,
                     dest_ddl=decision.dest_ddl,
                     dest_table=decision.dest_table,
+                    source_table=decision.source_table,
                     referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
+                    referenced_stream=decision.referenced_stream,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
                 )
@@ -858,8 +924,10 @@ def verify_foreign_keys(
                 source_detail=decision.source_detail,
                 dest_ddl=decision.dest_ddl,
                 dest_table=decision.dest_table,
+                source_table=decision.source_table,
                 referenced_schema=decision.referenced_schema,
                 referenced_table=decision.referenced_table,
+                referenced_stream=decision.referenced_stream,
                 columns=decision.columns,
                 referenced_columns=decision.referenced_columns,
             )

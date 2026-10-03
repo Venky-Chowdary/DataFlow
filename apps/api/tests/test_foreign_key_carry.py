@@ -271,6 +271,102 @@ def test_mutual_references_are_reported_rather_than_given_a_fake_order():
     assert cycle == ["a", "b"]
 
 
+def test_qualified_stream_in_the_job_is_not_an_outside_parent():
+    """archive.customers selected in this job is that stream, not a missing leaf."""
+    plan = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [
+                {
+                    "name": "orders_customer_fk",
+                    "columns": ["customer_id"],
+                    "referenced_schema": "archive",
+                    "referenced_table": "customers",
+                    "referenced_columns": ["id"],
+                }
+            ],
+        },
+        dest_schema="sales",
+        dest_table="orders",
+        source_table="sales.orders",
+        source_schema="sales",
+        table_map={"archive.customers": "dim_customer", "sales.orders": "orders"},
+        dest_existing_tables=set(),
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert decision.referenced_stream == "archive.customers"
+    assert 'REFERENCES "sales"."dim_customer"' in decision.dest_ddl
+
+
+def test_cross_schema_key_is_not_the_cycle_edge():
+    """archive.customers must not make the local customers↔orders cycle look carried."""
+    plan = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [
+                {
+                    "name": "orders_archive_fk",
+                    "columns": ["customer_id"],
+                    "referenced_schema": "archive",
+                    "referenced_table": "customers",
+                    "referenced_columns": ["id"],
+                }
+            ],
+        },
+        source_schema="public",
+        source_table="orders",
+        table_map={"orders": "orders", "customers": "customers"},
+        cycle_tables=["orders", "customers"],
+        dest_existing_tables={"customers", "orders"},
+    )
+    decision = _only(plan)
+    assert decision.referenced_stream == ""
+    assert "DEFERRABLE" not in decision.dest_ddl
+    missed = classify_cycle_resolution(["orders", "customers"], [decision.__dict__])
+    assert missed["edge_count"] == 0
+    assert missed["resolved"] is False
+    carried = classify_cycle_resolution(
+        ["orders", "customers"],
+        [
+            {
+                "source_table": "orders",
+                "dest_table": "orders",
+                "referenced_table": "customers",
+                "referenced_stream": "customers",
+                "status": "carried",
+            },
+            decision.__dict__,
+        ],
+    )
+    assert carried["resolved"] is True
+    assert carried["edge_count"] == 1
+
+
+def test_qualified_cycle_edges_resolve_by_stream_name():
+    resolution = classify_cycle_resolution(
+        ["archive.customers", "sales.orders"],
+        [
+            {
+                "source_table": "sales.orders",
+                "dest_table": "orders",
+                "referenced_stream": "archive.customers",
+                "referenced_table": "dim_customer",
+                "status": "carried",
+            },
+            {
+                "source_table": "archive.customers",
+                "dest_table": "dim_customer",
+                "referenced_stream": "sales.orders",
+                "referenced_table": "orders",
+                "status": "carried",
+            },
+        ],
+    )
+    assert resolution["resolved"] is True
+    assert resolution["edge_count"] == 2
+
+
 def test_cycle_edge_on_postgres_is_deferrable():
     plan = _plan(cycle_tables=["orders", "customers"])
     decision = _only(plan)

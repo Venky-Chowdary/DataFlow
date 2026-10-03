@@ -212,6 +212,8 @@ def carry_foreign_keys(
             dest_dialect=dest_dialect,
             dest_schema=qual_schema,
             dest_table=dest_table,
+            source_table=source_table,
+            source_schema=keys.schema,
             dest_columns=dest_columns.get(source_table, []),
             column_map=column_maps.get(source_table, {}),
             table_map=table_map,
