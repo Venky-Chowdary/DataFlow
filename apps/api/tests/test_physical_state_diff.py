@@ -16,6 +16,7 @@ from services.physical_state_diff import (
     ASPECTS,
     PhysicalState,
     catalog_default_fact,
+    catalog_index_fact,
     compare_physical_state,
     foreign_keys_from_catalog_state,
     _has_catalog_supplied_value,
@@ -494,10 +495,153 @@ def test_a_different_unique_column_set_is_absent() -> None:
 
 def test_index_column_order_stays_part_of_the_index() -> None:
     """(b, a) does not serve the lookups (a, b) does. Order stays on indexes."""
-    src = PhysicalState(found=True, readable=True, indexes=frozenset({("b", "a")}))
-    dst = PhysicalState(found=True, readable=True, indexes=frozenset({("a", "b")}))
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        indexes=frozenset({(False, ("b", "a"), "", False)}),
+    )
+    dst = PhysicalState(
+        found=True,
+        readable=True,
+        indexes=frozenset({(False, ("a", "b"), "", False)}),
+    )
     result = compare_physical_state(src, dst)
     assert result["aspects"]["indexes"]["status"] == "absent"
+    assert result["aspects"]["indexes"]["missing"] == ["b+a"]
+    assert result["aspects"]["indexes"]["extra"] == ["a+b"]
+
+
+def test_a_unique_index_is_not_a_plain_index(tmp_path: Path) -> None:
+    """CREATE UNIQUE INDEX is a different guarantee from CREATE INDEX."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE UNIQUE INDEX ux_src ON src (email)",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX ix_dst ON dst (email)",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert result["aspects"]["indexes"]["status"] == "absent"
+    assert result["aspects"]["indexes"]["missing"] == ["unique(email)"]
+    assert result["aspects"]["indexes"]["extra"] == ["email"]
+
+
+def test_a_partial_index_is_not_a_full_index(tmp_path: Path) -> None:
+    """The WHERE clause decides which rows the index covers."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, note TEXT)",
+        "CREATE INDEX ix_src ON src (note) WHERE note IS NOT NULL",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, note TEXT)",
+        "CREATE INDEX ix_dst ON dst (note)",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert result["aspects"]["indexes"]["missing"] == ["note where noteisnotnull"]
+    assert result["aspects"]["indexes"]["extra"] == ["note"]
+
+
+def test_the_same_unique_partial_index_is_carried(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE UNIQUE INDEX ux_src ON src (email) WHERE email IS NOT NULL",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE UNIQUE INDEX ux_dst ON dst (email) WHERE email IS NOT NULL",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["indexes"]["status"] == "carried"
+    assert result["aspects"]["indexes"]["missing"] == []
+    assert result["verified"] is True
+
+
+def test_direction_expression_and_nulls_stay_on_the_index() -> None:
+    """Postgres reflection reports these. A column list alone is not the index."""
+    plain = catalog_index_fact(
+        {"name": "ix", "unique": False, "column_names": ["email"]}
+    )
+    descending = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["email"],
+            "column_sorting": {"email": ("desc",)},
+        }
+    )
+    expression = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": [None],
+            "expressions": ['lower("email")'],
+        }
+    )
+    same_expression = catalog_index_fact(
+        {
+            "name": "ix_other",
+            "unique": False,
+            "column_names": [None],
+            "expressions": ["lower(email)"],
+        }
+    )
+    distinct_nulls = catalog_index_fact(
+        {
+            "name": "ux",
+            "unique": True,
+            "column_names": ["email"],
+            "dialect_options": {"postgresql_nulls_not_distinct": True},
+        }
+    )
+    many_nulls = catalog_index_fact(
+        {"name": "ux", "unique": True, "column_names": ["email"]}
+    )
+    assert expression == same_expression
+    order = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({descending})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )
+    assert order["aspects"]["indexes"]["missing"] == ["email desc"]
+    expr = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({expression})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )
+    assert expr["aspects"]["indexes"]["status"] == "absent"
+    assert expr["aspects"]["indexes"]["missing"] == ["lower(email)"]
+    nulls = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({distinct_nulls})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({many_nulls})),
+    )
+    assert nulls["aspects"]["indexes"]["missing"] == ["unique(email) nulls not distinct"]
+
+
+def test_an_expression_index_the_driver_skips_is_not_carried(tmp_path: Path) -> None:
+    """SQLite reflection drops lower(email). That must not look like no index."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX ix_src ON src (lower(email))",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, email TEXT)",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert "indexes" in result["unreadable"]
+
+
+def test_the_same_expression_index_on_both_sides_is_still_unreadable(
+    tmp_path: Path,
+) -> None:
+    """A driver that skips the expression cannot certify that the two match."""
+    cfg = _db(
+        tmp_path,
+        "CREATE TABLE src (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX ix_src ON src (lower(email))",
+        "CREATE TABLE dst (id INTEGER PRIMARY KEY, email TEXT)",
+        "CREATE INDEX ix_dst ON dst (lower(email))",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert "indexes" in result["unreadable"]
 
 
 def test_catalog_diff_uses_the_orphan_scan_relationship_identity() -> None:

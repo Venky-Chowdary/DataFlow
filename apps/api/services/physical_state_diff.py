@@ -24,7 +24,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import sqlalchemy as sa
 
@@ -241,7 +241,10 @@ class PhysicalState:
     foreign_key_facts: tuple[
         tuple[tuple[str, ...], str, str, tuple[str, ...]], ...
     ] = ()
-    indexes: frozenset[tuple[str, ...]] = frozenset()
+    #: Ordered key, uniqueness, partial predicate, and NULLS NOT DISTINCT.
+    #: Column order is the access path. A unique index is not a plain index.
+    #: A partial index is not a full index. See :class:`CatalogIndex`.
+    indexes: frozenset[CatalogIndex] = frozenset()
     not_null: frozenset[str] = frozenset()
     #: ``(column, normalized expression)``. A sequence or identity with no
     #: literal is the fill-in sentinel, not a second copy of some other default.
@@ -269,7 +272,7 @@ class PhysicalState:
                 }
                 for child, schema, table, parent in self.foreign_key_facts
             ],
-            "indexes": sorted("+".join(i) for i in self.indexes),
+            "indexes": sorted(_render_index(i) for i in self.indexes),
             "not_null": sorted(self.not_null),
             "defaults": sorted(
                 _render_default(column, expr) for column, expr in self.defaults
@@ -494,6 +497,14 @@ def read_physical_state(
         )
         fks = collector.run("foreign_keys", lambda: inspector.get_foreign_keys(name, **args))
         indexes = collector.run("indexes", lambda: inspector.get_indexes(name, **args))
+        if indexes is not None and _catalog_dialect(db_type) == "sqlite":
+            try:
+                omitted_names = _sqlite_omitted_index_names(conn, name, schema, indexes)
+            except Exception as exc:  # noqa: BLE001 — an unread index is not "no index"
+                collector.errors.append(f"indexes: {exc}")
+            else:
+                for omitted in omitted_names:
+                    collector.errors.append(f"indexes: {omitted}")
         columns = collector.run("columns", lambda: inspector.get_columns(name, **args))
         checks = collector.run(
             "check_constraints",
@@ -538,7 +549,9 @@ def read_physical_state(
         )
         fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     index_sets = {
-        _cols(i.get("column_names")) for i in indexes or [] if i.get("column_names")
+        fact
+        for i in indexes or []
+        if (fact := catalog_index_fact(i)) is not None
     }
 
     return PhysicalState(
@@ -587,14 +600,14 @@ def _strip_outer_parens(text: str) -> str:
     return text
 
 
-def _normalize_predicate(sqltext: Any) -> str:
+def _normalize_predicate(sqltext: Any, *, drop_not_null: bool = True) -> str:
     """Strip the dialect's punctuation so ``("qty" > 0)`` and ``qty>0`` match.
 
     Two engines never spell the same CHECK identically; comparing raw text would
     report every constraint as missing. Whitespace, quoting styles and wrapping
     parentheses carry no meaning, so they go.
     """
-    raw = str(sqltext or "").strip().casefold()
+    raw = "" if sqltext is None else str(sqltext).strip().casefold()
     if not raw:
         return ""
     # Single pass: keep string-literal CONTENTS verbatim (so ``<> 'a'`` and
@@ -663,9 +676,9 @@ def _normalize_predicate(sqltext: Any) -> str:
     # ``("qty")>0`` and ``qty>0`` are the same rule; parentheses around a bare
     # identifier are the engine's own echo, not part of the predicate.
     text = _BARE_PARENS.sub(r"\1", text)
-    # Oracle reflects every NOT NULL as a CHECK; the not_null aspect owns those,
-    # and counting them here would report a phantom loss on every other engine.
-    if text.endswith("isnotnull"):
+    # Oracle reflects every NOT NULL as a CHECK; the not_null aspect owns those.
+    # A partial index ``WHERE note IS NOT NULL`` keeps this predicate.
+    if drop_not_null and text.endswith("isnotnull"):
         return ""
     return text
 
@@ -832,6 +845,163 @@ def _read_dependent_routines(
     return names
 
 
+class CatalogIndex(NamedTuple):
+    """One index the catalog reflected, or an expression the driver spelled.
+
+    ``keys`` keeps column order. A reported sort direction is part of that key
+    (``email desc``). An expression stands in for a column the driver left
+    unnamed (``lower(email)``). ``predicate`` is the partial-index filter.
+    ``nulls_not_distinct`` is the Postgres unique-null rule; engines that omit
+    it store false, which is their default of many nulls.
+    """
+
+    unique: bool
+    keys: tuple[str, ...]
+    predicate: str
+    nulls_not_distinct: bool
+
+
+def _index_predicate(index: Mapping[str, Any]) -> str:
+    options = index.get("dialect_options") or {}
+    raw = None
+    for key in ("sqlite_where", "postgresql_where", "mysql_where"):
+        if key in options and options[key] is not None:
+            raw = options[key]
+            break
+    return _normalize_predicate(raw, drop_not_null=False)
+
+
+def _normalize_index_expression(expr: Any) -> str:
+    """Casefold an index expression and drop identifier quotes.
+
+    Parentheses stay. ``lower(email)`` is a call, and the CHECK normalizer
+    treats parentheses around a name as the engine's own echo.
+    """
+    raw = "" if expr is None else str(expr).strip().casefold()
+    return "".join(ch for ch in raw if ch not in '"`[] \t\n\r')
+
+
+def _sort_suffix(name: str, sorting: Mapping[str, Any]) -> str:
+    flags = sorting.get(name)
+    if not flags:
+        folded = _fold(name)
+        for key, value in sorting.items():
+            if _fold(key) == folded:
+                flags = value
+                break
+    if not flags:
+        return ""
+    return " ".join(
+        text for flag in flags if (text := str(flag).strip().casefold())
+    )
+
+
+def catalog_index_fact(index: Mapping[str, Any]) -> CatalogIndex | None:
+    """The index identity, or None when a key column was not spelled.
+
+    A ``None`` column without an expression is an index the driver did not
+    describe. Dropping the expression and keeping the other columns would
+    certify ``(lower(email), id)`` as a plain index on ``id``.
+    """
+    names = list(index.get("column_names") or [])
+    expressions = list(index.get("expressions") or [])
+    if not names and not expressions:
+        return None
+    sorting = index.get("column_sorting") or {}
+    keys: list[str] = []
+    for i in range(max(len(names), len(expressions))):
+        name = names[i] if i < len(names) else None
+        expr = expressions[i] if i < len(expressions) else None
+        if name:
+            key = _fold(name)
+            suffix = _sort_suffix(str(name), sorting)
+            keys.append(f"{key} {suffix}" if suffix else key)
+            continue
+        spelled = _normalize_index_expression(expr)
+        if not spelled:
+            return None
+        keys.append(spelled)
+    if not keys:
+        return None
+    options = index.get("dialect_options") or {}
+    return CatalogIndex(
+        unique=bool(index.get("unique")),
+        keys=tuple(keys),
+        predicate=_index_predicate(index),
+        nulls_not_distinct=bool(options.get("postgresql_nulls_not_distinct")),
+    )
+
+
+def _render_index(fact: tuple) -> str:
+    unique, keys, predicate, nulls_not_distinct = fact
+    body = "+".join(keys)
+    if unique:
+        body = f"unique({body})"
+    if nulls_not_distinct:
+        body = f"{body} nulls not distinct"
+    if predicate:
+        body = f"{body} where {predicate}"
+    return body
+
+
+def _diff_indexes(
+    source: frozenset[CatalogIndex],
+    destination: frozenset[CatalogIndex],
+) -> dict[str, Any]:
+    """Carried when each source index has the same access path on the destination.
+
+    ``(b, a)`` is not ``(a, b)``. A unique index is not a plain index. A
+    partial index is not a full index. ``email DESC`` is not ``email`` when
+    the catalog reports the direction. ``lower(email)`` is not ``email``.
+    """
+    missing = sorted(_render_index(fact) for fact in source - destination)
+    extra = sorted(_render_index(fact) for fact in destination - source)
+    return {
+        "status": "carried" if not missing else "absent",
+        "missing": missing,
+        "extra": extra,
+        "source_count": len(source),
+        "destination_count": len(destination),
+    }
+
+
+def _sqlite_omitted_index_names(
+    conn: Any,
+    table: str,
+    schema: str,
+    reflected: list[Any],
+) -> list[str]:
+    """Index names SQLite stored and the driver did not return.
+
+    SQLAlchemy drops expression indexes and warns. An omitted name must not
+    look like a catalog with no such index, or ``lower(email)`` certifies as
+    carried when the destination has no index at all.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    reflected_names = {
+        _fold(item.get("name"))
+        for item in reflected
+        if isinstance(item, Mapping) and item.get("name")
+    }
+    master = (
+        f"{quote_sql_identifier(schema)}.sqlite_master" if schema else "sqlite_master"
+    )
+    rows = conn.execute(
+        sa.text(
+            f"SELECT name FROM {master} "
+            "WHERE type = 'index' AND lower(tbl_name) = lower(:t) AND sql IS NOT NULL"
+        ),
+        {"t": table},
+    ).fetchall()
+    omitted: list[str] = []
+    for row in rows:
+        name = str(row[0] or "").strip()
+        if name and _fold(name) not in reflected_names:
+            omitted.append(f"index {name} was not reflected")
+    return omitted
+
+
 def _unique_constraints(inspector: Any, name: str, args: dict[str, Any]) -> list[dict]:
     """Unique constraints, falling back to unique indexes.
 
@@ -994,8 +1164,8 @@ def _diff_uniqueness(
     """Carried when the column sets match.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
-    key is the same rule. Catalog ordinal is not a second key. Index leading
-    columns stay on the indexes aspect, where order is the access path.
+    key is the same rule. Catalog ordinal is not a second key. Index order,
+    uniqueness, and the partial predicate stay on the indexes aspect.
     """
 
     def _sets(groups: frozenset[tuple[str, ...]]) -> set[frozenset[str]]:
@@ -1111,7 +1281,7 @@ def compare_physical_state(
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts, destination.foreign_key_facts
         ),
-        "indexes": _diff_sets(source.indexes, destination.indexes),
+        "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
         "defaults": _diff_defaults(source.defaults, destination.defaults),
         "check_constraints": _diff_sets(
