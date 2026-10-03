@@ -122,6 +122,9 @@ def test_measured_hybrid_table_blocks_a_duplicate_enforced_key():
     standard = _run(table_kind="NO")
     assert standard["passed"] is True
 
+    iceberg = _run(table_kind="iceberg")
+    assert iceberg["passed"] is True
+
     missing_enforced = _check_duplicate_keys(
         mappings,
         rows,
@@ -173,7 +176,11 @@ def test_snowflake_fetch_records_is_hybrid():
 
     failed = MagicMock()
     failed.fetchall.return_value = [("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "NO")]
-    failed.execute.side_effect = [None, RuntimeError("IS_HYBRID unavailable")]
+    failed.execute.side_effect = [
+        None,
+        RuntimeError("table kind columns unavailable"),
+        RuntimeError("IS_HYBRID unavailable"),
+    ]
     unread = _snowflake_fetch_unique_keys(failed, "PUBLIC", "ORDERS")
     assert unread["table_kind"] == ""
     assert "table_kind" not in unread["unique_keys"][0]

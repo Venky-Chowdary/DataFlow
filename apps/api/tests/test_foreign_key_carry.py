@@ -331,6 +331,10 @@ def test_measured_hybrid_foreign_key_is_carried():
     assert standard[0].status == "unsupported"
     assert "IS_HYBRID" in standard[0].reason
 
+    iceberg = verify_foreign_keys(plan.decisions, dest, table_kind="iceberg")
+    assert iceberg[0].status == "unsupported"
+    assert "IS_ICEBERG" in iceberg[0].reason
+
     other = ForeignKeys(
         dialect="bigquery",
         status="measured",

@@ -382,6 +382,93 @@ def normalize_snowflake_table_kind(value: Any) -> str:
         return "hybrid"
     if text in {"standard", "no", "n", "false"}:
         return "standard"
+    if text == "iceberg":
+        return "iceberg"
+    if text == "dynamic":
+        return "dynamic"
+    if text in {"immutable", "read only", "readonly"}:
+        return "immutable"
+    return ""
+
+
+def _snowflake_flag_yes(value: Any) -> bool:
+    """True for the documented ``YES`` flag and a boolean true."""
+    if value is True:
+        return True
+    text = str(value or "").strip().lower()
+    return text in {"yes", "y", "true"}
+
+
+def snowflake_table_kind_from_row(row: Any) -> str:
+    """Kind from one ``INFORMATION_SCHEMA.TABLES`` row.
+
+    Four cells are ``IS_HYBRID``, ``IS_ICEBERG``, ``IS_DYNAMIC``,
+    ``IS_IMMUTABLE``. One cell is the hybrid-only read. Hybrid wins when
+    ``IS_HYBRID`` is ``YES``, because that is the table that enforces keys.
+    Iceberg, dynamic, and read-only tables do not.
+    """
+    if row is None:
+        return ""
+    if not isinstance(row, (tuple, list)):
+        return normalize_snowflake_table_kind(row)
+    cells = list(row)
+    if len(cells) == 1:
+        return normalize_snowflake_table_kind(cells[0])
+    if len(cells) < 4:
+        return ""
+    hybrid, iceberg, dynamic, immutable = cells[:4]
+    if _snowflake_flag_yes(hybrid):
+        return "hybrid"
+    if _snowflake_flag_yes(iceberg):
+        return "iceberg"
+    if _snowflake_flag_yes(dynamic):
+        return "dynamic"
+    if _snowflake_flag_yes(immutable):
+        return "immutable"
+    if normalize_snowflake_table_kind(hybrid) == "standard":
+        return "standard"
+    return ""
+
+
+def _snowflake_measured_kind_reason(kind: str, *, foreign_key: bool) -> str:
+    """Sentence for a measured non-hybrid Snowflake table. Empty when unreported."""
+    if foreign_key:
+        stored = "Destination stores this foreign key and does not enforce it. "
+        proof = "The catalog fact is not proof the loaded rows match."
+    else:
+        stored = (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. "
+        )
+        proof = "The catalog object is not proof the loaded rows are unique."
+    if kind == "standard":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_HYBRID is NO, so this standard "
+            "table keeps the key for the planner. "
+            + proof
+        )
+    if kind == "iceberg":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_ICEBERG is YES. An Iceberg table "
+            "keeps the key for the planner. "
+            + proof
+        )
+    if kind == "dynamic":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_DYNAMIC is YES. A dynamic table "
+            "is a pipeline result, and its key is planner metadata. "
+            + proof
+        )
+    if kind == "immutable":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_IMMUTABLE is YES. A read-only "
+            "table still does not prove the stored rows with this key. "
+            + proof
+        )
     return ""
 
 
@@ -443,13 +530,11 @@ def uniqueness_proof_reason(dialect: str, *, table_kind: str = "") -> str:
             "are unique."
         )
     if key == "snowflake":
-        if normalize_snowflake_table_kind(table_kind) == "standard":
-            return (
-                "Destination stores this primary key or unique constraint and "
-                "does not enforce it. INFORMATION_SCHEMA.TABLES.IS_HYBRID is "
-                "NO, so this standard table keeps the key for the planner. "
-                "The catalog object is not proof the loaded rows are unique."
-            )
+        measured = _snowflake_measured_kind_reason(
+            normalize_snowflake_table_kind(table_kind), foreign_key=False
+        )
+        if measured:
+            return measured
         return (
             "Destination stores this primary key or unique constraint and "
             "does not enforce it. A Snowflake key on a standard table is "
@@ -532,13 +617,11 @@ def row_proof_reason(gap: str, dialect: str = "", *, table_kind: str = "") -> st
                 "proof the loaded rows match."
             )
         if key == "snowflake":
-            if normalize_snowflake_table_kind(table_kind) == "standard":
-                return (
-                    "Destination stores this foreign key and does not enforce "
-                    "it. INFORMATION_SCHEMA.TABLES.IS_HYBRID is NO, so this "
-                    "standard table keeps the constraint for the planner. "
-                    "The catalog fact is not proof the loaded rows match."
-                )
+            measured = _snowflake_measured_kind_reason(
+                normalize_snowflake_table_kind(table_kind), foreign_key=True
+            )
+            if measured:
+                return measured
             return (
                 "Destination stores this foreign key and does not enforce "
                 "it. A Snowflake foreign key on a standard table is visible "
@@ -1194,6 +1277,13 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
     )
 
 
+_SNOWFLAKE_TABLE_KIND_SQL = """
+SELECT is_hybrid, is_iceberg, is_dynamic, is_immutable
+  FROM information_schema.tables
+ WHERE UPPER(table_schema) = UPPER(%s)
+   AND table_name = %s
+"""
+
 _SNOWFLAKE_IS_HYBRID_SQL = """
 SELECT is_hybrid
   FROM information_schema.tables
@@ -1203,20 +1293,28 @@ SELECT is_hybrid
 
 
 def read_snowflake_table_kind(cursor_or_connection: Any, schema: str, table: str) -> str:
-    """``INFORMATION_SCHEMA.TABLES.IS_HYBRID``. Empty when the catalog did not answer.
+    """Table kind from ``INFORMATION_SCHEMA.TABLES``. Empty when unread.
 
-    Documented values are ``YES`` and ``NO``. A failed read stays unreported.
+    The first read asks for hybrid, Iceberg, dynamic, and read-only. When
+    that select fails, the hybrid column is read alone so an older account
+    still reports a hybrid table. A failed read stays unreported.
     """
+    params = (schema or "", table)
     try:
         cursor = as_driver_cursor(cursor_or_connection)
-        rows = _rows(cursor, _SNOWFLAKE_IS_HYBRID_SQL, (schema or "", table))
     except Exception:  # noqa: BLE001 — an unread kind is not a standard table
         return ""
+    rows: list[tuple] = []
+    try:
+        rows = _rows(cursor, _SNOWFLAKE_TABLE_KIND_SQL, params)
+    except Exception:  # noqa: BLE001 — fall back to the hybrid column
+        try:
+            rows = _rows(cursor, _SNOWFLAKE_IS_HYBRID_SQL, params)
+        except Exception:  # noqa: BLE001 — an unread kind is not a standard table
+            return ""
     if not rows or rows[0] is None:
         return ""
-    row = rows[0]
-    cell = row[0] if isinstance(row, (tuple, list)) else row
-    return normalize_snowflake_table_kind(cell)
+    return snowflake_table_kind_from_row(rows[0])
 
 
 _SNOWFLAKE_FK_SQL = """

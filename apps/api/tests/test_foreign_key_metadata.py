@@ -529,6 +529,9 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
     """
     assert normalize_snowflake_table_kind("YES") == "hybrid"
     assert normalize_snowflake_table_kind("NO") == "standard"
+    assert normalize_snowflake_table_kind("iceberg") == "iceberg"
+    assert normalize_snowflake_table_kind("dynamic") == "dynamic"
+    assert normalize_snowflake_table_kind("immutable") == "immutable"
     assert normalize_snowflake_table_kind(True) == "hybrid"
     assert normalize_snowflake_table_kind(False) == "standard"
     assert normalize_snowflake_table_kind("BASE TABLE") == ""
@@ -540,6 +543,12 @@ def test_measured_snowflake_hybrid_table_is_row_proof():
         assert uniqueness_proof_reason(dialect, table_kind="hybrid") == "", dialect
         assert uniqueness_proof_gap(dialect, table_kind="NO") == "unenforced", dialect
         assert "IS_HYBRID" in uniqueness_proof_reason(dialect, table_kind="NO")
+        assert uniqueness_proof_gap(dialect, table_kind="iceberg") == "unenforced"
+        assert "IS_ICEBERG" in uniqueness_proof_reason(dialect, table_kind="iceberg")
+        assert uniqueness_proof_gap(dialect, table_kind="dynamic") == "unenforced"
+        assert "IS_DYNAMIC" in uniqueness_proof_reason(dialect, table_kind="dynamic")
+        assert row_proof_gap(dialect, True, table_kind="iceberg") == "unenforced"
+        assert "Iceberg" in row_proof_reason("unenforced", dialect, table_kind="iceberg")
         assert uniqueness_proof_gap(dialect) == "unenforced", dialect
         assert row_proof_gap(dialect, True, table_kind="YES") == "", dialect
         assert covers_existing_rows(dialect, True, table_kind="YES") is True

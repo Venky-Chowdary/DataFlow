@@ -598,6 +598,17 @@ def test_snowflake_catalog_read_asks_is_hybrid() -> None:
     assert "information_schema.tables" in yes.sql
     assert yes.params == ("PUBLIC", "ORDERS")
     assert _read_snowflake_table_kind(_Cur([("NO",)]), "PUBLIC", "ORDERS") == "standard"
+    iceberg = _Cur([("NO", "YES", "NO", "NO")])
+    assert _read_snowflake_table_kind(iceberg, "PUBLIC", "ORDERS") == "iceberg"
+    assert "is_iceberg" in iceberg.sql
+    assert "is_dynamic" in iceberg.sql
+    assert "is_immutable" in iceberg.sql
+    assert _read_snowflake_table_kind(_Cur([("NO", "NO", "YES", "NO")]), "PUBLIC", "T") == (
+        "dynamic"
+    )
+    assert _read_snowflake_table_kind(_Cur([("YES", "YES", "NO", "NO")]), "PUBLIC", "T") == (
+        "hybrid"
+    )
     assert _read_snowflake_table_kind(_Cur([]), "PUBLIC", "ORDERS") == ""
 
     class _Broken:
@@ -648,6 +659,21 @@ def test_measured_hybrid_primary_key_is_carried_row_proof() -> None:
     )
     assert standard["aspects"]["primary_key"]["status"] == "unchecked"
     assert "IS_HYBRID" in standard["aspects"]["primary_key"]["reasons"][0]
+
+    iceberg_state = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake",
+            table_kind="iceberg",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert iceberg_state["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "IS_ICEBERG" in iceberg_state["aspects"]["primary_key"]["reasons"][0]
+    assert iceberg_state["destination"]["table_kind"] == "iceberg"
 
     borrowed = compare_physical_state(
         src,

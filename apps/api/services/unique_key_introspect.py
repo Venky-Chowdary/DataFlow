@@ -506,31 +506,10 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
 
 
 def _snowflake_table_kind(cur: Any, schema: str, table: str) -> str:
-    """Measured ``IS_HYBRID``. Empty when the catalog did not answer.
+    """Measured table kind. Empty when the catalog did not answer."""
+    from services.foreign_key_metadata import read_snowflake_table_kind
 
-    Snowflake documents ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` as ``YES``
-    or ``NO``. A missing column or a failed read stays unreported.
-    """
-    from services.foreign_key_metadata import normalize_snowflake_table_kind
-
-    try:
-        cur.execute(
-            """
-            SELECT is_hybrid
-            FROM information_schema.tables
-            WHERE UPPER(table_schema) = UPPER(%s)
-              AND table_name = %s
-            """,
-            (schema, table),
-        )
-        rows = cur.fetchall() or []
-    except Exception:
-        return ""
-    if not rows:
-        return ""
-    row = rows[0]
-    cell = row[0] if isinstance(row, (tuple, list)) else row
-    return normalize_snowflake_table_kind(cell)
+    return read_snowflake_table_kind(cur, schema, table)
 
 
 def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
