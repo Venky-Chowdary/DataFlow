@@ -9111,7 +9111,7 @@ button.df2-vd-assist-toggle:focus-visible {
   cursor: pointer;
   list-style: none;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 

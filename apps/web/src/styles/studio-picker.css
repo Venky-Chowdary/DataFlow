@@ -67,7 +67,7 @@
 
 .df2-studio-picker-value strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.25;
 }
 
@@ -97,7 +97,7 @@
   background: var(--df-brand-muted, #f0fdfa);
   color: var(--df-brand-strong, #115e59);
   font-size: 11.5px;
-  font-weight: 650;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -219,7 +219,7 @@
 
 .df2-studio-picker-option-copy strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-studio-picker-option-copy small {

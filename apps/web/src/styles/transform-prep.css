@@ -99,7 +99,7 @@
 .df2-xform-pane-count {
   margin-left: 8px;
   font-variant-numeric: tabular-nums;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-tertiary, #94a3b8);
 }
 
@@ -138,7 +138,7 @@
 .df2-xform .df2-rule-import-detail > summary {
   cursor: pointer;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-secondary, #475569);
 }
 
@@ -206,7 +206,7 @@
 
 .df2-xform-help {
   flex: 0 0 auto;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* ── How this works ─────────────────────────────────────────────────────── */
@@ -1361,7 +1361,7 @@
   margin-right: 6px;
   font-family: var(--df-font-mono, "JetBrains Mono", monospace);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-secondary, #475569);
 }
 
@@ -1369,7 +1369,7 @@
   margin: 10px 0 0;
   padding: 0 8px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--df-text-secondary, #64748b);
@@ -1436,7 +1436,7 @@
 .df2-rule-line-read { color: var(--df-text-primary, #0f172a); word-break: break-word; }
 .df2-rule-line-confidence {
   font-variant-numeric: tabular-nums;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 .df2-rule-line-action {
@@ -1468,7 +1468,7 @@
   padding: 0 8px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.01em;
   white-space: nowrap;
   overflow: hidden;
@@ -1537,7 +1537,7 @@
 .df2-rule-ledger-census dt {
   margin: 0;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--df-text-tertiary, #94a3b8);
@@ -1554,7 +1554,7 @@
   cursor: pointer;
   list-style: none;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 .df2-rule-roles-fold > summary::-webkit-details-marker { display: none; }
@@ -1577,7 +1577,7 @@
 .df2-rule-provenance dt {
   margin: 0;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--df-text-secondary, #64748b);
