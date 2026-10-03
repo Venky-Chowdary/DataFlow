@@ -9,6 +9,10 @@ os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
 from services.foreign_key_metadata import (
+    ForeignKey,
+    ForeignKeys,
+    covers_existing_rows,
+    enforced_relationship_identities,
     foreign_keys_from_payload,
     normalize_action,
     probe_foreign_keys,
@@ -40,8 +44,8 @@ def _cursor(rows):
 def test_postgres_composite_key_keeps_column_pairs_in_order():
     cur = _cursor(
         [
-            ("fk_line", "order_id", "public", "orders", "id", "a", "a", 1),
-            ("fk_line", "line_no", "public", "orders", "line_no", "a", "a", 2),
+            ("fk_line", "order_id", "public", "orders", "id", "a", "a", True, 1),
+            ("fk_line", "line_no", "public", "orders", "line_no", "a", "a", True, 2),
         ]
     )
     measured = probe_foreign_keys("postgresql", cur, "public", "order_lines")
@@ -51,7 +55,7 @@ def test_postgres_composite_key_keeps_column_pairs_in_order():
 
 
 def test_postgres_action_chars_are_spelled_out():
-    cur = _cursor([("fk", "customer_id", "public", "customers", "id", "n", "c", 1)])
+    cur = _cursor([("fk", "customer_id", "public", "customers", "id", "n", "c", True, 1)])
     fk = probe_foreign_keys("postgresql", cur, "public", "orders").items[0]
     assert fk.on_delete == "SET NULL"
     assert fk.on_update == "CASCADE"
@@ -68,7 +72,7 @@ def test_sqlserver_probe_survives_either_driver_paramstyle():
 
     cur.execute.side_effect = execute
     cur.fetchall.return_value = [
-        ("FK_orders", "customer_id", "dbo", "customers", "id", "CASCADE", "NO_ACTION")
+        ("FK_orders", "customer_id", "dbo", "customers", "id", "CASCADE", "NO_ACTION", 0, 0)
     ]
     measured = probe_foreign_keys("sqlserver", cur, "dbo", "orders")
     assert measured.status == "measured"
@@ -78,7 +82,9 @@ def test_sqlserver_probe_survives_either_driver_paramstyle():
 
 
 def test_oracle_probe_folds_identifiers_to_the_catalog_spelling():
-    cur = _cursor([("FK_ORDERS", "CUSTOMER_ID", "APP", "CUSTOMERS", "ID", "CASCADE", "NO ACTION")])
+    cur = _cursor(
+        [("FK_ORDERS", "CUSTOMER_ID", "APP", "CUSTOMERS", "ID", "CASCADE", "NO ACTION", "VALIDATED")]
+    )
     measured = probe_foreign_keys("oracle", cur, "app", "orders")
     assert measured.status == "measured"
     assert cur.calls[0][1] == {"owner": "APP", "tab": "ORDERS"}
@@ -167,6 +173,89 @@ def test_unresolvable_namespace_is_unknown_not_absent():
     keys = probe_foreign_keys("mysql", cursor, "", "orders")
     assert keys.measured is False
     assert "unknown, not empty" in keys.detail
+
+
+def test_postgres_not_valid_is_recorded_on_the_foreign_key():
+    cur = _cursor(
+        [("fk", "customer_id", "public", "customers", "id", "a", "a", False, 1)]
+    )
+    fk = probe_foreign_keys("postgresql", cur, "public", "orders").items[0]
+    assert "convalidated" in cur.calls[0][0]
+    assert fk.validated is False
+    assert covers_existing_rows("postgresql", fk.validated) is False
+
+
+def test_sqlserver_untrusted_key_does_not_cover_existing_rows():
+    cur = _cursor(
+        [("FK_orders", "customer_id", "dbo", "customers", "id", "NO ACTION", "NO ACTION", 0, 1)]
+    )
+    fk = probe_foreign_keys("sqlserver", cur, "dbo", "orders").items[0]
+    assert fk.validated is False
+    trusted = _cursor(
+        [("FK_orders", "customer_id", "dbo", "customers", "id", "NO ACTION", "NO ACTION", 0, 0)]
+    )
+    assert probe_foreign_keys("sqlserver", trusted, "dbo", "orders").items[0].validated is True
+
+
+def test_oracle_not_validated_does_not_cover_existing_rows():
+    cur = _cursor(
+        [("FK_ORDERS", "CUSTOMER_ID", "APP", "CUSTOMERS", "ID", "CASCADE", "NO ACTION", "NOT VALIDATED")]
+    )
+    fk = probe_foreign_keys("oracle", cur, "app", "orders").items[0]
+    assert fk.validated is False
+    assert covers_existing_rows("oracle", False) is False
+    assert covers_existing_rows("sqlite", None) is True
+
+
+def test_not_valid_inspector_fk_is_not_an_enforced_identity():
+    """SQLAlchemy omits NOT VALID. The catalog bit is what the scan trusts."""
+    inspector = [
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "public",
+            "referred_table": "customers",
+            "referred_columns": ["id"],
+        }
+    ]
+    unvalidated = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                validated=False,
+            )
+        ],
+    )
+    assert enforced_relationship_identities("postgresql", inspector, unvalidated) == []
+    checked = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                validated=True,
+            )
+        ],
+    )
+    assert len(enforced_relationship_identities("postgresql", inspector, checked)) == 1
+    assert enforced_relationship_identities("postgresql", inspector, None) == []
+    assert len(enforced_relationship_identities("sqlite", inspector, None)) == 1
+
+
+def test_payload_keeps_an_explicit_validation_bit():
+    keys = foreign_keys_from_payload(
+        [{"name": "fk", "columns": ["a"], "referenced_table": "t", "referenced_columns": ["b"], "validated": False}]
+    )
+    assert keys[0].validated is False
 
 
 def test_explicit_namespace_is_never_second_guessed():

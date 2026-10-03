@@ -48,6 +48,7 @@ from services.foreign_key_identity import fk_identity, fold, same_relationship, 
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
+    covers_existing_rows,
     foreign_keys_from_payload,
     normalize_action,
 )
@@ -883,7 +884,8 @@ def verify_foreign_keys(
     An engine may store the constraint under a name of its own, and DDL
     order is the same relationship. A same-named table in another schema
     is not. ON DELETE and ON UPDATE must be the source rule; a different
-    action on the same columns is not carried.
+    action on the same columns is not carried. A catalog bit that says
+    existing rows were not checked is not carried either.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
@@ -949,11 +951,34 @@ def verify_foreign_keys(
                 decision.on_delete, decision.on_update, fk.on_delete, fk.on_update
             )
         ]
-        if faithful:
+        covering = [
+            fk
+            for fk in faithful
+            if covers_existing_rows(
+                dest_foreign_keys.dialect if dest_foreign_keys else "",
+                fk.validated,
+            )
+        ]
+        if covering:
             status = "carried"
+            if any(fk.validated is True for fk in covering):
+                reason = (
+                    "Destination catalog reports the constraint, and it records "
+                    "that existing rows were checked."
+                )
+            else:
+                reason = (
+                    "Destination catalog reports the constraint, and the engine "
+                    "validated the loaded rows when it was added."
+                )
+        elif faithful:
+            status = "unsupported"
             reason = (
-                "Destination catalog reports the constraint, and the engine "
-                "validated the loaded rows when it was added."
+                "Destination reports this relationship, and the catalog records "
+                "that existing rows were not checked. A PostgreSQL NOT VALID "
+                "constraint, a SQL Server foreign key that is untrusted or "
+                "disabled, or an Oracle NOT VALIDATED constraint does not prove "
+                "the loaded rows."
             )
         elif matches:
             got = matches[0]

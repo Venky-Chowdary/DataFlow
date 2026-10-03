@@ -57,6 +57,11 @@ class ForeignKey:
     referenced_columns: list[str]
     on_delete: str = ""
     on_update: str = ""
+    #: True when the catalog records that existing rows were checked.
+    #: False when it records that they were not (PostgreSQL NOT VALID,
+    #: SQL Server untrusted or disabled, Oracle NOT VALIDATED).
+    #: None when this dialect has no separate validation bit.
+    validated: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,17 +123,72 @@ def _rows_any_paramstyle(cursor: Any, sql: str, params: tuple) -> list[tuple]:
     raise last if last else RuntimeError("no paramstyle attempted")
 
 
+def coerce_validated(value: Any) -> bool | None:
+    """The catalog's existing-row bit, or None when this value does not say.
+
+    ``NOT VALIDATED`` is checked before ``VALIDATED`` so the longer Oracle
+    spelling is not read as a yes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"", "none"}:
+        return None
+    if text in {"0", "f", "false", "no", "not validated", "not_validated"}:
+        return False
+    if text in {"1", "t", "true", "yes", "validated"}:
+        return True
+    return None
+
+
+# These catalogs record whether existing rows were checked. MySQL and SQLite
+# do not. Redshift stores the constraint and has no ``convalidated`` column.
+_VALIDATION_BIT_DIALECTS = frozenset(
+    {"postgres", "postgresql", "sqlserver", "mssql", "oracle"}
+)
+
+
+def covers_existing_rows(dialect: str, validated: bool | None) -> bool:
+    """Whether a catalog foreign key proves the rows already stored.
+
+    A missing bit on PostgreSQL, SQL Server, or Oracle is not a yes.
+    SQLAlchemy's PostgreSQL reflection drops ``NOT VALID``, so an absent
+    flag would certify a constraint that never checked existing rows.
+    MySQL and SQLite have no such bit; the constraint itself is the check
+    those catalogs report.
+    """
+    key = (dialect or "").strip().lower()
+    if key in _VALIDATION_BIT_DIALECTS:
+        return validated is True
+    return validated is not False
+
+
 def _collect(
     rows: list[tuple],
 ) -> list[ForeignKey]:
-    """Group ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)`` rows.
+    """Group catalog rows into one foreign key per constraint name.
 
-    Rows must already be ordered by constraint then ordinal position: a
-    composite key whose columns arrive out of order would build a constraint
-    that references the wrong column pairs.
+    Each row is ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)``
+    plus an optional existing-row flag. Rows must already be ordered by
+    constraint then ordinal position: a composite key whose columns arrive
+    out of order would reference the wrong column pairs. A False flag on any
+    row of the constraint wins.
     """
     by_name: dict[str, dict[str, Any]] = {}
-    for name, col, ref_schema, ref_table, ref_col, on_delete, on_update in rows:
+    for raw in rows:
+        fields = tuple(raw)
+        if len(fields) >= 8:
+            name, col, ref_schema, ref_table, ref_col, on_delete, on_update, flag = fields[:8]
+            validated = coerce_validated(flag)
+        elif len(fields) >= 7:
+            name, col, ref_schema, ref_table, ref_col, on_delete, on_update = fields[:7]
+            validated = None
+        else:
+            continue
         key = str(name or "").strip()
         if not key:
             continue
@@ -141,8 +201,13 @@ def _collect(
                 "referenced_table": str(ref_table or "").strip(),
                 "on_delete": normalize_action(on_delete),
                 "on_update": normalize_action(on_update),
+                "validated": validated,
             },
         )
+        if bucket["validated"] is not False and validated is False:
+            bucket["validated"] = False
+        elif bucket["validated"] is None:
+            bucket["validated"] = validated
         col_s = str(col or "").strip()
         ref_s = str(ref_col or "").strip()
         if col_s:
@@ -158,11 +223,37 @@ def _collect(
             referenced_columns=list(b["referenced_columns"]),
             on_delete=str(b["on_delete"]),
             on_update=str(b["on_update"]),
+            validated=b["validated"],
         )
         for name, b in by_name.items()
     ]
 
 
+_PG_SQL_REDSHIFT = """
+SELECT con.conname,
+       att.attname,
+       nsp_ref.nspname,
+       cls_ref.relname,
+       att_ref.attname,
+       con.confdeltype,
+       con.confupdtype,
+       ord.n
+  FROM pg_constraint con
+  JOIN pg_class cls ON cls.oid = con.conrelid
+  JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+  JOIN pg_class cls_ref ON cls_ref.oid = con.confrelid
+  JOIN pg_namespace nsp_ref ON nsp_ref.oid = cls_ref.relnamespace
+  JOIN LATERAL generate_subscripts(con.conkey, 1) AS ord(n) ON TRUE
+  JOIN pg_attribute att
+    ON att.attrelid = con.conrelid AND att.attnum = con.conkey[ord.n]
+  JOIN pg_attribute att_ref
+    ON att_ref.attrelid = con.confrelid AND att_ref.attnum = con.confkey[ord.n]
+ WHERE con.contype = 'f' AND nsp.nspname = %s AND cls.relname = %s
+ ORDER BY con.conname, ord.n
+"""
+
+# ``convalidated`` is PostgreSQL 9.1+. Redshift stores foreign keys and does
+# not expose that column; its probe keeps the older select.
 _PG_SQL = """
 SELECT con.conname,
        att.attname,
@@ -171,6 +262,7 @@ SELECT con.conname,
        att_ref.attname,
        con.confdeltype,
        con.confupdtype,
+       con.convalidated,
        ord.n
   FROM pg_constraint con
   JOIN pg_class cls ON cls.oid = con.conrelid
@@ -228,11 +320,21 @@ def _resolve_namespace(cursor: Any, dialect: str, schema: str) -> str:
     return resolved
 
 
-def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
+def _probe_pg(
+    cursor: Any,
+    schema: str,
+    table: str,
+    *,
+    dialect: str,
+    sql: str,
+    with_validated: bool,
+) -> ForeignKeys:
     schema = _resolve_namespace(cursor, "postgresql", schema)
-    rows = _rows(cursor, _PG_SQL, (schema, table))
-    mapped = [
-        (
+    rows = _rows(cursor, sql, (schema, table))
+    mapped: list[tuple] = []
+    for row in rows:
+        name, col, ref_schema, ref_table, ref_col, on_del, on_upd = row[:7]
+        item = (
             name,
             col,
             ref_schema,
@@ -241,14 +343,32 @@ def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
             _PG_ACTIONS.get(str(on_del or "").strip(), ""),
             _PG_ACTIONS.get(str(on_upd or "").strip(), ""),
         )
-        for name, col, ref_schema, ref_table, ref_col, on_del, on_upd, _n in rows
-    ]
+        if with_validated:
+            item = (*item, row[7])
+        mapped.append(item)
     return ForeignKeys(
-        dialect="postgresql",
+        dialect=dialect,
         status="measured",
         schema=schema,
         table=table,
         items=_collect(mapped),
+    )
+
+
+def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    return _probe_pg(
+        cursor, schema, table, dialect="postgresql", sql=_PG_SQL, with_validated=True
+    )
+
+
+def _probe_redshift(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    return _probe_pg(
+        cursor,
+        schema,
+        table,
+        dialect="redshift",
+        sql=_PG_SQL_REDSHIFT,
+        with_validated=False,
     )
 
 
@@ -293,7 +413,9 @@ SELECT fk.name,
        tref.name,
        cref.name,
        fk.delete_referential_action_desc,
-       fk.update_referential_action_desc
+       fk.update_referential_action_desc,
+       fk.is_disabled,
+       fk.is_not_trusted
   FROM sys.foreign_keys fk
   JOIN sys.tables t ON t.object_id = fk.parent_object_id
   JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -313,12 +435,21 @@ SELECT fk.name,
 def _probe_sqlserver(cursor: Any, schema: str, table: str) -> ForeignKeys:
     schema = _resolve_namespace(cursor, "sqlserver", schema)
     rows = _rows_any_paramstyle(cursor, _SQLSERVER_SQL, (schema, table))
+    mapped = []
+    for row in rows:
+        fields = tuple(row)
+        disabled = coerce_validated(fields[7]) if len(fields) > 7 else None
+        untrusted = coerce_validated(fields[8]) if len(fields) > 8 else None
+        # Either bit means the engine did not check the rows already stored.
+        # A missing bit is not a yes.
+        checked = disabled is False and untrusted is False
+        mapped.append((*fields[:7], checked))
     return ForeignKeys(
         dialect="sqlserver",
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        items=_collect(mapped),
     )
 
 
@@ -329,7 +460,8 @@ SELECT c.constraint_name,
        rc.table_name,
        rcc.column_name,
        c.delete_rule,
-       'NO ACTION'
+       'NO ACTION',
+       c.validated
   FROM all_constraints c
   JOIN all_cons_columns cc
     ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
@@ -351,12 +483,20 @@ def _probe_oracle(cursor: Any, schema: str, table: str) -> ForeignKeys:
     rows = _rows(
         cursor, _ORACLE_SQL, {"owner": schema.upper(), "tab": table.upper()}
     )
+    mapped = []
+    for row in rows:
+        fields = tuple(row)
+        flag = fields[7] if len(fields) > 7 else None
+        checked = coerce_validated(flag)
+        if checked is None:
+            checked = False
+        mapped.append((*fields[:7], checked))
     return ForeignKeys(
         dialect="oracle",
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        items=_collect(mapped),
     )
 
 
@@ -391,14 +531,62 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
 
 _PROBES = {
     "postgresql": _probe_postgres,
-    "redshift": _probe_postgres,
     "mysql": _probe_mysql,
     "mariadb": _probe_mysql,
     "sqlserver": _probe_sqlserver,
     "mssql": _probe_sqlserver,
     "oracle": _probe_oracle,
+    "redshift": _probe_redshift,
     "sqlite": _probe_sqlite,
 }
+
+
+def enforced_relationship_identities(
+    dialect: str,
+    inspector_fks: list[Any],
+    measured: ForeignKeys | None,
+) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+    """Inspector foreign keys that prove the rows already stored.
+
+    On PostgreSQL, SQL Server, and Oracle the proof is the catalog validation
+    bit, matched to the inspector row by relationship identity. SQLAlchemy's
+    PostgreSQL reflection omits ``NOT VALID``, so an inspector hit alone is
+    not that proof. An unreadable validation catalog yields no enforced
+    identity: the caller scans. MySQL and SQLite keep the inspector identity.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    requires_bit = (dialect or "").strip().lower() in _VALIDATION_BIT_DIALECTS
+    if requires_bit and (measured is None or not measured.measured):
+        return []
+    flags: list[tuple[Any, bool | None]] = []
+    if measured is not None and measured.measured:
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if ident is not None:
+                flags.append((ident, item.validated))
+    enforced: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        ident = fk_identity(fk)
+        if ident is None:
+            continue
+        if requires_bit:
+            matched = [flag for known, flag in flags if same_relationship(ident, known)]
+            if not matched or any(flag is False for flag in matched):
+                continue
+            if not any(flag is True for flag in matched):
+                continue
+        enforced.append(ident)
+    return enforced
 
 
 def probe_foreign_keys(
@@ -451,6 +639,11 @@ def foreign_keys_from_payload(payload: Any) -> list[ForeignKey]:
                 referenced_columns=ref_columns,
                 on_delete=normalize_action(entry.get("on_delete")),
                 on_update=normalize_action(entry.get("on_update")),
+                validated=(
+                    coerce_validated(entry.get("validated"))
+                    if "validated" in entry
+                    else None
+                ),
             )
         )
     return out

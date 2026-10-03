@@ -233,11 +233,35 @@ def test_carry_is_claimed_only_after_the_destination_catalog_agrees():
                 referenced_table="customers",
                 referenced_columns=["id"],
                 on_delete="CASCADE",
+                validated=True,
             )
         ],
     )
     settled = verify_foreign_keys(plan.decisions, dest)
     assert settled[0].status == "carried"
+
+
+def test_not_valid_catalog_bit_is_not_a_carried_foreign_key():
+    """The relationship matches. The catalog says existing rows were not checked."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=False,
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "existing rows were not checked" in settled[0].reason
 
 
 def test_a_different_referential_action_is_not_the_source_rule():
@@ -304,6 +328,7 @@ def test_unreported_action_matches_only_the_engine_default():
                 referenced_schema="public",
                 referenced_table="customers",
                 referenced_columns=["id"],
+                validated=True,
             )
         ],
     )
@@ -782,6 +807,7 @@ def test_catalog_reread_accepts_reversed_composite_pairs():
                 referenced_schema="public",
                 referenced_table="parent",
                 referenced_columns=["y", "x"],
+                validated=True,
             )
         ],
     )
@@ -822,6 +848,7 @@ def test_catalog_reread_matches_an_unqualified_parent_name():
                 referenced_table="customers",
                 referenced_columns=["id"],
                 on_delete="CASCADE",
+                validated=True,
             )
         ],
     )

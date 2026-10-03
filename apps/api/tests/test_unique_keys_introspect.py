@@ -91,9 +91,9 @@ def test_mysql_fetch_unique_keys_primary_and_unique():
 def test_pg_fetch_foreign_keys_groups_columns():
     cur = MagicMock()
     # pg_constraint row: name, col, ref schema, ref table, ref col,
-    # confdeltype, confupdtype, ordinal.
+    # confdeltype, confupdtype, convalidated, ordinal.
     cur.fetchall.return_value = [
-        ("orders_customer_fkey", "customer_id", "public", "customers", "id", "c", "a", 1),
+        ("orders_customer_fkey", "customer_id", "public", "customers", "id", "c", "a", False, 1),
     ]
     fks, meta = _fetch_foreign_keys("postgresql", cur, "public", "orders")
     assert meta["status"] == "measured"
@@ -103,6 +103,7 @@ def test_pg_fetch_foreign_keys_groups_columns():
     assert fks[0]["referenced_table"] == "customers"
     assert fks[0]["referenced_columns"] == ["id"]
     assert fks[0]["referenced_schema"] == "public"
+    assert fks[0]["validated"] is False
 
 
 def test_mysql_fetch_foreign_keys():

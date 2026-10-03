@@ -4,8 +4,12 @@ A carried foreign key is a *promise*; it is only worth anything if the engine
 was enforcing it while the rows landed. Two real migration outcomes this
 module separates, which a catalog diff alone cannot:
 
-``enforced``   the destination carries the FK, so the engine itself refused
-               orphans as they were written — no scan needed
+``enforced``   the destination carries a foreign key the catalog says was
+               checked against existing rows — no scan needed. PostgreSQL
+               NOT VALID, a SQL Server untrusted or disabled key, and an
+               Oracle NOT VALIDATED key are not this proof; those rows are
+               scanned. SQLAlchemy's PostgreSQL reflection omits NOT VALID,
+               so the validation bit is read from the catalog probe.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
@@ -33,6 +37,10 @@ from typing import Any
 import sqlalchemy as sa
 
 from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
+from services.foreign_key_metadata import (
+    enforced_relationship_identities,
+    probe_foreign_keys,
+)
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
 from services.fk_tuple_scan import scan_orphan_anti_join
 from services.foreign_key_identity import (
@@ -131,7 +139,18 @@ def verify_destination_referential_integrity(
             }
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
-        enforced = [ident for fk in dest_fks if (ident := _fk_identity(fk)) is not None]
+        measured = None
+        if (db_type or "").strip().lower() in {
+            "postgres",
+            "postgresql",
+            "sqlserver",
+            "mssql",
+            "oracle",
+        }:
+            measured = probe_foreign_keys(
+                db_type, conn, schema_arg or "", child_name
+            )
+        enforced = enforced_relationship_identities(db_type, dest_fks, measured)
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:
             return {
