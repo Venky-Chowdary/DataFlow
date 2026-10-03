@@ -15,6 +15,7 @@ from services.foreign_key_metadata import (
     enforced_relationship_identities,
     informational_key_engine,
     inspector_row_proof_gaps,
+    relationship_actions,
     relationship_match_type,
     row_proof_gap,
     foreign_keys_from_payload,
@@ -260,6 +261,66 @@ def test_probe_match_wins_over_the_inspector_clause():
     )
     assert relationship_match_type(identity, conflicted, inspector) == "unknown"
     assert relationship_match_type(None, probed, inspector) == ""
+
+
+def test_probe_referential_action_wins_over_the_inspector_clause():
+    """One reader: the metadata probe names the action, then inspector keys."""
+    from services.foreign_key_identity import fk_identity
+
+    inspector = [
+        {
+            "constrained_columns": ["parent_id"],
+            "referred_schema": "public",
+            "referred_table": "parent",
+            "referred_columns": ["id"],
+            "ondelete": "NO ACTION",
+            "onupdate": "NO ACTION",
+        }
+    ]
+    identity = fk_identity(inspector[0])
+    probed = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="fk",
+                columns=["parent_id"],
+                referenced_schema="public",
+                referenced_table="parent",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                on_update="RESTRICT",
+            )
+        ],
+    )
+    assert relationship_actions(identity, probed, inspector) == ("CASCADE", "RESTRICT")
+    assert relationship_actions(identity, None, inspector) == ("NO ACTION", "NO ACTION")
+    conflicted = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="fk",
+                columns=["parent_id"],
+                referenced_schema="public",
+                referenced_table="parent",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                on_update="CASCADE",
+            ),
+            ForeignKey(
+                name="fk",
+                columns=["parent_id"],
+                referenced_schema="public",
+                referenced_table="parent",
+                referenced_columns=["id"],
+                on_delete="SET NULL",
+                on_update="CASCADE",
+            ),
+        ],
+    )
+    assert relationship_actions(identity, conflicted, inspector) == ("unknown", "unknown")
+    assert relationship_actions(None, probed, inspector) == ("", "")
 
 
 def test_postgres_not_valid_is_recorded_on_the_foreign_key():

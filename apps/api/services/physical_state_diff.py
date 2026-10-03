@@ -14,10 +14,14 @@ Every aspect answers one of these honest states:
                   When both catalogs named a foreign-key match type, carried
                   also means the destination rule keeps the source promise.
                   Unreported match is MATCH SIMPLE. An empty match list means
-                  this comparison did not measure match.
+                  this comparison did not measure match. When both catalogs
+                  named ON DELETE and ON UPDATE, carried also means those
+                  actions keep the source rule. An empty action list means
+                  this comparison did not measure them. Unreported is NO ACTION.
 ``absent``        present on the source, missing on the destination
 ``unchecked``     the object is present and does not prove the rows, or the
-                  foreign-key match rule does not keep the source promise
+                  foreign-key match rule or referential action does not keep
+                  the source promise
 ``extra``         present on the destination only (informational, never a pass)
 ``unreadable``    the catalog could not be read — never counted as carried
 
@@ -263,6 +267,13 @@ class PhysicalState:
     #: relationship identity does not include it: ``MATCH FULL`` and
     #: ``MATCH SIMPLE`` are one relationship with two rules.
     foreign_key_match: tuple[str, ...] = ()
+    #: ON DELETE and ON UPDATE for each fact, same order as
+    #: ``foreign_key_facts``. Empty string is unreported (NO ACTION when the
+    #: actions are compared). An empty tuple means this read did not attach
+    #: actions. The relationship identity does not include them: CASCADE and
+    #: NO ACTION are one relationship with two rules.
+    foreign_key_on_delete: tuple[str, ...] = ()
+    foreign_key_on_update: tuple[str, ...] = ()
     #: Ordered key, uniqueness, predicate, covering columns, and access method.
     #: See :class:`CatalogIndex`. A unique, partial, covering, or gin index is
     #: not the plain column list.
@@ -298,6 +309,7 @@ class PhysicalState:
                     self._proof_at(index),
                     measured=bool(self.foreign_key_proof),
                     match=self._match_at(index),
+                    actions=self._actions_at(index),
                 )
                 for index, (child, schema, table, parent) in enumerate(
                     self.foreign_key_facts
@@ -334,6 +346,27 @@ class PhysicalState:
         if len(self.foreign_key_match) != len(self.foreign_key_facts):
             return "unknown"
         return normalize_match(self.foreign_key_match[index])
+
+    def _actions_at(self, index: int) -> tuple[str, str] | None:
+        """Actions attached to fact ``index``, or None when this read did not measure them.
+
+        A list that does not line up with the facts is ``unknown``. A
+        mis-attached action is not NO ACTION.
+        """
+        if not self.foreign_key_on_delete and not self.foreign_key_on_update:
+            return None
+        count = len(self.foreign_key_facts)
+        if (
+            len(self.foreign_key_on_delete) != count
+            or len(self.foreign_key_on_update) != count
+        ):
+            return "unknown", "unknown"
+        from services.foreign_key_metadata import normalize_action
+
+        return (
+            normalize_action(self.foreign_key_on_delete[index]),
+            normalize_action(self.foreign_key_on_update[index]),
+        )
 
 
 @dataclass
@@ -449,11 +482,14 @@ def _foreign_key_fact_dict(
     *,
     measured: bool,
     match: str | None = None,
+    actions: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Report wire for one relationship.
 
     The gap is present only when this read measured one. ``match`` is present
     only when this read measured a match type, including ``""`` for unreported.
+    Actions are present only when this read measured them, including empty
+    strings for an unreported ON DELETE or ON UPDATE.
     """
     item = {
         "constrained_columns": list(child),
@@ -465,7 +501,15 @@ def _foreign_key_fact_dict(
         item["row_proof_gap"] = gap
     if match is not None:
         item["match"] = match
+    if actions is not None:
+        item["on_delete"] = actions[0]
+        item["on_update"] = actions[1]
     return item
+
+
+def _fact_names_actions(item: Mapping[str, Any]) -> bool:
+    """True when this payload carries an ON DELETE or ON UPDATE field."""
+    return any(key in item for key in ("on_delete", "on_update", "ondelete", "onupdate"))
 
 
 def _fact_names_match(item: Mapping[str, Any]) -> bool:
@@ -505,6 +549,15 @@ def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
                 return None, parsed.conflict
             if not parsed.conflict:
                 relationship["match"] = parsed.match
+        if _fact_names_actions(item):
+            from services.foreign_key_metadata import normalize_action
+
+            relationship["on_delete"] = normalize_action(
+                item.get("on_delete") if "on_delete" in item else item.get("ondelete")
+            )
+            relationship["on_update"] = normalize_action(
+                item.get("on_update") if "on_update" in item else item.get("onupdate")
+            )
         return relationship, ""
     text = str(item or "").strip()
     parts = text.split("->")
@@ -562,21 +615,26 @@ def _reflect_foreign_keys(
     list[tuple[tuple[str, ...], str, str, tuple[str, ...]]],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
 ]:
-    """Relationship facts, the row-proof gap, and the match type for each one.
+    """Relationship facts, the row-proof gap, the match type, and the actions.
 
     The gap is :func:`services.foreign_key_metadata.inspector_row_proof_gaps`.
     The match type is :func:`services.foreign_key_metadata.relationship_match_type`.
-    Bit dialects read both from the metadata probe on this connection. Redshift
-    is unenforced without that query. MySQL and SQLite record an empty gap:
-    the constraint itself is the check those engines report. An empty match
-    string means the catalog did not name one.
+    The actions are :func:`services.foreign_key_metadata.relationship_actions`.
+    Bit dialects read all three from the metadata probe on this connection.
+    Redshift is unenforced without that query. MySQL and SQLite record an
+    empty gap: the constraint itself is the check those engines report. An
+    empty match string means the catalog did not name one. An empty action
+    string means the catalog did not name that action.
     """
     from services.foreign_key_metadata import (
+        catalog_probe_dialect,
         inspector_row_proof_gaps,
         probe_foreign_keys,
+        relationship_actions,
         relationship_match_type,
-        validation_catalog_dialect,
     )
 
     kept: list[dict[str, Any]] = []
@@ -605,8 +663,8 @@ def _reflect_foreign_keys(
         )
         fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     if not fk_facts:
-        return fk_sets, fk_facts, (), ()
-    catalog_dialect = validation_catalog_dialect(db_type)
+        return fk_sets, fk_facts, (), (), (), ()
+    catalog_dialect = catalog_probe_dialect(db_type)
     measured = (
         probe_foreign_keys(catalog_dialect, conn, schema or "", table)
         if catalog_dialect is not None
@@ -619,7 +677,18 @@ def _reflect_foreign_keys(
         relationship_match_type(fk_identity(fk), measured, inspector_rows)
         for fk in originals
     )
-    return fk_sets, fk_facts, tuple(gaps), matches
+    action_pairs = tuple(
+        relationship_actions(fk_identity(fk), measured, inspector_rows)
+        for fk in originals
+    )
+    return (
+        fk_sets,
+        fk_facts,
+        tuple(gaps),
+        matches,
+        tuple(pair[0] for pair in action_pairs),
+        tuple(pair[1] for pair in action_pairs),
+    )
 
 
 def read_physical_state(
@@ -681,8 +750,8 @@ def read_physical_state(
         routines = collector.run(
             "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
         )
-        fk_sets, fk_facts, fk_proof, fk_match = _reflect_foreign_keys(
-            db_type, conn, schema, name, fks
+        fk_sets, fk_facts, fk_proof, fk_match, fk_delete, fk_update = (
+            _reflect_foreign_keys(db_type, conn, schema, name, fks)
         )
 
     not_null: set[str] = set()
@@ -716,6 +785,8 @@ def read_physical_state(
         foreign_key_facts=tuple(fk_facts),
         foreign_key_proof=fk_proof,
         foreign_key_match=fk_match,
+        foreign_key_on_delete=fk_delete,
+        foreign_key_on_update=fk_update,
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),
@@ -1365,6 +1436,26 @@ def _measured_match(matches: tuple[str, ...], index: int, count: int) -> str | N
     return normalize_match(matches[index])
 
 
+def _measured_actions(
+    deletes: tuple[str, ...],
+    updates: tuple[str, ...],
+    index: int,
+    count: int,
+) -> tuple[str, str] | None:
+    """Normalized actions at ``index``, or None when this side did not measure them.
+
+    A list that does not line up with the facts is ``unknown``. That is not
+    NO ACTION.
+    """
+    if not deletes and not updates:
+        return None
+    if len(deletes) != count or len(updates) != count:
+        return "unknown", "unknown"
+    from services.foreign_key_metadata import normalize_action
+
+    return normalize_action(deletes[index]), normalize_action(updates[index])
+
+
 def _diff_foreign_keys(
     source: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
@@ -1373,6 +1464,10 @@ def _diff_foreign_keys(
     destination_dialect: str = "",
     source_match: tuple[str, ...] = (),
     destination_match: tuple[str, ...] = (),
+    source_on_delete: tuple[str, ...] = (),
+    source_on_update: tuple[str, ...] = (),
+    destination_on_delete: tuple[str, ...] = (),
+    destination_on_update: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves the source rule.
 
@@ -1390,7 +1485,14 @@ def _diff_foreign_keys(
     still compares identity and the row-proof gap. Unreported is MATCH SIMPLE.
     A destination MATCH FULL keeps a source MATCH SIMPLE promise. A
     destination MATCH SIMPLE does not keep a source MATCH FULL promise.
+
+    ON DELETE and ON UPDATE are not part of the relationship identity either.
+    When both sides measured them,
+    :func:`services.foreign_key_carry.referential_action_disagreement` decides
+    whether the destination actions keep the source rule. An empty action list
+    means that side did not measure them. Unreported is NO ACTION.
     """
+    from services.foreign_key_carry import referential_action_disagreement
     from services.foreign_key_metadata import row_proof_reason
 
     def _as_mapping(fact: tuple[tuple[str, ...], str, str, tuple[str, ...]]) -> dict[str, Any]:
@@ -1428,6 +1530,21 @@ def _diff_foreign_keys(
             disagreement = match_rule_disagreement(planned, measured)
             if disagreement:
                 tagged.append(("match", disagreement))
+        planned_actions = _measured_actions(
+            source_on_delete, source_on_update, source_index, len(source)
+        )
+        measured_actions = _measured_actions(
+            destination_on_delete, destination_on_update, match, len(destination)
+        )
+        if planned_actions is not None and measured_actions is not None:
+            action_disagreement = referential_action_disagreement(
+                planned_actions[0],
+                planned_actions[1],
+                measured_actions[0],
+                measured_actions[1],
+            )
+            if action_disagreement:
+                tagged.append(("action", action_disagreement))
         if tagged:
             unchecked.append((render_foreign_key_fact(*fact), tagged))
     extra = [
@@ -1441,6 +1558,9 @@ def _diff_foreign_keys(
     ]
     match_reasons = [
         reason for _wire, tagged in pairs for kind, reason in tagged if kind == "match"
+    ]
+    action_reasons = [
+        reason for _wire, tagged in pairs for kind, reason in tagged if kind == "action"
     ]
     if missing:
         status = "absent"
@@ -1456,6 +1576,7 @@ def _diff_foreign_keys(
         "reasons": [reason for _wire, tagged in pairs for _kind, reason in tagged],
         "proof_reasons": proof_reasons,
         "match_reasons": match_reasons,
+        "action_reasons": action_reasons,
         "source_count": len(source),
         "destination_count": len(destination),
     }
@@ -1615,6 +1736,10 @@ def compare_physical_state(
             destination_dialect=destination.dialect,
             source_match=source.foreign_key_match,
             destination_match=destination.foreign_key_match,
+            source_on_delete=source.foreign_key_on_delete,
+            source_on_update=source.foreign_key_on_update,
+            destination_on_delete=destination.foreign_key_on_delete,
+            destination_on_update=destination.foreign_key_on_update,
         ),
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),

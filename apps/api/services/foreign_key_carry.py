@@ -248,6 +248,45 @@ def referential_actions_match(
     return _one(planned_delete, measured_delete) and _one(planned_update, measured_update)
 
 
+def referential_action_disagreement(
+    planned_delete: str,
+    planned_update: str,
+    measured_delete: str,
+    measured_update: str,
+) -> str:
+    """Why the destination actions do not keep the source rule.
+
+    Empty when :func:`referential_actions_match` is true. An unreported
+    action is the engine default, NO ACTION. ``unknown`` means the catalog
+    named two actions for one relationship, so the rule was not certified.
+    """
+
+    def _unreadable(value: str) -> bool:
+        return str(value or "").strip().casefold() == "unknown"
+
+    if any(
+        _unreadable(value)
+        for value in (planned_delete, planned_update, measured_delete, measured_update)
+    ):
+        return (
+            "Foreign key referential actions could not be read, so the "
+            "relationship was not certified."
+        )
+    if referential_actions_match(
+        planned_delete, planned_update, measured_delete, measured_update
+    ):
+        return ""
+    return (
+        "Destination has this relationship with "
+        f"ON DELETE {normalize_action(measured_delete) or 'unreported'} "
+        f"ON UPDATE {normalize_action(measured_update) or 'unreported'}; "
+        "the source rule is "
+        f"ON DELETE {normalize_action(planned_delete) or 'NO ACTION'} "
+        f"ON UPDATE {normalize_action(planned_update) or 'NO ACTION'}. "
+        "A different referential action is not the source rule."
+    )
+
+
 def _is_cycle_edge(child: str, parent_stream: str, cycle_tables: set[str]) -> bool:
     """Self-ref or both selected streams sit in the detected cycle.
 
@@ -1012,14 +1051,11 @@ def verify_foreign_keys(
         elif matches:
             got = matches[0]
             status = "unsupported"
-            reason = (
-                "Destination has this relationship with "
-                f"ON DELETE {normalize_action(got.on_delete) or 'unreported'} "
-                f"ON UPDATE {normalize_action(got.on_update) or 'unreported'}; "
-                "the source rule is "
-                f"ON DELETE {normalize_action(decision.on_delete) or 'NO ACTION'} "
-                f"ON UPDATE {normalize_action(decision.on_update) or 'NO ACTION'}. "
-                "A different referential action is not the source rule."
+            reason = referential_action_disagreement(
+                decision.on_delete,
+                decision.on_update,
+                got.on_delete,
+                got.on_update,
             )
         else:
             status = "unsupported"

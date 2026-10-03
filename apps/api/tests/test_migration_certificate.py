@@ -384,6 +384,43 @@ def test_match_full_reread_as_simple_blocks_without_calling_the_object_absent() 
     assert not any("existing rows were checked" in b for b in blockers)
 
 
+def test_cascade_reread_as_no_action_blocks_without_calling_the_object_absent() -> None:
+    """A stored key with a different referential action is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination has this relationship with "
+                        "ON DELETE NO ACTION ON UPDATE NO ACTION; "
+                        "the source rule is ON DELETE CASCADE ON UPDATE CASCADE."
+                    ],
+                    "proof_reasons": [],
+                    "match_reasons": [],
+                    "action_reasons": [
+                        "Destination has this relationship with "
+                        "ON DELETE NO ACTION ON UPDATE NO ACTION; "
+                        "the source rule is ON DELETE CASCADE ON UPDATE CASCADE."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    blockers = verdict["blockers"]
+    assert any("referential action" in b and "CASCADE" in b for b in blockers)
+    assert not any("did not survive" in b for b in blockers)
+    assert not any("existing rows were checked" in b for b in blockers)
+
+
 def test_unchecked_primary_key_blocks_without_calling_the_object_absent() -> None:
     """A stored key that does not reject duplicates is not a missing key."""
     job = _proven_job()

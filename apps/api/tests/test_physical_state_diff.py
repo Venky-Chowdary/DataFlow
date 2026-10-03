@@ -127,6 +127,8 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
             "referred_columns": ["id"],
             "row_proof_gap": "",
             "match": "",
+            "on_delete": "NO ACTION",
+            "on_update": "NO ACTION",
         }
     ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
@@ -197,6 +199,8 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert ("note", "n") in state.defaults
     assert state.foreign_key_proof == ("",)
     assert state.foreign_key_match == ("",)
+    assert state.foreign_key_on_delete == ("NO ACTION",)
+    assert state.foreign_key_on_update == ("NO ACTION",)
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -461,6 +465,8 @@ def _fk_state(
     proof: tuple[str, ...] = (),
     dialect: str = "",
     match: tuple[str, ...] = (),
+    on_delete: tuple[str, ...] = (),
+    on_update: tuple[str, ...] = (),
 ) -> PhysicalState:
     return PhysicalState(
         found=True,
@@ -468,6 +474,8 @@ def _fk_state(
         foreign_key_facts=tuple(facts),
         foreign_key_proof=proof,
         foreign_key_match=match,
+        foreign_key_on_delete=on_delete,
+        foreign_key_on_update=on_update,
         dialect=dialect,
     )
 
@@ -1079,6 +1087,109 @@ def test_catalog_diff_compares_match_type_after_relationship_identity() -> None:
     legacy = compare_physical_state(_fk_state(fact), _fk_state(fact))
     assert legacy["aspects"]["foreign_keys"]["status"] == "carried"
     assert legacy["verified"] is True
+
+
+def test_catalog_fact_keeps_the_referential_actions() -> None:
+    """The structured fact keeps ON DELETE and ON UPDATE for the diff."""
+    keys, unparsed = foreign_keys_from_catalog_state(
+        {
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": ["parent_id"],
+                    "referred_schema": "public",
+                    "referred_table": "parent",
+                    "referred_columns": ["id"],
+                    "on_delete": "cascade",
+                    "onupdate": "no action",
+                }
+            ]
+        }
+    )
+    assert unparsed == []
+    assert keys[0]["on_delete"] == "CASCADE"
+    assert keys[0]["on_update"] == "NO ACTION"
+
+
+def test_catalog_diff_compares_referential_actions_after_identity() -> None:
+    """CASCADE and NO ACTION are one relationship and two rules.
+
+    Column order still matches. An empty action list is a comparison that
+    did not measure the actions, so those states stay on identity, the
+    row-proof gap, and the match type. An unreported action is NO ACTION.
+    These facts are catalog-shaped; a live Postgres server was not used.
+    """
+    fact = (("parent_id",), "public", "parent", ("id",))
+    weakened = compare_physical_state(
+        _fk_state(fact, on_delete=("CASCADE",), on_update=("CASCADE",)),
+        _fk_state(fact, on_delete=("NO ACTION",), on_update=("NO ACTION",)),
+    )
+    fk = weakened["aspects"]["foreign_keys"]
+    assert fk["status"] == "unchecked"
+    assert fk["missing"] == []
+    assert fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert fk["unchecked"].count("parent_id->public.parent->id") == 1
+    assert "ON DELETE NO ACTION" in fk["action_reasons"][0]
+    assert "ON DELETE CASCADE" in fk["action_reasons"][0]
+    assert "ON UPDATE" in fk["action_reasons"][0]
+    assert fk["proof_reasons"] == []
+    assert fk["match_reasons"] == []
+    assert weakened["verified"] is False
+    assert "foreign_keys" not in weakened["absent"]
+
+    same = compare_physical_state(
+        _fk_state(fact, on_delete=("cascade",), on_update=("NO ACTION",)),
+        _fk_state(fact, on_delete=("CASCADE",), on_update=("",)),
+    )
+    assert same["aspects"]["foreign_keys"]["status"] == "carried"
+    assert same["verified"] is True
+
+    unreported_dest = compare_physical_state(
+        _fk_state(fact, on_delete=("SET NULL",), on_update=("CASCADE",)),
+        _fk_state(fact, on_delete=("",), on_update=("",)),
+    )
+    assert unreported_dest["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "SET NULL" in unreported_dest["aspects"]["foreign_keys"]["action_reasons"][0]
+    assert "unreported" in unreported_dest["aspects"]["foreign_keys"]["action_reasons"][0]
+
+    forward = (("a", "b"), "", "parent", ("x", "y"))
+    reversed_pairs = (("b", "a"), "", "parent", ("y", "x"))
+    order = compare_physical_state(
+        _fk_state(forward, on_delete=("CASCADE",), on_update=("RESTRICT",)),
+        _fk_state(reversed_pairs, on_delete=("CASCADE",), on_update=("RESTRICT",)),
+    )
+    assert order["aspects"]["foreign_keys"]["status"] == "carried"
+
+    both = compare_physical_state(
+        _fk_state(fact, proof=("",), on_delete=("CASCADE",), on_update=("CASCADE",)),
+        _fk_state(
+            fact,
+            proof=("not_checked",),
+            on_delete=("NO ACTION",),
+            on_update=("NO ACTION",),
+        ),
+    )
+    both_fk = both["aspects"]["foreign_keys"]
+    assert both_fk["status"] == "unchecked"
+    assert both_fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert len(both_fk["proof_reasons"]) == 1
+    assert len(both_fk["action_reasons"]) == 1
+
+    absent = compare_physical_state(
+        _fk_state(fact, on_delete=("CASCADE",), on_update=("CASCADE",)),
+        _fk_state(on_delete=("NO ACTION",), on_update=("NO ACTION",)),
+    )
+    assert absent["aspects"]["foreign_keys"]["status"] == "absent"
+    assert absent["aspects"]["foreign_keys"]["action_reasons"] == []
+
+    misaligned = compare_physical_state(
+        _fk_state(fact, on_delete=("CASCADE",), on_update=("CASCADE",)),
+        _fk_state(fact, on_delete=("NO ACTION", "extra"), on_update=("NO ACTION",)),
+    )
+    assert misaligned["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "could not be read" in misaligned["aspects"]["foreign_keys"]["action_reasons"][0]
+
+    legacy = compare_physical_state(_fk_state(fact), _fk_state(fact))
+    assert legacy["aspects"]["foreign_keys"]["status"] == "carried"
 
 
 def test_arrow_in_a_column_name_stays_one_wire_tuple(tmp_path: Path) -> None:

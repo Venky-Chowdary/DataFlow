@@ -20,6 +20,7 @@ compare like for like.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -367,6 +368,19 @@ def validation_catalog_dialect(dialect: str) -> str | None:
     if key in _VALIDATION_BIT_DIALECTS:
         return "sqlserver" if key == "mssql" else key
     return None
+
+
+def catalog_probe_dialect(dialect: str) -> str | None:
+    """Probe dialect for foreign-key actions and match, or None when unsupported.
+
+    This is wider than :func:`validation_catalog_dialect`. SQLite and MySQL
+    have no separate validation bit, and they do name ON DELETE and ON UPDATE.
+    Redshift is unenforced and still names the actions the planner stored.
+    """
+    key = _dialect_key(dialect)
+    if key == "mssql":
+        key = "sqlserver"
+    return key if key in _PROBES else None
 
 
 def _collect(
@@ -755,6 +769,69 @@ _PROBES = {
     "redshift": _probe_redshift,
     "sqlite": _probe_sqlite,
 }
+
+
+def _inspector_action(fk: Mapping[str, Any], *keys: str) -> str:
+    """One referential action from an inspector foreign key, or empty."""
+    for key in keys:
+        if key in fk and str(fk.get(key) or "").strip():
+            return normalize_action(fk.get(key))
+    options = fk.get("options")
+    if isinstance(options, Mapping):
+        for key in keys:
+            if key in options and str(options.get(key) or "").strip():
+                return normalize_action(options.get(key))
+    return ""
+
+
+def relationship_actions(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> tuple[str, str]:
+    """``(on_delete, on_update)`` the catalog recorded for this relationship.
+
+    The metadata probe wins when it names an action. Inspector ``ondelete``
+    and ``onupdate`` are the fallback SQLAlchemy keeps. Empty means
+    unreported, which matches only the engine default NO ACTION. Two different
+    actions on the probe are ``unknown``.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    if identity is None:
+        return "", ""
+    if measured is not None and measured.measured:
+        seen: tuple[str, str] | None = None
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            pair = (
+                normalize_action(item.on_delete),
+                normalize_action(item.on_update),
+            )
+            if seen is not None and pair != seen:
+                return "unknown", "unknown"
+            seen = pair
+        if seen is not None and (seen[0] or seen[1]):
+            return seen
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        if not same_relationship(identity, fk_identity(fk)):
+            continue
+        return (
+            _inspector_action(fk, "ondelete", "on_delete"),
+            _inspector_action(fk, "onupdate", "on_update"),
+        )
+    return "", ""
 
 
 def relationship_match_type(
