@@ -73,6 +73,151 @@ def test_pg_fetch_unique_keys_groups_pk_and_unique():
     assert "email" in names["users_email_ci"]["expression_columns"]
     assert names["users_active_email"]["filter_predicate"] == "(status = 'active'::text)"
     assert names["users_active_email"]["nulls_not_distinct"] is True
+    assert "index_valid" not in names["users_email_key"]
+    assert "index_ready" not in names["users_email_key"]
+
+
+def test_pg_invalid_unique_index_stays_visible_and_splits_the_write_rule():
+    """``indisvalid`` false is not existing-row proof.
+
+    A seven-column row does not invent the bits. ``indisready`` false does
+    not reject a new duplicate. ``indisready`` true still does.
+    """
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        postgres_uniqueness_proof,
+        read_postgres_uniqueness_rows,
+    )
+
+    assert postgres_uniqueness_proof(
+        [
+            ("users_pkey", "id", True, True),
+            ("users_email_invalid", "email", False, True),
+            ("users_email_also", "email", True, True),
+        ]
+    ) == {frozenset({"id"}): "", frozenset({"email"}): ""}
+    assert postgres_uniqueness_proof(
+        [("users_email_invalid", "email", False, True)]
+    ) == {frozenset({"email"}): "not_checked"}
+    assert postgres_uniqueness_proof(
+        [("users_email_building", "email", False, False)]
+    ) == {frozenset({"email"}): "not_ready"}
+    assert postgres_uniqueness_proof(
+        [("users_pkey", "id")]
+    ) == {frozenset({"id"}): "unreported"}
+
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [],
+        [(1, "email")],
+        [
+            (
+                "users_email_invalid",
+                False,
+                "",
+                "",
+                "CREATE UNIQUE INDEX users_email_invalid ON users (email)",
+                "1",
+                False,
+                False,
+                True,
+            )
+        ],
+    ]
+    meta = _pg_fetch_unique_keys(cur, "public", "users")
+    key = meta["unique_keys"][0]
+    assert key["name"] == "users_email_invalid"
+    assert key["columns"] == ["email"]
+    assert key["index_valid"] is False
+    assert "index_ready" not in key
+    assert "enforced" not in key
+    sql = str(cur.execute.call_args_list[-1].args[0]).lower()
+    assert "i.indisvalid" in sql
+    assert "i.indisready" in sql
+    assert "and i.indisvalid" not in sql
+
+    not_ready = MagicMock()
+    not_ready.fetchall.side_effect = [
+        [],
+        [(1, "email")],
+        [
+            (
+                "users_email_building",
+                False,
+                "",
+                "",
+                "CREATE UNIQUE INDEX users_email_building ON users (email)",
+                "1",
+                False,
+                False,
+                False,
+            )
+        ],
+    ]
+    building = _pg_fetch_unique_keys(not_ready, "public", "users")["unique_keys"][0]
+    assert building["index_ready"] is False
+    assert building["enforced"] is False
+
+    class _Broken:
+        def execute(self, sql, params=()):
+            raise RuntimeError("pg_index unavailable")
+
+    assert read_postgres_uniqueness_rows(_Broken(), "public", "users") is None
+
+    assert _unique_constraint_enforced(
+        {"name": "users_email_invalid", "columns": ["email"], "index_valid": False},
+        dest_kind="postgresql",
+    ) is True
+    blocked = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="postgres",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "users_email_invalid",
+                "columns": ["email"],
+                "index_valid": False,
+            }
+        ],
+        target_types={"email": "text"},
+    )
+    assert blocked["passed"] is False
+    assert blocked["blocks_transfer"] is True
+    assert any("indisvalid" in warning for warning in blocked["warnings"])
+
+    assert _unique_constraint_enforced(
+        {
+            "name": "users_email_building",
+            "columns": ["email"],
+            "index_valid": False,
+            "index_ready": False,
+        },
+        dest_kind="azure_postgres",
+    ) is False
+    warned = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="azure_postgres",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "users_email_building",
+                "columns": ["email"],
+                "index_ready": False,
+                "index_valid": False,
+                "enforced": False,
+            }
+        ],
+        target_types={"email": "text"},
+    )
+    assert warned["passed"] is True
+    assert warned["blocks_transfer"] is False
+    assert any("indisready" in warning for warning in warned["warnings"])
 
 
 def test_mysql_fetch_unique_keys_primary_and_unique():

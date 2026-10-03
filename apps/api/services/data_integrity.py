@@ -639,6 +639,9 @@ def _unique_constraint_enforced(
     from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
 
     kind = _key_table_kind(uk)
+    if uk is not None and uk.get("index_ready") is False:
+        # PostgreSQL indisready is false. Inserts ignore the index.
+        return False
     if uk is not None and uk.get("disabled") is True:
         # SQL Server DISABLE. The index does not reject a new duplicate.
         return False
@@ -675,6 +678,15 @@ def _advisory_unique_key_warnings(
         uk for uk in keys if not _unique_constraint_enforced(uk, dest_kind=dest_kind)
     ]
     kind = normalize_dest_kind(dest_kind or "") or "destination"
+    if any(
+        uk.get("index_valid") is False and uk.get("index_ready") is not False
+        for uk in keys
+    ):
+        warnings.append(
+            f"{kind} unique index is invalid (pg_index.indisvalid is false). "
+            "New duplicates are still rejected while the index is ready for "
+            "inserts. Existing rows were not checked."
+        )
     if not advisory and not _destination_constraints_advisory(dest_kind, keys):
         return warnings
     if advisory:
@@ -696,6 +708,12 @@ def _advisory_unique_key_warnings(
         if any(uk.get("disabled") is True for uk in advisory):
             warnings.append(
                 f"{kind} unique index is disabled. It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
+            )
+        if any(uk.get("index_ready") is False for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is not ready for inserts "
+                "(pg_index.indisready is false). It does not reject a new "
                 "duplicate and does not prove the loaded rows are unique."
             )
     elif _destination_constraints_advisory(dest_kind, keys):

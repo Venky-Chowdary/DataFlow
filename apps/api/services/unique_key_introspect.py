@@ -22,6 +22,8 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
 
     ``UNIQUE (lower(email))`` is invisible in ``information_schema`` alone — we
     also read ``pg_index`` / ``pg_get_expr`` so Validate casefolds like the engine.
+    An invalid or not-ready unique index stays in the list. Filtering it out
+    would look like the destination has no key.
     """
     from services.type_system import parse_case_insensitive_index_expression
 
@@ -93,7 +95,9 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                        COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
                        pg_get_indexdef(i.indexrelid) AS indexdef,
                        i.indkey,
-                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct
+                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct,
+                       i.indisvalid,
+                       i.indisready
                 FROM pg_catalog.pg_index i
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                 JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
@@ -101,7 +105,6 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                 WHERE n.nspname = %s
                   AND t.relname = %s
                   AND i.indisunique
-                  AND i.indisvalid
                 """,
                 (schema, table),
             )
@@ -115,7 +118,9 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                        COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
                        pg_get_indexdef(i.indexrelid) AS indexdef,
                        i.indkey,
-                       false AS nulls_not_distinct
+                       false AS nulls_not_distinct,
+                       i.indisvalid,
+                       i.indisready
                 FROM pg_catalog.pg_index i
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                 JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
@@ -123,19 +128,22 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                 WHERE n.nspname = %s
                   AND t.relname = %s
                   AND i.indisunique
-                  AND i.indisvalid
                 """,
                 (schema, table),
             )
-        for (
-            idx_name,
-            is_primary,
-            exprs,
-            pred,
-            indexdef,
-            indkey,
-            nulls_not_distinct,
-        ) in cur.fetchall() or []:
+        for row in cur.fetchall() or []:
+            fields = tuple(row)
+            if len(fields) < 7:
+                continue
+            (
+                idx_name,
+                is_primary,
+                exprs,
+                pred,
+                indexdef,
+                indkey,
+                nulls_not_distinct,
+            ) = fields[:7]
             key = str(idx_name)
             bucket = by_name.setdefault(
                 key,
@@ -152,6 +160,12 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
             )
             bucket["primary"] = bool(is_primary) or bool(bucket.get("primary"))
             bucket["nulls_not_distinct"] = bool(nulls_not_distinct)
+            # A seven-column fixture did not ask. Do not invent the bits.
+            if len(fields) > 7 and _pg_index_bool(fields[7]) is False:
+                bucket["index_valid"] = False
+            if len(fields) > 8 and _pg_index_bool(fields[8]) is False:
+                bucket["index_ready"] = False
+                bucket["enforced"] = False
             if pred:
                 bucket["filter_predicate"] = str(pred).strip()
             expr_text = str(exprs or "").strip() or str(indexdef or "")
@@ -186,6 +200,112 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
             pk = list(bucket.get("columns") or [])
         unique_keys.append(bucket)
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
+
+
+def _pg_index_bool(value: Any) -> bool | None:
+    """``pg_index`` boolean. None when this cell did not say.
+
+    A raw cursor may return ``t`` / ``f``. A driver may return a real bool.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "t", "y"}:
+        return True
+    if text in {"0", "false", "no", "f", "n"}:
+        return False
+    return None
+
+
+def postgres_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from ``indisvalid`` and ``indisready``.
+
+    Columns are folded. A valid index on the same columns keeps the proof:
+    a second invalid index does not cancel it. ``not_ready`` is the only
+    gap that is also not a new-write rule. A row that omits the cells is
+    ``unreported`` for that index.
+    """
+    from services.foreign_key_metadata import postgres_unique_index_gap
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 2 or not fields[0] or not fields[1]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(
+            name, {"columns": [], "valid": None, "ready": None}
+        )
+        bucket["columns"].append(str(fields[1]).strip().casefold())
+        if len(fields) > 2:
+            valid = _pg_index_bool(fields[2])
+            if valid is False:
+                bucket["valid"] = False
+            elif valid is True and bucket["valid"] is not False:
+                bucket["valid"] = True
+        if len(fields) > 3:
+            ready = _pg_index_bool(fields[3])
+            if ready is False:
+                bucket["ready"] = False
+            elif ready is True and bucket["ready"] is not False:
+                bucket["ready"] = True
+    proof: dict[frozenset[str], str] = {}
+    rank = {"": 3, "not_checked": 2, "not_ready": 1, "unreported": 0}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = postgres_unique_index_gap(bucket["valid"], bucket["ready"])
+        if columns not in proof or rank[gap] > rank[proof[columns]]:
+            proof[columns] = gap
+    return proof
+
+
+def read_postgres_uniqueness_rows(
+    conn: Any, schema: str, table: str
+) -> list[Any] | None:
+    """Unique-index rows, or None when ``indisvalid`` was not read.
+
+    An empty list is a successful read of no unique index. Invalid indexes
+    stay in the result. The schema default is ``public`` when the caller
+    did not name one.
+    """
+    import sqlalchemy as sa
+
+    schema_name = (schema or "").strip() or "public"
+    try:
+        return list(
+            conn.execute(
+                sa.text(
+                    """
+                    SELECT ic.relname AS index_name,
+                           a.attname AS column_name,
+                           i.indisvalid,
+                           i.indisready
+                    FROM pg_catalog.pg_index i
+                    JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+                    JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+                    JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+                    JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = t.oid
+                     AND a.attnum = ANY (i.indkey)
+                    WHERE n.nspname = :schema
+                      AND t.relname = :table
+                      AND i.indisunique
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                    ORDER BY ic.relname, a.attnum
+                    """
+                ),
+                {"schema": schema_name, "table": table},
+            ).fetchall()
+        )
+    except Exception:
+        return None
 
 
 def _sqlserver_index_disabled(value: Any) -> bool | None:

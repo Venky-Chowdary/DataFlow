@@ -326,10 +326,12 @@ class PhysicalState:
     #: Existing-row gap for each primary-key or unique column set.
     #: ``(folded columns, gap)``. Oracle ``""`` is ``VALIDATED`` and
     #: ``not_checked`` is ``NOT VALIDATED``. SQL Server ``""`` is an enabled
-    #: unique index and ``not_checked`` is ``is_disabled = 1``. ``unreported``
-    #: means this read did not see the bit. An empty tuple means this
-    #: comparison did not measure it. A live read attaches one entry for
-    #: each reflected key.
+    #: unique index and ``not_checked`` is ``is_disabled = 1``. PostgreSQL
+    #: ``""`` is ``indisvalid``. ``not_checked`` is an invalid index that
+    #: still rejects a new row. ``not_ready`` is ``indisready`` false.
+    #: ``unreported`` means this read did not see the bit. An empty tuple
+    #: means this comparison did not measure it. A live read attaches one
+    #: entry for each reflected key.
     uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -865,16 +867,22 @@ def read_physical_state(
             )
         oracle_rows: list[Any] | None = None
         sqlserver_rows: list[Any] | None = None
+        postgres_rows: list[Any] | None = None
         if _dialect_key(db_type) == "oracle":
             from services.unique_key_introspect import read_oracle_uniqueness_rows
 
             oracle_rows = read_oracle_uniqueness_rows(conn, schema, name)
         from services.dialect_profiles import is_sqlserver_like
+        from services.foreign_key_metadata import postgres_index_catalog
 
         if is_sqlserver_like(db_type):
             from services.unique_key_introspect import read_sqlserver_uniqueness_rows
 
             sqlserver_rows = read_sqlserver_uniqueness_rows(conn, schema, name)
+        if postgres_index_catalog(db_type):
+            from services.unique_key_introspect import read_postgres_uniqueness_rows
+
+            postgres_rows = read_postgres_uniqueness_rows(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -949,6 +957,7 @@ def read_physical_state(
             unique_sets,
             oracle_rows,
             sqlserver_rows,
+            postgres_rows,
         ),
     )
 
@@ -959,16 +968,42 @@ def _measured_uniqueness_proof(
     unique_sets: set[tuple[str, ...]],
     oracle_rows: list[Any] | None,
     sqlserver_rows: list[Any] | None,
+    postgres_rows: list[Any] | None = None,
 ) -> tuple[tuple[tuple[str, ...], str], ...]:
-    """Oracle ``VALIDATED`` or SQL Server ``is_disabled``. Empty for other engines."""
+    """Oracle, SQL Server, or PostgreSQL uniqueness bits. Empty otherwise."""
     from services.dialect_profiles import is_sqlserver_like
-    from services.foreign_key_metadata import _dialect_key
+    from services.foreign_key_metadata import _dialect_key, postgres_index_catalog
 
+    if postgres_index_catalog(db_type):
+        return _postgres_uniqueness_proof(
+            db_type, primary_key, unique_sets, postgres_rows
+        )
     if _dialect_key(db_type) == "oracle":
         return _oracle_uniqueness_proof(db_type, primary_key, unique_sets, oracle_rows)
     if is_sqlserver_like(db_type):
         return _sqlserver_uniqueness_proof(primary_key, unique_sets, sqlserver_rows)
     return ()
+
+
+def _postgres_uniqueness_proof(
+    db_type: str,
+    primary_key: tuple[str, ...],
+    unique_sets: set[tuple[str, ...]],
+    rows: list[Any] | None,
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    """One gap per reflected PostgreSQL key.
+
+    ``rows is None`` means ``indisvalid`` was not read. Each reflected key
+    stays ``unreported``. ``indisvalid`` false is ``not_checked``.
+    ``indisready`` false is ``not_ready``. A valid index is an empty gap.
+    """
+    from services.foreign_key_metadata import postgres_index_catalog
+    from services.unique_key_introspect import postgres_uniqueness_proof
+
+    if not postgres_index_catalog(db_type):
+        return ()
+    measured = postgres_uniqueness_proof(rows) if rows is not None else {}
+    return _gaps_for_reflected_keys(primary_key, unique_sets, measured, rows is None)
 
 
 def _sqlserver_uniqueness_proof(
@@ -1892,8 +1927,10 @@ def _diff_uniqueness(
     not this verdict. Existing rows are carried only when
     ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. A SQL Server unique
     index with ``is_disabled = 1`` does not reject a new duplicate and is
-    not existing-row proof. An empty proof tuple means this comparison
-    did not measure that column.
+    not existing-row proof. A PostgreSQL unique index proves existing rows
+    only when ``pg_index.indisvalid`` is true. ``indisready`` false is not
+    a write rule either. An empty proof tuple means this comparison did
+    not measure that column.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,
@@ -1905,6 +1942,8 @@ def _diff_uniqueness(
     from services.foreign_key_metadata import (
         _dialect_key,
         oracle_uniqueness_validation_reason,
+        postgres_index_catalog,
+        postgres_unique_index_reason,
         sqlserver_disabled_unique_reason,
         uniqueness_proof_gap,
         uniqueness_proof_reason,
@@ -1932,7 +1971,9 @@ def _diff_uniqueness(
     )
     family = _dialect_key(destination_dialect)
     use_measured_proof = bool(uniqueness_proof) and (
-        family == "oracle" or is_sqlserver_like(destination_dialect)
+        family == "oracle"
+        or postgres_index_catalog(destination_dialect)
+        or is_sqlserver_like(destination_dialect)
     )
 
     def _item_gap(group: frozenset[str]) -> str:
@@ -1953,6 +1994,8 @@ def _diff_uniqueness(
         unchecked.append(_wire(group))
         if use_measured_proof and family == "oracle":
             reason = oracle_uniqueness_validation_reason(item_gap)
+        elif use_measured_proof and postgres_index_catalog(destination_dialect):
+            reason = postgres_unique_index_reason(item_gap)
         elif use_measured_proof and is_sqlserver_like(destination_dialect):
             reason = sqlserver_disabled_unique_reason(item_gap)
         else:

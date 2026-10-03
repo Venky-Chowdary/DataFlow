@@ -617,6 +617,91 @@ def oracle_uniqueness_validation_reason(gap: str) -> str:
     return ""
 
 
+# PostgreSQL wire catalogs that store ``pg_index.indisvalid`` and
+# ``indisready``. Streaming engines folded into the Postgres DDL family
+# do not. Redshift is not in this set.
+_POSTGRES_INDEX_DIALECTS = frozenset(
+    {
+        "pg",
+        "timescaledb",
+        "timescale",
+        "alloydb",
+        "citus",
+        "supabase",
+        "supabase_db",
+        "neon",
+        "neon_serverless",
+        "azure_postgres",
+        "aws_rds_postgres",
+        "rds_postgres",
+        "aurora_postgres",
+        "aurora-postgresql",
+        "cloudsql_postgres",
+        "gcp_cloud_sql_postgres",
+        "cloud_sql_postgres",
+        "greenplum",
+        "greenplum_cloud",
+        "yugabytedb",
+        "yugabyte",
+        "opengauss",
+        "open_gauss",
+    }
+)
+
+
+def postgres_index_catalog(dialect: str) -> bool:
+    """True when this engine's unique indexes live in ``pg_index``.
+
+    ``postgres`` and ``postgresql`` fold through :func:`_dialect_key`.
+    Hosted twins keep their own names and still use that catalog.
+    """
+    if _dialect_key(dialect) == "postgresql":
+        return True
+    return normalize_driver(dialect) in _POSTGRES_INDEX_DIALECTS
+
+
+def postgres_unique_index_gap(valid: bool | None, ready: bool | None) -> str:
+    """Existing-row gap from ``pg_index.indisvalid`` and ``indisready``.
+
+    A valid index is the check. ``indisvalid`` false is ``not_checked``:
+    a failed ``CREATE INDEX CONCURRENTLY`` does not prove stored rows, and
+    inserts still maintain the index while ``indisready`` is true.
+    ``indisready`` false is ``not_ready``: inserts ignore the index, so it
+    is not a write rule either. A missing validity cell stays unreported.
+    """
+    if ready is False:
+        return "not_ready"
+    if valid is True:
+        return ""
+    if valid is False:
+        return "not_checked"
+    return "unreported"
+
+
+def postgres_unique_index_reason(gap: str) -> str:
+    """Operator sentence for a non-empty PostgreSQL unique-index gap."""
+    if gap == "not_ready":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisready is false. The index does not reject a "
+            "new duplicate and does not prove the rows already stored "
+            "are unique."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisvalid is false. Existing rows were not checked. "
+            "New rows are still rejected while indisready is true."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisvalid was not read. An invalid unique index "
+            "does not prove the rows already stored are unique."
+        )
+    return ""
+
+
 def uniqueness_proof_gap(
     dialect: str, *, table_kind: str = "", index_status: str = ""
 ) -> str:

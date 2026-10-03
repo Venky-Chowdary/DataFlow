@@ -1734,3 +1734,98 @@ def test_sqlserver_disabled_unique_index_is_not_row_proof() -> None:
     )
     assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
     assert _measured_uniqueness_proof("sqlite", ("id",), {("email",)}, rows, rows) == ()
+
+
+def test_postgres_invalid_unique_index_is_not_existing_row_proof() -> None:
+    """``indisvalid`` is the existing-row proof. ``indisready`` is the write rule.
+
+    A hand-built PostgreSQL state with an empty proof tuple did not measure
+    the columns, so it stays on the older carried verdict. A live read
+    attaches one gap per reflected key. A valid index on the same columns
+    keeps that proof.
+    """
+    from services.physical_state_diff import _measured_uniqueness_proof
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id",),
+        unique_constraints=frozenset({("email",)}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="postgres",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert unmeasured["aspects"]["primary_key"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    invalid = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="azure_postgres",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "not_checked")),
+        ),
+    )
+    unique = invalid["aspects"]["unique_constraints"]
+    assert unique["status"] == "unchecked"
+    assert unique["missing"] == []
+    assert "email" in unique["unchecked"]
+    assert "indisvalid" in unique["reasons"][0]
+    assert "indisready is true" in unique["reasons"][0]
+    assert invalid["aspects"]["primary_key"]["status"] == "carried"
+    assert invalid["verified"] is False
+    assert "unique_constraints" not in invalid["absent"]
+
+    not_ready = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="postgresql",
+            primary_key=("id",),
+            uniqueness_proof=((("id",), "not_ready"),),
+        ),
+    )
+    primary = not_ready["aspects"]["primary_key"]
+    assert primary["status"] == "unchecked"
+    assert "indisready" in primary["reasons"][0]
+    assert "does not reject" in primary["reasons"][0]
+    assert not_ready["verified"] is False
+
+    rows = [
+        ("users_pkey", "id", True, True),
+        ("users_email_invalid", "email", False, True),
+    ]
+    proof = _measured_uniqueness_proof(
+        "postgres", ("id",), {("email",)}, None, None, rows
+    )
+    assert dict(proof) == {("email",): "not_checked", ("id",): ""}
+    cancelled = _measured_uniqueness_proof(
+        "postgresql",
+        ("id",),
+        {("email",)},
+        None,
+        None,
+        [
+            ("users_email_invalid", "email", False, True),
+            ("users_email_key", "email", True, True),
+        ],
+    )
+    assert dict(cancelled) == {("email",): "", ("id",): "unreported"}
+    failed = _measured_uniqueness_proof(
+        "neon", ("id",), {("email",)}, None, None, None
+    )
+    assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
+    assert _measured_uniqueness_proof(
+        "redshift", ("id",), {("email",)}, None, None, rows
+    ) == ()
