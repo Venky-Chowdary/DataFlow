@@ -421,6 +421,7 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
     pk: list[str] = []
     unique_keys: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
+    row_has_rely = False
     try:
         try:
             cur.execute(
@@ -429,7 +430,8 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                        tc.constraint_type,
                        kcu.column_name,
                        kcu.ordinal_position,
-                       COALESCE(tc.enforced, 'YES') AS enforced
+                       COALESCE(tc.enforced, 'YES') AS enforced,
+                       tc.rely
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
                   ON tc.constraint_catalog = kcu.constraint_catalog
@@ -444,9 +446,33 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                 """,
                 (schema, table),
             )
+            row_has_rely = True
         except Exception:
-            # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
-            cur.execute(
+            try:
+                cur.execute(
+                    """
+                    SELECT tc.constraint_name,
+                           tc.constraint_type,
+                           kcu.column_name,
+                           kcu.ordinal_position,
+                           COALESCE(tc.enforced, 'YES') AS enforced
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_catalog = kcu.constraint_catalog
+                     AND tc.constraint_schema = kcu.constraint_schema
+                     AND tc.constraint_name = kcu.constraint_name
+                     AND tc.table_schema = kcu.table_schema
+                     AND tc.table_name = kcu.table_name
+                    WHERE UPPER(tc.table_schema) = UPPER(%s)
+                      AND tc.table_name = %s
+                      AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                    ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
+                    """,
+                    (schema, table),
+                )
+            except Exception:
+                # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
+                cur.execute(
                 """
                 SELECT tc.constraint_name,
                        tc.constraint_type,
@@ -467,7 +493,12 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                 """,
                 (schema, table),
             )
-        for name, ctype, col, _ord, enforced in cur.fetchall() or []:
+        for raw in cur.fetchall() or []:
+            fields = tuple(raw)
+            if len(fields) < 5:
+                continue
+            name, ctype, col, _ord, enforced = fields[:5]
+            rely = _snowflake_rely(fields[5]) if row_has_rely and len(fields) > 5 else None
             key = str(name)
             is_primary = str(ctype).upper() == "PRIMARY KEY"
             bucket = by_name.setdefault(
@@ -486,6 +517,10 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
             bucket["primary"] = is_primary or bool(bucket.get("primary"))
             if str(enforced or "YES").upper() == "NO":
                 bucket["enforced"] = False
+            if rely is True:
+                bucket["rely"] = True
+            elif rely is False and bucket.get("rely") is not True:
+                bucket["rely"] = False
             if col:
                 bucket["columns"].append(str(col))
     except Exception:
@@ -503,6 +538,21 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
         "unique_keys": unique_keys,
         "table_kind": table_kind,
     }
+
+
+def _snowflake_rely(value: Any) -> bool | None:
+    """``TABLE_CONSTRAINTS.RELY``. None when this row did not say.
+
+    RELY lets the optimizer assume the constraint. It is not ``ENFORCED``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in {"YES", "Y", "TRUE", "1"}:
+        return True
+    if text in {"NO", "N", "FALSE", "0"}:
+        return False
+    return None
 
 
 def _snowflake_table_kind(cur: Any, schema: str, table: str) -> str:

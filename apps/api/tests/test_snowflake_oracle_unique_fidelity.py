@@ -185,6 +185,103 @@ def test_snowflake_fetch_records_is_hybrid():
     assert unread["table_kind"] == ""
     assert "table_kind" not in unread["unique_keys"][0]
     assert unread["unique_keys"][0]["enforced"] is False
+    assert "rely" not in unread["unique_keys"][0]
+
+
+def test_snowflake_fetch_records_rely_without_treating_it_as_enforced():
+    """``TABLE_CONSTRAINTS.RELY`` is stored beside ``ENFORCED``. It does not replace it.
+
+    A five-column row is an account that did not return RELY. A missing RELY
+    column falls back to the enforced select and leaves the key unmarked.
+    """
+    from services.unique_key_introspect import _snowflake_rely
+
+    assert _snowflake_rely("YES") is True
+    assert _snowflake_rely("no") is False
+    assert _snowflake_rely(None) is None
+    assert _snowflake_rely("MAYBE") is None
+
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [
+            ("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "NO", "YES"),
+            ("UQ_EMAIL", "UNIQUE", "ORG", 2, "NO", "NO"),
+        ],
+        [("NO", "NO", "NO", "NO")],
+    ]
+    meta = _snowflake_fetch_unique_keys(cur, "PUBLIC", "USERS")
+    key = meta["unique_keys"][0]
+    assert key["enforced"] is False
+    assert key["rely"] is True
+    assert "tc.rely" in str(cur.execute.call_args_list[0].args[0]).lower()
+
+    narrow = MagicMock()
+    narrow.fetchall.return_value = [("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "NO")]
+    narrow_meta = _snowflake_fetch_unique_keys(narrow, "PUBLIC", "USERS")
+    assert narrow_meta["unique_keys"][0]["enforced"] is False
+    assert "rely" not in narrow_meta["unique_keys"][0]
+
+    fallback = MagicMock()
+    fallback.fetchall.return_value = [("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "NO")]
+    fallback.execute.side_effect = [
+        RuntimeError("invalid identifier 'RELY'"),
+        None,
+        RuntimeError("table kind columns unavailable"),
+        RuntimeError("IS_HYBRID unavailable"),
+    ]
+    fallen = _snowflake_fetch_unique_keys(fallback, "PUBLIC", "USERS")
+    assert fallen["unique_keys"][0]["enforced"] is False
+    assert "rely" not in fallen["unique_keys"][0]
+    assert fallen["table_kind"] == ""
+    attempted = " ".join(str(call.args[0]) for call in fallback.execute.call_args_list).lower()
+    assert "tc.rely" in attempted
+    assert "coalesce(tc.enforced" in attempted
+
+
+def test_rely_yes_does_not_block_and_does_not_cancel_hybrid_enforcement():
+    """RELY YES is an optimizer hint. Hybrid plus ENFORCED YES still blocks."""
+    from services.data_integrity import _check_duplicate_keys
+
+    rows = [{"email": "a"}, {"email": "a"}]
+    mappings = [{"source": "email", "target": "EMAIL"}]
+    types = {"EMAIL": "VARCHAR", "ID": "INTEGER"}
+
+    def _run(**key):
+        return _check_duplicate_keys(
+            mappings,
+            rows,
+            "strict",
+            dest_kind="snowflake",
+            primary_key="id",
+            sync_mode="append",
+            destination_unique_keys=[
+                {
+                    "name": "UQ_EMAIL",
+                    "columns": ["EMAIL"],
+                    **key,
+                }
+            ],
+            target_types=types,
+        )
+
+    hinted = _run(enforced=False, rely=True, table_kind="hybrid")
+    assert hinted["passed"] is True
+    assert hinted["blocks_transfer"] is False
+    assert any("RELY is an optimizer hint" in warning for warning in hinted["warnings"])
+    assert any("NOT ENFORCED" in warning for warning in hinted["warnings"])
+
+    rely_without_kind = _run(enforced=True, rely=True)
+    assert rely_without_kind["passed"] is True
+    assert any("RELY is an optimizer hint" in warning for warning in rely_without_kind["warnings"])
+
+    rely_no = _run(enforced=False, rely=False, table_kind="hybrid")
+    assert rely_no["passed"] is True
+    assert not any("RELY" in warning for warning in rely_no["warnings"])
+
+    enforced = _run(enforced=True, rely=True, table_kind="YES")
+    assert enforced["passed"] is False
+    assert enforced["blocks_transfer"] is True
+    assert any("UQ_EMAIL" in issue for issue in enforced["issues"])
 
 
 def test_oracle_nlssort_binary_ci_forces_casefold():

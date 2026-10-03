@@ -685,6 +685,11 @@ def _advisory_unique_key_warnings(
             f"metadata): {', '.join(labels)} — Validate will not invent write "
             "blockers; prove uniqueness with pipeline tests before trusting merges."
         )
+        if any(uk.get("rely") is True for uk in advisory):
+            warnings.append(
+                f"{kind} RELY is an optimizer hint. It does not prove the "
+                "loaded rows are unique."
+            )
     elif _destination_constraints_advisory(dest_kind, keys):
         warnings.append(
             f"{kind} PRIMARY KEY / UNIQUE constraints are informational "
