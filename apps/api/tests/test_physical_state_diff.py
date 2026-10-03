@@ -1908,3 +1908,270 @@ def test_postgres_not_valid_check_is_not_existing_row_proof() -> None:
         "redshift",
         [{"sqltext": "qty > 0", "dialect_options": {"not_valid": True}}],
     ) == ()
+
+
+def test_sqlserver_untrusted_check_is_not_existing_row_proof() -> None:
+    """``is_not_trusted`` is not a dropped check. A disabled check is not a write rule.
+
+    A hand-built SQL Server state with an empty proof tuple did not measure
+    the bits, so it stays on the older carried verdict. A definition-only
+    row does not invent them.
+    """
+    from services.physical_state_diff import (
+        _check_constraints,
+        _measured_check_proof,
+    )
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        check_constraints=frozenset({"qty>0"}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="azure_sql",
+            check_constraints=frozenset({"qty>0"}),
+        ),
+    )
+    assert unmeasured["aspects"]["check_constraints"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    untrusted = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="mssql",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "not_checked"),),
+        ),
+    )
+    check = untrusted["aspects"]["check_constraints"]
+    assert check["status"] == "unchecked"
+    assert check["missing"] == []
+    assert check["unchecked"] == ["qty>0"]
+    assert "is_not_trusted" in check["reasons"][0]
+    assert "still rejected" in check["reasons"][0]
+    assert untrusted["verified"] is False
+    assert "check_constraints" not in untrusted["absent"]
+    assert "check_constraints" in untrusted["unchecked"]
+
+    disabled = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="sqlserver",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "disabled"),),
+        ),
+    )
+    assert disabled["aspects"]["check_constraints"]["status"] == "unchecked"
+    assert "is_disabled" in disabled["aspects"]["check_constraints"]["reasons"][0]
+    assert "does not reject" in disabled["aspects"]["check_constraints"]["reasons"][0]
+
+    missing = compare_physical_state(
+        PhysicalState(
+            found=True,
+            readable=True,
+            check_constraints=frozenset({"qty>0", "email<>''"}),
+        ),
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="mssql",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "not_checked"),),
+        ),
+    )
+    assert missing["aspects"]["check_constraints"]["status"] == "absent"
+    assert missing["aspects"]["check_constraints"]["missing"] == ["email<>''"]
+
+    reflected = _measured_check_proof(
+        "sqlserver",
+        [
+            {"sqltext": "qty > 0", "disabled": 0, "not_trusted": 1},
+            {"sqltext": "(email <> '')", "disabled": 1, "not_trusted": 1},
+            {"sqltext": "active = 1", "disabled": 0, "not_trusted": 0},
+            {"sqltext": "note is not null"},
+        ],
+    )
+    assert dict(reflected) == {
+        "qty>0": "not_checked",
+        "email<>''": "disabled",
+        "active=1": "",
+    }
+    worse = _measured_check_proof(
+        "azure_sql",
+        [
+            {"sqltext": "qty > 0", "disabled": 0, "not_trusted": 0},
+            {"sqltext": "(qty > 0)", "disabled": 1, "not_trusted": 0},
+        ],
+    )
+    assert dict(worse) == {"qty>0": "disabled"}
+    assert _measured_check_proof(
+        "redshift",
+        [{"sqltext": "qty > 0", "disabled": 1, "not_trusted": 1}],
+    ) == ()
+
+    class _Inspector:
+        def get_check_constraints(self, table, **kwargs):
+            raise NotImplementedError
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _Conn:
+        def __init__(self, rows):
+            self.rows = rows
+            self.sql = ""
+
+        def execute(self, sql, params=None):
+            self.sql = str(sql)
+            return _Result(self.rows)
+
+    trusted = _Conn([("qty > 0", 0, 0)])
+    rows = _check_constraints(_Inspector(), trusted, "sqlserver", "orders", {}, "dbo")
+    assert "is_disabled" in trusted.sql
+    assert "is_not_trusted" in trusted.sql
+    assert rows == [{"sqltext": "qty > 0", "disabled": 0, "not_trusted": 0}]
+    definition_only = _check_constraints(
+        _Inspector(), _Conn([("qty > 0",)]), "mssql", "orders", {}, "dbo"
+    )
+    assert definition_only == [{"sqltext": "qty > 0"}]
+
+
+def test_oracle_not_validated_check_is_not_existing_row_proof() -> None:
+    """``ENABLE NOVALIDATE`` is not a dropped check. ``DISABLED`` is not a write rule.
+
+    A hand-built Oracle state with an empty proof tuple did not measure
+    ``STATUS`` or ``VALIDATED``. SQLAlchemy's check reflection drops both
+    columns, so the catalog read is a separate query.
+    """
+    from services.physical_state_diff import (
+        _measured_check_proof,
+        read_oracle_check_rows,
+    )
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        check_constraints=frozenset({"qty>0"}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            check_constraints=frozenset({"qty>0"}),
+        ),
+    )
+    assert unmeasured["aspects"]["check_constraints"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    not_validated = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="amazon_rds_oracle",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "not_checked"),),
+        ),
+    )
+    check = not_validated["aspects"]["check_constraints"]
+    assert check["status"] == "unchecked"
+    assert check["missing"] == []
+    assert "NOT VALIDATED" in check["reasons"][0]
+    assert "still rejected" in check["reasons"][0]
+    assert not_validated["verified"] is False
+    assert "check_constraints" not in not_validated["absent"]
+
+    disabled = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "disabled"),),
+        ),
+    )
+    assert disabled["aspects"]["check_constraints"]["status"] == "unchecked"
+    assert "DISABLED" in disabled["aspects"]["check_constraints"]["reasons"][0]
+    assert "does not reject" in disabled["aspects"]["check_constraints"]["reasons"][0]
+
+    checks = [{"sqltext": "qty > 0"}, {"sqltext": "(email <> '')"}]
+    reflected = _measured_check_proof(
+        "oracle",
+        checks,
+        [
+            ("qty > 0", "ENABLED", "NOT VALIDATED"),
+            ("(email <> '')", "ENABLED", "VALIDATED"),
+        ],
+    )
+    assert dict(reflected) == {"qty>0": "not_checked", "email<>''": ""}
+    off = _measured_check_proof(
+        "oracle",
+        checks,
+        [("qty > 0", "DISABLED", "VALIDATED")],
+    )
+    assert dict(off) == {"qty>0": "disabled", "email<>''": "unreported"}
+    assert dict(
+        _measured_check_proof("oracle", checks, None)
+    ) == {"qty>0": "unreported", "email<>''": "unreported"}
+    worse = _measured_check_proof(
+        "autonomous_database",
+        [{"sqltext": "qty > 0"}],
+        [
+            ("qty > 0", "ENABLED", "VALIDATED"),
+            ("(qty > 0)", "ENABLED", "NOT VALIDATED"),
+        ],
+    )
+    assert dict(worse) == {"qty>0": "not_checked"}
+    assert _measured_check_proof(
+        "sqlite",
+        checks,
+        [("qty > 0", "ENABLED", "NOT VALIDATED")],
+    ) == ()
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _Conn:
+        def __init__(self, rows, fail=False):
+            self.rows = rows
+            self.fail = fail
+            self.sql = ""
+            self.params: dict = {}
+
+        def execute(self, sql, params=None):
+            if self.fail:
+                raise RuntimeError("ALL_CONSTRAINTS unavailable")
+            self.sql = str(sql)
+            self.params = dict(params or {})
+            return _Result(self.rows)
+
+    live = _Conn([("qty > 0", "ENABLED", "NOT VALIDATED")])
+    assert read_oracle_check_rows(live, "HR", "orders") == [
+        ("qty > 0", "ENABLED", "NOT VALIDATED")
+    ]
+    assert "search_condition_vc" in live.sql
+    assert "status" in live.sql
+    assert "validated" in live.sql
+    assert "constraint_type = 'C'" in live.sql
+    assert live.params == {"owner": "HR", "table": "orders"}
+    assert read_oracle_check_rows(_Conn([]), "HR", "orders") == []
+    assert read_oracle_check_rows(_Conn([], fail=True), "HR", "orders") is None

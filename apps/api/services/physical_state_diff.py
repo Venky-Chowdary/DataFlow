@@ -236,7 +236,8 @@ _ROUTINE_DEPEND_SQL: dict[str, str] = {
 
 _CHECK_SQL: dict[str, str] = {
     "mssql": (
-        "SELECT cc.definition FROM sys.check_constraints cc "
+        "SELECT cc.definition, cc.is_disabled, cc.is_not_trusted "
+        "FROM sys.check_constraints cc "
         "WHERE lower(OBJECT_NAME(cc.parent_object_id)) = lower(:t) "
         "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(cc.parent_object_id)) = lower(:s))"
     ),
@@ -336,8 +337,13 @@ class PhysicalState:
     #: Existing-row gap for each normalized CHECK predicate.
     #: ``(predicate, gap)``. PostgreSQL ``""`` means ``pg_get_constraintdef``
     #: did not say ``NOT VALID``. ``not_checked`` means it did. New rows are
-    #: still rejected. ``unreported`` means this read did not see the flag.
-    #: An empty tuple means this comparison did not measure it.
+    #: still rejected. SQL Server ``""`` is enabled and trusted.
+    #: ``not_checked`` is ``is_not_trusted`` on an enabled check.
+    #: ``disabled`` is ``is_disabled``. Oracle ``""`` is ``ENABLED`` and
+    #: ``VALIDATED``. ``not_checked`` is ``ENABLED`` and ``NOT VALIDATED``.
+    #: ``disabled`` is ``STATUS`` ``DISABLED``. ``unreported`` means this
+    #: read did not see the flag. An empty tuple means this comparison did
+    #: not measure it.
     check_proof: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -876,12 +882,14 @@ def read_physical_state(
                 conn, schema, name
             )
         oracle_rows: list[Any] | None = None
+        oracle_check_rows: list[Any] | None = None
         sqlserver_rows: list[Any] | None = None
         postgres_rows: list[Any] | None = None
         if _dialect_key(db_type) == "oracle":
             from services.unique_key_introspect import read_oracle_uniqueness_rows
 
             oracle_rows = read_oracle_uniqueness_rows(conn, schema, name)
+            oracle_check_rows = read_oracle_check_rows(conn, schema, name)
         from services.dialect_profiles import is_sqlserver_like
         from services.foreign_key_metadata import postgres_index_catalog
 
@@ -953,7 +961,7 @@ def read_physical_state(
             for c in checks or []
             if _normalize_predicate(c.get("sqltext"))
         ),
-        check_proof=_measured_check_proof(db_type, checks),
+        check_proof=_measured_check_proof(db_type, checks, oracle_check_rows),
         triggers=frozenset(triggers or ()),
         views=frozenset(views or ()),
         routines=frozenset(routines or ()),
@@ -1197,15 +1205,75 @@ def _check_constraints(
 
     SQLAlchemy's pyodbc dialect raises ``NotImplementedError`` here, and an
     unread CHECK would otherwise be indistinguishable from a dropped one.
+    A one-column row did not ask for ``is_disabled``. Do not invent the bits.
     """
     try:
         return list(inspector.get_check_constraints(table, **args))
     except NotImplementedError:
-        sql = _CHECK_SQL.get(str(db_type or "").strip().casefold())
+        from services.dialect_profiles import is_sqlserver_like
+
+        key = str(db_type or "").strip().casefold()
+        if is_sqlserver_like(key):
+            key = "mssql"
+        sql = _CHECK_SQL.get(key)
         if not sql:
             raise
         rows = conn.execute(sa.text(sql), {"t": table, "s": schema or ""}).fetchall()
-        return [{"sqltext": row[0]} for row in rows]
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item: dict[str, Any] = {"sqltext": row[0]}
+            if len(tuple(row)) > 2:
+                item["disabled"] = row[1]
+                item["not_trusted"] = row[2]
+            out.append(item)
+        return out
+
+
+def read_oracle_check_rows(conn: Any, owner: str, table: str) -> list[Any] | None:
+    """CHECK rows, or None when ``STATUS`` and ``VALIDATED`` were not read.
+
+    An empty list is a successful read of no check constraint. The exact
+    owner/table spelling is tried before upper case. ``search_condition_vc``
+    is the predicate SQLAlchemy's LONG ``search_condition`` is compared
+    against after normalization.
+    """
+    owner_u = (owner or "").upper()
+    table_u = (table or "").upper()
+    attempts = [(str(owner or ""), str(table or ""))]
+    if (owner_u, table_u) != attempts[0]:
+        attempts.append((owner_u, table_u))
+    sql = sa.text(
+        """
+        SELECT search_condition_vc, status, validated
+        FROM all_constraints
+        WHERE constraint_type = 'C'
+          AND table_name = :table
+          AND owner = :owner
+        """
+    )
+    try:
+        rows: list[Any] = []
+        for owner_try, table_try in attempts:
+            rows = list(
+                conn.execute(sql, {"owner": owner_try, "table": table_try}).fetchall()
+            )
+            if rows:
+                return rows
+        return []
+    except Exception:
+        return None
+
+
+def _oracle_status_enabled(value: Any) -> bool | None:
+    """``ALL_CONSTRAINTS.STATUS``. None when this cell did not say."""
+    if value is None:
+        return None
+    text = str(value).strip().casefold()
+    if text == "enabled":
+        return True
+    if text == "disabled":
+        return False
+    return None
 
 
 def _first_token(text: str, tokens: tuple[str, ...]) -> str:
@@ -2087,25 +2155,52 @@ def _diff_defaults(
     }
 
 
+_CHECK_GAP_RANK = {"": 0, "unreported": 1, "not_checked": 2, "disabled": 3}
+
+
+def _worse_check_gap(proof: dict[str, str], predicate: str, gap: str) -> None:
+    current = proof.get(predicate)
+    if current is None or _CHECK_GAP_RANK[gap] > _CHECK_GAP_RANK[current]:
+        proof[predicate] = gap
+
+
 def _measured_check_proof(
     db_type: str,
     checks: list[Any] | None,
+    oracle_rows: list[Any] | None = None,
 ) -> tuple[tuple[str, str], ...]:
-    """PostgreSQL ``NOT VALID`` gaps. Empty for every other engine.
+    """CHECK existing-row gaps. Empty when this engine does not measure them.
 
-    SQLAlchemy's PostgreSQL reflection sets ``dialect_options.not_valid``
-    only when ``pg_get_constraintdef`` says ``NOT VALID``. A check without
-    that key was reflected as valid. Two predicates that normalize together
-    keep the worse gap.
+    PostgreSQL uses ``dialect_options.not_valid``. SQL Server uses
+    ``is_disabled`` and ``is_not_trusted`` on the check row. Oracle uses
+    ``ALL_CONSTRAINTS`` rows. SQLite and Redshift stay empty.
     """
-    from services.foreign_key_metadata import (
-        postgres_check_validation_gap,
-        postgres_index_catalog,
-    )
+    from services.dialect_profiles import is_sqlserver_like
+    from services.foreign_key_metadata import _dialect_key, postgres_index_catalog
 
-    if not postgres_index_catalog(db_type) or not checks:
+    if postgres_index_catalog(db_type):
+        return _postgres_check_proof(checks)
+    if is_sqlserver_like(db_type):
+        return _sqlserver_check_proof(checks)
+    if _dialect_key(db_type) == "oracle":
+        return _oracle_check_proof(checks, oracle_rows)
+    return ()
+
+
+def _postgres_check_proof(
+    checks: list[Any] | None,
+) -> tuple[tuple[str, str], ...]:
+    """PostgreSQL ``NOT VALID`` gaps.
+
+    SQLAlchemy sets ``dialect_options.not_valid`` only when
+    ``pg_get_constraintdef`` says ``NOT VALID``. A check without that key
+    was reflected as valid. Two predicates that normalize together keep
+    the worse gap.
+    """
+    from services.foreign_key_metadata import postgres_check_validation_gap
+
+    if not checks:
         return ()
-    rank = {"": 0, "unreported": 1, "not_checked": 2}
     proof: dict[str, str] = {}
     for check in checks:
         if not isinstance(check, Mapping):
@@ -2118,9 +2213,121 @@ def _measured_check_proof(
             gap = postgres_check_validation_gap(bool(options.get("not_valid")))
         else:
             gap = ""
-        if predicate not in proof or rank[gap] > rank[proof[predicate]]:
-            proof[predicate] = gap
+        _worse_check_gap(proof, predicate, gap)
     return tuple(sorted(proof.items()))
+
+
+def _sqlserver_check_proof(
+    checks: list[Any] | None,
+) -> tuple[tuple[str, str], ...]:
+    """One gap per reflected SQL Server check.
+
+    A row that omits ``is_disabled`` and ``is_not_trusted`` is
+    ``unreported``. Disabled wins over untrusted on the same predicate.
+    """
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        sqlserver_check_validation_gap,
+    )
+
+    if not checks:
+        return ()
+    proof: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        predicate = _normalize_predicate(check.get("sqltext"))
+        if not predicate:
+            continue
+        if "disabled" in check or "not_trusted" in check:
+            gap = sqlserver_check_validation_gap(
+                coerce_validated(check.get("disabled")) if "disabled" in check else None,
+                coerce_validated(check.get("not_trusted"))
+                if "not_trusted" in check
+                else None,
+            )
+        else:
+            gap = "unreported"
+        _worse_check_gap(proof, predicate, gap)
+    return tuple(sorted(proof.items()))
+
+
+def _oracle_check_proof(
+    checks: list[Any] | None,
+    rows: list[Any] | None,
+) -> tuple[tuple[str, str], ...]:
+    """One gap per reflected Oracle check.
+
+    ``rows is None`` means ``STATUS`` and ``VALIDATED`` were not read.
+    Each reflected predicate stays ``unreported``. A successful read that
+    does not name a reflected predicate is the same gap. ``ENABLED`` and
+    ``NOT VALIDATED`` is ``not_checked``. ``DISABLED`` is ``disabled``.
+    """
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        oracle_check_validation_gap,
+    )
+
+    if not checks:
+        return ()
+    measured: dict[str, str] = {}
+    if rows is not None:
+        for row in rows:
+            fields = tuple(row)
+            if len(fields) < 3:
+                continue
+            predicate = _normalize_predicate(fields[0])
+            if not predicate:
+                continue
+            gap = oracle_check_validation_gap(
+                _oracle_status_enabled(fields[1]),
+                coerce_validated(fields[2]),
+            )
+            _worse_check_gap(measured, predicate, gap)
+    proof: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        predicate = _normalize_predicate(check.get("sqltext"))
+        if not predicate:
+            continue
+        if rows is None or predicate not in measured:
+            gap = "unreported"
+        else:
+            gap = measured[predicate]
+        _worse_check_gap(proof, predicate, gap)
+    return tuple(sorted(proof.items()))
+
+
+def _check_validation_reason(destination_dialect: str, gap: str) -> str:
+    """Sentence for a measured check gap. Empty when this engine ignores it."""
+    from services.dialect_profiles import is_sqlserver_like
+    from services.foreign_key_metadata import (
+        _dialect_key,
+        oracle_check_validation_reason,
+        postgres_check_validation_reason,
+        postgres_index_catalog,
+        sqlserver_check_validation_reason,
+    )
+
+    if postgres_index_catalog(destination_dialect):
+        return postgres_check_validation_reason(gap)
+    if is_sqlserver_like(destination_dialect):
+        return sqlserver_check_validation_reason(gap)
+    if _dialect_key(destination_dialect) == "oracle":
+        return oracle_check_validation_reason(gap)
+    return ""
+
+
+def _check_proof_applies(destination_dialect: str) -> bool:
+    from services.dialect_profiles import is_sqlserver_like
+    from services.foreign_key_metadata import _dialect_key, postgres_index_catalog
+
+    return (
+        postgres_index_catalog(destination_dialect)
+        or is_sqlserver_like(destination_dialect)
+        or _dialect_key(destination_dialect) == "oracle"
+    )
 
 
 def _diff_check_constraints(
@@ -2132,18 +2339,14 @@ def _diff_check_constraints(
 ) -> dict[str, Any]:
     """Carried when the predicates match and existing rows were checked.
 
-    A PostgreSQL ``NOT VALID`` check still rejects a new row. That write
-    rule is not this verdict. An empty proof tuple means this comparison
-    did not measure the flag, so a hand-built state stays on the older
-    carried verdict.
+    A ``NOT VALID``, untrusted, or ``NOT VALIDATED`` check still rejects a
+    new row. A disabled check does not. Neither write rule is this verdict
+    by itself: the certificate says whether existing rows were checked.
+    An empty proof tuple means this comparison did not measure the flag,
+    so a hand-built state stays on the older carried verdict.
     """
-    from services.foreign_key_metadata import (
-        postgres_check_validation_reason,
-        postgres_index_catalog,
-    )
-
     base = _diff_sets(source, destination)
-    if not check_proof or not postgres_index_catalog(destination_dialect):
+    if not check_proof or not _check_proof_applies(destination_dialect):
         return base
     proof = {predicate: gap for predicate, gap in check_proof}
     unchecked: list[str] = []
@@ -2153,7 +2356,7 @@ def _diff_check_constraints(
         if not gap:
             continue
         unchecked.append(str(predicate))
-        reason = postgres_check_validation_reason(gap)
+        reason = _check_validation_reason(destination_dialect, gap)
         if reason and reason not in reasons:
             reasons.append(reason)
     if base["missing"]:

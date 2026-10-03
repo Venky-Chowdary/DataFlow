@@ -709,6 +709,97 @@ def postgres_check_validation_reason(gap: str) -> str:
     return ""
 
 
+def sqlserver_check_validation_gap(
+    disabled: bool | None, not_trusted: bool | None
+) -> str:
+    """Existing-row gap from ``sys.check_constraints``.
+
+    An enabled trusted check is the scan. ``is_disabled`` true means
+    inserts ignore the constraint: it is not a write rule and not
+    existing-row proof. ``is_not_trusted`` true while the constraint is
+    enabled is ``not_checked``: existing rows were not verified, and new
+    rows are still rejected. A missing cell stays unreported. Disabled
+    wins over an unread trust bit.
+    """
+    if disabled is True:
+        return "disabled"
+    if disabled is None or not_trusted is None:
+        return "unreported"
+    if not_trusted is True:
+        return "not_checked"
+    return ""
+
+
+def sqlserver_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty SQL Server check validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "sys.check_constraints.is_disabled is 1. The constraint does "
+            "not reject a new row and does not prove the rows already "
+            "stored match."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "sys.check_constraints.is_not_trusted is 1. Existing rows were "
+            "not checked. New rows are still rejected."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. is_disabled and "
+            "is_not_trusted were not read. A SQL Server check can be "
+            "disabled or untrusted, so this catalog object is not proof "
+            "the rows already stored match."
+        )
+    return ""
+
+
+def oracle_check_validation_gap(
+    enabled: bool | None, validated: bool | None
+) -> str:
+    """Existing-row gap from ``ALL_CONSTRAINTS.STATUS`` and ``VALIDATED``.
+
+    ``ENABLED`` and ``VALIDATED`` is the scan. ``ENABLED`` and
+    ``NOT VALIDATED`` is ``not_checked``: existing rows were not checked,
+    and new rows are still rejected. ``DISABLED`` does not reject a new
+    row. A missing cell stays unreported. Disabled wins over an unread
+    ``VALIDATED`` cell.
+    """
+    if enabled is False:
+        return "disabled"
+    if enabled is None or validated is None:
+        return "unreported"
+    if validated is False:
+        return "not_checked"
+    return ""
+
+
+def oracle_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty Oracle check validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "ALL_CONSTRAINTS.STATUS is DISABLED. The constraint does not "
+            "reject a new row and is not existing-row proof."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "ALL_CONSTRAINTS.VALIDATED is NOT VALIDATED. Existing rows "
+            "were not checked. New rows are still rejected while STATUS "
+            "is ENABLED."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. STATUS and "
+            "VALIDATED were not read. An ENABLED check can still be "
+            "NOT VALIDATED, so this catalog object is not proof the "
+            "rows already stored match."
+        )
+    return ""
+
+
 def postgres_unique_index_reason(gap: str) -> str:
     """Operator sentence for a non-empty PostgreSQL unique-index gap."""
     if gap == "not_ready":
