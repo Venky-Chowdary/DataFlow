@@ -550,6 +550,40 @@ def _snowflake_index_status_reason(index_status: str, *, foreign_key: bool) -> s
     )
 
 
+def oracle_uniqueness_validation_gap(validated: bool | None) -> str:
+    """Existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
+
+    ``VALIDATED`` is the only value that proves rows already stored.
+    ``NOT VALIDATED`` was measured and is not that proof. A missing cell
+    stays unreported. ``STATUS`` ``ENABLED`` can still reject a new row
+    while this gap is set.
+    """
+    if validated is True:
+        return ""
+    if validated is False:
+        return "not_checked"
+    return "unreported"
+
+
+def oracle_uniqueness_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty Oracle uniqueness validation gap."""
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.VALIDATED is NOT VALIDATED. Existing rows "
+            "were not checked. New rows are still rejected while STATUS "
+            "is ENABLED."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.VALIDATED was not read. An ENABLED constraint "
+            "can still be NOT VALIDATED, so this catalog object is not "
+            "proof the rows already stored are unique."
+        )
+    return ""
+
+
 def uniqueness_proof_gap(
     dialect: str, *, table_kind: str = "", index_status: str = ""
 ) -> str:

@@ -285,7 +285,8 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
                   ac.constraint_name,
                   ac.constraint_type,
                   acc.column_name,
-                  acc.position
+                  acc.position,
+                  ac.validated
                 FROM all_constraints ac
                 JOIN all_cons_columns acc
                   ON ac.owner = acc.owner
@@ -301,6 +302,66 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
             {"owner": owner, "table": table},
         ).fetchall()
     )
+
+
+def oracle_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
+
+    Columns are folded. ``NOT VALIDATED`` wins across the column rows of one
+    constraint. A row that omits the cell is ``unreported`` for that set.
+    """
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        oracle_uniqueness_validation_gap,
+    )
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 4 or not fields[0] or not fields[2]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(name, {"columns": [], "validated": None})
+        bucket["columns"].append(str(fields[2]).strip().casefold())
+        if len(fields) > 4:
+            checked = coerce_validated(fields[4])
+            if checked is False:
+                bucket["validated"] = False
+            elif checked is True and bucket["validated"] is not False:
+                bucket["validated"] = True
+    proof: dict[frozenset[str], str] = {}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = oracle_uniqueness_validation_gap(bucket["validated"])
+        # A measured failure beats an empty or unread gap on the same columns.
+        rank = {"": 0, "unreported": 1, "not_checked": 2}
+        if columns not in proof or rank[gap] > rank[proof[columns]]:
+            proof[columns] = gap
+    return proof
+
+
+def read_oracle_uniqueness_rows(conn: Any, owner: str, table: str) -> list[Any] | None:
+    """Enabled PRIMARY/UNIQUE rows, or None when the catalog did not answer.
+
+    An empty list is a successful read of no enabled constraint. It is not
+    a failed read. The exact owner/table spelling is tried before upper case.
+    """
+    owner_u = (owner or "").upper()
+    table_u = (table or "").upper()
+    attempts = [(str(owner or ""), str(table or ""))]
+    if (owner_u, table_u) != attempts[0]:
+        attempts.append((owner_u, table_u))
+    try:
+        rows: list[Any] = []
+        for owner_try, table_try in attempts:
+            rows = _oracle_unique_constraint_rows(conn, owner_try, table_try)
+            if rows:
+                return list(rows)
+        return []
+    except Exception:
+        return None
 
 
 def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
@@ -334,7 +395,11 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
     except Exception:
         return {"primary_key_columns": [], "unique_keys": []}
 
-    for name, ctype, col, _pos in rows or []:
+    from services.foreign_key_metadata import coerce_validated
+
+    for row in rows or []:
+        fields = tuple(row)
+        name, ctype, col, _pos = fields[:4]
         key = str(name)
         bucket = by_name.setdefault(
             key,
@@ -349,6 +414,13 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
             },
         )
         bucket["columns"].append(str(col))
+        # A four-column fixture did not ask. Do not invent VALIDATED.
+        if len(fields) > 4:
+            checked = coerce_validated(fields[4])
+            if checked is False:
+                bucket["validated"] = False
+            elif checked is True and bucket.get("validated") is not False:
+                bucket["validated"] = True
     # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
     try:
         fbi_rows = conn.execute(

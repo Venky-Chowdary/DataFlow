@@ -202,6 +202,7 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert state.foreign_key_match == ("",)
     assert state.foreign_key_on_delete == ("NO ACTION",)
     assert state.foreign_key_on_update == ("NO ACTION",)
+    assert state.uniqueness_proof == ()
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -1582,3 +1583,92 @@ def test_catalog_diff_compares_deferral_after_identity() -> None:
         _fk_state(reversed_pairs, deferral=("immediate",)),
     )
     assert order["aspects"]["foreign_keys"]["status"] == "carried"
+
+
+def test_oracle_not_validated_key_is_not_existing_row_proof() -> None:
+    """ENABLED is the new-write rule. VALIDATED is the existing-row proof.
+
+    A hand-built Oracle state with an empty proof tuple did not measure the
+    column, so it stays on the older carried verdict. A live read attaches
+    one gap per reflected key.
+    """
+    from services.physical_state_diff import _oracle_uniqueness_proof
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id",),
+        unique_constraints=frozenset({("email",)}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert unmeasured["aspects"]["primary_key"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    validated = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "")),
+        ),
+    )
+    assert validated["aspects"]["primary_key"]["status"] == "carried"
+    assert validated["aspects"]["unique_constraints"]["status"] == "carried"
+    assert validated["verified"] is True
+
+    not_validated = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), "not_checked"), (("email",), "")),
+        ),
+    )
+    primary = not_validated["aspects"]["primary_key"]
+    assert primary["status"] == "unchecked"
+    assert primary["missing"] == []
+    assert "id" in primary["unchecked"]
+    assert "NOT VALIDATED" in primary["reasons"][0]
+    assert "ENABLED" in primary["reasons"][0]
+    assert not_validated["aspects"]["unique_constraints"]["status"] == "carried"
+    assert not_validated["verified"] is False
+    assert "primary_key" in not_validated["unchecked"]
+    assert "primary_key" not in not_validated["absent"]
+
+    unread = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="oracle",
+            primary_key=("id",),
+            uniqueness_proof=((("id",), "unreported"),),
+        ),
+    )
+    assert unread["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "was not read" in unread["aspects"]["primary_key"]["reasons"][0]
+
+    rows = [
+        ("PK_ID", "P", "ID", 1, "VALIDATED"),
+        ("UQ_EMAIL", "U", "EMAIL", 1, "NOT VALIDATED"),
+    ]
+    proof = _oracle_uniqueness_proof("oracle", ("id",), {("email",)}, rows)
+    assert dict(proof) == {("email",): "not_checked", ("id",): ""}
+    failed = _oracle_uniqueness_proof("oracle", ("id",), {("email",)}, None)
+    assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
+    assert _oracle_uniqueness_proof("postgresql", ("id",), {("email",)}, rows) == ()

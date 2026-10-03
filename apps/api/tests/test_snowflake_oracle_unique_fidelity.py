@@ -294,6 +294,77 @@ def test_rely_yes_does_not_block_and_does_not_cancel_hybrid_enforcement():
     assert still_enforced["blocks_transfer"] is True
 
 
+def test_oracle_not_validated_is_recorded_and_still_blocks_a_new_duplicate():
+    """``VALIDATED`` is not ``STATUS``. NOT VALIDATED still rejects a new row."""
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        _oracle_fetch_unique_keys,
+        oracle_uniqueness_proof,
+        read_oracle_uniqueness_rows,
+    )
+
+    assert oracle_uniqueness_proof(
+        [
+            ("PK_EMP", "P", "ID", 1, "NOT VALIDATED"),
+            ("PK_EMP", "P", "ORG", 2, "VALIDATED"),
+        ]
+    ) == {frozenset({"id", "org"}): "not_checked"}
+    assert oracle_uniqueness_proof(
+        [("UQ_EMAIL", "U", "EMAIL", 1, "VALIDATED")]
+    ) == {frozenset({"email"}): ""}
+
+    cur = MagicMock()
+    cur.execute.return_value.fetchall.side_effect = [
+        [("PK_EMP", "P", "ID", 1, "NOT VALIDATED")],
+        [],
+    ]
+    meta = _oracle_fetch_unique_keys(cur, "HR", "EMP")
+    key = meta["unique_keys"][0]
+    assert key["validated"] is False
+    assert key["primary"] is True
+    assert key["columns"] == ["ID"]
+    sql = str(cur.execute.call_args_list[0].args[0]).lower()
+    assert "ac.validated" in sql
+    assert "status = 'enabled'" in sql
+
+    narrow = MagicMock()
+    narrow.execute.return_value.fetchall.side_effect = [
+        [("PK_EMP", "P", "ID", 1)],
+        [],
+    ]
+    unmarked = _oracle_fetch_unique_keys(narrow, "HR", "EMP")
+    assert "validated" not in unmarked["unique_keys"][0]
+
+    class _Broken:
+        def execute(self, sql, params=()):
+            raise RuntimeError("ORA-00904: VALIDATED")
+
+    assert read_oracle_uniqueness_rows(_Broken(), "HR", "EMP") is None
+
+    assert _unique_constraint_enforced(
+        {"name": "PK_EMP", "columns": ["ID"], "validated": False},
+        dest_kind="oracle",
+    ) is True
+    blocked = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="oracle",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "UQ_EMAIL",
+                "columns": ["EMAIL"],
+                "validated": False,
+            }
+        ],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert blocked["passed"] is False
+    assert blocked["blocks_transfer"] is True
+
+
 def test_oracle_nlssort_binary_ci_forces_casefold():
     expr = "NLSSORT(\"EMAIL\",'NLS_SORT=BINARY_CI')"
     assert parse_case_insensitive_index_expression(expr) == ["EMAIL"]

@@ -323,6 +323,13 @@ class PhysicalState:
     #: ``SHOW INDEXES.status_info`` for the worst index. Empty when the
     #: command did not return that cell, or every index is ``ACTIVE``.
     index_detail: str = ""
+    #: Oracle existing-row gap for each primary-key or unique column set.
+    #: ``(folded columns, gap)``. ``""`` is ``VALIDATED``. ``not_checked`` is
+    #: ``NOT VALIDATED``. ``unreported`` means this read did not see the bit.
+    #: An empty tuple means this comparison did not measure
+    #: ``ALL_CONSTRAINTS.VALIDATED``. A live Oracle read attaches one entry
+    #: for each reflected key.
+    uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         from services.foreign_key_metadata import (
@@ -338,6 +345,10 @@ class PhysicalState:
             "table_kind": _reported_table_kind(self.table_kind),
             "index_status": normalize_snowflake_index_status(self.index_status),
             "index_detail": snowflake_index_detail(self.index_detail),
+            "uniqueness_proof": [
+                {"columns": list(columns), "gap": gap}
+                for columns, gap in self.uniqueness_proof
+            ],
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
@@ -851,6 +862,11 @@ def read_physical_state(
             index_status, index_detail = read_snowflake_index_proof(
                 conn, schema, name
             )
+        oracle_rows: list[Any] | None = None
+        if _dialect_key(db_type) == "oracle":
+            from services.unique_key_introspect import read_oracle_uniqueness_rows
+
+            oracle_rows = read_oracle_uniqueness_rows(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -919,7 +935,49 @@ def read_physical_state(
         table_kind=table_kind,
         index_status=index_status,
         index_detail=index_detail,
+        uniqueness_proof=_oracle_uniqueness_proof(
+            db_type,
+            _cols((pk or {}).get("constrained_columns")),
+            unique_sets,
+            oracle_rows,
+        ),
     )
+
+
+def _oracle_uniqueness_proof(
+    db_type: str,
+    primary_key: tuple[str, ...],
+    unique_sets: set[tuple[str, ...]],
+    rows: list[Any] | None,
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    """One gap per reflected Oracle key. Empty when this engine is not Oracle.
+
+    ``rows is None`` means ``ALL_CONSTRAINTS.VALIDATED`` was not read. Each
+    reflected key stays ``unreported``. A successful read that does not name
+    a reflected column set is the same gap. ``NOT VALIDATED`` is
+    ``not_checked``. ``VALIDATED`` is an empty gap.
+    """
+    from services.foreign_key_metadata import _dialect_key
+    from services.unique_key_introspect import oracle_uniqueness_proof
+
+    if _dialect_key(db_type) != "oracle":
+        return ()
+    measured = oracle_uniqueness_proof(rows) if rows is not None else {}
+    reflected = [primary_key] if primary_key else []
+    reflected.extend(cols for cols in unique_sets if cols)
+    proof: list[tuple[tuple[str, ...], str]] = []
+    seen: set[frozenset[str]] = set()
+    for cols in reflected:
+        key = frozenset(cols)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if rows is None or key not in measured:
+            gap = "unreported"
+        else:
+            gap = measured[key]
+        proof.append((tuple(sorted(key)), gap))
+    return tuple(proof)
 
 
 def _strip_outer_parens(text: str) -> str:
@@ -1769,12 +1827,18 @@ def _diff_uniqueness(
     table_kind: str = "",
     index_status: str = "",
     index_detail: str = "",
+    uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = (),
 ) -> dict[str, Any]:
     """Carried when the column sets match and existing rows were checked.
 
     A Snowflake hybrid table rejects a new duplicate when the key is
     enforced. That write rule is not this verdict. Existing rows are
     carried only when ``SHOW INDEXES`` status is ``ACTIVE``.
+
+    An Oracle ``ENABLED`` key rejects a new duplicate. That write rule is
+    not this verdict. Existing rows are carried only when
+    ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. An empty proof tuple
+    means this comparison did not measure that column.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,
@@ -1783,6 +1847,8 @@ def _diff_uniqueness(
     as ``unchecked``. The object is present. It is not a duplicate-row count.
     """
     from services.foreign_key_metadata import (
+        _dialect_key,
+        oracle_uniqueness_validation_reason,
         uniqueness_proof_gap,
         uniqueness_proof_reason,
         with_snowflake_index_detail,
@@ -1798,7 +1864,7 @@ def _diff_uniqueness(
     dst = _sets(destination)
     missing = sorted(_wire(group) for group in src - dst)
     extra = sorted(_wire(group) for group in dst - src)
-    gap = (
+    dialect_gap = (
         uniqueness_proof_gap(
             destination_dialect,
             table_kind=table_kind,
@@ -1807,11 +1873,30 @@ def _diff_uniqueness(
         if destination_dialect
         else ""
     )
-    matched = sorted(_wire(group) for group in src & dst)
-    unchecked = matched if gap and matched else []
-    reasons = (
-        [
-            with_snowflake_index_detail(
+    use_oracle_proof = bool(uniqueness_proof) and _dialect_key(destination_dialect) == (
+        "oracle"
+    )
+
+    def _item_gap(group: frozenset[str]) -> str:
+        if not use_oracle_proof:
+            return dialect_gap
+        for columns, item_gap in uniqueness_proof:
+            if frozenset(columns) == group:
+                return item_gap
+        return "unreported"
+
+    matched_groups = sorted(src & dst, key=_wire)
+    unchecked: list[str] = []
+    reasons: list[str] = []
+    for group in matched_groups:
+        item_gap = _item_gap(group)
+        if not item_gap:
+            continue
+        unchecked.append(_wire(group))
+        if use_oracle_proof:
+            reason = oracle_uniqueness_validation_reason(item_gap)
+        else:
+            reason = with_snowflake_index_detail(
                 uniqueness_proof_reason(
                     destination_dialect,
                     table_kind=table_kind,
@@ -1819,10 +1904,8 @@ def _diff_uniqueness(
                 ),
                 index_detail,
             )
-        ]
-        if unchecked
-        else []
-    )
+        if reason and reason not in reasons:
+            reasons.append(reason)
     if missing:
         status = "absent"
     elif unchecked:
@@ -1934,6 +2017,7 @@ def compare_physical_state(
             table_kind=destination.table_kind,
             index_status=destination.index_status,
             index_detail=destination.index_detail,
+            uniqueness_proof=destination.uniqueness_proof,
         ),
         "unique_constraints": _diff_uniqueness(
             source.unique_constraints,
@@ -1942,6 +2026,7 @@ def compare_physical_state(
             table_kind=destination.table_kind,
             index_status=destination.index_status,
             index_detail=destination.index_detail,
+            uniqueness_proof=destination.uniqueness_proof,
         ),
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,
