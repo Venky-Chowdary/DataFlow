@@ -283,7 +283,14 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(guide, /never modified/);
     assert.match(guide, /not as loss/);
     assert.match(guide, /post-load transform/);
-    assert.match(guide, /re-checks every row of the[\s\S]{0,40}population/);
+    assert.match(guide, /re-checks[\s\S]{0,80}every row of the[\s\S]{0,40}population/);
+    assert.match(step, /id="xform-title">Transform</);
+    assert.doesNotMatch(step, />Transform \(pre-load\)</);
+    assert.match(step, /How it works/);
+    assert.match(step, /<Dialog/);
+    assert.match(step, /df2-xform-guide-dialog/);
+    assert.doesNotMatch(step, /showGuide/);
+    assert.doesNotMatch(step, /df2-xform-eyebrow/);
     // Identity is what Execute is held to, so it is stated where it is approved.
     assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
     // A refused recipe still has no identity — Map stays locked. A transport

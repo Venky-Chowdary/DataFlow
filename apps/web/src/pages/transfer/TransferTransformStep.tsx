@@ -5,6 +5,7 @@ import { TransformColumnChart } from "../../components/transfer/TransformColumnC
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import { Dialog } from "../../components/ui/Dialog";
 import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
 import type { RuleCompileReport } from "../../lib/businessRules";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
@@ -74,7 +75,6 @@ interface TransferTransformStepProps {
 
 const PREVIEW_ROWS = 12;
 const PREVIEW_DEBOUNCE_MS = 250;
-const GUIDE_KEY = "df.transform.guide.dismissed";
 
 function isTransportTimeout(message: string): boolean {
   return /timed out|abort|504|network/i.test(message);
@@ -95,16 +95,12 @@ function cellText(value: unknown): string {
 }
 
 /**
- * Transform (pre-load) — repair the source on the read, before Map and the write.
+ * Transform — repair the source on the read, before Map and the write.
  *
- * Three panels in the order the decision is made: what the sample holds (charted
- * per column, with profile-driven suggestions), the ordered steps to apply, and
- * the before/after the recipe produces. Nothing here mutates the source; the
- * recipe travels with the plan under an identity Execute is held to, and every
- * step states what it did — cells changed, nulls introduced, rows removed.
- *
- * The step is named for the operator, not for the engine: post-load SQL
- * transforms are a different plane, and this one is explicitly *pre-load*.
+ * Two workspaces: rules and steps, then the sample result. Nothing here mutates
+ * the source. The recipe travels with the plan under an identity Execute is held
+ * to, and every step states what it did — cells changed, nulls introduced, rows
+ * removed. How the step works opens in its own window, off this page.
  */
 export function TransferTransformStep({
   sampleRows,
@@ -138,13 +134,7 @@ export function TransferTransformStep({
   const [preview, setPreview] = useState<ShapePreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showGuide, setShowGuide] = useState(() => {
-    try {
-      return window.localStorage.getItem(GUIDE_KEY) === "0";
-    } catch {
-      return false;
-    }
-  });
+  const [guideOpen, setGuideOpen] = useState(false);
   const [pane, setPane] = useState<"prepare" | "result">("prepare");
   const [showEveryResultColumn, setShowEveryResultColumn] = useState(false);
   const [showAllColumns, setShowAllColumns] = useState(false);
@@ -198,18 +188,6 @@ export function TransferTransformStep({
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }, [onApplyRules, plan.allowed, sourceColumns, targetSchema, sourceSchema, sourceTable, destTable, sourceTables, sourceCatalog, destTables, destCatalog, syncMode]);
-
-  const toggleGuide = useCallback(() => {
-    setShowGuide((open) => {
-      const next = !open;
-      try {
-        window.localStorage.setItem(GUIDE_KEY, next ? "0" : "1");
-      } catch {
-        /* a private-mode browser simply shows the guide every visit */
-      }
-      return next;
-    });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,8 +355,7 @@ export function TransferTransformStep({
       <header className="df2-xform-head">
         <div className="df2-xform-head-row">
           <div className="df2-xform-head-copy">
-            <p className="df2-xform-eyebrow">Before the load · the source is never modified</p>
-            <h2 className="df2-xform-title" id="xform-title">Transform (pre-load)</h2>
+            <h2 className="df2-xform-title" id="xform-title">Transform</h2>
             <p className="df2-xform-route">
               <span>{sourceLabel}</span>
               <DtIcon name="transfer" size={14} />
@@ -398,11 +375,11 @@ export function TransferTransformStep({
             )}
             <button
               type="button"
-              className="df2-btn df2-btn-ghost df2-btn-sm"
-              aria-expanded={showGuide}
-              onClick={toggleGuide}
+              className="df2-btn df2-btn-ghost df2-btn-sm df2-xform-help"
+              aria-haspopup="dialog"
+              onClick={() => setGuideOpen(true)}
             >
-              <DtIcon name="book" size={14} /> {showGuide ? "Hide how this works" : "How this works"}
+              <DtIcon name="info" size={14} /> How it works
             </button>
           </div>
         </div>
@@ -446,9 +423,21 @@ export function TransferTransformStep({
         </div>
       )}
 
-      {showGuide && (
+      <Dialog
+        open={guideOpen}
+        onClose={() => setGuideOpen(false)}
+        title="How Transform works"
+        subtitle="The recipe runs while the data is read. The source file or table is never modified."
+        size="xl"
+        className="df2-xform-guide-dialog"
+        footer={(
+          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => setGuideOpen(false)}>
+            Close
+          </button>
+        )}
+      >
         <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
-      )}
+      </Dialog>
 
       {!plan.allowed && (
         <div className="df2-alert df2-alert-info" role="status">
@@ -800,9 +789,7 @@ export function TransferTransformStep({
           </header>
           {kitchen.from === "shaped" ? (
             <p className="df2-xform-note">
-              These columns are the pre-load image — source names plus columns
-              this recipe just derived. Destination names (customer_key,
-              first_name, …) land on Map. Validate contracts never write.
+              Source names, plus columns this recipe derived. Map chooses the destination names.
             </p>
           ) : profile?.sample_notice ? (
             <p className="df2-xform-note">{profile.sample_notice}</p>
@@ -880,7 +867,7 @@ export function TransferTransformStep({
             </div>
           </div>
           <div className="df2-xform-gridpane">
-            <h4>Pre-load image — source names plus derived columns. Map renames to destination names.</h4>
+            <h4>After the recipe</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
                 {previewError
