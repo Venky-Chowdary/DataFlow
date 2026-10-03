@@ -38,11 +38,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
 from services.dialect_profiles import quote_char_for
+from services.foreign_key_identity import fk_identity, fold, same_relationship
 from services.foreign_key_metadata import (
     ForeignKey,
     ForeignKeys,
@@ -90,6 +92,7 @@ class ForeignKeyDecision:
     # Destination objects the statement touches, so a caller can order work and
     # a re-read knows what to look at.
     dest_table: str = ""
+    referenced_schema: str = ""
     referenced_table: str = ""
     columns: tuple[str, ...] = ()
     referenced_columns: tuple[str, ...] = ()
@@ -318,6 +321,66 @@ def _action_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
     return (" " + " ".join(parts) if parts else ""), ""
 
 
+def parent_relation_schema(
+    *,
+    source_schema: str,
+    dest_schema: str,
+    in_job: bool,
+) -> str:
+    """Schema the ``REFERENCES`` clause names.
+
+    A parent this job loads lands in ``dest_schema``. A parent the catalog
+    placed in another schema stays in that schema. An unnamed source schema
+    uses the destination schema, which is how engines that omit the default
+    schema are written.
+    """
+    if in_job or not str(source_schema or "").strip():
+        return dest_schema or ""
+    if fold(source_schema) == fold(dest_schema):
+        return dest_schema or source_schema
+    return source_schema
+
+
+def parent_table_on_destination(
+    *,
+    schema: str,
+    table: str,
+    job_schema: str,
+    in_job: bool,
+    job_tables: set[str] | None,
+    tables_by_schema: Mapping[str, set[str] | None] | None,
+) -> bool | None:
+    """Whether the parent relation is on the destination.
+
+    ``True`` present, ``False`` absent, ``None`` when the catalog list that
+    would answer was not read. A leaf in the job schema is not a parent the
+    source catalog placed in a different schema.
+    """
+    if in_job:
+        return True
+    source = fold(schema)
+    job = fold(job_schema)
+    leaf = fold(table)
+    cross = bool(source and job and source != job)
+    if cross:
+        if tables_by_schema is None:
+            return None
+        bucket: set[str] | None = None
+        seen = False
+        for key, value in tables_by_schema.items():
+            if fold(key) == source:
+                bucket = value
+                seen = True
+                break
+        if not seen or bucket is None:
+            return None
+        return leaf in {fold(name) for name in bucket}
+    if job_tables is None:
+        return None
+    names = {fold(name) for name in job_tables}
+    return leaf in names or bool(source and f"{source}.{leaf}" in names)
+
+
 def plan_foreign_keys(
     *,
     source_foreign_keys: Any,
@@ -328,6 +391,7 @@ def plan_foreign_keys(
     column_map: dict[str, str] | None = None,
     table_map: dict[str, str] | None = None,
     dest_existing_tables: set[str] | None = None,
+    dest_tables_by_schema: Mapping[str, set[str] | None] | None = None,
     referenced_column_maps: dict[str, dict[str, str]] | None = None,
     cycle_tables: list[str] | set[str] | None = None,
 ) -> ForeignKeyPlan:
@@ -337,10 +401,10 @@ def plan_foreign_keys(
     ``referenced_column_maps`` maps each source table → its column map, so a
     renamed parent key is referenced under the name the load actually wrote.
     ``table_map`` maps source table → destination table for the tables this job
-    moves. ``dest_existing_tables`` are the tables already present on the
-    destination (lower-cased), used when the parent is not part of the job.
-    ``None`` means the destination catalog could not be listed, which is
-    ``unknown`` — never "the parent is missing".
+    moves. ``dest_existing_tables`` are the tables already present in the job
+    schema. ``dest_tables_by_schema`` lists every other schema a source key
+    names. A leaf in the job schema is not a parent that lives in another
+    schema. ``None`` means that list was not read, which is ``unknown``.
     ``cycle_tables`` are members of a detected FK cycle (and self-refs are
     treated as cycle edges even when omitted): PostgreSQL/Oracle emit
     DEFERRABLE INITIALLY DEFERRED on those edges.
@@ -437,35 +501,77 @@ def plan_foreign_keys(
         in_job = bool(ref_dest)
         if not ref_dest:
             ref_dest = ref_source
+        parent_schema = parent_relation_schema(
+            source_schema=fk.referenced_schema,
+            dest_schema=dest_schema,
+            in_job=in_job,
+        )
         if not in_job:
-            if known_tables is None:
+            present = parent_table_on_destination(
+                schema=fk.referenced_schema,
+                table=ref_dest,
+                job_schema=dest_schema,
+                in_job=False,
+                job_tables=known_tables,
+                tables_by_schema=dest_tables_by_schema,
+            )
+            qualified = (
+                f"{fk.referenced_schema}.{ref_source}"
+                if fk.referenced_schema
+                else ref_source
+            )
+            cross = bool(
+                fold(fk.referenced_schema)
+                and fold(dest_schema)
+                and fold(fk.referenced_schema) != fold(dest_schema)
+            )
+            if present is None:
+                reason = (
+                    f"Referenced table '{qualified}' is not part of this job, and "
+                    f"destination schema {fk.referenced_schema} was not listed. "
+                    f"The table {ref_source} in schema {dest_schema or '(default)'} "
+                    "is a different relation, so the key stays unverified."
+                    if cross
+                    else (
+                        f"Referenced table '{ref_source}' is not part of this job "
+                        "and the destination table list could not be read, so the "
+                        "key is unverified rather than absent."
+                    )
+                )
                 plan.decisions.append(
                     ForeignKeyDecision(
                         name=fk.name,
                         status="unknown",
-                        reason=(
-                            f"Referenced table '{ref_source}' is not part of this job "
-                            "and the destination table list could not be read, so the "
-                            "key is unverified rather than absent."
-                        ),
+                        reason=reason,
                         source_detail=detail,
                         dest_table=dest_table,
+                        referenced_schema=parent_schema,
                         referenced_table=ref_dest,
                     )
                 )
                 continue
-            if ref_dest.lower() not in known_tables:
+            if not present:
+                reason = (
+                    f"Referenced table '{qualified}' is neither in this transfer "
+                    f"nor present in destination schema {fk.referenced_schema}. "
+                    f"A table named {ref_source} in schema {dest_schema} is a "
+                    "different relation — add the parent to the stream selection, "
+                    "or create it in its own schema first."
+                    if cross
+                    else (
+                        f"Referenced table '{ref_source}' is neither in this "
+                        "transfer nor present on the destination — add it to the "
+                        "stream selection, or create it first."
+                    )
+                )
                 plan.decisions.append(
                     ForeignKeyDecision(
                         name=fk.name,
                         status="unsupported",
-                        reason=(
-                            f"Referenced table '{ref_source}' is neither in this "
-                            "transfer nor present on the destination — add it to the "
-                            "stream selection, or create it first."
-                        ),
+                        reason=reason,
                         source_detail=detail,
                         dest_table=dest_table,
+                        referenced_schema=parent_schema,
                         referenced_table=ref_dest,
                     )
                 )
@@ -493,6 +599,7 @@ def plan_foreign_keys(
                     ),
                     source_detail=detail,
                     dest_table=dest_table,
+                    referenced_schema=parent_schema,
                     referenced_table=ref_dest,
                 )
             )
@@ -509,6 +616,7 @@ def plan_foreign_keys(
                     ),
                     source_detail=detail,
                     dest_table=dest_table,
+                    referenced_schema=parent_schema,
                     referenced_table=ref_dest,
                 )
             )
@@ -523,6 +631,7 @@ def plan_foreign_keys(
                     reason=refusal,
                     source_detail=detail,
                     dest_table=dest_table,
+                    referenced_schema=parent_schema,
                     referenced_table=ref_dest,
                 )
             )
@@ -539,7 +648,7 @@ def plan_foreign_keys(
             f"ALTER TABLE {_qualified(dial, dest_schema, dest_table)} "
             f"ADD CONSTRAINT {_quote(dial, name)} FOREIGN KEY "
             f"({', '.join(_quote(dial, c) for c in child_cols)}) "
-            f"REFERENCES {_qualified(dial, dest_schema, ref_dest)} "
+            f"REFERENCES {_qualified(dial, parent_schema, ref_dest)} "
             f"({', '.join(_quote(dial, c) for c in ref_cols)}){clause}{defer}"
         )
         plan.statements.append(statement)
@@ -554,6 +663,7 @@ def plan_foreign_keys(
                 source_detail=detail,
                 dest_ddl=statement,
                 dest_table=dest_table,
+                referenced_schema=parent_schema,
                 referenced_table=ref_dest,
                 columns=tuple(child_cols),
                 referenced_columns=tuple(ref_cols),
@@ -641,6 +751,7 @@ def apply_foreign_keys(
                     source_detail=decision.source_detail,
                     dest_ddl=decision.dest_ddl,
                     dest_table=decision.dest_table,
+                    referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
@@ -652,13 +763,18 @@ def apply_foreign_keys(
     return out
 
 
-def _signature(columns: tuple[str, ...] | list[str], table: str,
-               referenced: tuple[str, ...] | list[str]) -> tuple:
-    return (
-        tuple(c.lower() for c in columns),
-        table.lower(),
-        tuple(c.lower() for c in referenced),
-    )
+def _relationship_fact(
+    columns: tuple[str, ...] | list[str],
+    schema: str,
+    table: str,
+    referenced: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
+    return {
+        "constrained_columns": list(columns),
+        "referred_schema": schema,
+        "referred_table": table,
+        "referred_columns": list(referenced),
+    }
 
 
 def verify_foreign_keys(
@@ -667,19 +783,28 @@ def verify_foreign_keys(
 ) -> list[ForeignKeyDecision]:
     """Settle planned keys against the destination catalog.
 
-    Matching is structural — child columns, parent table, parent columns —
-    because an engine may store the constraint under a name of its own, and a
-    name comparison would report a carried key as missing.
+    Matching uses :func:`services.foreign_key_identity.same_relationship`:
+    the parent relation, including schema, plus the set of column pairs.
+    An engine may store the constraint under a name of its own, and DDL
+    order is the same relationship. A same-named table in another schema
+    is not.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
     present = (
-        {
-            _signature(fk.columns, fk.referenced_table, fk.referenced_columns)
+        [
+            fk_identity(
+                _relationship_fact(
+                    fk.columns,
+                    fk.referenced_schema,
+                    fk.referenced_table,
+                    fk.referenced_columns,
+                )
+            )
             for fk in dest_foreign_keys.items
-        }
+        ]
         if measured and dest_foreign_keys is not None
-        else set()
+        else []
     )
     for decision in decisions:
         if decision.status != "planned":
@@ -701,16 +826,22 @@ def verify_foreign_keys(
                     source_detail=decision.source_detail,
                     dest_ddl=decision.dest_ddl,
                     dest_table=decision.dest_table,
+                    referenced_schema=decision.referenced_schema,
                     referenced_table=decision.referenced_table,
                     columns=decision.columns,
                     referenced_columns=decision.referenced_columns,
                 )
             )
             continue
-        signature = _signature(
-            decision.columns, decision.referenced_table, decision.referenced_columns
+        wanted = fk_identity(
+            _relationship_fact(
+                decision.columns,
+                decision.referenced_schema,
+                decision.referenced_table,
+                decision.referenced_columns,
+            )
         )
-        carried = signature in present
+        carried = any(same_relationship(wanted, known) for known in present)
         out.append(
             ForeignKeyDecision(
                 name=decision.name,
@@ -727,6 +858,7 @@ def verify_foreign_keys(
                 source_detail=decision.source_detail,
                 dest_ddl=decision.dest_ddl,
                 dest_table=decision.dest_table,
+                referenced_schema=decision.referenced_schema,
                 referenced_table=decision.referenced_table,
                 columns=decision.columns,
                 referenced_columns=decision.referenced_columns,

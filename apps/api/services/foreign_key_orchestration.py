@@ -116,6 +116,35 @@ def _destination_tables(engine: Any, dialect: str, schema: str) -> set[str] | No
         return None
 
 
+def _parent_schemas_on_destination(
+    engine: Any,
+    dialect: str,
+    source_keys: dict[str, ForeignKeys],
+    job_schema: str,
+) -> dict[str, set[str] | None] | None:
+    """Tables in each parent schema that is not the job schema.
+
+    The job-schema list cannot answer for those parents. ``None`` for a schema
+    means that list was not read.
+    """
+    job = (job_schema or "").strip().casefold()
+    schemas: list[str] = []
+    seen: set[str] = set()
+    for keys in source_keys.values():
+        for fk in getattr(keys, "items", ()) or ():
+            schema = str(getattr(fk, "referenced_schema", "") or "").strip()
+            folded = schema.casefold()
+            if not schema or (job and folded == job) or folded in seen:
+                continue
+            seen.add(folded)
+            schemas.append(schema)
+    if not schemas:
+        return None
+    return {
+        schema: _destination_tables(engine, dialect, schema) for schema in schemas
+    }
+
+
 def carry_foreign_keys(
     *,
     dest_dialect: str,
@@ -159,6 +188,9 @@ def carry_foreign_keys(
         ]
 
     known = _destination_tables(engine, dest_dialect, catalog_ns)
+    by_schema = _parent_schemas_on_destination(
+        engine, dest_dialect, source_keys, catalog_ns
+    )
     for source_table, keys in source_keys.items():
         dest_table = table_map.get(source_table, source_table)
         plan = plan_foreign_keys(
@@ -170,6 +202,7 @@ def carry_foreign_keys(
             column_map=column_maps.get(source_table, {}),
             table_map=table_map,
             dest_existing_tables=known,
+            dest_tables_by_schema=by_schema,
             referenced_column_maps=column_maps,
             cycle_tables=cycle_tables,
         )
