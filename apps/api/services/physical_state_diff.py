@@ -241,9 +241,9 @@ class PhysicalState:
     foreign_key_facts: tuple[
         tuple[tuple[str, ...], str, str, tuple[str, ...]], ...
     ] = ()
-    #: Ordered key, uniqueness, partial predicate, and NULLS NOT DISTINCT.
-    #: Column order is the access path. A unique index is not a plain index.
-    #: A partial index is not a full index. See :class:`CatalogIndex`.
+    #: Ordered key, uniqueness, predicate, covering columns, and access method.
+    #: See :class:`CatalogIndex`. A unique, partial, covering, or gin index is
+    #: not the plain column list.
     indexes: frozenset[CatalogIndex] = frozenset()
     not_null: frozenset[str] = frozenset()
     #: ``(column, normalized expression)``. A sequence or identity with no
@@ -848,17 +848,24 @@ def _read_dependent_routines(
 class CatalogIndex(NamedTuple):
     """One index the catalog reflected, or an expression the driver spelled.
 
-    ``keys`` keeps column order. A reported sort direction is part of that key
-    (``email desc``). An expression stands in for a column the driver left
+    ``keys`` keeps column order. A reported sort direction, opclass, or prefix
+    length is part of that key (``email desc``, ``email text_pattern_ops``,
+    ``email(10)``). An expression stands in for a column the driver left
     unnamed (``lower(email)``). ``predicate`` is the partial-index filter.
-    ``nulls_not_distinct`` is the Postgres unique-null rule; engines that omit
-    it store false, which is their default of many nulls.
+    ``include`` is the covering set. ``using`` is the access method when the
+    driver reports one other than its default (``gin``, ``fulltext``). An
+    omitted method is that default, so SQLite and a Postgres btree match.
+    ``nulls_not_distinct`` is the Postgres unique-null rule. ``invalid`` is a
+    Postgres index the catalog says is not usable.
     """
 
     unique: bool
     keys: tuple[str, ...]
     predicate: str
     nulls_not_distinct: bool
+    include: tuple[str, ...] = ()
+    using: str = ""
+    invalid: bool = False
 
 
 def _index_predicate(index: Mapping[str, Any]) -> str:
@@ -896,6 +903,48 @@ def _sort_suffix(name: str, sorting: Mapping[str, Any]) -> str:
     )
 
 
+def _column_option(options: Mapping[str, Any], name: str, *keys: str) -> str:
+    """A per-column dialect option, matched on the catalog's own spelling."""
+    folded = _fold(name)
+    for key in keys:
+        table = options.get(key) or {}
+        if not isinstance(table, Mapping):
+            continue
+        if name in table and table[name] is not None:
+            return str(table[name]).strip()
+        for column, value in table.items():
+            if _fold(column) == folded and value is not None:
+                return str(value).strip()
+    return ""
+
+
+def _index_using(options: Mapping[str, Any]) -> str:
+    """Access method when it is not the driver's default.
+
+    Postgres omits btree. MySQL omits a plain ``KEY`` and records ``FULLTEXT``
+    or ``SPATIAL`` on ``mysql_prefix``. A parser is part of that method.
+    """
+    method = _fold(
+        options.get("postgresql_using")
+        or options.get("mysql_prefix")
+        or options.get("mariadb_prefix")
+        or ""
+    )
+    parser = _fold(
+        options.get("mysql_with_parser") or options.get("mariadb_with_parser") or ""
+    )
+    if parser:
+        return f"{method} {parser}".strip()
+    return method
+
+
+def _index_include(options: Mapping[str, Any]) -> tuple[str, ...]:
+    """Covering columns. Order does not change which columns are stored."""
+    raw = options.get("postgresql_include") or ()
+    names = sorted({_fold(column) for column in raw if str(column or "").strip()})
+    return tuple(names)
+
+
 def catalog_index_fact(index: Mapping[str, Any]) -> CatalogIndex | None:
     """The index identity, or None when a key column was not spelled.
 
@@ -908,14 +957,24 @@ def catalog_index_fact(index: Mapping[str, Any]) -> CatalogIndex | None:
     if not names and not expressions:
         return None
     sorting = index.get("column_sorting") or {}
+    options = index.get("dialect_options") or {}
     keys: list[str] = []
     for i in range(max(len(names), len(expressions))):
         name = names[i] if i < len(names) else None
         expr = expressions[i] if i < len(expressions) else None
         if name:
             key = _fold(name)
+            length = _column_option(
+                options, str(name), "mysql_length", "mariadb_length"
+            )
+            if length:
+                key = f"{key}({length})"
             suffix = _sort_suffix(str(name), sorting)
-            keys.append(f"{key} {suffix}" if suffix else key)
+            opclass = _fold(
+                _column_option(options, str(name), "postgresql_ops")
+            )
+            extras = " ".join(part for part in (suffix, opclass) if part)
+            keys.append(f"{key} {extras}" if extras else key)
             continue
         spelled = _normalize_index_expression(expr)
         if not spelled:
@@ -923,24 +982,38 @@ def catalog_index_fact(index: Mapping[str, Any]) -> CatalogIndex | None:
         keys.append(spelled)
     if not keys:
         return None
-    options = index.get("dialect_options") or {}
     return CatalogIndex(
         unique=bool(index.get("unique")),
         keys=tuple(keys),
         predicate=_index_predicate(index),
         nulls_not_distinct=bool(options.get("postgresql_nulls_not_distinct")),
+        include=_index_include(options),
+        using=_index_using(options),
+        invalid=bool(options.get("postgresql_invalid")),
     )
 
 
+def _as_index(fact: tuple) -> CatalogIndex:
+    if isinstance(fact, CatalogIndex):
+        return fact
+    return CatalogIndex(*fact)
+
+
 def _render_index(fact: tuple) -> str:
-    unique, keys, predicate, nulls_not_distinct = fact
-    body = "+".join(keys)
-    if unique:
+    index = _as_index(fact)
+    body = "+".join(index.keys)
+    if index.unique:
         body = f"unique({body})"
-    if nulls_not_distinct:
+    if index.nulls_not_distinct:
         body = f"{body} nulls not distinct"
-    if predicate:
-        body = f"{body} where {predicate}"
+    if index.include:
+        body = f"{body} include {'+'.join(index.include)}"
+    if index.using:
+        body = f"{body} using {index.using}"
+    if index.invalid:
+        body = f"{body} invalid"
+    if index.predicate:
+        body = f"{body} where {index.predicate}"
     return body
 
 
@@ -953,6 +1026,8 @@ def _diff_indexes(
     ``(b, a)`` is not ``(a, b)``. A unique index is not a plain index. A
     partial index is not a full index. ``email DESC`` is not ``email`` when
     the catalog reports the direction. ``lower(email)`` is not ``email``.
+    A covering ``INCLUDE``, a ``gin`` or ``FULLTEXT`` method, a prefix
+    length, and an invalid index are part of the same path.
     """
     missing = sorted(_render_index(fact) for fact in source - destination)
     extra = sorted(_render_index(fact) for fact in destination - source)

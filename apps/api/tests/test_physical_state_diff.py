@@ -615,6 +615,105 @@ def test_direction_expression_and_nulls_stay_on_the_index() -> None:
     assert nulls["aspects"]["indexes"]["missing"] == ["unique(email) nulls not distinct"]
 
 
+def test_covering_method_prefix_and_invalid_stay_on_the_index() -> None:
+    """INCLUDE, gin, FULLTEXT, a prefix length, and INVALID are the access path.
+
+    Postgres and MySQL report these on the inspector dict. A column list alone
+    would certify a covering gin index as a plain btree index.
+    """
+    plain = catalog_index_fact(
+        {"name": "ix", "unique": False, "column_names": ["email"]}
+    )
+    covering = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["email"],
+            "dialect_options": {"postgresql_include": ["Phone", "name"]},
+        }
+    )
+    same_covering = catalog_index_fact(
+        {
+            "name": "ix_other",
+            "unique": False,
+            "column_names": ["email"],
+            "dialect_options": {"postgresql_include": ["name", "phone"]},
+        }
+    )
+    gin = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["body"],
+            "dialect_options": {"postgresql_using": "gin"},
+        }
+    )
+    fulltext = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["body"],
+            "dialect_options": {"mysql_prefix": "FULLTEXT", "mysql_with_parser": "ngram"},
+        }
+    )
+    prefix = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["email"],
+            "dialect_options": {"mysql_length": {"email": 10}},
+        }
+    )
+    opclass = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["email"],
+            "dialect_options": {"postgresql_ops": {"email": "text_pattern_ops"}},
+        }
+    )
+    invalid = catalog_index_fact(
+        {
+            "name": "ix",
+            "unique": False,
+            "column_names": ["email"],
+            "dialect_options": {"postgresql_invalid": True},
+        }
+    )
+    assert covering == same_covering
+    covered = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({covering})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )
+    assert covered["aspects"]["indexes"]["missing"] == ["email include name+phone"]
+    btree = catalog_index_fact(
+        {"name": "ix", "unique": False, "column_names": ["body"]}
+    )
+    method = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({gin})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({btree})),
+    )
+    assert method["aspects"]["indexes"]["missing"] == ["body using gin"]
+    assert method["aspects"]["indexes"]["extra"] == ["body"]
+    parsed = compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({fulltext})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({btree})),
+    )
+    assert parsed["aspects"]["indexes"]["missing"] == ["body using fulltext ngram"]
+    assert compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({prefix})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )["aspects"]["indexes"]["missing"] == ["email(10)"]
+    assert compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({opclass})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )["aspects"]["indexes"]["missing"] == ["email text_pattern_ops"]
+    assert compare_physical_state(
+        PhysicalState(found=True, readable=True, indexes=frozenset({invalid})),
+        PhysicalState(found=True, readable=True, indexes=frozenset({plain})),
+    )["aspects"]["indexes"]["missing"] == ["email invalid"]
+
+
 def test_an_expression_index_the_driver_skips_is_not_carried(tmp_path: Path) -> None:
     """SQLite reflection drops lower(email). That must not look like no index."""
     cfg = _db(
