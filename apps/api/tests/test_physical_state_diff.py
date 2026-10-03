@@ -575,6 +575,97 @@ def test_informational_warehouse_primary_key_is_not_carried_row_proof() -> None:
         assert "primary_key" not in carried["unchecked"], dialect
 
 
+def test_snowflake_catalog_read_asks_is_hybrid() -> None:
+    """The certificate read uses INFORMATION_SCHEMA.TABLES.IS_HYBRID."""
+    from services.physical_state_diff import _read_snowflake_table_kind
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Conn:
+        def __init__(self, row):
+            self.row = row
+            self.sql = ""
+            self.params: dict = {}
+
+        def execute(self, stmt, params):
+            self.sql = str(stmt)
+            self.params = dict(params)
+            return _Result(self.row)
+
+    yes = _Conn(("YES",))
+    assert _read_snowflake_table_kind(yes, "PUBLIC", "ORDERS") == "hybrid"
+    assert "is_hybrid" in yes.sql
+    assert "information_schema.tables" in yes.sql
+    assert yes.params == {"schema": "PUBLIC", "table": "ORDERS"}
+    assert _read_snowflake_table_kind(_Conn(("NO",)), "PUBLIC", "ORDERS") == "standard"
+    assert _read_snowflake_table_kind(_Conn(None), "PUBLIC", "ORDERS") == ""
+
+    class _Broken:
+        def execute(self, stmt, params):
+            raise RuntimeError("column is_hybrid does not exist")
+
+    assert _read_snowflake_table_kind(_Broken(), "PUBLIC", "ORDERS") == ""
+
+
+def test_measured_hybrid_primary_key_is_carried_row_proof() -> None:
+    """IS_HYBRID YES makes a matching Snowflake key carried. The label does not travel."""
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id",),
+        unique_constraints=frozenset({("email",)}),
+    )
+    hybrid = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake_aws",
+            table_kind="YES",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert hybrid["aspects"]["primary_key"]["status"] == "carried"
+    assert hybrid["aspects"]["unique_constraints"]["status"] == "carried"
+    assert hybrid["aspects"]["primary_key"]["unchecked"] == []
+    assert "primary_key" not in hybrid["unchecked"]
+    assert hybrid["destination"]["table_kind"] == "hybrid"
+
+    standard = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="snowflake",
+            table_kind="NO",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert standard["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "IS_HYBRID" in standard["aspects"]["primary_key"]["reasons"][0]
+
+    borrowed = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="bigquery",
+            table_kind="hybrid",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+        ),
+    )
+    assert borrowed["aspects"]["primary_key"]["status"] == "unchecked"
+    assert "BigQuery" in borrowed["aspects"]["primary_key"]["reasons"][0]
+
+
 def test_a_missing_unique_stays_absent_on_an_informational_engine() -> None:
     """The object that never arrived is absent. The gap does not hide that."""
     src = PhysicalState(

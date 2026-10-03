@@ -414,7 +414,9 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
 
     Hybrid tables enforce these at write time; standard tables often declare
     ``NOT ENFORCED`` constraints — surface ``enforced`` so Validate does not
-    invent blockers for advisory-only keys (Snowflake honesty bar).
+    invent blockers for advisory-only keys. ``table_kind`` is
+    ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` (``YES`` or ``NO``). An unread
+    kind stays empty, so a stamped ``enforced`` flag is not a hybrid table.
     """
     pk: list[str] = []
     unique_keys: list[dict[str, Any]] = []
@@ -487,13 +489,48 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
             if col:
                 bucket["columns"].append(str(col))
     except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
+        return {"primary_key_columns": [], "unique_keys": [], "table_kind": ""}
 
+    table_kind = _snowflake_table_kind(cur, schema, table)
     for bucket in by_name.values():
         if bucket.get("primary"):
             pk = list(bucket.get("columns") or [])
+        if table_kind:
+            bucket["table_kind"] = table_kind
         unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+    return {
+        "primary_key_columns": pk,
+        "unique_keys": unique_keys,
+        "table_kind": table_kind,
+    }
+
+
+def _snowflake_table_kind(cur: Any, schema: str, table: str) -> str:
+    """Measured ``IS_HYBRID``. Empty when the catalog did not answer.
+
+    Snowflake documents ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` as ``YES``
+    or ``NO``. A missing column or a failed read stays unreported.
+    """
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    try:
+        cur.execute(
+            """
+            SELECT is_hybrid
+            FROM information_schema.tables
+            WHERE UPPER(table_schema) = UPPER(%s)
+              AND table_name = %s
+            """,
+            (schema, table),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    row = rows[0]
+    cell = row[0] if isinstance(row, (tuple, list)) else row
+    return normalize_snowflake_table_kind(cell)
 
 
 def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:

@@ -599,6 +599,15 @@ def _sample_unique_constraint_dupes(
     return [f"{label}: duplicate key values ({sample})"]
 
 
+def _key_table_kind(uk: dict[str, Any] | None) -> str:
+    """Table kind stamped on one catalog key, or empty when it was not measured."""
+    if not isinstance(uk, dict) or "table_kind" not in uk:
+        return ""
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    return normalize_snowflake_table_kind(uk.get("table_kind"))
+
+
 def _destination_constraints_advisory(
     dest_kind: str,
     destination_unique_keys: list[dict[str, Any]] | None = None,
@@ -606,17 +615,20 @@ def _destination_constraints_advisory(
     """True when dest PK/UNIQUE are optimizer metadata, not a write rule.
 
     Redshift, BigQuery, Databricks, and Snowflake standard tables share
-    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A key dict
-    that says ``enforced`` false on any other engine is the same answer.
+    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A Snowflake
+    key becomes a write rule only when its measured table kind is hybrid
+    and ``enforced`` is true. A stamped ``enforced`` flag without that kind
+    stays advisory. A key dict that says ``enforced`` false on any other
+    engine is the same answer.
     """
     from services.foreign_key_metadata import uniqueness_proof_gap
 
-    if uniqueness_proof_gap(dest_kind) == "unenforced":
-        return True
-    keys = list(destination_unique_keys or [])
-    if keys and all(uk.get("enforced") is False for uk in keys):
-        return True
-    return False
+    keys = [uk for uk in (destination_unique_keys or []) if isinstance(uk, dict)]
+    if not keys:
+        return uniqueness_proof_gap(dest_kind) == "unenforced"
+    return all(
+        not _unique_constraint_enforced(uk, dest_kind=dest_kind) for uk in keys
+    )
 
 
 def _unique_constraint_enforced(
@@ -624,15 +636,20 @@ def _unique_constraint_enforced(
     *,
     dest_kind: str = "",
 ) -> bool:
-    from services.foreign_key_metadata import uniqueness_proof_gap
+    from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
 
-    if uniqueness_proof_gap(dest_kind) == "unenforced":
+    kind = _key_table_kind(uk)
+    if uniqueness_proof_gap(dest_kind, table_kind=kind) == "unenforced":
         return False
+    if _dialect_key(dest_kind) == "snowflake":
+        # Hybrid tables enforce the key. The constraint row still has to say so.
+        return uk is not None and uk.get("enforced") is True
     if uk is not None and uk.get("enforced") is False:
         return False
     if uk is not None and uk.get("enforced") is True:
         return True
-    return not _destination_constraints_advisory(dest_kind, [uk] if uk else None)
+    # An enforcing engine with no separate bit treats the constraint as the check.
+    return True
 
 
 def _advisory_unique_key_warnings(

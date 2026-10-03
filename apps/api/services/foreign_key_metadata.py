@@ -321,9 +321,11 @@ _VALIDATION_BIT_DIALECTS = frozenset(
 # BigQuery: only NOT ENFORCED is supported.
 # Databricks: primary, foreign, and unique keys are informational.
 # Snowflake: not enforced on a standard table. A hybrid table does enforce
-# them. This dialect string does not say which table kind it is, so a
-# Snowflake catalog hit is not row proof. The orphan scan still runs, and
-# a carried unique is not a duplicate-row count.
+# them. INFORMATION_SCHEMA.TABLES.IS_HYBRID is the measurement (YES or NO).
+# SHOW TABLES is_hybrid is the same fact as a boolean. The dialect string
+# is not that column. An unreported kind stays unenforced. The orphan scan
+# still runs until the kind is hybrid, and a carried unique on a standard
+# table is not a duplicate-row count.
 _INFORMATIONAL_KEY_DIALECTS = frozenset(
     {"redshift", "snowflake", "bigquery", "databricks"}
 )
@@ -361,34 +363,64 @@ def _dialect_key(dialect: str) -> str:
     return key
 
 
+def normalize_snowflake_table_kind(value: Any) -> str:
+    """Measured Snowflake table kind. Empty when this read did not say.
+
+    ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES`` or ``NO``.
+    ``SHOW TABLES`` ``is_hybrid`` is a boolean. A dialect name, a constraint
+    ``ENFORCED`` flag, and ``TABLE_TYPE`` (``BASE TABLE`` for both kinds)
+    are not this value. An unrecognized spelling stays unreported.
+    """
+    if value is True:
+        return "hybrid"
+    if value is False:
+        return "standard"
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    if text in {"hybrid", "yes", "y", "true"}:
+        return "hybrid"
+    if text in {"standard", "no", "n", "false"}:
+        return "standard"
+    return ""
+
+
 def informational_key_engine(dialect: str) -> bool:
     """True when this engine stores PK, UNIQUE, and FK and does not check rows.
 
     Snowflake hybrid tables do enforce those keys. The dialect name does not
-    say the table is hybrid, so the catalog object is not that proof.
+    say the table is hybrid. :func:`normalize_snowflake_table_kind` is the
+    catalog fact that does.
     """
     return _dialect_key(dialect) in _INFORMATIONAL_KEY_DIALECTS
 
 
-def uniqueness_proof_gap(dialect: str) -> str:
+def uniqueness_proof_gap(dialect: str, *, table_kind: str = "") -> str:
     """Why a catalog primary key or unique constraint does not prove the rows.
 
     Empty when the engine rejects a duplicate. ``unenforced`` when the
     catalog object is planner metadata. A stray ``enforced=True`` on the
-    key dict cannot override this.
+    key dict cannot override a Snowflake dialect. A measured ``IS_HYBRID``
+    of ``YES`` can: hybrid tables reject a duplicate primary key or unique
+    value. The same label on BigQuery, Redshift, or Databricks does not.
     """
+    if (
+        _dialect_key(dialect) == "snowflake"
+        and normalize_snowflake_table_kind(table_kind) == "hybrid"
+    ):
+        return ""
     if informational_key_engine(dialect):
         return "unenforced"
     return ""
 
 
-def uniqueness_proof_reason(dialect: str) -> str:
+def uniqueness_proof_reason(dialect: str, *, table_kind: str = "") -> str:
     """Operator sentence for a non-empty :func:`uniqueness_proof_gap`.
 
     Empty when this engine rejects a duplicate. The sentence is not emitted
     for Postgres, SQL Server, or an unnamed dialect.
     """
-    if uniqueness_proof_gap(dialect) != "unenforced":
+    if uniqueness_proof_gap(dialect, table_kind=table_kind) != "unenforced":
         return ""
     key = _dialect_key(dialect)
     if key == "redshift":
@@ -411,6 +443,13 @@ def uniqueness_proof_reason(dialect: str) -> str:
             "are unique."
         )
     if key == "snowflake":
+        if normalize_snowflake_table_kind(table_kind) == "standard":
+            return (
+                "Destination stores this primary key or unique constraint and "
+                "does not enforce it. INFORMATION_SCHEMA.TABLES.IS_HYBRID is "
+                "NO, so this standard table keeps the key for the planner. "
+                "The catalog object is not proof the loaded rows are unique."
+            )
         return (
             "Destination stores this primary key or unique constraint and "
             "does not enforce it. A Snowflake key on a standard table is "
@@ -426,14 +465,24 @@ def uniqueness_proof_reason(dialect: str) -> str:
     )
 
 
-def row_proof_gap(dialect: str, validated: bool | None) -> str:
+def row_proof_gap(
+    dialect: str, validated: bool | None, *, table_kind: str = ""
+) -> str:
     """Why a catalog foreign key does not prove the rows already stored.
 
     Empty when it does. ``unenforced`` is an engine that never checks the
     constraint. ``not_checked`` is a bit that says the check was skipped.
     ``unreported`` is an engine that has the bit and did not return it.
+    A Snowflake hybrid table enforces a foreign key. That proof still needs
+    ``IS_HYBRID`` of ``YES`` and a measured ``ENFORCED`` of ``YES``.
     """
     key = _dialect_key(dialect)
+    if key == "snowflake" and normalize_snowflake_table_kind(table_kind) == "hybrid":
+        if validated is True:
+            return ""
+        if validated is False:
+            return "not_checked"
+        return "unreported"
     if key in _UNENFORCED_FK_DIALECTS:
         return "unenforced"
     if key in _VALIDATION_BIT_DIALECTS:
@@ -447,12 +496,14 @@ def row_proof_gap(dialect: str, validated: bool | None) -> str:
     return ""
 
 
-def covers_existing_rows(dialect: str, validated: bool | None) -> bool:
+def covers_existing_rows(
+    dialect: str, validated: bool | None, *, table_kind: str = ""
+) -> bool:
     """Whether a catalog foreign key proves the rows already stored."""
-    return row_proof_gap(dialect, validated) == ""
+    return row_proof_gap(dialect, validated, table_kind=table_kind) == ""
 
 
-def row_proof_reason(gap: str, dialect: str = "") -> str:
+def row_proof_reason(gap: str, dialect: str = "", *, table_kind: str = "") -> str:
     """Operator sentence for a non-empty :func:`row_proof_gap`.
 
     Empty when the catalog fact proves the rows. Carry and the catalog diff
@@ -481,6 +532,13 @@ def row_proof_reason(gap: str, dialect: str = "") -> str:
                 "proof the loaded rows match."
             )
         if key == "snowflake":
+            if normalize_snowflake_table_kind(table_kind) == "standard":
+                return (
+                    "Destination stores this foreign key and does not enforce "
+                    "it. INFORMATION_SCHEMA.TABLES.IS_HYBRID is NO, so this "
+                    "standard table keeps the constraint for the planner. "
+                    "The catalog fact is not proof the loaded rows match."
+                )
             return (
                 "Destination stores this foreign key and does not enforce "
                 "it. A Snowflake foreign key on a standard table is visible "
@@ -495,12 +553,30 @@ def row_proof_reason(gap: str, dialect: str = "") -> str:
             "This catalog fact is not proof the loaded rows match."
         )
     if gap == "unreported":
+        if (
+            _dialect_key(dialect) == "snowflake"
+            and normalize_snowflake_table_kind(table_kind) == "hybrid"
+        ):
+            return (
+                "Destination table is a hybrid table, and the catalog did "
+                "not say whether this foreign key is enforced. The "
+                "relationship is not proof the loaded rows match."
+            )
         return (
             "Destination reports this relationship, and the catalog did "
             "not say whether existing rows were checked. The constraint "
             "is not that proof."
         )
     if gap == "not_checked":
+        if (
+            _dialect_key(dialect) == "snowflake"
+            and normalize_snowflake_table_kind(table_kind) == "hybrid"
+        ):
+            return (
+                "Destination reports this relationship on a hybrid table, "
+                "and INFORMATION_SCHEMA.TABLE_CONSTRAINTS.ENFORCED is NO. "
+                "That catalog fact does not prove the loaded rows match."
+            )
         return (
             "Destination reports this relationship, and the catalog records "
             "that existing rows were not checked. A PostgreSQL NOT VALID "
@@ -515,9 +591,11 @@ def validation_catalog_dialect(dialect: str) -> str | None:
     """Probe dialect for the validation bit, or None when no probe is required.
 
     Redshift, Snowflake, BigQuery, and Databricks are not asked for a
-    validation bit. Redshift has no ``convalidated`` column, and the others
-    do not enforce the constraint. Asking would fail the catalog read or
-    invent a yes. The unenforced rule covers them without a probe.
+    validation bit here. Redshift has no ``convalidated`` column. A Snowflake
+    hybrid table enforces foreign keys, and that proof is
+    ``IS_HYBRID`` plus ``TABLE_CONSTRAINTS.ENFORCED``, not this probe.
+    Asking the other engines for a validation bit would fail the catalog
+    read or invent a yes. The unenforced rule covers them without a probe.
     """
     key = _dialect_key(dialect)
     if key in _UNENFORCED_FK_DIALECTS:
@@ -1298,22 +1376,30 @@ def inspector_row_proof_gaps(
     dialect: str,
     inspector_fks: list[Any],
     measured: ForeignKeys | None,
+    *,
+    table_kind: str = "",
 ) -> list[str]:
     """One :func:`row_proof_gap` per inspector foreign key, in that order.
 
     Carry, the destination scan, and the catalog diff all read this list.
     Redshift, Snowflake, BigQuery, and Databricks are ``unenforced`` without
-    a validation query. PostgreSQL, SQL Server, and Oracle match the metadata
-    probe by relationship identity.
+    a validation query. A measured Snowflake ``IS_HYBRID`` of ``YES`` uses
+    each constraint's ``validated`` bit (``TABLE_CONSTRAINTS.ENFORCED``)
+    instead. PostgreSQL, SQL Server, and Oracle match the metadata probe
+    by relationship identity.
     SQLAlchemy's PostgreSQL reflection omits ``NOT VALID``, so an inspector
     hit alone is ``unreported``, not a yes. An unreadable probe is the same.
     MySQL and SQLite have no separate bit: the constraint itself is the check.
     """
     from services.foreign_key_identity import fk_identity, same_relationship
 
-    if row_proof_gap(dialect, True) == "unenforced":
+    hybrid = (
+        _dialect_key(dialect) == "snowflake"
+        and normalize_snowflake_table_kind(table_kind) == "hybrid"
+    )
+    if not hybrid and row_proof_gap(dialect, True) == "unenforced":
         return ["unenforced"] * len(inspector_fks)
-    requires_bit = validation_catalog_dialect(dialect) is not None
+    requires_bit = hybrid or validation_catalog_dialect(dialect) is not None
     flags: list[tuple[Any, bool | None]] = []
     if requires_bit and measured is not None and measured.measured:
         for item in measured.items:
@@ -1353,6 +1439,8 @@ def enforced_relationship_identities(
     dialect: str,
     inspector_fks: list[Any],
     measured: ForeignKeys | None,
+    *,
+    table_kind: str = "",
 ) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
     """Inspector foreign keys that prove the rows already stored.
 
@@ -1363,7 +1451,10 @@ def enforced_relationship_identities(
 
     enforced: list[tuple[str, tuple[tuple[str, str], ...]]] = []
     for fk, gap in zip(
-        inspector_fks, inspector_row_proof_gaps(dialect, inspector_fks, measured)
+        inspector_fks,
+        inspector_row_proof_gaps(
+            dialect, inspector_fks, measured, table_kind=table_kind
+        ),
     ):
         if gap or not isinstance(fk, dict):
             continue

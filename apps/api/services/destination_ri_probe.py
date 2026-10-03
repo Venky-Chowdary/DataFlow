@@ -13,8 +13,10 @@ module separates, which a catalog diff alone cannot:
                Snowflake, BigQuery, and Databricks store the constraint and
                do not check rows against it, so a catalog hit is not this
                proof either. A Snowflake hybrid table does enforce a foreign
-               key; the dialect name does not say the table is hybrid, so
-               that catalog hit is not the proof either.
+               key when ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES``
+               and ``TABLE_CONSTRAINTS.ENFORCED`` is ``YES``. This scan does
+               not read that pair, so a Snowflake catalog hit stays unenforced
+               until those two facts are measured.
 ``scanned``    the destination has no such constraint (dropped for load speed,
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real

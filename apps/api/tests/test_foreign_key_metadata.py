@@ -15,9 +15,11 @@ from services.foreign_key_metadata import (
     enforced_relationship_identities,
     informational_key_engine,
     inspector_row_proof_gaps,
+    normalize_snowflake_table_kind,
     relationship_actions,
     relationship_match_type,
     row_proof_gap,
+    row_proof_reason,
     foreign_keys_from_payload,
     normalize_action,
     probe_foreign_keys,
@@ -517,6 +519,93 @@ def test_informational_warehouse_unique_key_is_not_row_proof():
         assert informational_key_engine(dialect) is False, dialect
         assert uniqueness_proof_gap(dialect) == "", dialect
         assert uniqueness_proof_reason(dialect) == "", dialect
+
+
+def test_measured_snowflake_hybrid_table_is_row_proof():
+    """IS_HYBRID YES is the catalog fact. A dialect name and a stamped flag are not.
+
+    These are catalog-shaped values from Snowflake's documented columns.
+    A live Snowflake account was not used.
+    """
+    assert normalize_snowflake_table_kind("YES") == "hybrid"
+    assert normalize_snowflake_table_kind("NO") == "standard"
+    assert normalize_snowflake_table_kind(True) == "hybrid"
+    assert normalize_snowflake_table_kind(False) == "standard"
+    assert normalize_snowflake_table_kind("BASE TABLE") == ""
+    assert normalize_snowflake_table_kind("snowflake") == ""
+    assert normalize_snowflake_table_kind(None) == ""
+
+    for dialect in ("snowflake", "snowflake_aws", "snowflake_azure", "snowflake_gcp"):
+        assert uniqueness_proof_gap(dialect, table_kind="YES") == "", dialect
+        assert uniqueness_proof_reason(dialect, table_kind="hybrid") == "", dialect
+        assert uniqueness_proof_gap(dialect, table_kind="NO") == "unenforced", dialect
+        assert "IS_HYBRID" in uniqueness_proof_reason(dialect, table_kind="NO")
+        assert uniqueness_proof_gap(dialect) == "unenforced", dialect
+        assert row_proof_gap(dialect, True, table_kind="YES") == "", dialect
+        assert covers_existing_rows(dialect, True, table_kind="YES") is True
+        assert row_proof_gap(dialect, None, table_kind="hybrid") == "unreported"
+        assert row_proof_gap(dialect, False, table_kind="hybrid") == "not_checked"
+        assert "ENFORCED" in row_proof_reason(
+            "not_checked", dialect, table_kind="YES"
+        )
+        assert row_proof_gap(dialect, True) == "unenforced", dialect
+
+    assert uniqueness_proof_gap("bigquery", table_kind="hybrid") == "unenforced"
+    assert uniqueness_proof_gap("redshift", table_kind="YES") == "unenforced"
+    assert uniqueness_proof_gap("databricks", table_kind="hybrid") == "unenforced"
+    assert row_proof_gap("google_bigquery", True, table_kind="YES") == "unenforced"
+
+    inspector = [
+        {
+            "constrained_columns": ["customer_id"],
+            "referred_schema": "public",
+            "referred_table": "customers",
+            "referred_columns": ["id"],
+        }
+    ]
+    enforced = ForeignKeys(
+        dialect="snowflake",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                validated=True,
+            )
+        ],
+    )
+    assert inspector_row_proof_gaps(
+        "snowflake", inspector, enforced, table_kind="YES"
+    ) == [""]
+    assert len(
+        enforced_relationship_identities(
+            "snowflake_aws", inspector, enforced, table_kind="hybrid"
+        )
+    ) == 1
+    assert inspector_row_proof_gaps(
+        "snowflake", inspector, None, table_kind="YES"
+    ) == ["unreported"]
+    assert inspector_row_proof_gaps("snowflake", inspector, enforced) == ["unenforced"]
+    denied = ForeignKeys(
+        dialect="snowflake",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                validated=False,
+            )
+        ],
+    )
+    assert inspector_row_proof_gaps(
+        "snowflake", inspector, denied, table_kind="YES"
+    ) == ["not_checked"]
 
 
 def test_payload_keeps_an_explicit_validation_bit():

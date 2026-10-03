@@ -87,6 +87,99 @@ def test_integrity_does_not_block_on_a_stamped_snowflake_enforced_flag():
     assert result["passed"] is True
 
 
+def test_measured_hybrid_table_blocks_a_duplicate_enforced_key():
+    """IS_HYBRID YES plus ENFORCED YES is a write rule. Either fact alone is not."""
+    from services.data_integrity import _check_duplicate_keys
+
+    rows = [{"email": "a"}, {"email": "a"}]
+    mappings = [{"source": "email", "target": "EMAIL"}]
+    types = {"EMAIL": "VARCHAR", "ID": "INTEGER"}
+
+    def _run(**key):
+        return _check_duplicate_keys(
+            mappings,
+            rows,
+            "strict",
+            dest_kind="snowflake_aws",
+            primary_key="id",
+            sync_mode="append",
+            destination_unique_keys=[
+                {
+                    "name": "UQ_EMAIL",
+                    "columns": ["EMAIL"],
+                    "enforced": True,
+                    **key,
+                }
+            ],
+            target_types=types,
+        )
+
+    hybrid = _run(table_kind="YES")
+    assert hybrid["passed"] is False
+    assert hybrid["blocks_transfer"] is True
+    assert any("UQ_EMAIL" in issue for issue in hybrid["issues"])
+
+    standard = _run(table_kind="NO")
+    assert standard["passed"] is True
+
+    missing_enforced = _check_duplicate_keys(
+        mappings,
+        rows,
+        "strict",
+        dest_kind="snowflake",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {"name": "UQ_EMAIL", "columns": ["EMAIL"], "table_kind": "hybrid"}
+        ],
+        target_types=types,
+    )
+    assert missing_enforced["passed"] is True
+
+    other_engine = _check_duplicate_keys(
+        mappings,
+        rows,
+        "strict",
+        dest_kind="bigquery",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "UQ_EMAIL",
+                "columns": ["EMAIL"],
+                "enforced": True,
+                "table_kind": "hybrid",
+            }
+        ],
+        target_types=types,
+    )
+    assert other_engine["passed"] is True
+
+
+def test_snowflake_fetch_records_is_hybrid():
+    """The table-kind read is INFORMATION_SCHEMA.TABLES.IS_HYBRID, after the keys."""
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "YES")],
+        [("YES",)],
+    ]
+    meta = _snowflake_fetch_unique_keys(cur, "PUBLIC", "ORDERS")
+    assert meta["table_kind"] == "hybrid"
+    assert meta["unique_keys"][0]["table_kind"] == "hybrid"
+    assert meta["unique_keys"][0]["enforced"] is True
+    sql = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "is_hybrid" in sql
+    assert "information_schema.tables" in sql
+
+    failed = MagicMock()
+    failed.fetchall.return_value = [("UQ_EMAIL", "UNIQUE", "EMAIL", 1, "NO")]
+    failed.execute.side_effect = [None, RuntimeError("IS_HYBRID unavailable")]
+    unread = _snowflake_fetch_unique_keys(failed, "PUBLIC", "ORDERS")
+    assert unread["table_kind"] == ""
+    assert "table_kind" not in unread["unique_keys"][0]
+    assert unread["unique_keys"][0]["enforced"] is False
+
+
 def test_oracle_nlssort_binary_ci_forces_casefold():
     expr = "NLSSORT(\"EMAIL\",'NLS_SORT=BINARY_CI')"
     assert parse_case_insensitive_index_expression(expr) == ["EMAIL"]

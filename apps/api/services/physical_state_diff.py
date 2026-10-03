@@ -243,6 +243,13 @@ _CHECK_SQL: dict[str, str] = {
 }
 
 
+def _reported_table_kind(value: str) -> str:
+    """Operator spelling of a measured Snowflake table kind."""
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    return normalize_snowflake_table_kind(value) if value else ""
+
+
 @dataclass(frozen=True)
 class PhysicalState:
     """Catalog facts for one table, normalized for cross-engine comparison."""
@@ -303,6 +310,11 @@ class PhysicalState:
     #: Engine this catalog was read from. Foreign-key and uniqueness sentences
     #: name this engine. Empty when the caller built the state by hand.
     dialect: str = ""
+    #: Measured Snowflake table kind. ``hybrid`` or ``standard`` when
+    #: ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` answered. Empty when this
+    #: read did not ask, or the catalog did not say. A dialect name is not
+    #: this field.
+    table_kind: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -310,6 +322,7 @@ class PhysicalState:
             "found": self.found,
             "reason": self.reason,
             "dialect": self.dialect,
+            "table_kind": _reported_table_kind(self.table_kind),
             "primary_key": list(self.primary_key),
             "unique_constraints": sorted("+".join(u) for u in self.unique_constraints),
             "foreign_keys": sorted("->".join(f) for f in self.foreign_keys),
@@ -640,12 +653,43 @@ def foreign_keys_from_catalog_state(
     return keys, unparsed
 
 
+def _read_snowflake_table_kind(conn: Any, schema: str, table: str) -> str:
+    """``IS_HYBRID`` for one table. Empty when the catalog did not answer.
+
+    Snowflake documents ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` as ``YES``
+    or ``NO``. A failed read stays unreported so a standard-table rule is
+    not invented from a missing column.
+    """
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    try:
+        row = conn.execute(
+            sa.text(
+                "SELECT is_hybrid FROM information_schema.tables "
+                "WHERE UPPER(table_schema) = UPPER(:schema) "
+                "AND table_name = :table"
+            ),
+            {"schema": schema or "", "table": table},
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — an unread kind is not a standard table
+        return ""
+    if row is None:
+        return ""
+    try:
+        cell = row[0]
+    except (TypeError, KeyError, IndexError):
+        cell = getattr(row, "is_hybrid", None)
+    return normalize_snowflake_table_kind(cell)
+
+
 def _reflect_foreign_keys(
     db_type: str,
     conn: Any,
     schema: str,
     table: str,
     inspector_fks: Any,
+    *,
+    table_kind: str = "",
 ) -> tuple[
     set[tuple[str, str, str]],
     list[tuple[tuple[str, ...], str, str, tuple[str, ...]]],
@@ -710,7 +754,9 @@ def _reflect_foreign_keys(
         if catalog_dialect is not None
         else None
     )
-    gaps = inspector_row_proof_gaps(db_type, kept, measured)
+    gaps = inspector_row_proof_gaps(
+        db_type, kept, measured, table_kind=table_kind
+    )
     if len(gaps) != len(fk_facts):
         gaps = ["unreported"] * len(fk_facts)
     matches = tuple(
@@ -795,6 +841,11 @@ def read_physical_state(
         routines = collector.run(
             "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
         )
+        from services.foreign_key_metadata import _dialect_key
+
+        table_kind = ""
+        if _dialect_key(db_type) == "snowflake":
+            table_kind = _read_snowflake_table_kind(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -803,7 +854,9 @@ def read_physical_state(
             fk_delete,
             fk_update,
             fk_deferral,
-        ) = _reflect_foreign_keys(db_type, conn, schema, name, fks)
+        ) = _reflect_foreign_keys(
+            db_type, conn, schema, name, fks, table_kind=table_kind
+        )
 
     not_null: set[str] = set()
     defaults: set[tuple[str, str]] = set()
@@ -852,6 +905,7 @@ def read_physical_state(
         routines=frozenset(routines or ()),
         errors=tuple(collector.errors),
         dialect=str(db_type or ""),
+        table_kind=table_kind,
     )
 
 
@@ -1537,6 +1591,7 @@ def _diff_foreign_keys(
     destination_on_update: tuple[str, ...] = (),
     source_deferral: tuple[str, ...] = (),
     destination_deferral: tuple[str, ...] = (),
+    destination_table_kind: str = "",
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves the source rule.
 
@@ -1602,7 +1657,14 @@ def _diff_foreign_keys(
         tagged: list[tuple[str, str]] = []
         gap = _dest_row_proof_gap(destination_proof, match, len(destination))
         if gap:
-            tagged.append(("proof", row_proof_reason(gap, destination_dialect)))
+            tagged.append(
+                (
+                    "proof",
+                    row_proof_reason(
+                        gap, destination_dialect, table_kind=destination_table_kind
+                    ),
+                )
+            )
         planned = _measured_match(source_match, source_index, len(source))
         measured = _measured_match(destination_match, match, len(destination))
         if planned is not None and measured is not None:
@@ -1681,6 +1743,7 @@ def _diff_uniqueness(
     destination: frozenset[tuple[str, ...]],
     *,
     destination_dialect: str = "",
+    table_kind: str = "",
 ) -> dict[str, Any]:
     """Carried when the column sets match and the engine rejects a duplicate.
 
@@ -1705,10 +1768,18 @@ def _diff_uniqueness(
     dst = _sets(destination)
     missing = sorted(_wire(group) for group in src - dst)
     extra = sorted(_wire(group) for group in dst - src)
-    gap = uniqueness_proof_gap(destination_dialect) if destination_dialect else ""
+    gap = (
+        uniqueness_proof_gap(destination_dialect, table_kind=table_kind)
+        if destination_dialect
+        else ""
+    )
     matched = sorted(_wire(group) for group in src & dst)
     unchecked = matched if gap == "unenforced" and matched else []
-    reasons = [uniqueness_proof_reason(destination_dialect)] if unchecked else []
+    reasons = (
+        [uniqueness_proof_reason(destination_dialect, table_kind=table_kind)]
+        if unchecked
+        else []
+    )
     if missing:
         status = "absent"
     elif unchecked:
@@ -1817,17 +1888,20 @@ def compare_physical_state(
             frozenset({source.primary_key} if source.primary_key else set()),
             frozenset({destination.primary_key} if destination.primary_key else set()),
             destination_dialect=destination.dialect,
+            table_kind=destination.table_kind,
         ),
         "unique_constraints": _diff_uniqueness(
             source.unique_constraints,
             destination.unique_constraints,
             destination_dialect=destination.dialect,
+            table_kind=destination.table_kind,
         ),
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,
             destination.foreign_key_facts,
             destination_proof=destination.foreign_key_proof,
             destination_dialect=destination.dialect,
+            destination_table_kind=destination.table_kind,
             source_match=source.foreign_key_match,
             destination_match=destination.foreign_key_match,
             source_on_delete=source.foreign_key_on_delete,
