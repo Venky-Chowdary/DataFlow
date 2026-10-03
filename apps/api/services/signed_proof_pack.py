@@ -812,13 +812,15 @@ def build_signed_proof_pack(
         "prev_audit_hash": prev_audit_hash,
         "timing": timing if isinstance(timing, dict) else {},
         "delivery_semantics": {
-            "cdc_default": "at_least_once",
+            "cdc_default": "auto",
             "exactly_once": False,
             "at_least_once": True,
             "at_most_once": False,
             "note": (
-                "Destinations must upsert with PK/LSN guards under at-least-once capture; "
-                "exactly-once and at-most-once are not claimed."
+                "auto selects dest-owned exactly-once when the route can commit "
+                "apply and the watermark together. exactly_once here is the "
+                "platform-wide claim and stays false. A run's resolved guarantee "
+                "is on the job. At-most-once is not offered."
             ),
         },
         "governance_operations": _governance_operations_for_pack(governance_operations),

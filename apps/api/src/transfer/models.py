@@ -148,9 +148,11 @@ class TransferRequest:
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
     idempotency_key: str = ""
-    # CDC / stream delivery. Default at_least_once. exactly_once is opt-in
-    # dest-owned watermark EOS and fail-closed on ineligible routes.
-    delivery_guarantee: str = "at_least_once"
+    # CDC / stream delivery. ``auto`` selects dest-owned exactly-once when the
+    # route can commit apply and the watermark together; otherwise at-least-once.
+    # An explicit at_least_once pin is not upgraded. exactly_once on an
+    # ineligible route fails closed.
+    delivery_guarantee: str = "auto"
     # Operator acks from Validate — Execute must carry the same trail (Validate≡Execute).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False

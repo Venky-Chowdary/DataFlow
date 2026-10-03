@@ -8,7 +8,7 @@
     {"path": "services/target_sample.py", "max_lines": 1650, "facade": "services.reconciliation"},
     {"path": "connectors/generic_sql.py", "max_lines": 6420, "facade": "connectors.merge_registry"},
     {"path": "connectors/writer_common.py", "max_lines": 5520, "facade": "connectors.writer_common_api"},
-    {"path": "src/transfer/engine.py", "max_lines": 5620, "facade": "services.decision_kernel.execute_gate"},
+    {"path": "src/transfer/engine.py", "max_lines": 5540, "facade": "services.decision_kernel.execute_gate"},
     {"path": "services/schema_introspect.py", "max_lines": 4900, "facade": "services.decision_kernel"},
     {"path": "src/transfer/stream.py", "max_lines": 3900, "facade": "src.transfer.stream_foreign_keys"},
     {"path": "src/transfer/adapters.py", "max_lines": 2520, "facade": null},

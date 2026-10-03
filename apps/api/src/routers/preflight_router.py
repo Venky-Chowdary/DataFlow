@@ -142,8 +142,8 @@ class PreflightRequest(BaseModel):
     row_limit: int = 0
     # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
     dest_extra: dict[str, Any] | None = None
-    # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
-    delivery_guarantee: str = "at_least_once"
+    # CDC delivery — auto selects dest-owned exactly-once on an eligible route.
+    delivery_guarantee: str = "auto"
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
     # gates must judge the transformed image, not the raw source.
     shape_recipe: dict[str, Any] | None = None
@@ -548,7 +548,7 @@ async def run_preflight(body: PreflightRequest):
                 destination_config=dest_meta.get("_probe_cfg") or None,
                 destination_table=(body.dest_table or body.dest_collection or ""),
             ),
-            delivery_guarantee=body.delivery_guarantee or "at_least_once",
+            delivery_guarantee=body.delivery_guarantee or "auto",
             allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
         ),
         validation_mode=body.validation_mode,

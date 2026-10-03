@@ -50,7 +50,6 @@ from services.transform_engine import (
     assumed_number_locale,
     canonical_date_locale,
     canonical_number_locale,
-    infer_date_locale,
     infer_number_locale,
     reset_active_date_locale,
     reset_active_number_locale,
@@ -176,14 +175,8 @@ class FilePreflightContext(PreflightContext):
         }
 
     def _dest_nullability(self) -> dict[str, bool]:
-        """Live/create-new nullability. Missing columns stay unknown (nullable)."""
-        out: dict[str, bool] = {}
-        for col in getattr(self.plan.destination, "target_columns", None) or []:
-            name = getattr(col, "name", None)
-            if not name:
-                continue
-            out[str(name)] = bool(getattr(col, "nullable", True))
-        return out
+        from services.preflight_source_kind import destination_nullability
+        return destination_nullability(getattr(self.plan.destination, "target_columns", None))
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
@@ -518,7 +511,7 @@ def run_transfer_policy_gates(
     source_kind: str = "file",
     write_via_staging: bool = False,
     source_read_mode: str = "",
-    delivery_guarantee: str = "at_least_once",
+    delivery_guarantee: str = "auto",
     allow_append_only: bool = False,
     read_scope: Any = None,
     priority_column: str = "",
@@ -849,31 +842,7 @@ from services.preflight_policy_gates import (  # noqa: E402
 )
 
 
-def resolve_preflight_source_kind(
-    source_kind: str | None,
-    *,
-    source_connector_id: str | None = None,
-    source_file_id: str | None = None,
-) -> str:
-    """File blanks become SQL NULL only for an upload, never for a connector.
-
-    The request model defaults ``source_kind`` to ``file``. A saved source
-    connector must not inherit that default, even when a stale upload id is
-    sent with it: Validate would accept empty integers that the database
-    writer still rejects.
-    """
-    kind = (source_kind or "").strip().lower()
-    connector = (source_connector_id or "").strip()
-    # The upload id is part of the call so every router can pass the id it
-    # already holds. It is not a selector: a stale upload cannot keep the
-    # spreadsheet NULL rule on a connector, and it cannot turn an explicit
-    # database kind into a file.
-    _ = source_file_id
-    if not kind:
-        kind = "database" if connector else "file"
-    if connector and kind == "file":
-        return "database"
-    return kind or "file"
+from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
 
 
 @_with_date_locale
@@ -1025,19 +994,13 @@ def run_file_preflight(
     date_locale = canonical_date_locale(date_locale)
     number_locale = canonical_number_locale(number_locale)
     # Operator locale wins. Otherwise adopt one inferred order only when
-    # every date column agrees. A settler in ``dob`` must not rewrite an
-    # unrelated column whose slash dates are still ambiguous.
+    # every date column agrees.
     if sample_rows and columns and not date_locale:
-        from services.transform_engine import ambiguous_date_columns as _ambiguous_dates
+        from services.preflight_source_kind import agreed_sample_date_locale
 
-        per_column = {
-            col: infer_date_locale(sample_rows, [col])
-            for col in columns
-        }
-        agreed = {loc for loc in per_column.values() if loc}
-        unsettled = _ambiguous_dates(sample_rows, columns)
-        if len(agreed) == 1 and not unsettled:
-            date_locale = next(iter(agreed))
+        agreed = agreed_sample_date_locale(sample_rows, columns)
+        if agreed:
+            date_locale = agreed
             set_active_date_locale(date_locale)
     if sample_rows and columns:
         inferred_numbers = infer_number_locale(
@@ -1268,33 +1231,19 @@ def run_file_preflight(
             ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
 
-    def _plan_write_transform(mapping: dict) -> Any:
-        """Write-path cast Gate-8 will apply — the same resolver Execute stamps.
-
-        The Decision Artifact keeps the operator's transform. Only the gate
-        plan sees the resolved cast, so a blank integer is judged as SQL NULL
-        on Validate instead of passing as identity and failing at Run.
-        """
-        raw = mapping.get("transform")
-        try:
-            from services.transform_resolver import resolve_transform
-
-            live = dest_types if destination_table_exists is True else {}
-            return resolve_transform(
-                mapping,
-                column_types=dict(column_types or {}),
-                dest_types=dict(live or {}),
-            )
-        except Exception:
-            logger.debug("write-path transform resolve skipped", exc_info=True)
-            return raw
+    from services.transform_resolver import write_plan_transform
 
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
             target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
-            transform=_plan_write_transform(m if isinstance(m, dict) else {}),
+            transform=write_plan_transform(
+                m if isinstance(m, dict) else {},
+                column_types=column_types,
+                dest_types=dest_types,
+                destination_table_exists=destination_table_exists,
+            ),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),

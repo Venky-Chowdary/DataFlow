@@ -306,150 +306,6 @@ def _persist_load_history_profile(
         logger.debug("load-history save_profile skipped: %s", exc, exc_info=exc)
 
 
-def _validation_plan_for_result(pf: dict | None) -> dict:
-    """Checklist plus live gate outcomes so operators see float→decimal etc. warnings."""
-    if not pf:
-        return {}
-    plan = dict(pf.get("validation_plan") or {})
-    if pf.get("gates") is not None:
-        plan["gates"] = pf.get("gates") or []
-    if "passed" in pf:
-        plan["passed"] = pf.get("passed")
-    if pf.get("warnings") is not None:
-        plan["warnings"] = pf.get("warnings") or []
-    if pf.get("blockers") is not None:
-        plan["blockers"] = pf.get("blockers") or []
-    if pf.get("readiness_score") is not None:
-        plan["readiness_score"] = pf.get("readiness_score")
-    return plan
-
-
-
-
-def _blank_cells_as_null_from_preflight(pf: dict) -> int:
-    """Highest Gate-8 count of spreadsheet blanks stored as SQL NULL.
-
-    Several gates can echo the same sample. Summing them would double-count
-    one blank cell. The max is the disposition the write path recorded.
-    """
-    highest = 0
-    for gate in pf.get("gates") or []:
-        if not isinstance(gate, dict):
-            continue
-        details = gate.get("details")
-        if not isinstance(details, dict):
-            continue
-        raw = details.get("file_blank_null_count")
-        if raw is None:
-            continue
-        try:
-            highest = max(highest, int(raw))
-        except (TypeError, ValueError):
-            continue
-    return highest
-
-
-def _fail_job_preflight(
-    mongo,
-    job_id: str,
-    pf: dict,
-    *,
-    lineage,
-    rows_read: int | None = None,
-    sync_mode: str = "",
-) -> tuple[str, dict]:
-    """Mark job failed at preflight and persist inspectable quarantine rows.
-
-    ``rows_read`` is the count already taken (file peek or in-memory batch).
-    When it is present the job ledger is write-refused: measured read, zero
-    writes, dest COUNT(*) not taken. Omitting it leaves the read unmeasured,
-    which is only honest when nothing was counted.
-    """
-    from services.quarantine_from_preflight import quarantine_rows_from_preflight
-
-    decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
-    blocker_reasons = [
-        b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)
-    ]
-    qrows = quarantine_rows_from_preflight(pf)
-    row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
-    rejected_rows = len(row_ids) if row_ids else len(qrows)
-    error_details = {
-        "reason": "Preflight blocked transfer",
-        "blockers": blocker_reasons,
-        "guidance": [
-            {
-                "gate": b.get("id"),
-                "message": b.get("message"),
-                "why": (b.get("guidance") or {}).get("why", ""),
-                "fix": (b.get("guidance") or {}).get("fix", ""),
-            }
-            for b in pf.get("blockers", [])
-            if isinstance(b, dict) and b.get("guidance")
-        ],
-        "proof_bundle": {
-            "decision": decision.get("decision"),
-            "reason": decision.get("reason"),
-            "semantic_mapping_score": pf.get("proof_bundle", {}).get(
-                "semantic_mapping_score"
-            ),
-            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get(
-                "risk_score"
-            ),
-        },
-        "readiness_score": pf.get("readiness_score"),
-        "validation_plan": _validation_plan_for_result(pf),
-        "payload_shape": pf.get("payload_shape"),
-        "quarantine_issue_count": len(qrows),
-        "quarantine_row_count": rejected_rows,
-    }
-    ledger_dict: dict | None = None
-    if rows_read is not None:
-        from services.row_conservation import write_refused_ledger
-
-        ledger_dict = write_refused_ledger(
-            rows_read=int(rows_read),
-            quarantined_rows=rejected_rows,
-            blank_cells_as_null=_blank_cells_as_null_from_preflight(pf),
-            sync_mode=sync_mode,
-        ).to_dict()
-        error_details["row_accounting"] = ledger_dict
-    error_message = (
-        decision.get("reason")
-        or "; ".join(str(x) for x in blocker_reasons if x)
-        or "Preflight blocked transfer"
-    )
-    lineage.emit_preflight_completed(
-        run_id=job_id,
-        passed=False,
-        readiness_score=pf.get("readiness_score", 0),
-        blockers=pf.get("blockers", []),
-        validation_plan=_validation_plan_for_result(pf),
-    )
-    lineage.emit_run_failed(
-        run_id=job_id,
-        job_id=job_id,
-        error=error_message,
-        error_details=error_details,
-    )
-    status_fields: dict = {
-        "error": error_message,
-        "phase": "failed",
-        "progress_pct": 0,
-        "error_details": error_details,
-        "preflight": pf,
-        "rejected_details": qrows,
-        "rejected_rows": rejected_rows,
-    }
-    if ledger_dict is not None:
-        status_fields["row_accounting"] = ledger_dict
-        status_fields["sync_mode"] = str(sync_mode or "")
-    mongo.update_job_status(job_id, "failed", **status_fields)
-    return error_message, error_details
-
-
 def _coalesce_sort_value(value: Any) -> Any:
     """Return a tuple that sorts None/empty values last regardless of direction.
 
@@ -1461,10 +1317,13 @@ from .engine_shape import (  # noqa: E402,F401 — re-export
 # historical ``engine`` import surface.
 from .job_failure import (  # noqa: E402,F401 — re-export
     _CDC_JOB_FIELDS,
+    _blank_cells_as_null_from_preflight,
     _cdc_fields_from_summary,
+    _fail_job_preflight,
     _fail_runtime_job,
     _job_failure_fields,
     _promote_cdc_job_fields,
+    _validation_plan_for_result,
 )
 
 
@@ -2010,21 +1869,21 @@ class UniversalTransferEngine:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
-        # Delivery: at_least_once default; exactly_once opt-in and fail-closed
-        # on ineligible routes. at_most_once is never offered.
+        # auto selects dest-owned exactly-once on an eligible CDC route.
+        # An explicit at_least_once pin stays. Ineligible exactly_once fails closed.
         from services.cdc_exactly_once import (
             ExactlyOnceRouteError,
-            assert_requested_cdc_delivery,
             dest_allow_append_only,
             route_has_cdc_pk,
+            select_route_delivery,
         )
         from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
         from services.procedure_source import is_callable_source
 
         try:
-            assert_requested_cdc_delivery(
-                getattr(request, "delivery_guarantee", None) or "at_least_once",
+            request.delivery_guarantee = select_route_delivery(
+                getattr(request, "delivery_guarantee", None) or "auto",
                 sync_mode=getattr(request, "sync_mode", "") or "",
                 dest_type=str(getattr(request.destination, "format", "") or ""),
                 source_type=str(getattr(request.source, "format", "") or ""),

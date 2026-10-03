@@ -258,8 +258,9 @@ class ExecuteTransferRequest(BaseModel):
     date_locale: str = ""
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
     number_locale: str = ""
-    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
-    delivery_guarantee: str = "at_least_once"
+    # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
+    # CDC route. Pin at_least_once to keep upsert redelivery.
+    delivery_guarantee: str = "auto"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
@@ -869,7 +870,7 @@ async def execute_transfer_json(
         number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        delivery_guarantee=body.delivery_guarantee or "auto",
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
@@ -1081,7 +1082,7 @@ async def run_universal_transfer(
     data_region: str = Form(""),
     date_locale: str = Form(""),
     number_locale: str = Form(""),
-    delivery_guarantee: str = Form("at_least_once"),
+    delivery_guarantee: str = Form("auto"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
@@ -1235,7 +1236,7 @@ async def run_universal_transfer(
         number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=delivery_guarantee or "at_least_once",
+        delivery_guarantee=delivery_guarantee or "auto",
         compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),

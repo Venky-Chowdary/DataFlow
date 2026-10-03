@@ -142,6 +142,8 @@ def test_assert_delivery_allows_exactly_once_token():
 
     assert assert_delivery_guarantee_allowed("at_least_once") == "at_least_once"
     assert assert_delivery_guarantee_allowed("exactly_once") == "exactly_once"
+    assert assert_delivery_guarantee_allowed("auto") == "auto"
+    assert assert_delivery_guarantee_allowed(None) == "auto"
     try:
         assert_delivery_guarantee_allowed("at_most_once")
         raised = False

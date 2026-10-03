@@ -153,6 +153,55 @@ def test_classify_fail_closed_ineligible_routes() -> None:
     assert duck.wired is True
 
 
+def test_auto_selects_exactly_once_only_when_the_route_can_commit() -> None:
+    from services.cdc_exactly_once import select_route_delivery
+
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "exactly_once"
+    )
+    assert (
+        select_route_delivery(
+            None,
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "at_least_once",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="full_refresh_overwrite",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        select_route_delivery(
+            "exactly_once",
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+    assert exc.value.reason == REASON_DEST_NOT_TXN
+
+
 def test_assert_requested_refuses_ineligible_exactly_once() -> None:
     assert (
         assert_requested_cdc_delivery("at_least_once", sync_mode="cdc", dest_type="csv")
