@@ -678,6 +678,37 @@ def postgres_unique_index_gap(valid: bool | None, ready: bool | None) -> str:
     return "unreported"
 
 
+def postgres_check_validation_gap(not_valid: bool | None) -> str:
+    """Existing-row gap from a PostgreSQL ``CHECK`` ``NOT VALID`` flag.
+
+    A check that is not ``NOT VALID`` is the scan. ``NOT VALID`` was
+    measured and is not that proof. New rows are still rejected. A missing
+    cell stays unreported.
+    """
+    if not_valid is False:
+        return ""
+    if not_valid is True:
+        return "not_checked"
+    return "unreported"
+
+
+def postgres_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty PostgreSQL check validation gap."""
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "pg_get_constraintdef says NOT VALID. Existing rows were not "
+            "checked. New rows are still rejected."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. NOT VALID was not "
+            "read. A PostgreSQL check can still be NOT VALID, so this "
+            "catalog object is not proof the rows already stored match."
+        )
+    return ""
+
+
 def postgres_unique_index_reason(gap: str) -> str:
     """Operator sentence for a non-empty PostgreSQL unique-index gap."""
     if gap == "not_ready":

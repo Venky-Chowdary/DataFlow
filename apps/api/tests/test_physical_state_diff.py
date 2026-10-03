@@ -203,6 +203,7 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert state.foreign_key_on_delete == ("NO ACTION",)
     assert state.foreign_key_on_update == ("NO ACTION",)
     assert state.uniqueness_proof == ()
+    assert state.check_proof == ()
 
 
 def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
@@ -279,6 +280,7 @@ def test_check_constraint_spelling_differences_still_match(tmp_path: Path) -> No
     )
     result = _verify(cfg, "src", "dst")
     assert result["aspects"]["check_constraints"]["status"] == "carried"
+    assert result["destination"]["check_proof"] == []
 
 
 def test_triggers_are_reported_but_never_block_the_verdict(tmp_path: Path) -> None:
@@ -1828,4 +1830,81 @@ def test_postgres_invalid_unique_index_is_not_existing_row_proof() -> None:
     assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
     assert _measured_uniqueness_proof(
         "redshift", ("id",), {("email",)}, None, None, rows
+    ) == ()
+
+
+def test_postgres_not_valid_check_is_not_existing_row_proof() -> None:
+    """``NOT VALID`` is not a dropped check. New rows are still rejected.
+
+    A hand-built PostgreSQL state with an empty proof tuple did not measure
+    the flag, so it stays on the older carried verdict. SQLAlchemy omits
+    ``dialect_options.not_valid`` when the reflected text is valid.
+    """
+    from services.physical_state_diff import _measured_check_proof
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        check_constraints=frozenset({"qty>0"}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="postgres",
+            check_constraints=frozenset({"qty>0"}),
+        ),
+    )
+    assert unmeasured["aspects"]["check_constraints"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    not_valid = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="azure_postgres",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "not_checked"),),
+        ),
+    )
+    check = not_valid["aspects"]["check_constraints"]
+    assert check["status"] == "unchecked"
+    assert check["missing"] == []
+    assert check["unchecked"] == ["qty>0"]
+    assert "NOT VALID" in check["reasons"][0]
+    assert "still rejected" in check["reasons"][0]
+    assert not_valid["verified"] is False
+    assert "check_constraints" not in not_valid["absent"]
+    assert "check_constraints" in not_valid["unchecked"]
+
+    unread = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="postgresql",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "unreported"),),
+        ),
+    )
+    assert unread["aspects"]["check_constraints"]["status"] == "unchecked"
+    assert "was not read" in unread["aspects"]["check_constraints"]["reasons"][0]
+
+    reflected = _measured_check_proof(
+        "postgres",
+        [
+            {"sqltext": "qty > 0"},
+            {
+                "sqltext": "(email <> '')",
+                "dialect_options": {"not_valid": True},
+            },
+        ],
+    )
+    assert dict(reflected) == {"qty>0": "", "email<>''": "not_checked"}
+    assert _measured_check_proof("sqlite", [{"sqltext": "qty > 0"}]) == ()
+    assert _measured_check_proof(
+        "redshift",
+        [{"sqltext": "qty > 0", "dialect_options": {"not_valid": True}}],
     ) == ()

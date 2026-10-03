@@ -333,6 +333,12 @@ class PhysicalState:
     #: means this comparison did not measure it. A live read attaches one
     #: entry for each reflected key.
     uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = ()
+    #: Existing-row gap for each normalized CHECK predicate.
+    #: ``(predicate, gap)``. PostgreSQL ``""`` means ``pg_get_constraintdef``
+    #: did not say ``NOT VALID``. ``not_checked`` means it did. New rows are
+    #: still rejected. ``unreported`` means this read did not see the flag.
+    #: An empty tuple means this comparison did not measure it.
+    check_proof: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         from services.foreign_key_metadata import (
@@ -377,6 +383,10 @@ class PhysicalState:
                 _render_default(column, expr) for column, expr in self.defaults
             ),
             "check_constraints": sorted(self.check_constraints),
+            "check_proof": [
+                {"predicate": predicate, "gap": gap}
+                for predicate, gap in self.check_proof
+            ],
             "triggers": sorted(_render_trigger(t) for t in self.triggers),
             "views": sorted(self.views),
             "routines": sorted(self.routines),
@@ -943,6 +953,7 @@ def read_physical_state(
             for c in checks or []
             if _normalize_predicate(c.get("sqltext"))
         ),
+        check_proof=_measured_check_proof(db_type, checks),
         triggers=frozenset(triggers or ()),
         views=frozenset(views or ()),
         routines=frozenset(routines or ()),
@@ -2076,6 +2087,84 @@ def _diff_defaults(
     }
 
 
+def _measured_check_proof(
+    db_type: str,
+    checks: list[Any] | None,
+) -> tuple[tuple[str, str], ...]:
+    """PostgreSQL ``NOT VALID`` gaps. Empty for every other engine.
+
+    SQLAlchemy's PostgreSQL reflection sets ``dialect_options.not_valid``
+    only when ``pg_get_constraintdef`` says ``NOT VALID``. A check without
+    that key was reflected as valid. Two predicates that normalize together
+    keep the worse gap.
+    """
+    from services.foreign_key_metadata import (
+        postgres_check_validation_gap,
+        postgres_index_catalog,
+    )
+
+    if not postgres_index_catalog(db_type) or not checks:
+        return ()
+    rank = {"": 0, "unreported": 1, "not_checked": 2}
+    proof: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        predicate = _normalize_predicate(check.get("sqltext"))
+        if not predicate:
+            continue
+        options = check.get("dialect_options") or {}
+        if isinstance(options, Mapping) and "not_valid" in options:
+            gap = postgres_check_validation_gap(bool(options.get("not_valid")))
+        else:
+            gap = ""
+        if predicate not in proof or rank[gap] > rank[proof[predicate]]:
+            proof[predicate] = gap
+    return tuple(sorted(proof.items()))
+
+
+def _diff_check_constraints(
+    source: frozenset,
+    destination: frozenset,
+    *,
+    destination_dialect: str = "",
+    check_proof: tuple[tuple[str, str], ...] = (),
+) -> dict[str, Any]:
+    """Carried when the predicates match and existing rows were checked.
+
+    A PostgreSQL ``NOT VALID`` check still rejects a new row. That write
+    rule is not this verdict. An empty proof tuple means this comparison
+    did not measure the flag, so a hand-built state stays on the older
+    carried verdict.
+    """
+    from services.foreign_key_metadata import (
+        postgres_check_validation_reason,
+        postgres_index_catalog,
+    )
+
+    base = _diff_sets(source, destination)
+    if not check_proof or not postgres_index_catalog(destination_dialect):
+        return base
+    proof = {predicate: gap for predicate, gap in check_proof}
+    unchecked: list[str] = []
+    reasons: list[str] = []
+    for predicate in sorted(source & destination):
+        gap = proof.get(str(predicate), "unreported")
+        if not gap:
+            continue
+        unchecked.append(str(predicate))
+        reason = postgres_check_validation_reason(gap)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    if base["missing"]:
+        status = "absent"
+    elif unchecked:
+        status = "unchecked"
+    else:
+        status = "carried"
+    return {**base, "status": status, "unchecked": unchecked, "reasons": reasons}
+
+
 def _diff_sets(source: frozenset, dest: frozenset) -> dict[str, Any]:
     missing = sorted(_render(v) for v in source - dest)
     extra = sorted(_render(v) for v in dest - source)
@@ -2150,8 +2239,11 @@ def compare_physical_state(
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
         "defaults": _diff_defaults(source.defaults, destination.defaults),
-        "check_constraints": _diff_sets(
-            source.check_constraints, destination.check_constraints
+        "check_constraints": _diff_check_constraints(
+            source.check_constraints,
+            destination.check_constraints,
+            destination_dialect=destination.dialect,
+            check_proof=destination.check_proof,
         ),
     }
     advisory = {
