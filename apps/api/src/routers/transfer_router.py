@@ -806,9 +806,10 @@ async def execute_transfer_json(
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
     from services.cdc_exactly_once import (
         ExactlyOnceRouteError,
-        assert_requested_cdc_delivery,
         dest_allow_append_only,
+        route_declares_log_position,
         route_has_cdc_pk,
+        select_route_delivery,
     )
     from services.execution_engine_contract import DeliveryGuaranteeError
     from services.procedure_source import is_callable_source
@@ -823,12 +824,16 @@ async def execute_transfer_json(
         body.destination.kind, body.destination.model_dump(by_alias=True)
     )
     try:
-        assert_requested_cdc_delivery(
+        # auto is the product default. select_route_delivery keeps an explicit
+        # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
+        # which 400s every JSON execute that omits the field.
+        select_route_delivery(
             body.delivery_guarantee,
             sync_mode=body.sync_mode or "",
             dest_type=str(getattr(dst_preview, "format", "") or ""),
             source_type=str(getattr(src_preview, "format", "") or ""),
             has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            has_lsn_column=route_declares_log_position(body.stream_contracts),
             allow_append_only=dest_allow_append_only(dst_preview),
             callable_source=is_callable_source(src_preview),
         )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from services.execution_engine_contract import (
@@ -150,6 +152,23 @@ def test_assert_delivery_allows_exactly_once_token():
     except DeliveryGuaranteeError:
         raised = True
     assert raised is True
+
+
+def test_json_execute_resolves_auto_instead_of_rejecting_it():
+    """POST /transfer/execute defaults to auto. The route gate must resolve it.
+
+    assert_requested_cdc_delivery only accepts at_least_once and exactly_once,
+    so a JSON execute that omits the field used to 400 before the engine ran.
+    """
+    text = Path(__file__).resolve().parents[1].joinpath(
+        "src/routers/transfer_router.py"
+    ).read_text(encoding="utf-8")
+    start = text.index("async def execute_transfer_json")
+    end = text.index('@router.post("/run")', start)
+    chunk = text[start:end]
+    assert "select_route_delivery(" in chunk
+    assert "assert_requested_cdc_delivery(" not in chunk
+    assert "route_declares_log_position(" in chunk
 
 
 def test_recovery_honesty_embeds_execution_contract():
