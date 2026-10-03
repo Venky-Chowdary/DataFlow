@@ -14,8 +14,9 @@
 @import "./tokens.css";
 @import "./dataflow-ui.css";
 @import "./jarvis-ui.css";
-@import "./landing.css";
-@import "./marketing-layout.css";
+/* landing.css and marketing-layout.css load from marketing-base.css (index.html)
+   so this workspace bundle stays within the CSS chunk budget. Later sheets here
+   still override that base. */
 @import "./enterprise-platform.css";
 @import "./premium-theme.css";
 @import "./brand-system.css";

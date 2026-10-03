@@ -1,0 +1,14 @@
+/**
+ * Public landing and marketing layout.
+ *
+ * Linked from index.html ahead of the workspace bundle. Editorial,
+ * enterprise-ui, the hero sheet, and the rules in app-styles.css still
+ * load later and keep the overrides they already had.
+ */
+@import "./landing.css";
+@import "./marketing-layout.css";
+
+/* Build splits the workspace bundle after this rule. It is not a visual style. */
+.df2-css-split-marketing-base {
+  contain: none;
+}
