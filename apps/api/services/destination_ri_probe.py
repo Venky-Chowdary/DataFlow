@@ -39,7 +39,7 @@ from services.foreign_key_identity import (
     fk_identity as _fk_identity,
     fold as _fold,
     parent_label as _parent_label,
-    qualified_parent as _qualified_parent,
+    parse_foreign_key,
     relationship_identity,
     same_relationship as _same_relationship,
 )
@@ -145,27 +145,27 @@ def verify_destination_referential_integrity(
             inspector, schema_arg, conn=conn, dialect=str(db_type)
         )
         for fk in wanted:
-            child_cols = [
-                str(c)
-                for c in (fk.get("constrained_columns") or fk.get("columns") or ())
-                if c
-            ]
-            parent_cols = [
-                str(c)
-                for c in (
-                    fk.get("referred_columns") or fk.get("referenced_columns") or ()
-                )
-                if c
-            ]
-            parent_schema, parent_table = _qualified_parent(fk)
-            key = relationship_identity(
-                child_cols, _parent_label(parent_schema, parent_table), parent_cols
-            )
+            parsed = parse_foreign_key(fk)
+            child_cols = list(parsed.child_columns)
+            parent_cols = list(parsed.parent_columns)
+            parent_schema = _fold(parsed.parent_schema)
+            parent_table = _fold(parsed.parent_table)
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,
                 "referred_columns": parent_cols,
             }
+            if parsed.conflict:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    reason=parsed.conflict,
+                )
+                relations.append(rel)
+                continue
+            key = relationship_identity(
+                child_cols, _parent_label(parent_schema, parent_table), parent_cols
+            )
             if any(_same_relationship(key, known) for known in enforced):
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)

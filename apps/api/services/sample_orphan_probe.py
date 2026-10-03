@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable
 
+from services.foreign_key_identity import parse_foreign_key
 from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
@@ -138,46 +139,17 @@ def _resolve_source_column(
 
 
 def _fk_parts(fk: dict[str, Any]) -> tuple[list[str], str, list[str]]:
-    """Normalize source-catalog, dest-inspector, and Studio FK payloads.
+    """Scan target from :func:`parse_foreign_key`.
 
-    Source probe uses ``columns`` / ``referenced_*``. Destination RI and some
-    engine extras use ``constrained_columns`` / ``referred_*``. One parser so
-    Validate does not treat a dest-shaped composite as incomplete.
+    Source catalogs, Studio (``ref_table``), and the destination inspector
+    are one read. A payload that names two parents or two column lists
+    returns empty parts; the probe surfaces ``conflict`` instead of scanning
+    the alias that happens to be listed first.
     """
-    cols = (
-        fk.get("columns")
-        or fk.get("column")
-        or fk.get("fk_columns")
-        or fk.get("constrained_columns")
-        or []
-    )
-    if isinstance(cols, str):
-        cols = [cols]
-    cols = [str(c).strip() for c in cols if str(c).strip()]
-    ref_table = str(
-        fk.get("referenced_table")
-        or fk.get("ref_table")
-        or fk.get("referred_table")
-        or ""
-    ).strip()
-    ref_schema = str(
-        fk.get("referenced_schema")
-        or fk.get("ref_schema")
-        or fk.get("referred_schema")
-        or ""
-    ).strip()
-    if ref_schema and ref_table and "." not in ref_table:
-        ref_table = f"{ref_schema}.{ref_table}"
-    ref_cols = (
-        fk.get("referenced_columns")
-        or fk.get("ref_columns")
-        or fk.get("referred_columns")
-        or []
-    )
-    if isinstance(ref_cols, str):
-        ref_cols = [ref_cols]
-    ref_cols = [str(c).strip() for c in ref_cols if str(c).strip()]
-    return cols, ref_table, ref_cols
+    parsed = parse_foreign_key(fk)
+    if parsed.conflict:
+        return [], "", []
+    return list(parsed.child_columns), parsed.scan_label, list(parsed.parent_columns)
 
 
 def _severity(*, validation_mode: str, fk_risk_acknowledged: bool) -> str:
@@ -350,7 +322,34 @@ def probe_sample_fk_orphans(
     )
 
     for fk in fks:
-        cols, ref_table, ref_cols = _fk_parts(fk)
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict:
+            findings.append(
+                {
+                    "code": "foreign_key_alias_conflict",
+                    "severity": sev,
+                    "columns": list(parsed.child_columns),
+                    "coverage": "sample_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"{parsed.conflict} Sample orphan probe did not run — "
+                        "population RI not proven."
+                    ),
+                }
+            )
+            checks.append(
+                {
+                    "skipped": True,
+                    "reason": "foreign_key_alias_conflict",
+                    "fk": fk,
+                    "coverage": "sample_orphan_probe",
+                    "population_proof": False,
+                }
+            )
+            continue
+        cols = list(parsed.child_columns)
+        ref_table = parsed.scan_label
+        ref_cols = list(parsed.parent_columns)
         if not cols or not ref_table or not ref_cols:
             checks.append(
                 {

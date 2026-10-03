@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.foreign_key_identity import parse_foreign_key
 from services.sample_orphan_probe import (
     _fk_display,
     _fk_parts,
@@ -231,7 +232,35 @@ def probe_population_fk_orphans(
     )
 
     for fk in fks:
-        cols, ref_table, ref_cols = _fk_parts(fk)
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict:
+            complete = False
+            checks.append(
+                {
+                    "skipped": True,
+                    "reason": "foreign_key_alias_conflict",
+                    "fk": fk,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                }
+            )
+            findings.append(
+                {
+                    "code": "foreign_key_alias_conflict",
+                    "severity": sev,
+                    "columns": list(parsed.child_columns),
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"{parsed.conflict} Population orphan scan did not run — "
+                        "referential integrity is not proven."
+                    ),
+                }
+            )
+            continue
+        cols = list(parsed.child_columns)
+        ref_table = parsed.scan_label
+        ref_cols = list(parsed.parent_columns)
         if not cols or not ref_table or not ref_cols:
             complete = False
             checks.append({"skipped": True, "reason": "incomplete_fk_metadata", "fk": fk})

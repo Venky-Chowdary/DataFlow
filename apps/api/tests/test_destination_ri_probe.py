@@ -157,6 +157,39 @@ def test_reversed_composite_pairs_still_count_as_enforced(tmp_path: Path) -> Non
     assert result["relations"][0]["status"] == "enforced"
 
 
+def test_two_parent_aliases_are_not_scanned_as_clean(tmp_path: Path) -> None:
+    """A local customers row must not prove a payload that also names real_parent."""
+    path = str(tmp_path / "two_parents.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO customers (id) VALUES (10)")
+        conn.execute("CREATE TABLE real_parent (id INTEGER PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER)"
+        )
+        conn.execute("INSERT INTO orders (id, customer_id) VALUES (1, 10)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="orders",
+        foreign_keys=[
+            {
+                "columns": ["customer_id"],
+                "referenced_table": "customers",
+                "referenced_columns": ["id"],
+                "referred_table": "real_parent",
+                "referred_columns": ["id"],
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert result["orphan_rows"] == 0
+    reason = result["relations"][0]["reason"]
+    assert "customers" in reason
+    assert "real_parent" in reason
+
+
 def test_parent_named_in_another_schema_is_not_the_local_table(tmp_path: Path) -> None:
     """A local ``parent`` does not prove ``sales.parent``. The scan must not borrow it."""
     cfg = _db(
