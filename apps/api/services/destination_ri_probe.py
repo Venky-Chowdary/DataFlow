@@ -13,6 +13,11 @@ module separates, which a catalog diff alone cannot:
 Composite keys are scanned as a tuple under SQL ``MATCH SIMPLE``: a child row
 with any NULL in the key is unconstrained and is not an orphan.
 
+An enforced catalog FK counts only when it is the same relationship: the same
+parent table and the same (child column, parent column) pairs. A constraint on
+the same child columns that points at a different parent column is not that
+promise, and the child rows are scanned.
+
 Anything else — parent table missing, unreadable catalog, failed scan — is
 reported unavailable with a reason. An unproven relationship never counts as
 clean, because "no orphans found" and "no scan ran" look identical in a report
@@ -40,6 +45,7 @@ _PROVEN_STATUSES = frozenset({"enforced", "scanned"})
 
 __all__ = [
     "verify_destination_referential_integrity",
+    "relationship_identity",
     "referential_integrity_proven",
     "build_dest_ri_gate",
     "build_dest_ri_validate_gate",
@@ -50,6 +56,73 @@ __all__ = [
 
 def _fold(name: Any) -> str:
     return str(name or "").strip().casefold()
+
+
+def _table_parts(name: str) -> tuple[str | None, str]:
+    """``(schema, table)``. An unqualified name has no schema."""
+    folded = _fold(name)
+    if "." not in folded:
+        return None, folded
+    schema, table = folded.rsplit(".", 1)
+    if not schema or not table:
+        return None, folded
+    return schema, table
+
+
+def _same_parent_table(left: str, right: str) -> bool:
+    """True when both names are the same destination relation.
+
+    ``parent`` matches ``public.parent``. ``sales.parent`` does not match
+    ``archive.parent`` — those are two tables that share a leaf name.
+    """
+    if _fold(left) == _fold(right):
+        return True
+    left_schema, left_table = _table_parts(left)
+    right_schema, right_table = _table_parts(right)
+    if not left_table or left_table != right_table:
+        return False
+    if left_schema is None or right_schema is None:
+        return True
+    return left_schema == right_schema
+
+
+def relationship_identity(
+    child_columns: list[str] | tuple[str, ...],
+    parent_table: str,
+    parent_columns: list[str] | tuple[str, ...],
+) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    """Parent table plus the set of (child column, parent column) pairs.
+
+    DDL order is not part of the promise: ``(a, b) REFERENCES (x, y)`` is the
+    same relationship as ``(b, a) REFERENCES (y, x)``. A missing or uneven
+    pairing is not an identity — the caller must scan or refuse, not treat it
+    as enforced.
+    """
+    children = [str(c).strip() for c in child_columns]
+    parents = [str(c).strip() for c in parent_columns]
+    if not str(parent_table or "").strip() or not children or len(children) != len(parents):
+        return None
+    if any(not child or not parent for child, parent in zip(children, parents)):
+        return None
+    pairs = tuple(sorted((_fold(child), _fold(parent)) for child, parent in zip(children, parents)))
+    return (_fold(parent_table), pairs)
+
+
+def _fk_identity(fk: Mapping[str, Any]) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    return relationship_identity(
+        list(fk.get("constrained_columns") or ()),
+        str(fk.get("referred_table") or ""),
+        list(fk.get("referred_columns") or ()),
+    )
+
+
+def _same_relationship(
+    left: tuple[str, tuple[tuple[str, str], ...]] | None,
+    right: tuple[str, tuple[tuple[str, str], ...]] | None,
+) -> bool:
+    if left is None or right is None:
+        return False
+    return left[1] == right[1] and _same_parent_table(left[0], right[0])
 
 
 def _orphan_scan(
@@ -121,14 +194,7 @@ def verify_destination_referential_integrity(
             }
 
         dest_fks = inspector.get_foreign_keys(child_name, schema=schema_arg)
-        enforced = {
-            (
-                "+".join(_fold(c) for c in fk.get("constrained_columns") or ()),
-                _fold(fk.get("referred_table")),
-            )
-            for fk in dest_fks
-            if fk.get("constrained_columns")
-        }
+        enforced = [ident for fk in dest_fks if (ident := _fk_identity(fk)) is not None]
         wanted = list(foreign_keys if foreign_keys is not None else dest_fks)
         if not wanted:
             return {
@@ -145,16 +211,13 @@ def verify_destination_referential_integrity(
             child_cols = [str(c) for c in fk.get("constrained_columns") or () if c]
             parent_cols = [str(c) for c in fk.get("referred_columns") or () if c]
             parent_table = str(fk.get("referred_table") or "")
-            key = (
-                "+".join(_fold(c) for c in child_cols),
-                _fold(parent_table),
-            )
+            key = relationship_identity(child_cols, parent_table, parent_cols)
             rel: dict[str, Any] = {
                 "columns": child_cols,
                 "referred_table": parent_table,
                 "referred_columns": parent_cols,
             }
-            if key in enforced:
+            if any(_same_relationship(key, known) for known in enforced):
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)
                 continue

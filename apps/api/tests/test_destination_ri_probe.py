@@ -12,7 +12,11 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from services.destination_ri_probe import verify_destination_referential_integrity
+from services.destination_ri_probe import (
+    _same_relationship,
+    relationship_identity,
+    verify_destination_referential_integrity,
+)
 from services.migration_certificate import (
     _referential_blockers,
     physical_state_findings,
@@ -70,6 +74,20 @@ def test_orphan_rows_are_counted_and_exampled(tmp_path: Path) -> None:
     assert result["orphan_relations"] == ["parent_id->parent"]
 
 
+def test_relationship_identity_is_the_column_pairs() -> None:
+    """Order in the DDL is not a different promise. A different parent column is."""
+    forward = relationship_identity(["a", "b"], "public.parent", ["x", "y"])
+    reversed_pairs = relationship_identity(["b", "a"], "parent", ["y", "x"])
+    other_parent_column = relationship_identity(["a", "b"], "parent", ["y", "x"])
+    other_schema = relationship_identity(["a", "b"], "archive.parent", ["x", "y"])
+    assert forward is not None and reversed_pairs is not None
+    assert _same_relationship(forward, reversed_pairs) is True
+    assert other_parent_column is not None
+    assert _same_relationship(forward, other_parent_column) is False
+    assert other_schema is not None
+    assert _same_relationship(forward, other_schema) is False
+
+
 def test_enforced_fk_needs_no_scan(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,
@@ -78,6 +96,63 @@ def test_enforced_fk_needs_no_scan(tmp_path: Path) -> None:
         "INSERT INTO child (id, parent_id) VALUES (1, 1)",
     )
     result = _probe(cfg)
+    assert result["verified"] is True
+    assert result["relations"][0]["status"] == "enforced"
+
+
+def test_enforced_fk_on_a_different_parent_column_is_scanned(tmp_path: Path) -> None:
+    """Same child column and parent table, different parent column, is not enforced.
+
+    ``parent_id → parent.legacy_id`` does not prove ``parent_id → parent.id``.
+    The row 10 is a real legacy key and an orphan of id.
+    """
+    path = str(tmp_path / "wrong_parent_col.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY, legacy_id INTEGER UNIQUE)"
+        )
+        conn.execute("INSERT INTO parent (id, legacy_id) VALUES (1, 10), (2, 20)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, "
+            "parent_id INTEGER REFERENCES parent(legacy_id))"
+        )
+        conn.execute("INSERT INTO child (id, parent_id) VALUES (1, 10)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=SOURCE_FK,
+    )
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["orphan_rows"] == 1
+    assert result["verified"] is False
+
+
+def test_reversed_composite_pairs_still_count_as_enforced(tmp_path: Path) -> None:
+    """(b, a) → (y, x) is the same FK as (a, b) → (x, y)."""
+    path = str(tmp_path / "pair_order.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE parent (x INTEGER, y INTEGER, PRIMARY KEY (x, y))"
+        )
+        conn.execute("INSERT INTO parent (x, y) VALUES (1, 2)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER, "
+            "FOREIGN KEY (a, b) REFERENCES parent (x, y))"
+        )
+        conn.execute("INSERT INTO child (id, a, b) VALUES (1, 1, 2)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["b", "a"],
+                "referred_table": "public.parent",
+                "referred_columns": ["y", "x"],
+            }
+        ],
+    )
     assert result["verified"] is True
     assert result["relations"][0]["status"] == "enforced"
 
