@@ -326,7 +326,8 @@ class PhysicalState:
     index_detail: str = ""
     #: Existing-row gap for each primary-key or unique column set.
     #: ``(folded columns, gap)``. Oracle ``""`` is ``VALIDATED`` and
-    #: ``not_checked`` is ``NOT VALIDATED``. SQL Server ``""`` is an enabled
+    #: ``not_checked`` is ``NOT VALIDATED``. ``disabled`` is ``STATUS``
+    #: ``DISABLED``. SQL Server ``""`` is an enabled
     #: unique index and ``not_checked`` is ``is_disabled = 1``. PostgreSQL
     #: ``""`` is ``indisvalid``. ``not_checked`` is an invalid index that
     #: still rejects a new row. ``not_ready`` is ``indisready`` false.
@@ -1266,14 +1267,9 @@ def read_oracle_check_rows(conn: Any, owner: str, table: str) -> list[Any] | Non
 
 def _oracle_status_enabled(value: Any) -> bool | None:
     """``ALL_CONSTRAINTS.STATUS``. None when this cell did not say."""
-    if value is None:
-        return None
-    text = str(value).strip().casefold()
-    if text == "enabled":
-        return True
-    if text == "disabled":
-        return False
-    return None
+    from services.foreign_key_metadata import oracle_constraint_enabled
+
+    return oracle_constraint_enabled(value)
 
 
 def _first_token(text: str, tokens: tuple[str, ...]) -> str:
@@ -2004,7 +2000,8 @@ def _diff_uniqueness(
 
     An Oracle ``ENABLED`` key rejects a new duplicate. That write rule is
     not this verdict. Existing rows are carried only when
-    ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. A SQL Server unique
+    ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. ``STATUS`` ``DISABLED``
+    does not reject a new duplicate. A SQL Server unique
     index with ``is_disabled = 1`` does not reject a new duplicate and is
     not existing-row proof. A PostgreSQL unique index proves existing rows
     only when ``pg_index.indisvalid`` is true. ``indisready`` false is not

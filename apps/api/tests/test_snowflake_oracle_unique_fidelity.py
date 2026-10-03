@@ -325,7 +325,8 @@ def test_oracle_not_validated_is_recorded_and_still_blocks_a_new_duplicate():
     assert key["columns"] == ["ID"]
     sql = str(cur.execute.call_args_list[0].args[0]).lower()
     assert "ac.validated" in sql
-    assert "status = 'enabled'" in sql
+    assert "ac.status" in sql
+    assert "status = 'enabled'" not in sql
 
     narrow = MagicMock()
     narrow.execute.return_value.fetchall.side_effect = [
@@ -363,6 +364,55 @@ def test_oracle_not_validated_is_recorded_and_still_blocks_a_new_duplicate():
     )
     assert blocked["passed"] is False
     assert blocked["blocks_transfer"] is True
+
+
+def test_oracle_disabled_unique_stays_visible_and_does_not_block():
+    """``STATUS`` ``DISABLED`` is not a dropped key and not a write block.
+
+    A five-column row did not ask for ``STATUS``. An enabled constraint on
+    the same columns keeps the existing-row proof.
+    """
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        _oracle_fetch_unique_keys,
+        oracle_uniqueness_proof,
+    )
+
+    assert oracle_uniqueness_proof(
+        [("UQ_EMAIL", "U", "EMAIL", 1, "VALIDATED", "DISABLED")]
+    ) == {frozenset({"email"}): "disabled"}
+    assert oracle_uniqueness_proof(
+        [
+            ("UQ_EMAIL", "U", "EMAIL", 1, "VALIDATED", "ENABLED"),
+            ("UQ_EMAIL_OFF", "U", "EMAIL", 1, "VALIDATED", "DISABLED"),
+        ]
+    ) == {frozenset({"email"}): ""}
+    assert oracle_uniqueness_proof(
+        [("PK_EMP", "P", "ID", 1, "NOT VALIDATED")]
+    ) == {frozenset({"id"}): "not_checked"}
+
+    cur = MagicMock()
+    cur.execute.return_value.fetchall.side_effect = [
+        [("UQ_EMAIL", "U", "EMAIL", 1, "VALIDATED", "DISABLED")],
+        [],
+    ]
+    key = _oracle_fetch_unique_keys(cur, "HR", "EMP")["unique_keys"][0]
+    assert key["disabled"] is True
+    assert key["enforced"] is False
+    assert _unique_constraint_enforced(key, dest_kind="oracle") is False
+    warned = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="oracle",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[key],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert warned["passed"] is True
+    assert warned["blocks_transfer"] is False
+    assert any("STATUS" in warning and "DISABLED" in warning for warning in warned["warnings"])
 
 
 def test_oracle_nlssort_binary_ci_forces_casefold():

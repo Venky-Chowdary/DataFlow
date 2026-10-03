@@ -706,10 +706,19 @@ def _advisory_unique_key_warnings(
                 "loaded rows are unique."
             )
         if any(uk.get("disabled") is True for uk in advisory):
-            warnings.append(
-                f"{kind} unique index is disabled. It does not reject a new "
-                "duplicate and does not prove the loaded rows are unique."
-            )
+            from services.foreign_key_metadata import _dialect_key
+
+            if _dialect_key(dest_kind) == "oracle":
+                warnings.append(
+                    f"{kind} primary key or unique constraint has STATUS "
+                    "DISABLED. It does not reject a new duplicate and does "
+                    "not prove the loaded rows are unique."
+                )
+            else:
+                warnings.append(
+                    f"{kind} unique index is disabled. It does not reject a "
+                    "new duplicate and does not prove the loaded rows are unique."
+                )
         if any(uk.get("index_ready") is False for uk in advisory):
             warnings.append(
                 f"{kind} unique index is not ready for inserts "

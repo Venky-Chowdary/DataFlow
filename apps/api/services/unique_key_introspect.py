@@ -478,7 +478,8 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
                   ac.constraint_type,
                   acc.column_name,
                   acc.position,
-                  ac.validated
+                  ac.validated,
+                  ac.status
                 FROM all_constraints ac
                 JOIN all_cons_columns acc
                   ON ac.owner = acc.owner
@@ -487,7 +488,6 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
                 WHERE ac.owner = :owner
                   AND ac.table_name = :table
                   AND ac.constraint_type IN ('P', 'U')
-                  AND ac.status = 'ENABLED'
                 ORDER BY ac.constraint_name, acc.position
                 """
             ),
@@ -497,14 +497,18 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
 
 
 def oracle_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
-    """Column set to existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
+    """Column set to existing-row gap from ``STATUS`` and ``VALIDATED``.
 
-    Columns are folded. ``NOT VALIDATED`` wins across the column rows of one
-    constraint. A row that omits the cell is ``unreported`` for that set.
+    Columns are folded. ``NOT VALIDATED`` wins across the column rows of
+    one constraint. ``DISABLED`` wins inside that constraint. Across two
+    constraints on the same columns, an enabled constraint keeps the
+    proof: a disabled sibling does not cancel it. A five-column row did
+    not ask for ``STATUS``.
     """
     from services.foreign_key_metadata import (
         coerce_validated,
-        oracle_uniqueness_validation_gap,
+        oracle_constraint_enabled,
+        oracle_uniqueness_status_gap,
     )
 
     by_name: dict[str, dict[str, Any]] = {}
@@ -513,7 +517,9 @@ def oracle_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
         if len(fields) < 4 or not fields[0] or not fields[2]:
             continue
         name = str(fields[0])
-        bucket = by_name.setdefault(name, {"columns": [], "validated": None})
+        bucket = by_name.setdefault(
+            name, {"columns": [], "validated": None, "enabled": None}
+        )
         bucket["columns"].append(str(fields[2]).strip().casefold())
         if len(fields) > 4:
             checked = coerce_validated(fields[4])
@@ -521,24 +527,33 @@ def oracle_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
                 bucket["validated"] = False
             elif checked is True and bucket["validated"] is not False:
                 bucket["validated"] = True
+        if len(fields) > 5:
+            enabled = oracle_constraint_enabled(fields[5])
+            if enabled is False:
+                bucket["enabled"] = False
+            elif enabled is True and bucket["enabled"] is not False:
+                bucket["enabled"] = True
     proof: dict[frozenset[str], str] = {}
+    # An enabled constraint is the check. A disabled constraint on the
+    # same columns does not erase it.
+    best = {"": 3, "not_checked": 2, "unreported": 1, "disabled": 0}
     for bucket in by_name.values():
         columns = frozenset(col for col in bucket["columns"] if col)
         if not columns:
             continue
-        gap = oracle_uniqueness_validation_gap(bucket["validated"])
-        # A measured failure beats an empty or unread gap on the same columns.
-        rank = {"": 0, "unreported": 1, "not_checked": 2}
-        if columns not in proof or rank[gap] > rank[proof[columns]]:
+        gap = oracle_uniqueness_status_gap(bucket["enabled"], bucket["validated"])
+        current = proof.get(columns)
+        if current is None or best[gap] > best[current]:
             proof[columns] = gap
     return proof
 
 
 def read_oracle_uniqueness_rows(conn: Any, owner: str, table: str) -> list[Any] | None:
-    """Enabled PRIMARY/UNIQUE rows, or None when the catalog did not answer.
+    """PRIMARY/UNIQUE rows, or None when the catalog did not answer.
 
-    An empty list is a successful read of no enabled constraint. It is not
-    a failed read. The exact owner/table spelling is tried before upper case.
+    ``DISABLED`` stays in the list. An empty list is a successful read of
+    no constraint. It is not a failed read. The exact owner/table spelling
+    is tried before upper case.
     """
     owner_u = (owner or "").upper()
     table_u = (table or "").upper()
@@ -587,7 +602,10 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
     except Exception:
         return {"primary_key_columns": [], "unique_keys": []}
 
-    from services.foreign_key_metadata import coerce_validated
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        oracle_constraint_enabled,
+    )
 
     for row in rows or []:
         fields = tuple(row)
@@ -613,6 +631,10 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
                 bucket["validated"] = False
             elif checked is True and bucket.get("validated") is not False:
                 bucket["validated"] = True
+        # A five-column fixture did not ask. Do not invent STATUS.
+        if len(fields) > 5 and oracle_constraint_enabled(fields[5]) is False:
+            bucket["disabled"] = True
+            bucket["enforced"] = False
     # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
     try:
         fbi_rows = conn.execute(

@@ -583,6 +583,18 @@ def sqlserver_disabled_unique_reason(gap: str) -> str:
     return ""
 
 
+def oracle_constraint_enabled(value: Any) -> bool | None:
+    """``ALL_CONSTRAINTS.STATUS``. None when this cell did not say."""
+    if value is None:
+        return None
+    text = str(value).strip().casefold()
+    if text == "enabled":
+        return True
+    if text == "disabled":
+        return False
+    return None
+
+
 def oracle_uniqueness_validation_gap(validated: bool | None) -> str:
     """Existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
 
@@ -598,8 +610,29 @@ def oracle_uniqueness_validation_gap(validated: bool | None) -> str:
     return "unreported"
 
 
+def oracle_uniqueness_status_gap(
+    enabled: bool | None, validated: bool | None
+) -> str:
+    """Existing-row gap from ``STATUS`` and ``VALIDATED``.
+
+    ``DISABLED`` does not reject a new duplicate. A missing ``STATUS``
+    cell keeps the older ``VALIDATED`` rule, so a five-column row does
+    not invent a disabled constraint.
+    """
+    if enabled is False:
+        return "disabled"
+    return oracle_uniqueness_validation_gap(validated)
+
+
 def oracle_uniqueness_validation_reason(gap: str) -> str:
     """Operator sentence for a non-empty Oracle uniqueness validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.STATUS is DISABLED. The constraint does not "
+            "reject a new duplicate and does not prove the rows already "
+            "stored are unique."
+        )
     if gap == "not_checked":
         return (
             "Destination stores this primary key or unique constraint. "

@@ -1675,6 +1675,37 @@ def test_oracle_not_validated_key_is_not_existing_row_proof() -> None:
     assert dict(failed) == {("email",): "unreported", ("id",): "unreported"}
     assert _oracle_uniqueness_proof("postgresql", ("id",), {("email",)}, rows) == ()
 
+    disabled = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="amazon_rds_oracle",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "disabled")),
+        ),
+    )
+    unique = disabled["aspects"]["unique_constraints"]
+    assert unique["status"] == "unchecked"
+    assert unique["missing"] == []
+    assert "email" in unique["unchecked"]
+    assert "DISABLED" in unique["reasons"][0]
+    assert "does not reject" in unique["reasons"][0]
+    assert disabled["aspects"]["primary_key"]["status"] == "carried"
+    assert disabled["verified"] is False
+    assert "unique_constraints" not in disabled["absent"]
+    off = _oracle_uniqueness_proof(
+        "oracle",
+        ("id",),
+        {("email",)},
+        [
+            ("PK_ID", "P", "ID", 1, "VALIDATED", "ENABLED"),
+            ("UQ_EMAIL", "U", "EMAIL", 1, "VALIDATED", "DISABLED"),
+        ],
+    )
+    assert dict(off) == {("email",): "disabled", ("id",): ""}
+
 
 def test_sqlserver_disabled_unique_index_is_not_row_proof() -> None:
     """``is_disabled = 1`` is not a write rule and not existing-row proof.
