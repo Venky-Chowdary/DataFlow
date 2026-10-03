@@ -2358,9 +2358,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         if value is None:
             return None
         try:
-            from services.value_serializer import cell_to_string
+            from services.value_serializer import transform_input_cell
 
-            return cell_to_string(value)
+            return transform_input_cell(value)
         except Exception:
             return str(value)
 

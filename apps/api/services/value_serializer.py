@@ -544,6 +544,21 @@ def project_row_cells(
     return out
 
 
+def transform_input_cell(value: Any) -> str | None:
+    """Text a write-path transform should see.
+
+    ``None`` stays ``None``. A sparse omit (``DF_MISSING``) stays the sentinel.
+    ``cell_to_string`` flattens that sentinel to ``""`` for export wires. Gate-8
+    used that flatten, so a Mongo document that simply lacks ``balance`` failed
+    as ``Empty value cannot coerce to decimal``. Absence is not an empty cell.
+    """
+    if value is None:
+        return None
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
+    return cell_to_string(value)
+
+
 def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     """Convert a typed Python value into a canonical intermediate string.
 
