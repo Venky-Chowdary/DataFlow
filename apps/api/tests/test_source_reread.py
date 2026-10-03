@@ -26,15 +26,22 @@ def test_engine_family_collapses_postgres_aliases():
     assert engine_family("mysql") != engine_family("postgresql")
 
 
-def test_auto_reread_only_heterogeneous_warehouse(monkeypatch):
+def test_auto_reread_full_refresh_includes_same_engine(monkeypatch):
+    """HVR bulk compare re-reads source and target, including same-engine refresh."""
     monkeypatch.delenv("DATAFLOW_RECONCILE_SOURCE_REREAD", raising=False)
     monkeypatch.delenv("DATAWRAP_RECONCILE_SOURCE_REREAD", raising=False)
     monkeypatch.delenv("RECONCILE_SOURCE_REREAD", raising=False)
     assert should_reread_source(src_type="snowflake", dest_type="postgresql") is True
     assert should_reread_source(src_type="mysql", dest_type="postgresql") is True
-    assert should_reread_source(src_type="postgresql", dest_type="postgresql") is False
-    assert should_reread_source(src_type="sqlite", dest_type="sqlite") is False
+    assert should_reread_source(src_type="postgresql", dest_type="postgresql") is True
+    assert should_reread_source(src_type="postgres", dest_type="postgres") is True
+    assert should_reread_source(src_type="sqlite", dest_type="sqlite") is True
+    assert should_reread_source(src_type="mssql", dest_type="postgresql") is True
+    assert should_reread_source(src_type="s3", dest_type="postgresql") is False
     assert should_reread_source(src_type="snowflake", dest_type="kafka") is False
+    assert should_reread_source(
+        src_type="postgresql", dest_type="postgresql", incremental=True
+    ) is False
     assert should_reread_source(
         src_type="snowflake", dest_type="postgresql", incremental=True
     ) is False

@@ -252,6 +252,29 @@ def test_source_reread_with_identity_and_versions_is_migration_proven():
     assert_pack_may_claim_migration_proven(pack)
 
 
+def test_proof_pack_records_elapsed_and_phase_split():
+    """Elapsed time is part of the signed evidence, with the phase split beside it."""
+    pack = build_signed_proof_pack(
+        job_id="timed",
+        reconciliation={"passed": True, "coverage": "row_count"},
+        timing={
+            "elapsed_seconds": 1.25,
+            "records_per_second": 8.0,
+            "phase_profile": {
+                "phases": [
+                    {"phase": "transform_write", "seconds": 0.8, "rows": 10},
+                    {"phase": "checksum", "seconds": 0.4, "rows": 10},
+                ],
+                "busy_seconds": 1.2,
+                "elapsed_seconds": 1.25,
+            },
+        },
+    )
+    assert pack["timing"]["elapsed_seconds"] == 1.25
+    assert pack["timing"]["phase_profile"]["phases"][1]["phase"] == "checksum"
+    assert verify_signed_proof_pack(pack)["ok"] is True
+
+
 def test_format_only_versions_cannot_keep_migration_proven():
     pack = build_signed_proof_pack(
         job_id="fmt-proven",

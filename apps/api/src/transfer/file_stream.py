@@ -13,6 +13,7 @@ import itertools
 import json
 import logging
 import os
+import time
 from services.brand_env import getenv_brand
 import sys
 import tempfile
@@ -1536,6 +1537,15 @@ def stream_file_to_database(
         from services.copy_csv_local import try_copy_local_csv
     except ImportError:
         from src.services.copy_csv_local import try_copy_local_csv  # type: ignore
+    from services.phase_profile import (
+        PHASE_BULK_COPY,
+        PHASE_CHECKSUM,
+        PHASE_TRANSFORM_WRITE,
+        PhaseProfile,
+    )
+
+    phase_profile = PhaseProfile()
+    copy_started = time.perf_counter()
     csv_fast = try_copy_local_csv(
         content=content,
         filename=filename,
@@ -1567,6 +1577,12 @@ def stream_file_to_database(
             file_type=file_type,
             dest_type=dest_type,
         )
+        phase_profile.add(
+            PHASE_BULK_COPY,
+            time.perf_counter() - copy_started,
+            rows=int(rows_copied or 0),
+        )
+        reread_started = time.perf_counter()
         _maybe_upgrade_copy_reread(
             dest_summary,
             file_type=file_type,
@@ -1589,6 +1605,19 @@ def stream_file_to_database(
             cursor_pk_source=cursor_pk_source,
             shape_recipe=getattr(shape_runner, "recipe", None) if shape_runner is not None else None,
         )
+        if dest_summary.get("source_independently_reread") is True or isinstance(
+            dest_summary.get("identity_alignment"), dict
+        ):
+            phase_profile.add(
+                PHASE_CHECKSUM,
+                time.perf_counter() - reread_started,
+                rows=int(
+                    (dest_summary.get("identity_alignment") or {}).get("reread_rows")
+                    or rows_copied
+                    or 0
+                ),
+            )
+        dest_summary["phase_profile"] = phase_profile.snapshot()
         if incremental:
             dest_summary["sync_mode"] = effective_sync
             dest_summary["cursor_key"] = cursor_key
@@ -2149,6 +2178,7 @@ def stream_file_to_database(
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
+    write_started = time.perf_counter()
     try:
         first_idx, first_batch = next(batch_enum)
     except StopIteration:
@@ -2188,6 +2218,11 @@ def stream_file_to_database(
                     )
                 state["conn"] = None
 
+    phase_profile.add(
+        PHASE_TRANSFORM_WRITE,
+        time.perf_counter() - write_started,
+        rows=int(written or 0),
+    )
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
     # All rows may be quarantined (written == 0) — that is a real transfer with
@@ -2209,6 +2244,7 @@ def stream_file_to_database(
     )
     full_source_rows = 0
     final_checksum = ""
+    checksum_started = time.perf_counter()
     if want_reread:
         try:
             reread_acc, full_source_rows = fingerprint_parsed_file(
@@ -2286,6 +2322,12 @@ def stream_file_to_database(
         dest_summary["identity_hash_aligned"] = False
         if final_checksum:
             dest_summary["checksum_mode"] = "inline_write_pass"
+    phase_profile.add(
+        PHASE_CHECKSUM,
+        time.perf_counter() - checksum_started,
+        rows=int(full_source_rows or getattr(fp_accumulator, "total", 0) or 0),
+    )
+    dest_summary["phase_profile"] = phase_profile.snapshot()
 
     if (
         incremental

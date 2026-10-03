@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   earliestJobStartMs,
   jobAverageRowsPerSecond,
+  publishedEngineElapsedSeconds,
   theaterElapsedMs,
   theaterProgressPct,
 } from "./jobTheaterProgress.js";
@@ -124,6 +125,22 @@ describe("theaterElapsedMs", () => {
       nowMs: later,
     });
     assert.ok(live > 200 * 60_000);
+  });
+});
+
+describe("publishedEngineElapsedSeconds", () => {
+  it("keeps a measured sub-second execute", () => {
+    assert.equal(publishedEngineElapsedSeconds(1.25), 1.25);
+    assert.equal(publishedEngineElapsedSeconds("0.4"), 0.4);
+  });
+
+  it("refuses a missing or non-numeric clock", () => {
+    assert.equal(publishedEngineElapsedSeconds(undefined), null);
+    assert.equal(publishedEngineElapsedSeconds(null), null);
+    assert.equal(publishedEngineElapsedSeconds(""), null);
+    assert.equal(publishedEngineElapsedSeconds(false), null);
+    assert.equal(publishedEngineElapsedSeconds("n/a"), null);
+    assert.equal(publishedEngineElapsedSeconds(-1), null);
   });
 });
 

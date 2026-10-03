@@ -3379,10 +3379,12 @@ def _stream_database_transfer_impl(
         )
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
-    # Heterogeneous warehouse routes auto-re-read (DATAFLOW_RECONCILE_SOURCE_REREAD=auto)
-    # so Snowflake→Postgres can earn independent_source_reread / full_checksum.
+    # Warehouse full refresh auto-re-reads, including same-engine
+    # (DATAFLOW_RECONCILE_SOURCE_REREAD=auto), so Gate-8 can earn
+    # independent_source_reread / full_checksum from a second source scan.
     # Force off with =0; force on with =1. Partial write-pass (resume tail) always
     # re-reads — a session digest vs a full destination is a false mismatch.
+    # Incremental and CDC stay on the write-pass.
     #
     # Resume: the write pass only fingerprints this session's rows while Gate-8
     # compares the full destination — force a source re-read. This holds for
@@ -3420,9 +3422,10 @@ def _stream_database_transfer_impl(
         dest_summary["identity_hash_aligned"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
-            "no second source scan. Heterogeneous warehouse routes re-read by "
-            "default; set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second "
-            "scan on same-engine routes (double I/O)."
+            "no second source scan. Full-refresh warehouse routes re-read by "
+            "default, including same-engine. This run stayed on the write-pass "
+            "(incremental, CDC, or DATAFLOW_RECONCILE_SOURCE_REREAD=0). "
+            "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
     elif src_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.

@@ -27,7 +27,8 @@ import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagree
 import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
-import { earliestJobStartMs, jobAverageRowsPerSecond, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
+import { earliestJobStartMs, jobAverageRowsPerSecond, publishedEngineElapsedSeconds, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
+import { formatSeconds } from "../lib/phaseProfile";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -594,6 +595,8 @@ export function JobTheaterView({
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
+  const engineSeconds = publishedEngineElapsedSeconds(destinationSummary.elapsed_seconds);
+  const showEngineElapsed = !isRunning && engineSeconds != null;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
     strategy?: string;
     executable?: boolean;
@@ -610,7 +613,11 @@ export function JobTheaterView({
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
-  const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
+  const writerWarnings = Array.isArray(destinationSummary.warnings)
+    ? destinationSummary.warnings.map((item) => String(item)).filter(Boolean)
+    : [];
+  const warningCount = writerWarnings.length;
+  const warningsSuppressed = Number(destinationSummary.warnings_suppressed ?? 0) || 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const fkSummary = (destinationSummary.foreign_keys ?? null) as {
     cycle?: string[];
@@ -1133,11 +1140,22 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        <article className="df2-theater-v3-metric">
+        <article
+          className="df2-theater-v3-metric"
+          title={
+            showEngineElapsed && engineSeconds != null
+              ? `Engine monotonic execute time. Job wall clock from start is ${formatDuration(elapsed)}.`
+              : undefined
+          }
+        >
           <DtIcon name="jobs" size={16} />
           <div>
-            <strong>{formatDuration(elapsed)}</strong>
-            <span>Elapsed</span>
+            <strong>
+              {showEngineElapsed && engineSeconds != null
+                ? formatSeconds(engineSeconds)
+                : formatDuration(elapsed)}
+            </strong>
+            <span>{showEngineElapsed ? "Engine time" : "Elapsed"}</span>
           </div>
         </article>
         {typeof destinationSummary.staging_table === "string" && destinationSummary.staging_table && (
@@ -1625,12 +1643,12 @@ export function JobTheaterView({
               : "Normal type fits (ISO→DATETIME) are not counted here"}
           </small>
         </article>
-        <article className="df2-theater-v3-sla-card">
+        <article className={`df2-theater-v3-sla-card${warningCount > 0 ? " is-warn" : ""}`}>
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
-          <small>
+          <small title={writerWarnings.join("\n")}>
             {warningCount
-              ? "Sample of writer messages (capped for display)"
+              ? `${writerWarnings[0]}${warningCount > 1 ? ` · +${warningCount - 1} more` : ""}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} not listed` : ""}`
               : "No destination warnings"}
           </small>
         </article>

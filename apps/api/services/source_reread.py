@@ -7,7 +7,8 @@ require a second source digest that did not travel with the write.
 
 This module owns two decisions so stream.py cannot drift:
 
-* **When** to re-read (operator env + heterogeneous warehouse auto).
+* **When** to re-read (operator env, file→warehouse, and warehouse full refresh
+  including same-engine). Incremental and CDC stay on the write-pass.
 * **How** to page the re-read. Snapshot-scan sources must not OFFSET-page
   (O(n²) and skip/duplicate under concurrent writes) — the same cliff the
   extract already closed.
@@ -104,10 +105,11 @@ def should_reread_source(
     comparing a session digest to a full destination is a false mismatch.
     ``DATAFLOW_RECONCILE_SOURCE_REREAD=0`` still cannot suppress that.
 
-    Auto (default): heterogeneous warehouse → warehouse full refresh. Same-engine
-    routes keep the cheap write-pass unless the operator forces ``=1``.
-    Snowflake→Postgres is the named hole: engine HASH_AGG is PostgreSQL-family
-    same-type only, so without this re-read the 150k TPC-H path stayed writer-ack.
+    Auto (default): warehouse → warehouse full refresh, including same-engine.
+    HVR Compare checksums a fresh source read against the target; a write-pass
+    digest is the bytes we just sent, not that second read. Incremental and
+    CDC stay on the write-pass — a second scan of a moving table is a false
+    mismatch, and CDC remains at-least-once upsert.
     """
     if partial_write_pass:
         return True
@@ -120,11 +122,17 @@ def should_reread_source(
         return False
     src = engine_family(src_type)
     dest = engine_family(dest_type)
-    if not src or not dest or src == dest:
+    raw_src = (src_type or "").strip().lower()
+    raw_dest = (dest_type or "").strip().lower()
+    if not src or not dest:
         return False
-    if src_type not in SNAPSHOT_SCAN_SOURCES:
+    # Membership uses the family so ``postgres`` and ``mssql`` are the same
+    # engines as ``postgresql`` and ``sqlserver``. Object stores stay on the
+    # write-pass unless the operator forces a second scan: a full object
+    # download is not the warehouse SELECT this policy is for.
+    if src not in SNAPSHOT_SCAN_SOURCES and raw_src not in SNAPSHOT_SCAN_SOURCES:
         return False
-    if dest_type not in WAREHOUSE_VERIFY_DESTS:
+    if dest not in WAREHOUSE_VERIFY_DESTS and raw_dest not in WAREHOUSE_VERIFY_DESTS:
         return False
     return True
 

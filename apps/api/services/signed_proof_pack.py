@@ -718,6 +718,7 @@ def build_signed_proof_pack(
     require_risk_completeness: bool | None = None,
     anchor_in_chain: bool = False,
     governance_operations: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -809,6 +810,7 @@ def build_signed_proof_pack(
             else None,
         },
         "prev_audit_hash": prev_audit_hash,
+        "timing": timing if isinstance(timing, dict) else {},
         "delivery_semantics": {
             "cdc_default": "at_least_once",
             "exactly_once": False,
@@ -901,6 +903,22 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
                 "was altered after it was sealed, or the anchor belongs to another pack"
             )
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
+
+
+def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
+    """Elapsed and phase split from the run. Empty when the engine did not measure."""
+    summary = dest if isinstance(dest, dict) else {}
+    timing: dict[str, Any] = {}
+    elapsed = summary.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        timing["elapsed_seconds"] = elapsed
+    rate = summary.get("records_per_second")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        timing["records_per_second"] = rate
+    profile = summary.get("phase_profile")
+    if isinstance(profile, dict) and profile.get("phases"):
+        timing["phase_profile"] = profile
+    return timing
 
 
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
@@ -1045,4 +1063,5 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         or bool(job_success and not accepted and expected_risks),
         anchor_in_chain=True,
         governance_operations=_collect_governance_for_pack(job),
+        timing=_timing_for_pack(dest),
     )

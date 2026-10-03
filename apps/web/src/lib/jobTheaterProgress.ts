@@ -51,6 +51,17 @@ export function theaterElapsedMs(input: {
   return Math.max(0, end - start);
 }
 
+/**
+ * Engine monotonic seconds published on the finished run.
+ * Null when the engine did not measure, so Theater keeps the live wall clock.
+ */
+export function publishedEngineElapsedSeconds(value: unknown): number | null {
+  if (typeof value === "boolean" || value == null || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 /** Job-average rows/s. Refuse a reconnect-window invent (460k / 0.5s). */
 export function jobAverageRowsPerSecond(processed: number, elapsedMs: number): number {
   if (!(processed > 0) || !(elapsedMs >= 5_000)) return 0;

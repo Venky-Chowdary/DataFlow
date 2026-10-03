@@ -157,6 +157,13 @@ def test_ten_row_csv_reread_aligns_identity_and_captures_versions(monkeypatch):
         assert any(ch.isdigit() for ch in str(versions.get("source")))
         assert "sqlite3" in str(versions.get("destination"))
         assert any(ch.isdigit() for ch in str(versions.get("destination")))
+        phases = {
+            str(p.get("phase"))
+            for p in (summary.get("phase_profile") or {}).get("phases") or []
+        }
+        assert "transform_write" in phases
+        assert "checksum" in phases
+        assert float((summary.get("phase_profile") or {}).get("busy_seconds") or 0) > 0
 
         from services.signed_proof_pack import build_signed_proof_pack
         from src.transfer.reconcile_step import run_reconciliation
