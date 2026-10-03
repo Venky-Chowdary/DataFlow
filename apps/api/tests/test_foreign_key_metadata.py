@@ -645,8 +645,9 @@ def test_snowflake_foreign_key_probe_reads_enforced_match_and_deferral():
             ),
         ]
     )
-    measured = probe_foreign_keys("snowflake", cur, "PUBLIC", "ORDERS")
+    measured = probe_foreign_keys("snowflake_aws", cur, "PUBLIC", "ORDERS")
     assert measured.status == "measured"
+    assert measured.dialect == "snowflake"
     assert "referential_constraints" in cur.calls[0][0]
     assert "position_in_unique_constraint" in cur.calls[0][0]
     item = measured.items[0]

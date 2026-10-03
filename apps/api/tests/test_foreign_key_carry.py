@@ -305,6 +305,42 @@ def test_informational_warehouse_catalog_foreign_key_does_not_prove_loaded_rows(
             assert "hybrid" in settled[0].reason
 
 
+def test_measured_hybrid_foreign_key_is_carried():
+    """IS_HYBRID YES plus ENFORCED YES is the checked load. The dialect is not."""
+    plan = _plan()
+    dest = ForeignKeys(
+        dialect="snowflake_aws",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+            )
+        ],
+    )
+    carried = verify_foreign_keys(plan.decisions, dest, table_kind="YES")
+    assert carried[0].status == "carried"
+    assert "existing rows were checked" in carried[0].reason
+
+    standard = verify_foreign_keys(plan.decisions, dest, table_kind="NO")
+    assert standard[0].status == "unsupported"
+    assert "IS_HYBRID" in standard[0].reason
+
+    other = ForeignKeys(
+        dialect="bigquery",
+        status="measured",
+        items=list(dest.items),
+    )
+    assert verify_foreign_keys(plan.decisions, other, table_kind="YES")[0].status == (
+        "unsupported"
+    )
+
+
 def test_not_valid_catalog_bit_is_not_a_carried_foreign_key():
     """The relationship matches. The catalog says existing rows were not checked."""
     plan = _plan()

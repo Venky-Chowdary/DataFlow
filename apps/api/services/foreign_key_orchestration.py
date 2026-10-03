@@ -233,11 +233,21 @@ def carry_foreign_keys(
         else:
             settled = list(plan.decisions)
         if any(d.status == "planned" for d in settled):
+            from services.foreign_key_metadata import (
+                _dialect_key,
+                read_snowflake_table_kind,
+            )
+
+            table_kind = ""
             with engine.connect() as conn:
                 dest_keys = probe_foreign_keys(
                     dest_dialect, conn, catalog_ns, dest_table
                 )
-            settled = verify_foreign_keys(settled, dest_keys)
+                if _dialect_key(dest_dialect) == "snowflake":
+                    table_kind = read_snowflake_table_kind(
+                        conn, catalog_ns, dest_table
+                    )
+            settled = verify_foreign_keys(settled, dest_keys, table_kind=table_kind)
         decisions.extend(settled)
 
     return [{"table": d.dest_table, **d.__dict__} for d in decisions]

@@ -1577,7 +1577,7 @@ def probe_foreign_keys(
     dialect: str, cursor_or_connection: Any, schema: str, table: str
 ) -> ForeignKeys:
     """Measure the foreign keys of ``schema.table``, or report why it could not."""
-    key = (dialect or "").strip().lower()
+    key = _dialect_key(dialect)
     probe = _PROBES.get(key)
     if probe is None:
         return _unavailable(

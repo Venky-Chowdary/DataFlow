@@ -1017,6 +1017,8 @@ def _relationship_fact(
 def verify_foreign_keys(
     decisions: list[ForeignKeyDecision],
     dest_foreign_keys: ForeignKeys | None,
+    *,
+    table_kind: str = "",
 ) -> list[ForeignKeyDecision]:
     """Settle planned keys against the destination catalog.
 
@@ -1027,7 +1029,9 @@ def verify_foreign_keys(
     is not. ON DELETE and ON UPDATE must be the source rule; a different
     action on the same columns is not carried. MATCH FULL on the source is
     not carried when the destination match is SIMPLE. A catalog bit that says
-    existing rows were not checked is not carried either.
+    existing rows were not checked is not carried either. A Snowflake key
+    is that proof only when ``table_kind`` is the measured hybrid value and
+    the constraint row says it is enforced.
     """
     out: list[ForeignKeyDecision] = []
     measured = dest_foreign_keys is not None and dest_foreign_keys.measured
@@ -1087,7 +1091,9 @@ def verify_foreign_keys(
         ]
         dest_dialect = dest_foreign_keys.dialect if dest_foreign_keys else ""
         covering = [
-            fk for fk in faithful if row_proof_gap(dest_dialect, fk.validated) == ""
+            fk
+            for fk in faithful
+            if row_proof_gap(dest_dialect, fk.validated, table_kind=table_kind) == ""
         ]
         if covering:
             status = "carried"
@@ -1102,11 +1108,13 @@ def verify_foreign_keys(
                     "validated the loaded rows when it was added."
                 )
         elif faithful:
-            gap = row_proof_gap(dest_dialect, faithful[0].validated)
-            status = "unsupported"
-            reason = row_proof_reason(gap, dest_dialect) or row_proof_reason(
-                "not_checked"
+            gap = row_proof_gap(
+                dest_dialect, faithful[0].validated, table_kind=table_kind
             )
+            status = "unsupported"
+            reason = row_proof_reason(
+                gap, dest_dialect, table_kind=table_kind
+            ) or row_proof_reason("not_checked")
         elif same_actions:
             got = same_actions[0]
             status = "unsupported"
