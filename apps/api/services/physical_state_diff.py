@@ -928,6 +928,33 @@ def _diff_foreign_keys(
     }
 
 
+def _diff_uniqueness(
+    source: frozenset[tuple[str, ...]],
+    destination: frozenset[tuple[str, ...]],
+) -> dict[str, Any]:
+    """Carried when the column sets match.
+
+    ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
+    key is the same rule. Catalog ordinal is not a second key. Index leading
+    columns stay on the indexes aspect, where order is the access path.
+    """
+
+    def _sets(groups: frozenset[tuple[str, ...]]) -> set[frozenset[str]]:
+        return {frozenset(group) for group in groups if group}
+
+    src = _sets(source)
+    dst = _sets(destination)
+    missing = sorted("+".join(sorted(group)) for group in src - dst)
+    extra = sorted("+".join(sorted(group)) for group in dst - src)
+    return {
+        "status": "carried" if not missing else "absent",
+        "missing": missing,
+        "extra": extra,
+        "source_count": len(src),
+        "destination_count": len(dst),
+    }
+
+
 def _diff_sets(source: frozenset, dest: frozenset) -> dict[str, Any]:
     missing = sorted(_render(v) for v in source - dest)
     extra = sorted(_render(v) for v in dest - source)
@@ -965,11 +992,11 @@ def compare_physical_state(
         }
 
     aspects: dict[str, Any] = {
-        "primary_key": _diff_sets(
+        "primary_key": _diff_uniqueness(
             frozenset({source.primary_key} if source.primary_key else set()),
             frozenset({destination.primary_key} if destination.primary_key else set()),
         ),
-        "unique_constraints": _diff_sets(
+        "unique_constraints": _diff_uniqueness(
             source.unique_constraints, destination.unique_constraints
         ),
         "foreign_keys": _diff_foreign_keys(

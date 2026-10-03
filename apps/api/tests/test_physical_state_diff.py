@@ -456,6 +456,49 @@ def _fk_state(
     return PhysicalState(found=True, readable=True, foreign_key_facts=tuple(facts))
 
 
+def test_uniqueness_is_the_column_set_not_the_catalog_order() -> None:
+    """UNIQUE (b, a) and PRIMARY KEY (code, id) are the same rules reversed."""
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("code", "id"),
+        unique_constraints=frozenset({("b", "a"), ("note",)}),
+    )
+    dst = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id", "code"),
+        unique_constraints=frozenset({("a", "b"), ("note",)}),
+    )
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["primary_key"]["status"] == "carried"
+    assert result["aspects"]["primary_key"]["missing"] == []
+    assert result["aspects"]["unique_constraints"]["status"] == "carried"
+    assert "primary_key" not in result["absent"]
+    assert "unique_constraints" not in result["absent"]
+
+
+def test_a_different_unique_column_set_is_absent() -> None:
+    src = PhysicalState(
+        found=True, readable=True, unique_constraints=frozenset({("a", "b")})
+    )
+    dst = PhysicalState(
+        found=True, readable=True, unique_constraints=frozenset({("a",)})
+    )
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["unique_constraints"]["status"] == "absent"
+    assert result["aspects"]["unique_constraints"]["missing"] == ["a+b"]
+    assert result["aspects"]["unique_constraints"]["extra"] == ["a"]
+
+
+def test_index_column_order_stays_part_of_the_index() -> None:
+    """(b, a) does not serve the lookups (a, b) does. Order stays on indexes."""
+    src = PhysicalState(found=True, readable=True, indexes=frozenset({("b", "a")}))
+    dst = PhysicalState(found=True, readable=True, indexes=frozenset({("a", "b")}))
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["indexes"]["status"] == "absent"
+
+
 def test_catalog_diff_uses_the_orphan_scan_relationship_identity() -> None:
     """Schema, qualification, and column order follow one identity.
 
