@@ -20,6 +20,7 @@ compare like for like.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -68,6 +69,12 @@ class ForeignKey:
     #: ``""`` when the catalog did not name a match type. ``simple``,
     #: ``full``, ``partial``, and ``unknown`` are :func:`normalize_match`.
     match: str = ""
+    #: ``""`` when this read did not name a deferral mode.
+    #: ``not_deferrable``, ``immediate``, ``deferred``, and ``unknown`` are
+    #: :func:`normalize_deferral`. The relationship identity does not include
+    #: it: NOT DEFERRABLE and INITIALLY DEFERRED are one relationship with
+    #: two check times.
+    deferral: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -111,6 +118,156 @@ def normalize_action(action: str | None) -> str:
     if not text or text == "NONE":
         return ""
     return text if text in KNOWN_ACTIONS else text
+
+
+def _as_bool(value: Any) -> bool | None:
+    """A catalog boolean, or None when the value is not a yes/no bit."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().casefold()
+    if text in {"1", "t", "true", "y", "yes"}:
+        return True
+    if text in {"0", "f", "false", "n", "no"}:
+        return False
+    return None
+
+
+def _deferral_spelling(value: Any) -> str:
+    """One deferral token. ``""`` when this read did not name a mode."""
+    if value is None:
+        return ""
+    text = " ".join(str(value).strip().casefold().replace("_", " ").split())
+    if not text or text == "unreported":
+        return ""
+    if text in {"not deferrable", "nondeferrable", "non deferrable"}:
+        return "not_deferrable"
+    if text in {"immediate", "initially immediate", "deferrable initially immediate"}:
+        return "immediate"
+    if text in {"deferred", "initially deferred", "deferrable initially deferred"}:
+        return "deferred"
+    if text == "deferrable":
+        return "immediate"
+    if text == "unknown":
+        return "unknown"
+    if "not deferrable" in text:
+        rest = text.replace("not deferrable", " ")
+        if "deferrable" in rest:
+            return "unknown"
+        return "not_deferrable"
+    if "initially deferred" in text or text.endswith(" deferred"):
+        return "deferred"
+    if "deferrable" in text or "initially immediate" in text:
+        return "immediate"
+    return "unknown"
+
+
+def _deferral_pair(deferrable: Any, initially_deferred: Any) -> str | None:
+    """Postgres ``condeferrable``/``condeferred`` or Oracle DEFERRABLE/DEFERRED."""
+    defer_text = "" if deferrable is None else str(deferrable).strip()
+    initial_text = "" if initially_deferred is None else str(initially_deferred).strip()
+    if not defer_text and not initial_text and deferrable is None and initially_deferred is None:
+        return ""
+    if not defer_text and not initial_text:
+        return ""
+    flag = _as_bool(deferrable)
+    initial = _as_bool(initially_deferred)
+    folded_defer = " ".join(defer_text.casefold().replace("_", " ").split())
+    folded_initial = " ".join(initial_text.casefold().replace("_", " ").split())
+    if folded_defer in {"not deferrable", "non deferrable"}:
+        if folded_initial in {"deferred", "initially deferred"} or initial is True:
+            return "unknown"
+        return "not_deferrable"
+    if flag is False:
+        if initial is True or folded_initial in {"deferred", "initially deferred"}:
+            return "unknown"
+        return "not_deferrable"
+    if folded_defer == "deferrable" or flag is True:
+        if initial is True or folded_initial in {"deferred", "initially deferred"}:
+            return "deferred"
+        return "immediate"
+    return None
+
+
+def normalize_deferral(
+    deferrable: Any = None,
+    initially_deferred: Any = None,
+    *,
+    spelling: Any = None,
+) -> str:
+    """Catalog deferral mode.
+
+    ``""`` when this read did not name one. ``not_deferrable`` checks at the
+    end of the statement and cannot be postponed. ``immediate`` is DEFERRABLE
+    INITIALLY IMMEDIATE (including bare DEFERRABLE, whose SQL default is
+    IMMEDIATE). ``deferred`` is DEFERRABLE INITIALLY DEFERRED. ``unknown`` is
+    a pair or a spelling this rule does not recognize, including a constraint
+    that is both deferred and not deferrable.
+    """
+    if deferrable is None and initially_deferred is None:
+        return _deferral_spelling(spelling)
+    parsed = _deferral_pair(deferrable, initially_deferred)
+    if parsed is not None:
+        return parsed
+    if spelling is not None:
+        return _deferral_spelling(spelling)
+    return "unknown"
+
+
+def deferral_label(mode: str) -> str:
+    """Operator name for a deferral mode. Unreported is the SQL default."""
+    kind = normalize_deferral(spelling=mode)
+    if kind == "deferred":
+        return "DEFERRABLE INITIALLY DEFERRED"
+    if kind == "immediate":
+        return "DEFERRABLE INITIALLY IMMEDIATE"
+    if kind == "unknown":
+        return "an unreadable deferral mode"
+    if kind == "not_deferrable":
+        return "NOT DEFERRABLE"
+    return "NOT DEFERRABLE (unreported)"
+
+
+def deferral_modes_agree(planned: str, measured: str) -> bool:
+    """True when the destination checks at the same time as the source.
+
+    Unreported is NOT DEFERRABLE, the SQL default. Neither direction is a
+    stricter rule that still keeps the promise. A destination that can
+    postpone the check accepts a state the source would reject at the
+    statement. A destination that cannot postpone rejects an intermediate
+    state the source accepts until commit.
+    """
+    want = normalize_deferral(spelling=planned) or "not_deferrable"
+    got = normalize_deferral(spelling=measured) or "not_deferrable"
+    if want == "unknown" or got == "unknown":
+        return False
+    return want == got
+
+
+def deferral_disagreement(planned: str, measured: str) -> str:
+    """Why the destination deferral mode does not keep the source rule.
+
+    Empty when :func:`deferral_modes_agree` is true. An unreported mode is
+    NOT DEFERRABLE. ``unknown`` means the catalog named two modes, or a pair
+    that cannot exist, so the rule was not certified.
+    """
+    want = normalize_deferral(spelling=planned)
+    got = normalize_deferral(spelling=measured)
+    if want == "unknown" or got == "unknown":
+        return (
+            "Foreign key deferral mode could not be read, so the "
+            "relationship was not certified."
+        )
+    if deferral_modes_agree(planned, measured):
+        return ""
+    return (
+        f"Destination checks this relationship as {deferral_label(measured)}; "
+        f"the source rule is {deferral_label(planned)}. "
+        "A different deferral mode is not the source rule."
+    )
 
 
 def _rows(cursor: Any, sql: str, params: tuple | dict) -> list[tuple]:
@@ -389,8 +546,8 @@ def _collect(
     """Group catalog rows into one foreign key per constraint name.
 
     Each row is ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)``
-    plus an optional existing-row flag and an optional match type. Rows must
-    already be ordered by
+    plus an optional existing-row flag, an optional match type, and an
+    optional deferral mode. Rows must already be ordered by
     constraint then ordinal position: a composite key whose columns arrive
     out of order would reference the wrong column pairs. A False flag on any
     row of the constraint wins.
@@ -407,6 +564,7 @@ def _collect(
         else:
             continue
         match = normalize_match(fields[8]) if len(fields) >= 9 else ""
+        deferral = normalize_deferral(spelling=fields[9]) if len(fields) >= 10 else ""
         key = str(name or "").strip()
         if not key:
             continue
@@ -421,6 +579,7 @@ def _collect(
                 "on_update": normalize_action(on_update),
                 "validated": validated,
                 "match": match,
+                "deferral": deferral,
             },
         )
         if bucket["validated"] is not False and validated is False:
@@ -431,6 +590,10 @@ def _collect(
             bucket["match"] = "unknown"
         elif match and not bucket["match"]:
             bucket["match"] = match
+        if deferral and bucket["deferral"] and bucket["deferral"] != deferral:
+            bucket["deferral"] = "unknown"
+        elif deferral and not bucket["deferral"]:
+            bucket["deferral"] = deferral
         col_s = str(col or "").strip()
         ref_s = str(ref_col or "").strip()
         if col_s:
@@ -448,6 +611,7 @@ def _collect(
             on_update=str(b["on_update"]),
             validated=b["validated"],
             match=str(b.get("match") or ""),
+            deferral=str(b.get("deferral") or ""),
         )
         for name, b in by_name.items()
     ]
@@ -488,7 +652,9 @@ SELECT con.conname,
        con.confupdtype,
        con.convalidated,
        ord.n,
-       con.confmatchtype
+       con.confmatchtype,
+       con.condeferrable,
+       con.condeferred
   FROM pg_constraint con
   JOIN pg_class cls ON cls.oid = con.conrelid
   JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
@@ -572,9 +738,16 @@ def _probe_pg(
             item = (*item, row[7])
             # Ordinal stays at index 8. Match is the column after it, so an
             # older 9-tuple fixture (validated, ordinal) does not become a
-            # match type.
+            # match type. Deferral is the pair after match, so a 10-tuple
+            # fixture (match, no deferral) stays unreported.
             if len(row) > 9:
                 item = (*item, row[9])
+            if len(row) > 11:
+                item = (*item, normalize_deferral(row[10], row[11]))
+        elif len(row) > 9:
+            # Redshift selects the ordinal, then condeferrable, condeferred.
+            # An older fixture that stops at the ordinal does not become a mode.
+            item = (*item, None, "", normalize_deferral(row[8], row[9]))
         mapped.append(item)
     return ForeignKeys(
         dialect=dialect,
@@ -632,7 +805,11 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> ForeignKeys:
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        # InnoDB has no DEFERRABLE foreign key. That is a measured fact, not
+        # an unread column: the check cannot be postponed until commit.
+        items=_collect(
+            [(*tuple(r)[:7], None, "", "not_deferrable") for r in rows]
+        ),
     )
 
 
@@ -673,7 +850,9 @@ def _probe_sqlserver(cursor: Any, schema: str, table: str) -> ForeignKeys:
         # Either bit means the engine did not check the rows already stored.
         # A missing bit is not a yes.
         checked = disabled is False and untrusted is False
-        mapped.append((*fields[:7], checked))
+        # SQL Server has no DEFERRABLE foreign key. The check cannot be
+        # postponed, so the mode is measured rather than left unread.
+        mapped.append((*fields[:7], checked, "", "not_deferrable"))
     return ForeignKeys(
         dialect="sqlserver",
         status="measured",
@@ -691,7 +870,9 @@ SELECT c.constraint_name,
        rcc.column_name,
        c.delete_rule,
        'NO ACTION',
-       c.validated
+       c.validated,
+       c.deferrable,
+       c.deferred
   FROM all_constraints c
   JOIN all_cons_columns cc
     ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
@@ -720,7 +901,12 @@ def _probe_oracle(cursor: Any, schema: str, table: str) -> ForeignKeys:
         checked = coerce_validated(flag)
         if checked is None:
             checked = False
-        mapped.append((*fields[:7], checked))
+        # DEFERRABLE and DEFERRED sit after VALIDATED. An older fixture that
+        # stops at the validation flag does not become NOT DEFERRABLE.
+        deferral = (
+            normalize_deferral(fields[8], fields[9]) if len(fields) > 9 else ""
+        )
+        mapped.append((*fields[:7], checked, "", deferral))
     return ForeignKeys(
         dialect="oracle",
         status="measured",
@@ -730,14 +916,181 @@ def _probe_oracle(cursor: Any, schema: str, table: str) -> ForeignKeys:
     )
 
 
+_SQL_IDENT = re.compile(
+    r'"(?:[^"]|"")+"|\[(?:[^\]]|\]\])+\]|`(?:[^`]|``)+`|[A-Za-z_][A-Za-z0-9_]*'
+)
+
+
+def _sql_idents(text: str) -> list[str]:
+    """Identifiers in ``text``, quotes removed, compared case-insensitively."""
+    names: list[str] = []
+    for match in _SQL_IDENT.finditer(text):
+        token = match.group(0)
+        if token[0] in {'"', "[", "`"}:
+            inner = token[1:-1].replace(token[0] * 2, token[0])
+            names.append(inner.casefold())
+        else:
+            names.append(token.casefold())
+    return names
+
+
+def _strip_sql_strings(text: str) -> str:
+    """Replace single-quoted literals so a default cannot look like a clause."""
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] != "'":
+            out.append(text[index])
+            index += 1
+            continue
+        index += 1
+        while index < length:
+            if text[index] == "'":
+                if index + 1 < length and text[index + 1] == "'":
+                    index += 2
+                    continue
+                index += 1
+                break
+            index += 1
+        out.append("''")
+    return "".join(out)
+
+
+def _sqlite_table_segments(ddl: str) -> list[str]:
+    """Top-level column and table constraints inside one CREATE TABLE."""
+    segments: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    started = False
+    in_string = False
+    index = 0
+    length = len(ddl)
+    while index < length:
+        char = ddl[index]
+        if in_string:
+            if started:
+                buf.append(char)
+            if char == "'":
+                if index + 1 < length and ddl[index + 1] == "'":
+                    if started:
+                        buf.append("'")
+                    index += 2
+                    continue
+                in_string = False
+            index += 1
+            continue
+        if char == "'":
+            in_string = True
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            if depth == 1 and not started:
+                started = True
+                buf = []
+                index += 1
+                continue
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == ")":
+            if depth == 1 and started:
+                segment = "".join(buf).strip()
+                if segment:
+                    segments.append(segment)
+                return segments
+            depth = max(0, depth - 1)
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == "," and depth == 1 and started:
+            segment = "".join(buf).strip()
+            if segment:
+                segments.append(segment)
+            buf = []
+            index += 1
+            continue
+        if started:
+            buf.append(char)
+        index += 1
+    return segments
+
+
+def _deferral_in_clause(segment: str) -> str:
+    """Mode named by one foreign-key clause. Absent keyword is NOT DEFERRABLE."""
+    scrubbed = _strip_sql_strings(segment).casefold()
+    without_not = re.sub(r"\bnot\s+deferrable\b", " ", scrubbed)
+    has_not = without_not != scrubbed
+    has_deferrable = re.search(r"\bdeferrable\b", without_not) is not None
+    if has_not and has_deferrable:
+        return "unknown"
+    if has_not or not has_deferrable:
+        return "not_deferrable"
+    if re.search(r"\binitially\s+deferred\b", scrubbed):
+        return "deferred"
+    return "immediate"
+
+
+def sqlite_clause_deferral(ddl: str, column: str, referenced_table: str) -> str:
+    """Deferral of one SQLite foreign key, read from its CREATE TABLE text.
+
+    ``""`` when the CREATE text is missing or no clause binds this column to
+    that parent. SQLite can postpone a check, so an unread clause is not
+    NOT DEFERRABLE. A clause that binds and does not say DEFERRABLE is
+    NOT DEFERRABLE, which is the SQL default.
+    """
+    if not str(ddl or "").strip() or not str(column or "").strip():
+        return ""
+    wanted_column = column.casefold()
+    wanted_table = referenced_table.casefold()
+    found: list[str] = []
+    for segment in _sqlite_table_segments(ddl):
+        marker = re.search(r"\breferences\b", segment, re.IGNORECASE)
+        if marker is None:
+            continue
+        if wanted_column not in _sql_idents(segment[: marker.start()]):
+            continue
+        head = segment[marker.end() :].split("(", 1)[0]
+        if wanted_table not in _sql_idents(head):
+            continue
+        found.append(_deferral_in_clause(segment))
+    if not found:
+        return ""
+    if any(mode != found[0] for mode in found):
+        return "unknown"
+    return found[0]
+
+
 def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
-    """``PRAGMA foreign_key_list`` — id, seq, table, from, to, on_update, on_delete."""
+    """``PRAGMA foreign_key_list`` — id, seq, table, from, to, on_update, on_delete.
+
+    The pragma does not name DEFERRABLE. ``sqlite_master.sql`` does. A missing
+    CREATE text stays unreported: SQLite can postpone a check, so an unread
+    clause is not NOT DEFERRABLE.
+    """
     from connectors.writer_common import quote_sql_identifier
 
     rows = _rows(cursor, f"PRAGMA foreign_key_list({quote_sql_identifier(table)})", ())
+    ddl = ""
+    try:
+        ddl_rows = _rows(
+            cursor,
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+    except Exception:  # noqa: BLE001 — an unread CREATE is not a mode
+        ddl_rows = []
+    if ddl_rows and ddl_rows[0] and ddl_rows[0][0]:
+        ddl = str(ddl_rows[0][0])
     mapped: list[tuple] = []
     for row in rows:
         fk_id, _seq, ref_table, from_col, to_col, on_update, on_delete = list(row)[:7]
+        deferral = sqlite_clause_deferral(ddl, str(from_col or ""), str(ref_table or ""))
         mapped.append(
             (
                 f"fk_{table}_{fk_id}",
@@ -748,6 +1101,9 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
                 to_col if to_col is not None else "",
                 on_delete,
                 on_update,
+                None,
+                "",
+                deferral,
             )
         )
     return ForeignKeys(
@@ -882,6 +1238,59 @@ def relationship_match_type(
         if parsed.conflict or not same_relationship(identity, fk_identity(fk)):
             continue
         return normalize_match(parsed.match)
+    return ""
+
+
+def relationship_deferral(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> str:
+    """Deferral mode the catalog recorded for this relationship.
+
+    The metadata probe wins. Empty means unreported, which a comparison
+    treats as NOT DEFERRABLE. Two different modes on the probe are
+    ``unknown``: the catalog did not name one rule. Inspector options are
+    the fallback only when the probe did not see this relationship.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    if identity is None:
+        return ""
+    if measured is not None and measured.measured:
+        named = ""
+        found = False
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            found = True
+            kind = normalize_deferral(spelling=item.deferral)
+            if kind and named and kind != named:
+                return "unknown"
+            if kind:
+                named = kind
+        if named or found:
+            return named
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        if not same_relationship(identity, fk_identity(fk)):
+            continue
+        options = fk.get("options") if isinstance(fk.get("options"), Mapping) else {}
+        if "deferral" in fk:
+            return normalize_deferral(spelling=fk.get("deferral"))
+        if "deferrable" in fk or "deferrable" in options:
+            flag = fk.get("deferrable", options.get("deferrable"))
+            initial = fk.get("initially", options.get("initially"))
+            return normalize_deferral(flag, initial)
     return ""
 
 
@@ -1028,6 +1437,11 @@ def foreign_keys_from_payload(payload: Any) -> list[ForeignKey]:
                         if isinstance(entry.get("options"), dict)
                         else ""
                     )
+                ),
+                deferral=(
+                    normalize_deferral(spelling=entry.get("deferral"))
+                    if "deferral" in entry
+                    else ""
                 ),
             )
         )

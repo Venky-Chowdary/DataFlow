@@ -421,6 +421,42 @@ def test_cascade_reread_as_no_action_blocks_without_calling_the_object_absent() 
     assert not any("existing rows were checked" in b for b in blockers)
 
 
+def test_deferred_reread_as_not_deferrable_blocks_without_calling_the_object_absent() -> None:
+    """A stored key that checks at a different time is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination checks this relationship as NOT DEFERRABLE; "
+                        "the source rule is DEFERRABLE INITIALLY DEFERRED."
+                    ],
+                    "proof_reasons": [],
+                    "match_reasons": [],
+                    "action_reasons": [],
+                    "deferral_reasons": [
+                        "Destination checks this relationship as NOT DEFERRABLE; "
+                        "the source rule is DEFERRABLE INITIALLY DEFERRED."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    blockers = verdict["blockers"]
+    assert any("deferral mode" in b and "INITIALLY DEFERRED" in b for b in blockers)
+    assert not any("did not survive" in b for b in blockers)
+    assert not any("existing rows were checked" in b for b in blockers)
+
+
 def test_unchecked_primary_key_blocks_without_calling_the_object_absent() -> None:
     """A stored key that does not reject duplicates is not a missing key."""
     job = _proven_job()

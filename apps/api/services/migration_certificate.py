@@ -268,6 +268,7 @@ def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
             "proof_reasons" in info
             or "match_reasons" in info
             or "action_reasons" in info
+            or "deferral_reasons" in info
         ):
             proof_reasons = [
                 str(reason) for reason in (info.get("proof_reasons") or []) if reason
@@ -278,9 +279,12 @@ def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
             action_reasons = [
                 str(reason) for reason in (info.get("action_reasons") or []) if reason
             ]
+            deferral_reasons = [
+                str(reason) for reason in (info.get("deferral_reasons") or []) if reason
+            ]
             if proof_reasons:
                 out.append(f"{headline}: {'; '.join(proof_reasons)}")
-            elif not match_reasons and not action_reasons:
+            elif not match_reasons and not action_reasons and not deferral_reasons:
                 out.append(f"{headline}: {fallback}")
             if match_reasons:
                 out.append(
@@ -292,6 +296,12 @@ def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
                     "Destination foreign key is present and does not keep the "
                     "source referential action: "
                     f"{'; '.join(action_reasons)}"
+                )
+            if deferral_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    "source deferral mode: "
+                    f"{'; '.join(deferral_reasons)}"
                 )
             continue
         reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]

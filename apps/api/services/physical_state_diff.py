@@ -18,6 +18,12 @@ Every aspect answers one of these honest states:
                   named ON DELETE and ON UPDATE, carried also means those
                   actions keep the source rule. An empty action list means
                   this comparison did not measure them. Unreported is NO ACTION.
+                  When both catalogs named a deferral mode, carried also means
+                  the destination checks at the same time as the source.
+                  An empty deferral list means this comparison did not measure
+                  it. Unreported is NOT DEFERRABLE. A cycle load that adds
+                  DEFERRABLE on the destination does not keep a source rule
+                  that checks at the statement.
 ``absent``        present on the source, missing on the destination
 ``unchecked``     the object is present and does not prove the rows, or the
                   foreign-key match rule or referential action does not keep
@@ -274,6 +280,13 @@ class PhysicalState:
     #: NO ACTION are one relationship with two rules.
     foreign_key_on_delete: tuple[str, ...] = ()
     foreign_key_on_update: tuple[str, ...] = ()
+    #: Deferral mode for each fact, same order as ``foreign_key_facts``.
+    #: ``""`` is unreported (NOT DEFERRABLE when the modes are compared).
+    #: ``not_deferrable``, ``immediate``, ``deferred``, and ``unknown`` are
+    #: :func:`services.foreign_key_metadata.normalize_deferral`. An empty
+    #: tuple means this read did not attach a mode. The relationship
+    #: identity does not include it.
+    foreign_key_deferral: tuple[str, ...] = ()
     #: Ordered key, uniqueness, predicate, covering columns, and access method.
     #: See :class:`CatalogIndex`. A unique, partial, covering, or gin index is
     #: not the plain column list.
@@ -310,6 +323,7 @@ class PhysicalState:
                     measured=bool(self.foreign_key_proof),
                     match=self._match_at(index),
                     actions=self._actions_at(index),
+                    deferral=self._deferral_at(index),
                 )
                 for index, (child, schema, table, parent) in enumerate(
                     self.foreign_key_facts
@@ -367,6 +381,20 @@ class PhysicalState:
             normalize_action(self.foreign_key_on_delete[index]),
             normalize_action(self.foreign_key_on_update[index]),
         )
+
+    def _deferral_at(self, index: int) -> str | None:
+        """Deferral attached to fact ``index``, or None when this read did not measure one.
+
+        A list that does not line up with the facts is ``unknown``. A
+        mis-attached mode is not NOT DEFERRABLE.
+        """
+        if not self.foreign_key_deferral:
+            return None
+        if len(self.foreign_key_deferral) != len(self.foreign_key_facts):
+            return "unknown"
+        from services.foreign_key_metadata import normalize_deferral
+
+        return normalize_deferral(spelling=self.foreign_key_deferral[index])
 
 
 @dataclass
@@ -483,13 +511,15 @@ def _foreign_key_fact_dict(
     measured: bool,
     match: str | None = None,
     actions: tuple[str, str] | None = None,
+    deferral: str | None = None,
 ) -> dict[str, Any]:
     """Report wire for one relationship.
 
     The gap is present only when this read measured one. ``match`` is present
     only when this read measured a match type, including ``""`` for unreported.
     Actions are present only when this read measured them, including empty
-    strings for an unreported ON DELETE or ON UPDATE.
+    strings for an unreported ON DELETE or ON UPDATE. ``deferral`` is present
+    only when this read measured a mode, including ``""`` for unreported.
     """
     item = {
         "constrained_columns": list(child),
@@ -504,6 +534,8 @@ def _foreign_key_fact_dict(
     if actions is not None:
         item["on_delete"] = actions[0]
         item["on_update"] = actions[1]
+    if deferral is not None:
+        item["deferral"] = deferral
     return item
 
 
@@ -558,6 +590,10 @@ def decode_foreign_key_item(item: Any) -> tuple[dict[str, Any] | None, str]:
             relationship["on_update"] = normalize_action(
                 item.get("on_update") if "on_update" in item else item.get("onupdate")
             )
+        if "deferral" in item:
+            from services.foreign_key_metadata import normalize_deferral
+
+            relationship["deferral"] = normalize_deferral(spelling=item.get("deferral"))
         return relationship, ""
     text = str(item or "").strip()
     parts = text.split("->")
@@ -617,23 +653,27 @@ def _reflect_foreign_keys(
     tuple[str, ...],
     tuple[str, ...],
     tuple[str, ...],
+    tuple[str, ...],
 ]:
-    """Relationship facts, the row-proof gap, the match type, and the actions.
+    """Relationship facts, row-proof gap, match, actions, and deferral.
 
     The gap is :func:`services.foreign_key_metadata.inspector_row_proof_gaps`.
     The match type is :func:`services.foreign_key_metadata.relationship_match_type`.
     The actions are :func:`services.foreign_key_metadata.relationship_actions`.
-    Bit dialects read all three from the metadata probe on this connection.
+    The deferral mode is :func:`services.foreign_key_metadata.relationship_deferral`.
+    Bit dialects read them from the metadata probe on this connection.
     Redshift is unenforced without that query. MySQL and SQLite record an
     empty gap: the constraint itself is the check those engines report. An
     empty match string means the catalog did not name one. An empty action
-    string means the catalog did not name that action.
+    string means the catalog did not name that action. An empty deferral
+    string means the catalog did not name a mode.
     """
     from services.foreign_key_metadata import (
         catalog_probe_dialect,
         inspector_row_proof_gaps,
         probe_foreign_keys,
         relationship_actions,
+        relationship_deferral,
         relationship_match_type,
     )
 
@@ -663,7 +703,7 @@ def _reflect_foreign_keys(
         )
         fk_facts.append((child_cols, parent_schema, parent_table, parent_cols))
     if not fk_facts:
-        return fk_sets, fk_facts, (), (), (), ()
+        return fk_sets, fk_facts, (), (), (), (), ()
     catalog_dialect = catalog_probe_dialect(db_type)
     measured = (
         probe_foreign_keys(catalog_dialect, conn, schema or "", table)
@@ -681,6 +721,10 @@ def _reflect_foreign_keys(
         relationship_actions(fk_identity(fk), measured, inspector_rows)
         for fk in originals
     )
+    deferrals = tuple(
+        relationship_deferral(fk_identity(fk), measured, inspector_rows)
+        for fk in originals
+    )
     return (
         fk_sets,
         fk_facts,
@@ -688,6 +732,7 @@ def _reflect_foreign_keys(
         matches,
         tuple(pair[0] for pair in action_pairs),
         tuple(pair[1] for pair in action_pairs),
+        deferrals,
     )
 
 
@@ -750,9 +795,15 @@ def read_physical_state(
         routines = collector.run(
             "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
         )
-        fk_sets, fk_facts, fk_proof, fk_match, fk_delete, fk_update = (
-            _reflect_foreign_keys(db_type, conn, schema, name, fks)
-        )
+        (
+            fk_sets,
+            fk_facts,
+            fk_proof,
+            fk_match,
+            fk_delete,
+            fk_update,
+            fk_deferral,
+        ) = _reflect_foreign_keys(db_type, conn, schema, name, fks)
 
     not_null: set[str] = set()
     defaults: set[tuple[str, str]] = set()
@@ -787,6 +838,7 @@ def read_physical_state(
         foreign_key_match=fk_match,
         foreign_key_on_delete=fk_delete,
         foreign_key_on_update=fk_update,
+        foreign_key_deferral=fk_deferral,
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),
@@ -1456,6 +1508,21 @@ def _measured_actions(
     return normalize_action(deletes[index]), normalize_action(updates[index])
 
 
+def _measured_deferral(modes: tuple[str, ...], index: int, count: int) -> str | None:
+    """Normalized deferral at ``index``, or None when this side did not measure one.
+
+    A list that does not line up with the facts is ``unknown``. That is not
+    a completed mode, and it is not silently NOT DEFERRABLE.
+    """
+    if not modes:
+        return None
+    if len(modes) != count:
+        return "unknown"
+    from services.foreign_key_metadata import normalize_deferral
+
+    return normalize_deferral(spelling=modes[index])
+
+
 def _diff_foreign_keys(
     source: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
     destination: tuple[tuple[tuple[str, ...], str, str, tuple[str, ...]], ...],
@@ -1468,6 +1535,8 @@ def _diff_foreign_keys(
     source_on_update: tuple[str, ...] = (),
     destination_on_delete: tuple[str, ...] = (),
     destination_on_update: tuple[str, ...] = (),
+    source_deferral: tuple[str, ...] = (),
+    destination_deferral: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves the source rule.
 
@@ -1489,11 +1558,21 @@ def _diff_foreign_keys(
     ON DELETE and ON UPDATE are not part of the relationship identity either.
     When both sides measured them,
     :func:`services.foreign_key_carry.referential_action_disagreement` decides
-    whether the destination actions keep the source rule. An empty action list
+    whether the destination actions keep the source rule.     An empty action list
     means that side did not measure them. Unreported is NO ACTION.
+
+    Deferral is not part of the relationship identity either. When both
+    sides measured it,
+    :func:`services.foreign_key_metadata.deferral_disagreement` decides
+    whether the destination checks at the same time as the source. An empty
+    deferral list means that side did not measure one. Unreported is NOT
+    DEFERRABLE. NOT DEFERRABLE, INITIALLY IMMEDIATE, and INITIALLY DEFERRED
+    are three rules. A destination that checks sooner does not keep a source
+    that waits until commit, and a destination that can postpone the check
+    does not keep a source that cannot.
     """
     from services.foreign_key_carry import referential_action_disagreement
-    from services.foreign_key_metadata import row_proof_reason
+    from services.foreign_key_metadata import deferral_disagreement, row_proof_reason
 
     def _as_mapping(fact: tuple[tuple[str, ...], str, str, tuple[str, ...]]) -> dict[str, Any]:
         child, schema, table, parent = fact
@@ -1545,6 +1624,14 @@ def _diff_foreign_keys(
             )
             if action_disagreement:
                 tagged.append(("action", action_disagreement))
+        planned_deferral = _measured_deferral(source_deferral, source_index, len(source))
+        measured_deferral = _measured_deferral(
+            destination_deferral, match, len(destination)
+        )
+        if planned_deferral is not None and measured_deferral is not None:
+            defer_disagreement = deferral_disagreement(planned_deferral, measured_deferral)
+            if defer_disagreement:
+                tagged.append(("deferral", defer_disagreement))
         if tagged:
             unchecked.append((render_foreign_key_fact(*fact), tagged))
     extra = [
@@ -1562,6 +1649,12 @@ def _diff_foreign_keys(
     action_reasons = [
         reason for _wire, tagged in pairs for kind, reason in tagged if kind == "action"
     ]
+    deferral_reasons = [
+        reason
+        for _wire, tagged in pairs
+        for kind, reason in tagged
+        if kind == "deferral"
+    ]
     if missing:
         status = "absent"
     elif pairs:
@@ -1577,6 +1670,7 @@ def _diff_foreign_keys(
         "proof_reasons": proof_reasons,
         "match_reasons": match_reasons,
         "action_reasons": action_reasons,
+        "deferral_reasons": deferral_reasons,
         "source_count": len(source),
         "destination_count": len(destination),
     }
@@ -1740,6 +1834,8 @@ def compare_physical_state(
             source_on_update=source.foreign_key_on_update,
             destination_on_delete=destination.foreign_key_on_delete,
             destination_on_update=destination.foreign_key_on_update,
+            source_deferral=source.foreign_key_deferral,
+            destination_deferral=destination.foreign_key_deferral,
         ),
         "indexes": _diff_indexes(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),

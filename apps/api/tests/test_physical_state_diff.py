@@ -129,6 +129,7 @@ def test_dropped_constraints_are_reported_absent(tmp_path: Path) -> None:
             "match": "",
             "on_delete": "NO ACTION",
             "on_update": "NO ACTION",
+            "deferral": "not_deferrable",
         }
     ]
     assert result["aspects"]["not_null"]["missing"] == ["code"]
@@ -467,6 +468,7 @@ def _fk_state(
     match: tuple[str, ...] = (),
     on_delete: tuple[str, ...] = (),
     on_update: tuple[str, ...] = (),
+    deferral: tuple[str, ...] = (),
 ) -> PhysicalState:
     return PhysicalState(
         found=True,
@@ -476,6 +478,7 @@ def _fk_state(
         foreign_key_match=match,
         foreign_key_on_delete=on_delete,
         foreign_key_on_update=on_update,
+        foreign_key_deferral=deferral,
         dialect=dialect,
     )
 
@@ -1326,3 +1329,90 @@ def test_clock_and_cast_spellings_are_the_same_default_rule() -> None:
     assert result["aspects"]["defaults"]["status"] == "carried"
     assert result["aspects"]["defaults"]["missing"] == []
     assert result["verified"] is True
+
+
+def test_catalog_fact_keeps_the_deferral_mode() -> None:
+    """The structured fact keeps when the constraint is checked."""
+    keys, unparsed = foreign_keys_from_catalog_state(
+        {
+            "foreign_key_facts": [
+                {
+                    "constrained_columns": ["parent_id"],
+                    "referred_schema": "public",
+                    "referred_table": "parent",
+                    "referred_columns": ["id"],
+                    "deferral": "DEFERRABLE INITIALLY DEFERRED",
+                }
+            ]
+        }
+    )
+    assert unparsed == []
+    assert keys[0]["deferral"] == "deferred"
+
+
+def test_catalog_diff_compares_deferral_after_identity() -> None:
+    """INITIALLY DEFERRED and NOT DEFERRABLE are one relationship and two rules.
+
+    Column order still matches. An empty deferral list is a comparison that
+    did not measure the mode, so those states stay on identity, the row-proof
+    gap, the match type, and the referential actions. An unreported mode is
+    NOT DEFERRABLE. These facts are catalog-shaped; a live server was not used.
+    """
+    fact = (("parent_id",), "public", "parent", ("id",))
+    postponed = compare_physical_state(
+        _fk_state(fact, deferral=("deferred",)),
+        _fk_state(fact, deferral=("not_deferrable",)),
+    )
+    fk = postponed["aspects"]["foreign_keys"]
+    assert fk["status"] == "unchecked"
+    assert fk["missing"] == []
+    assert fk["unchecked"] == ["parent_id->public.parent->id"]
+    assert fk["unchecked"].count("parent_id->public.parent->id") == 1
+    assert "DEFERRABLE INITIALLY DEFERRED" in fk["deferral_reasons"][0]
+    assert "NOT DEFERRABLE" in fk["deferral_reasons"][0]
+    assert fk["proof_reasons"] == []
+    assert fk["match_reasons"] == []
+    assert fk["action_reasons"] == []
+    assert postponed["verified"] is False
+    assert "foreign_keys" not in postponed["absent"]
+
+    sooner = compare_physical_state(
+        _fk_state(fact, deferral=("not_deferrable",)),
+        _fk_state(fact, deferral=("immediate",)),
+    )
+    assert sooner["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "INITIALLY IMMEDIATE" in sooner["aspects"]["foreign_keys"]["deferral_reasons"][0]
+    assert "NOT DEFERRABLE" in sooner["aspects"]["foreign_keys"]["deferral_reasons"][0]
+
+    same = compare_physical_state(
+        _fk_state(fact, deferral=("DEFERRABLE INITIALLY DEFERRED",)),
+        _fk_state(fact, deferral=("deferred",)),
+    )
+    assert same["aspects"]["foreign_keys"]["status"] == "carried"
+    assert same["verified"] is True
+
+    unreported_dest = compare_physical_state(
+        _fk_state(fact, deferral=("deferred",)),
+        _fk_state(fact, deferral=("",)),
+    )
+    assert unreported_dest["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "unreported" in unreported_dest["aspects"]["foreign_keys"]["deferral_reasons"][0]
+
+    legacy = compare_physical_state(_fk_state(fact), _fk_state(fact))
+    assert legacy["aspects"]["foreign_keys"]["status"] == "carried"
+    assert legacy["verified"] is True
+
+    misaligned = compare_physical_state(
+        _fk_state(fact, deferral=("deferred",)),
+        _fk_state(fact, deferral=("deferred", "extra")),
+    )
+    assert misaligned["aspects"]["foreign_keys"]["status"] == "unchecked"
+    assert "could not be read" in misaligned["aspects"]["foreign_keys"]["deferral_reasons"][0]
+
+    forward = (("a", "b"), "", "parent", ("x", "y"))
+    reversed_pairs = (("b", "a"), "", "parent", ("y", "x"))
+    order = compare_physical_state(
+        _fk_state(forward, deferral=("immediate",)),
+        _fk_state(reversed_pairs, deferral=("immediate",)),
+    )
+    assert order["aspects"]["foreign_keys"]["status"] == "carried"

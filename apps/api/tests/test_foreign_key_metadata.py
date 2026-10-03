@@ -530,3 +530,135 @@ def test_explicit_namespace_is_never_second_guessed():
     cursor = ScriptedCursor("other", [])
     probe_foreign_keys("postgresql", cursor, "public", "orders")
     assert not any("CURRENT_SCHEMA" in sql.upper() for sql, _ in cursor.calls)
+
+
+def test_postgres_deferral_pair_is_recorded_after_the_match_type():
+    """condeferrable sits after match, so a match-only fixture stays unreported."""
+    from services.foreign_key_metadata import normalize_deferral
+
+    deferred = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "s", True, True)]
+    )
+    fk = probe_foreign_keys("postgresql", deferred, "public", "child").items[0]
+    assert "condeferrable" in deferred.calls[0][0]
+    assert "condeferred" in deferred.calls[0][0]
+    assert fk.deferral == "deferred"
+    assert fk.match == "simple"
+    immediate = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "f", True, False)]
+    )
+    assert (
+        probe_foreign_keys("postgresql", immediate, "public", "child").items[0].deferral
+        == "immediate"
+    )
+    plain = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "s", False, False)]
+    )
+    assert (
+        probe_foreign_keys("postgresql", plain, "public", "child").items[0].deferral
+        == "not_deferrable"
+    )
+    legacy = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "s")]
+    )
+    assert probe_foreign_keys("postgresql", legacy, "public", "child").items[0].deferral == ""
+    assert normalize_deferral(False, True) == "unknown"
+
+
+def test_oracle_deferral_columns_are_recorded_after_validation():
+    deferred = _cursor(
+        [
+            (
+                "FK_ORDERS",
+                "CUSTOMER_ID",
+                "APP",
+                "CUSTOMERS",
+                "ID",
+                "NO ACTION",
+                "NO ACTION",
+                "VALIDATED",
+                "DEFERRABLE",
+                "DEFERRED",
+            )
+        ]
+    )
+    fk = probe_foreign_keys("oracle", deferred, "app", "orders").items[0]
+    assert fk.validated is True
+    assert fk.deferral == "deferred"
+    assert "c.deferrable" in deferred.calls[0][0].lower()
+    immediate = _cursor(
+        [
+            (
+                "FK_ORDERS",
+                "CUSTOMER_ID",
+                "APP",
+                "CUSTOMERS",
+                "ID",
+                "CASCADE",
+                "NO ACTION",
+                "VALIDATED",
+                "DEFERRABLE",
+                "IMMEDIATE",
+            )
+        ]
+    )
+    assert (
+        probe_foreign_keys("oracle", immediate, "app", "orders").items[0].deferral
+        == "immediate"
+    )
+    legacy = _cursor(
+        [("FK_ORDERS", "CUSTOMER_ID", "APP", "CUSTOMERS", "ID", "CASCADE", "NO ACTION", "VALIDATED")]
+    )
+    assert probe_foreign_keys("oracle", legacy, "app", "orders").items[0].deferral == ""
+
+
+def test_mysql_and_sqlserver_cannot_postpone_a_foreign_key():
+    """Those engines have no DEFERRABLE clause. The mode is measured."""
+    mysql = ScriptedCursor(
+        "shop",
+        [("fk_o", "cust_id", "shop", "customers", "id", "NO ACTION", "NO ACTION")],
+    )
+    assert probe_foreign_keys("mysql", mysql, "", "orders").items[0].deferral == "not_deferrable"
+    sqlserver = _cursor(
+        [("FK_orders", "customer_id", "dbo", "customers", "id", "NO ACTION", "NO ACTION", 0, 0)]
+    )
+    assert (
+        probe_foreign_keys("sqlserver", sqlserver, "dbo", "orders").items[0].deferral
+        == "not_deferrable"
+    )
+
+
+def test_sqlite_reads_deferrable_from_the_create_table():
+    """PRAGMA foreign_key_list omits DEFERRABLE. The CREATE text names it."""
+    import sqlite3
+
+    from services.foreign_key_metadata import sqlite_clause_deferral
+
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY, code TEXT)")
+    connection.execute(
+        """
+        CREATE TABLE child (
+            id INTEGER PRIMARY KEY,
+            parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED,
+            other_id INTEGER REFERENCES parent(id),
+            note TEXT DEFAULT 'DEFERRABLE INITIALLY DEFERRED',
+            pair_id INTEGER,
+            FOREIGN KEY (pair_id) REFERENCES parent(id) DEFERRABLE INITIALLY IMMEDIATE
+        )
+        """
+    )
+    keys = probe_foreign_keys("sqlite", connection.cursor(), "", "child")
+    by_col = {tuple(key.columns): key.deferral for key in keys.items}
+    assert by_col[("parent_id",)] == "deferred"
+    assert by_col[("other_id",)] == "not_deferrable"
+    assert by_col[("pair_id",)] == "immediate"
+    assert sqlite_clause_deferral("", "parent_id", "parent") == ""
+    assert (
+        sqlite_clause_deferral(
+            "CREATE TABLE child (parent_id INT REFERENCES parent(id) NOT DEFERRABLE)",
+            "parent_id",
+            "parent",
+        )
+        == "not_deferrable"
+    )
