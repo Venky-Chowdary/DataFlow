@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 from services.dialect_profiles import normalize_driver
+from services.fk_tuple_scan import normalize_match
 from services.physical_storage_metadata import as_driver_cursor
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ class ForeignKey:
     #: SQL Server untrusted or disabled, Oracle NOT VALIDATED).
     #: None when this dialect has no separate validation bit.
     validated: bool | None = None
+    #: ``""`` when the catalog did not name a match type. ``simple``,
+    #: ``full``, ``partial``, and ``unknown`` are :func:`normalize_match`.
+    match: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -371,7 +375,8 @@ def _collect(
     """Group catalog rows into one foreign key per constraint name.
 
     Each row is ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)``
-    plus an optional existing-row flag. Rows must already be ordered by
+    plus an optional existing-row flag and an optional match type. Rows must
+    already be ordered by
     constraint then ordinal position: a composite key whose columns arrive
     out of order would reference the wrong column pairs. A False flag on any
     row of the constraint wins.
@@ -387,6 +392,7 @@ def _collect(
             validated = None
         else:
             continue
+        match = normalize_match(fields[8]) if len(fields) >= 9 else ""
         key = str(name or "").strip()
         if not key:
             continue
@@ -400,12 +406,17 @@ def _collect(
                 "on_delete": normalize_action(on_delete),
                 "on_update": normalize_action(on_update),
                 "validated": validated,
+                "match": match,
             },
         )
         if bucket["validated"] is not False and validated is False:
             bucket["validated"] = False
         elif bucket["validated"] is None:
             bucket["validated"] = validated
+        if match and bucket["match"] and bucket["match"] != match:
+            bucket["match"] = "unknown"
+        elif match and not bucket["match"]:
+            bucket["match"] = match
         col_s = str(col or "").strip()
         ref_s = str(ref_col or "").strip()
         if col_s:
@@ -422,6 +433,7 @@ def _collect(
             on_delete=str(b["on_delete"]),
             on_update=str(b["on_update"]),
             validated=b["validated"],
+            match=str(b.get("match") or ""),
         )
         for name, b in by_name.items()
     ]
@@ -461,7 +473,8 @@ SELECT con.conname,
        con.confdeltype,
        con.confupdtype,
        con.convalidated,
-       ord.n
+       ord.n,
+       con.confmatchtype
   FROM pg_constraint con
   JOIN pg_class cls ON cls.oid = con.conrelid
   JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
@@ -543,6 +556,11 @@ def _probe_pg(
         )
         if with_validated:
             item = (*item, row[7])
+            # Ordinal stays at index 8. Match is the column after it, so an
+            # older 9-tuple fixture (validated, ordinal) does not become a
+            # match type.
+            if len(row) > 9:
+                item = (*item, row[9])
         mapped.append(item)
     return ForeignKeys(
         dialect=dialect,
@@ -872,6 +890,16 @@ def foreign_keys_from_payload(payload: Any) -> list[ForeignKey]:
                     coerce_validated(entry.get("validated"))
                     if "validated" in entry
                     else None
+                ),
+                match=normalize_match(
+                    entry.get("match")
+                    if entry.get("match") not in (None, "")
+                    else entry.get("confmatchtype")
+                    or (
+                        entry.get("options").get("match")
+                        if isinstance(entry.get("options"), dict)
+                        else ""
+                    )
                 ),
             )
         )

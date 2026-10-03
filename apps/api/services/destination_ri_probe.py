@@ -19,8 +19,11 @@ module separates, which a catalog diff alone cannot:
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
 
-Composite keys are scanned as a tuple under SQL ``MATCH SIMPLE``: a child row
-with any NULL in the key is unconstrained and is not an orphan.
+Composite keys are scanned as a tuple under the catalog match type. Unreported
+is SQL ``MATCH SIMPLE``: a child row with any NULL in the key is unconstrained
+and is not an orphan. A source ``MATCH FULL`` is that scan, including when the
+destination constraint is enforced as ``MATCH SIMPLE``. ``MATCH PARTIAL`` is
+not a completed scan.
 
 An enforced catalog FK counts only when it is the same relationship: the same
 parent table and the same (child column, parent column) pairs. A constraint on
@@ -48,7 +51,7 @@ from services.foreign_key_metadata import (
     validation_catalog_dialect,
 )
 from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
-from services.fk_tuple_scan import scan_orphan_anti_join
+from services.fk_tuple_scan import match_scan_refusal, normalize_match, scan_orphan_anti_join
 from services.foreign_key_identity import (
     fk_identity as _fk_identity,
     fold as _fold,
@@ -76,6 +79,49 @@ __all__ = [
 ]
 
 
+def _destination_match(
+    identity: tuple[str, tuple[tuple[str, str], ...]] | None,
+    measured: Any,
+    inspector_fks: list[Any],
+) -> str:
+    """Match type the destination catalog recorded for this relationship.
+
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback
+    SQLAlchemy keeps when the DDL names the clause. Empty means unreported.
+    """
+    if identity is None:
+        return ""
+    if measured is not None and getattr(measured, "measured", False):
+        named = ""
+        for item in measured.items:
+            ident = _fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                    "match": item.match,
+                }
+            )
+            if not _same_relationship(identity, ident):
+                continue
+            kind = normalize_match(item.match)
+            if kind and named and kind != named:
+                return "unknown"
+            if kind:
+                named = kind
+        if named:
+            return named
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict or not _same_relationship(identity, _fk_identity(fk)):
+            continue
+        return normalize_match(parsed.match)
+    return ""
+
+
 def _orphan_scan(
     conn: Any,
     *,
@@ -83,8 +129,9 @@ def _orphan_scan(
     child_columns: list[str],
     parent: Any,
     parent_columns: list[str],
+    match: str = "",
 ) -> dict[str, Any]:
-    """Anti-join via ``fk_tuple_scan`` — MATCH SIMPLE composite tuples."""
+    """Anti-join via ``fk_tuple_scan`` using the catalog match type."""
     try:
         c_cols = [_table_col(child, name) for name in child_columns]
         p_cols = [_table_col(parent, name) for name in parent_columns]
@@ -96,6 +143,7 @@ def _orphan_scan(
         child_columns=c_cols,
         parent=parent,
         parent_columns=p_cols,
+        match=match,
     )
 
 
@@ -186,7 +234,24 @@ def verify_destination_referential_integrity(
             key = relationship_identity(
                 child_cols, _parent_label(parent_schema, parent_table), parent_cols
             )
-            if any(_same_relationship(key, known) for known in enforced):
+            source_match = normalize_match(parsed.match)
+            refusal = match_scan_refusal(source_match)
+            if refusal:
+                rel.update(
+                    status="unavailable",
+                    available=False,
+                    match=source_match,
+                    reason=refusal,
+                )
+                relations.append(rel)
+                continue
+            # An enforced MATCH SIMPLE constraint does not prove MATCH FULL.
+            # A partial NULL is legal there and is an orphan under the source rule.
+            dest_match = _destination_match(key, measured, dest_fks)
+            simple_promise = source_match != "full"
+            if any(_same_relationship(key, known) for known in enforced) and (
+                simple_promise or dest_match == "full"
+            ):
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)
                 continue
@@ -247,6 +312,7 @@ def verify_destination_referential_integrity(
                     child_columns=[str(c) for c in resolved_child],
                     parent=parent_tbl,
                     parent_columns=[str(p) for p in resolved_parent],
+                    match=source_match,
                 )
             except Exception as exc:  # noqa: BLE001 — a failed scan is evidence
                 logger.warning("destination RI scan failed: %s", exc)

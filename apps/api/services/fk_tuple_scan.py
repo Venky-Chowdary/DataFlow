@@ -1,8 +1,11 @@
-"""MATCH SIMPLE tuple anti-join / tuple-IN — one owner for source and dest RI.
+"""Tuple anti-join / tuple-IN — one owner for source and dest RI.
 
-Composite foreign keys are scanned as a whole tuple. A child row with any
-NULL key component is unconstrained (SQL MATCH SIMPLE) and is not an orphan.
-Single-column FKs use the same predicates with arity 1.
+Composite foreign keys are scanned as a whole tuple. The catalog match type
+selects the rule. Unreported is MATCH SIMPLE: a child row with any NULL key
+component is unconstrained and is not an orphan. MATCH FULL allows a row only
+when every key column is NULL or every key column matches a parent row. A
+partial NULL is an orphan under FULL. MATCH PARTIAL is stored by PostgreSQL
+and is not implemented, so that fact is not a completed scan.
 
 Dest post-write (`destination_ri_probe`) and source preflight
 (`population_orphan_probe`, `sample_orphan_probe`) must not invent a second
@@ -30,6 +33,95 @@ def orphan_example_text(row: Any) -> str:
     return "+".join(present_cell_text(v) or "" for v in cells)
 
 
+def normalize_match(value: Any) -> str:
+    """Catalog match spelling.
+
+    ``""`` when the catalog did not name one. ``simple``, ``full``, and
+    ``partial`` are the SQL match types. PostgreSQL stores ``s``, ``f``, and
+    ``p``. ``unknown`` is a present spelling this rule does not recognize, so
+    the scan does not invent SIMPLE or FULL for it.
+    """
+    if value is None:
+        return ""
+    text = " ".join(str(value).strip().lower().replace("_", " ").split())
+    if not text:
+        return ""
+    if text.startswith("match "):
+        text = text[6:].strip()
+    if text in {"s", "simple"}:
+        return "simple"
+    if text in {"f", "full"}:
+        return "full"
+    if text in {"p", "partial"}:
+        return "partial"
+    return "unknown"
+
+
+def match_scan_refusal(match: str) -> str:
+    """Why this match type is not a completed orphan scan. Empty when it is."""
+    kind = normalize_match(match)
+    if kind == "partial":
+        return (
+            "MATCH PARTIAL is stored and is not a completed scan. "
+            "PostgreSQL accepts the type and does not implement it."
+        )
+    if kind == "unknown":
+        return (
+            "Foreign key match type could not be read, so the rows were not certified."
+        )
+    return ""
+
+
+def match_rule_label(match: str) -> str:
+    """Operator name for a match type. Unreported is the SQL default."""
+    kind = normalize_match(match)
+    if kind == "full":
+        return "MATCH FULL"
+    if kind == "partial":
+        return "MATCH PARTIAL"
+    if kind == "unknown":
+        return "an unreadable match type"
+    if kind == "simple":
+        return "MATCH SIMPLE"
+    return "MATCH SIMPLE (unreported)"
+
+
+def match_rules_agree(planned: str, measured: str) -> bool:
+    """True when the destination match rule keeps the source promise.
+
+    Unreported is MATCH SIMPLE. A destination MATCH FULL still rejects every
+    orphan MATCH SIMPLE would reject. A destination MATCH SIMPLE does not
+    keep a source MATCH FULL promise: a partial NULL is unconstrained there.
+    """
+    want = normalize_match(planned) or "simple"
+    got = normalize_match(measured) or "simple"
+    if want in {"partial", "unknown"} or got in {"partial", "unknown"}:
+        return False
+    if want == "full":
+        return got == "full"
+    return got in {"simple", "full"}
+
+
+def tuple_match_class(keys: Sequence[Any], match: str) -> str:
+    """``skip``, ``check``, or ``violation`` for one child tuple.
+
+    ``keys`` are presenter results. ``None`` means the cell is absent.
+    Unreported and simple: any absence is ``skip``. Full: every cell absent
+    is ``skip``; a mix is ``violation``; every cell present is ``check``.
+    """
+    kind = normalize_match(match) or "simple"
+    missing = [key is None for key in keys]
+    if kind == "full":
+        if all(missing):
+            return "skip"
+        if any(missing):
+            return "violation"
+        return "check"
+    if any(missing):
+        return "skip"
+    return "check"
+
+
 def match_simple_predicates(c_cols: Sequence[Any], p_cols: Sequence[Any]) -> tuple[Any, Any]:
     """Join ON every pair; WHERE every child col is NOT NULL and parent is missing."""
     import sqlalchemy as sa
@@ -44,6 +136,25 @@ def match_simple_predicates(c_cols: Sequence[Any], p_cols: Sequence[Any]) -> tup
     return on_clause, where
 
 
+def match_full_predicates(c_cols: Sequence[Any], p_cols: Sequence[Any]) -> tuple[Any, Any]:
+    """MATCH FULL: all-NULL is allowed; a partial NULL is a violation.
+
+    A row whose key columns are all present is an orphan when the parent
+    tuple is missing. A row with some NULL columns and some present columns
+    is an orphan whether or not a parent row shares the present values.
+    """
+    import sqlalchemy as sa
+
+    if not c_cols or len(c_cols) != len(p_cols):
+        raise ValueError("FK column pairing arity mismatch")
+    on_clause = sa.and_(*[c == p for c, p in zip(c_cols, p_cols)])
+    all_present = sa.and_(*[c.is_not(None) for c in c_cols])
+    all_missing = sa.and_(*[c.is_(None) for c in c_cols])
+    partial = sa.and_(sa.not_(all_present), sa.not_(all_missing))
+    missing_parent = sa.and_(all_present, p_cols[0].is_(None))
+    return on_clause, sa.or_(missing_parent, partial)
+
+
 def scan_orphan_anti_join(
     conn: Any,
     *,
@@ -52,16 +163,33 @@ def scan_orphan_anti_join(
     parent: Any,
     parent_columns: Sequence[Any],
     max_examples: int = MAX_EXAMPLES,
+    match: str = "",
 ) -> dict[str, Any]:
-    """Anti-join child against parent. ``child_columns`` / ``parent_columns`` are ColumnElements."""
+    """Anti-join child against parent. ``child_columns`` / ``parent_columns`` are ColumnElements.
+
+    ``match`` is the catalog fact. Empty scans MATCH SIMPLE and does not
+    claim the catalog named that type.
+    """
     import sqlalchemy as sa
 
+    refusal = match_scan_refusal(match)
+    kind = normalize_match(match)
+    if refusal:
+        return {
+            "available": False,
+            "orphan_count": 0,
+            "examples": [],
+            "match": kind,
+            "reason": refusal,
+        }
     if any(c is None for c in child_columns) or any(p is None for p in parent_columns):
         return {"available": False, "reason": "join column missing from catalog"}
     if len(child_columns) != len(parent_columns) or not child_columns:
         return {"available": False, "reason": "relationship has no usable column pairing"}
 
-    on_clause, where = match_simple_predicates(child_columns, parent_columns)
+    effective = kind or "simple"
+    predicates = match_full_predicates if effective == "full" else match_simple_predicates
+    on_clause, where = predicates(child_columns, parent_columns)
     joined = child.outerjoin(parent, on_clause)
     count = int(
         conn.execute(sa.select(sa.func.count()).select_from(joined).where(where)).scalar()
@@ -77,6 +205,8 @@ def scan_orphan_anti_join(
         "available": True,
         "orphan_count": count,
         "examples": examples,
+        "match": effective,
+        "match_reported": kind in {"simple", "full"},
     }
 
 
@@ -146,8 +276,18 @@ def sql_population_orphan_scan(
     child_columns: Sequence[str],
     parent_columns: Sequence[str],
     max_examples: int = 25,
+    match: str = "",
 ) -> dict[str, Any]:
-    """Full-table MATCH SIMPLE anti-join using bound, quoted identifiers."""
+    """Full-table anti-join using bound, quoted identifiers and the catalog match."""
+    refusal = match_scan_refusal(match)
+    if refusal:
+        return {
+            "available": False,
+            "orphan_count": 0,
+            "examples": [],
+            "match": normalize_match(match),
+            "reason": refusal,
+        }
     from connectors.generic_sql import _engine
 
     child_cols = [str(c).strip() for c in child_columns if str(c).strip()]
@@ -177,13 +317,11 @@ def sql_population_orphan_scan(
             parent=parent,
             parent_columns=p_els,
             max_examples=max_examples,
+            match=match,
         )
     if not scan.get("available"):
-        raise ValueError(scan.get("reason") or "population orphan scan unavailable")
-    return {
-        "orphan_count": int(scan.get("orphan_count") or 0),
-        "examples": list(scan.get("examples") or []),
-    }
+        return scan
+    return scan
 
 
 def _tuple_in_clause(p_cols: Sequence[Any], chunk: Sequence[Sequence[Any]]) -> Any:
@@ -230,6 +368,48 @@ def sql_existing_parent_tuples(
     return found
 
 
+def partition_fk_tuples(
+    sample_rows: list[dict[str, Any]] | None,
+    columns: Sequence[str],
+    *,
+    present_key,
+    match: str = "",
+    limit: int = 500,
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+    """``(tuples to look up, MATCH FULL partial-NULL violations)``.
+
+    ``present_key`` is the same cell presenter the sample probe already uses.
+    """
+    cols = [str(c).strip() for c in columns if str(c).strip()]
+    if not sample_rows or not cols:
+        return [], []
+    seen_check: set[tuple[Any, ...]] = set()
+    seen_violation: set[tuple[Any, ...]] = set()
+    to_check: list[tuple[Any, ...]] = []
+    violations: list[tuple[Any, ...]] = []
+    for row in sample_rows:
+        if not isinstance(row, dict):
+            continue
+        raw = tuple(row.get(c) for c in cols)
+        keys = tuple(present_key(v) for v in raw)
+        role = tuple_match_class(keys, match)
+        if role == "skip":
+            continue
+        if role == "violation":
+            if keys in seen_violation:
+                continue
+            seen_violation.add(keys)
+            violations.append(raw)
+        else:
+            if keys in seen_check:
+                continue
+            seen_check.add(keys)
+            to_check.append(raw)
+        if len(to_check) + len(violations) >= limit:
+            break
+    return to_check, violations
+
+
 def distinct_fk_tuples(
     sample_rows: list[dict[str, Any]] | None,
     columns: Sequence[str],
@@ -242,25 +422,10 @@ def distinct_fk_tuples(
     A row with any NULL / blank component is unconstrained and is omitted.
     ``present_key`` is the same cell presenter the sample probe already uses.
     """
-    cols = [str(c).strip() for c in columns if str(c).strip()]
-    if not sample_rows or not cols:
-        return []
-    seen: set[tuple[str, ...]] = set()
-    out: list[tuple[Any, ...]] = []
-    for row in sample_rows:
-        if not isinstance(row, dict):
-            continue
-        raw = tuple(row.get(c) for c in cols)
-        keys = tuple(present_key(v) for v in raw)
-        if any(k is None for k in keys):
-            continue
-        if keys in seen:
-            continue
-        seen.add(keys)
-        out.append(raw)
-        if len(out) >= limit:
-            break
-    return out
+    to_check, _violations = partition_fk_tuples(
+        sample_rows, columns, present_key=present_key, match="", limit=limit
+    )
+    return to_check
 
 
 def orphan_tuples(

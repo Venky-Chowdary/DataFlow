@@ -39,10 +39,11 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
+from services.fk_tuple_scan import match_rule_label, match_rules_agree, normalize_match
 from services.dialect_profiles import quote_char_for
 from services.foreign_key_identity import fk_identity, fold, same_relationship, select_job_table
 from services.foreign_key_metadata import (
@@ -108,6 +109,8 @@ class ForeignKeyDecision:
     on_update: str = ""
     columns: tuple[str, ...] = ()
     referenced_columns: tuple[str, ...] = ()
+    #: Catalog match type. Empty is unreported and means MATCH SIMPLE.
+    match: str = ""
     # True when the destination *rejected* the constraint because the loaded
     # rows violate it. That is a data finding, not a capability gap.
     integrity_violation: bool = False
@@ -335,6 +338,42 @@ def classify_cycle_resolution(
             )
         ),
     }
+
+
+# Engines that enforce MATCH FULL. MySQL parses the clause and ignores it.
+# SQL Server, Oracle, and SQLite have no MATCH clause. PostgreSQL enforces
+# FULL and does not implement PARTIAL.
+_MATCH_FULL_DIALECTS = frozenset({"postgresql"})
+
+
+def _match_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
+    """``(sql fragment, refusal)``. Empty refusal means the fragment is safe.
+
+    Unreported and MATCH SIMPLE emit no clause: that is the SQL default.
+    MATCH FULL is emitted only where the engine enforces it. MATCH PARTIAL
+    is refused everywhere, because a carried key would claim a rule the
+    engine does not check.
+    """
+    kind = normalize_match(fk.match)
+    if kind in {"", "simple"}:
+        return "", ""
+    if kind == "partial":
+        return "", (
+            "Source declares MATCH PARTIAL. PostgreSQL stores that type and "
+            "does not implement it, so the constraint is not carried."
+        )
+    if kind != "full":
+        return "", (
+            "Source match type could not be read, so the constraint is not carried."
+        )
+    dial = _dialect(dialect)
+    if dial not in _MATCH_FULL_DIALECTS:
+        return "", (
+            f"Source declares MATCH FULL, which {dial} does not enforce. "
+            "Carrying the key without it would accept a partial null the "
+            "source rejects."
+        )
+    return " MATCH FULL", ""
 
 
 def _action_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
@@ -709,7 +748,11 @@ def plan_foreign_keys(
             )
             continue
 
-        clause, refusal = _action_clause(dial, fk)
+        match_sql, refusal = _match_clause(dial, fk)
+        clause = ""
+        if not refusal:
+            clause, refusal = _action_clause(dial, fk)
+            clause = f"{match_sql}{clause}"
         if refusal:
             plan.decisions.append(
                 ForeignKeyDecision(
@@ -760,6 +803,7 @@ def plan_foreign_keys(
                 on_update=fk.on_update,
                 columns=tuple(child_cols),
                 referenced_columns=tuple(ref_cols),
+                match=normalize_match(fk.match),
             )
         )
     return plan
@@ -832,8 +876,8 @@ def apply_foreign_keys(
                 continue
             violation = _is_violation(message)
             out.append(
-                ForeignKeyDecision(
-                    name=decision.name,
+                replace(
+                    decision,
                     status="unsupported",
                     reason=(
                         "Destination rejected the constraint because the loaded rows "
@@ -841,17 +885,6 @@ def apply_foreign_keys(
                         if violation
                         else f"Destination rejected the constraint. {message}"
                     ),
-                    source_detail=decision.source_detail,
-                    dest_ddl=decision.dest_ddl,
-                    dest_table=decision.dest_table,
-                    source_table=decision.source_table,
-                    referenced_schema=decision.referenced_schema,
-                    referenced_table=decision.referenced_table,
-                    referenced_stream=decision.referenced_stream,
-                    on_delete=decision.on_delete,
-                    on_update=decision.on_update,
-                    columns=decision.columns,
-                    referenced_columns=decision.referenced_columns,
                     integrity_violation=violation,
                 )
             )
@@ -885,7 +918,8 @@ def verify_foreign_keys(
     An engine may store the constraint under a name of its own, and DDL
     order is the same relationship. A same-named table in another schema
     is not. ON DELETE and ON UPDATE must be the source rule; a different
-    action on the same columns is not carried. A catalog bit that says
+    action on the same columns is not carried. MATCH FULL on the source is
+    not carried when the destination match is SIMPLE. A catalog bit that says
     existing rows were not checked is not carried either.
     """
     out: list[ForeignKeyDecision] = []
@@ -900,25 +934,14 @@ def verify_foreign_keys(
                 "destination catalog not read"
             )
             out.append(
-                ForeignKeyDecision(
-                    name=decision.name,
+                replace(
+                    decision,
                     status="unknown",
                     reason=(
                         "The ALTER was issued, but the destination foreign key "
                         f"catalog could not be re-read ({detail}), so the carry is "
                         "unverified — emitted DDL is not proof."
                     ),
-                    source_detail=decision.source_detail,
-                    dest_ddl=decision.dest_ddl,
-                    dest_table=decision.dest_table,
-                    source_table=decision.source_table,
-                    referenced_schema=decision.referenced_schema,
-                    referenced_table=decision.referenced_table,
-                    referenced_stream=decision.referenced_stream,
-                    on_delete=decision.on_delete,
-                    on_update=decision.on_update,
-                    columns=decision.columns,
-                    referenced_columns=decision.referenced_columns,
                 )
             )
             continue
@@ -945,12 +968,15 @@ def verify_foreign_keys(
                 ),
             )
         ]
-        faithful = [
+        same_actions = [
             fk
             for fk in matches
             if referential_actions_match(
                 decision.on_delete, decision.on_update, fk.on_delete, fk.on_update
             )
+        ]
+        faithful = [
+            fk for fk in same_actions if match_rules_agree(decision.match, fk.match)
         ]
         dest_dialect = dest_foreign_keys.dialect if dest_foreign_keys else ""
         covering = [
@@ -974,6 +1000,15 @@ def verify_foreign_keys(
             reason = row_proof_reason(gap, dest_dialect) or row_proof_reason(
                 "not_checked"
             )
+        elif same_actions:
+            got = same_actions[0]
+            status = "unsupported"
+            reason = (
+                "Destination has this relationship with "
+                f"{match_rule_label(got.match)}; the source rule is "
+                f"{match_rule_label(decision.match)}. A different match type "
+                "is not the source rule."
+            )
         elif matches:
             got = matches[0]
             status = "unsupported"
@@ -992,24 +1027,7 @@ def verify_foreign_keys(
                 "Destination catalog does not report this reference after the "
                 "ALTER; the key is not enforced there."
             )
-        out.append(
-            ForeignKeyDecision(
-                name=decision.name,
-                status=status,
-                reason=reason,
-                source_detail=decision.source_detail,
-                dest_ddl=decision.dest_ddl,
-                dest_table=decision.dest_table,
-                source_table=decision.source_table,
-                referenced_schema=decision.referenced_schema,
-                referenced_table=decision.referenced_table,
-                referenced_stream=decision.referenced_stream,
-                on_delete=decision.on_delete,
-                on_update=decision.on_update,
-                columns=decision.columns,
-                referenced_columns=decision.referenced_columns,
-            )
-        )
+        out.append(replace(decision, status=status, reason=reason))
     return out
 
 

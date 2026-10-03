@@ -852,7 +852,8 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         "gate": "constraint_fk",
         "why": (
             "Population orphan scan found missing parents or could not complete. "
-            "Composite FKs are scanned as MATCH SIMPLE tuples — a pairing mismatch "
+            "Composite FKs are scanned as the catalog match type — unreported is "
+            "MATCH SIMPLE. A pairing mismatch "
             "or failed scan still leaves referential integrity unproven."
         ),
         "fix": (

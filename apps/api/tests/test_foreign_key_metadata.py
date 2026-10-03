@@ -180,6 +180,30 @@ def test_unresolvable_namespace_is_unknown_not_absent():
     assert "unknown, not empty" in keys.detail
 
 
+def test_postgres_match_full_is_recorded_on_the_foreign_key():
+    """confmatchtype sits after the ordinal, so an older fixture stays unreported."""
+    full = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "f"),
+         ("fk", "b", "public", "parent", "code", "a", "a", True, 2, "f")]
+    )
+    fk = probe_foreign_keys("postgresql", full, "public", "child").items[0]
+    assert "confmatchtype" in full.calls[0][0]
+    assert fk.match == "full"
+    assert fk.validated is True
+    simple = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", True, 1, "s")]
+    )
+    assert probe_foreign_keys("postgresql", simple, "public", "child").items[0].match == "simple"
+    partial = _cursor(
+        [("fk", "a", "public", "parent", "id", "a", "a", False, 1, "p")]
+    )
+    assert probe_foreign_keys("postgresql", partial, "public", "child").items[0].match == "partial"
+    legacy = _cursor(
+        [("fk", "customer_id", "public", "customers", "id", "a", "a", False, 1)]
+    )
+    assert probe_foreign_keys("postgresql", legacy, "public", "orders").items[0].match == ""
+
+
 def test_postgres_not_valid_is_recorded_on_the_foreign_key():
     cur = _cursor(
         [("fk", "customer_id", "public", "customers", "id", "a", "a", False, 1)]

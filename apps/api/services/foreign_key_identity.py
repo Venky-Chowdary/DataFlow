@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 from connectors.sql_identifiers import split_qualified_table
+from services.fk_tuple_scan import normalize_match
 
 
 def fold(name: Any) -> str:
@@ -91,6 +92,8 @@ class ParsedForeignKey(NamedTuple):
     parent_columns: tuple[str, ...]
     scan_label: str
     conflict: str
+    #: ``""`` unreported, or ``simple`` / ``full`` / ``partial`` / ``unknown``.
+    match: str = ""
 
 
 class _Parent(NamedTuple):
@@ -106,6 +109,7 @@ _PARENT_SHAPES = (
     ("ref_schema", "ref_table"),
     ("referred_schema", "referred_table"),
 )
+_MATCH_KEYS = ("match", "confmatchtype")
 
 
 def _blank(value: Any) -> bool:
@@ -228,6 +232,27 @@ def _merge_parents(parents: list[_Parent]) -> tuple[_Parent | None, str]:
     return groups[0], ""
 
 
+def _read_match(fk: Mapping[str, Any]) -> tuple[str, str]:
+    """One match type, or a conflict when the payload names two.
+
+    Inspector reflection puts the clause on ``options["match"]``. The catalog
+    probe puts PostgreSQL ``confmatchtype`` on ``match``. Both naming the
+    same type is one fact. ``FULL`` and ``SIMPLE`` on the same key are not.
+    """
+    found: list[str] = []
+    for key in _MATCH_KEYS:
+        if key in fk and not _blank(fk.get(key)):
+            found.append(normalize_match(fk.get(key)))
+    options = fk.get("options")
+    if isinstance(options, Mapping) and not _blank(options.get("match")):
+        found.append(normalize_match(options.get("match")))
+    named = [item for item in found if item]
+    if len(set(named)) > 1:
+        rendered = " and ".join(sorted(set(named)))
+        return "", f"Foreign key names two match types ({rendered})."
+    return (named[0] if named else ""), ""
+
+
 def parse_foreign_key(fk: Mapping[str, Any] | None) -> ParsedForeignKey:
     """The one parent this payload names, or a conflict.
 
@@ -262,6 +287,9 @@ def parse_foreign_key(fk: Mapping[str, Any] | None) -> ParsedForeignKey:
             return ParsedForeignKey(child, "", "", parent_cols, "", error)
         if parent is not None:
             parents.append(parent)
+    match, match_error = _read_match(fk)
+    if match_error:
+        return ParsedForeignKey(child, "", "", parent_cols, "", match_error)
     chosen, merge_error = _merge_parents(parents)
     if merge_error or chosen is None:
         return ParsedForeignKey(child, "", "", parent_cols, "", merge_error)
@@ -272,6 +300,7 @@ def parse_foreign_key(fk: Mapping[str, Any] | None) -> ParsedForeignKey:
         parent_cols,
         scan_label(chosen.schema, chosen.table),
         "",
+        match,
     )
 
 

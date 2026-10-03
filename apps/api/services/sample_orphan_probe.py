@@ -11,6 +11,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable
 
+from services.fk_tuple_scan import (
+    match_scan_refusal,
+    normalize_match,
+    orphan_example_text,
+    orphan_tuples,
+    partition_fk_tuples,
+)
 from services.foreign_key_identity import parse_foreign_key
 from services.value_serializer import present_cell_text
 
@@ -347,6 +354,32 @@ def probe_sample_fk_orphans(
                 }
             )
             continue
+        kind = normalize_match(parsed.match)
+        refusal = match_scan_refusal(kind)
+        if refusal:
+            findings.append(
+                {
+                    "code": "fk_orphan_probe_failed",
+                    "severity": sev,
+                    "columns": list(parsed.child_columns),
+                    "coverage": "sample_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"{refusal} Sample orphan probe did not run — "
+                        "population RI not proven."
+                    ),
+                }
+            )
+            checks.append(
+                {
+                    "skipped": True,
+                    "reason": kind or "unknown",
+                    "coverage": "sample_orphan_probe",
+                    "population_proof": False,
+                    "match": kind,
+                }
+            )
+            continue
         cols = list(parsed.child_columns)
         ref_table = parsed.scan_label
         ref_cols = list(parsed.parent_columns)
@@ -397,14 +430,10 @@ def probe_sample_fk_orphans(
 
         try:
             if composite:
-                from services.fk_tuple_scan import (
-                    distinct_fk_tuples,
-                    orphan_example_text,
-                    orphan_tuples,
+                values, violations = partition_fk_tuples(
+                    sample_rows, sample_cols, present_key=_fk_key, match=kind
                 )
-
-                values = distinct_fk_tuples(sample_rows, sample_cols, present_key=_fk_key)
-                if not values:
+                if not values and not violations:
                     checks.append(
                         {
                             "column": label,
@@ -415,19 +444,31 @@ def probe_sample_fk_orphans(
                             "orphan_count": 0,
                             "coverage": "sample_orphan_probe",
                             "population_proof": False,
-                            "note": "No MATCH SIMPLE (all-non-null) FK tuples in Validate sample.",
+                            "note": (
+                                "No MATCH FULL tuples in the Validate sample."
+                                if kind == "full"
+                                else "No MATCH SIMPLE (all-non-null) FK tuples in Validate sample."
+                            ),
+                            "match": kind or "simple",
                         }
                     )
                     continue
-                present = _sql_existing_parent_tuples(
-                    cfg,
-                    parent_table=ref_table,
-                    parent_columns=parent_cols,
-                    values=values,
+                present = (
+                    _sql_existing_parent_tuples(
+                        cfg,
+                        parent_table=ref_table,
+                        parent_columns=parent_cols,
+                        values=values,
+                    )
+                    if values
+                    else []
                 )
-                missing = orphan_tuples(values, present, present_key=_fk_key)
+                missing = [
+                    *violations,
+                    *orphan_tuples(values, present, present_key=_fk_key),
+                ]
                 example_fn = orphan_example_text
-                checked_n = len(values)
+                checked_n = len(values) + len(violations)
             else:
                 child_col = cols[0]
                 parent_col = parent_cols[0]
@@ -503,7 +544,9 @@ def probe_sample_fk_orphans(
             "orphan_examples": [example_fn(v) for v in missing[:5]],
             "coverage": "sample_orphan_probe",
             "population_proof": False,
-            "match_simple": True,
+            "match": kind or "simple",
+            "match_simple": kind != "full",
+            "match_full": kind == "full",
         }
         checks.append(check)
         if missing:

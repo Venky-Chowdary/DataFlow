@@ -287,11 +287,90 @@ def test_composite_fk_with_intact_tuples_is_clean(tmp_path: Path) -> None:
 
 
 def test_composite_fk_partial_null_is_unconstrained_not_orphan(tmp_path: Path) -> None:
-    """MATCH SIMPLE: any NULL component means the key imposes no constraint."""
+    """Unreported match is MATCH SIMPLE: any NULL component imposes no constraint."""
     cfg = _composite_db(tmp_path, "(1, NULL, 999)", "(2, 9, NULL)")
     result = _composite_probe(cfg)
     assert result["verified"] is True
     assert result["orphan_rows"] == 0
+    assert result["relations"][0]["match"] == "simple"
+
+
+def test_match_full_partial_null_is_an_orphan_even_when_the_constraint_exists(
+    tmp_path: Path,
+) -> None:
+    """A stored MATCH SIMPLE foreign key does not prove a MATCH FULL source rule.
+
+    SQLite lists the constraint and has no match type. The old scan skipped
+    those rows. (NULL, 999) and (9, NULL) are orphans under MATCH FULL.
+    (NULL, NULL) is allowed.
+    """
+    path = str(tmp_path / "full.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE orders (tenant_id INTEGER, order_no INTEGER, "
+            "PRIMARY KEY (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO orders VALUES (1, 100)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, tenant_id INTEGER, "
+            "order_no INTEGER, FOREIGN KEY (tenant_id, order_no) "
+            "REFERENCES orders (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO child VALUES (1, NULL, 999)")
+        conn.execute("INSERT INTO child VALUES (2, 9, NULL)")
+        conn.execute("INSERT INTO child VALUES (3, NULL, NULL)")
+        conn.execute("INSERT INTO child VALUES (4, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="child",
+        foreign_keys=[
+            {
+                "constrained_columns": ["tenant_id", "order_no"],
+                "referred_table": "orders",
+                "referred_columns": ["tenant_id", "order_no"],
+                "match": "FULL",
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["relations"][0]["match"] == "full"
+    assert result["orphan_rows"] == 2
+    assert set(result["relations"][0]["examples"]) == {"+999", "9+"}
+
+
+def test_match_partial_is_not_a_completed_scan(tmp_path: Path) -> None:
+    cfg = _composite_db(tmp_path, "(1, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[{**COMPOSITE_FK[0], "match": "PARTIAL"}],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "unavailable"
+    assert result["orphan_rows"] == 0
+    assert "MATCH PARTIAL" in result["relations"][0]["reason"]
+    assert "not a completed scan" in result["relations"][0]["reason"]
+
+
+def test_two_match_spellings_do_not_scan(tmp_path: Path) -> None:
+    cfg = _composite_db(tmp_path, "(1, 1, 100)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        cfg,
+        table="child",
+        foreign_keys=[
+            {
+                **COMPOSITE_FK[0],
+                "match": "FULL",
+                "options": {"match": "SIMPLE"},
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert "two match types" in result["relations"][0]["reason"]
 
 
 def test_self_referential_composite_is_aliased_and_scanned(tmp_path: Path) -> None:

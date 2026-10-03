@@ -368,6 +368,75 @@ def test_a_different_referential_action_is_not_the_source_rule():
     assert "SET NULL" in drifted[0].reason
 
 
+def test_match_full_is_emitted_on_postgresql_and_refused_elsewhere():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                **MEASURED["items"][0],
+                "match": "full",
+            }
+        ],
+    }
+    plan = _plan(source_foreign_keys=source)
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert "MATCH FULL" in decision.dest_ddl
+    assert decision.dest_ddl.index("MATCH FULL") < decision.dest_ddl.index("ON DELETE")
+    mysql = _plan(source_foreign_keys=source, dest_dialect="mysql")
+    refused = _only(mysql)
+    assert refused.status == "unsupported"
+    assert "MATCH FULL" in refused.reason
+    assert "does not enforce" in refused.reason
+    partial = _plan(
+        source_foreign_keys={
+            "status": "measured",
+            "items": [{**MEASURED["items"][0], "match": "partial"}],
+        }
+    )
+    assert _only(partial).status == "unsupported"
+    assert "MATCH PARTIAL" in _only(partial).reason
+
+
+def test_match_full_reread_as_simple_is_not_carried():
+    source = {
+        "status": "measured",
+        "items": [{**MEASURED["items"][0], "match": "f"}],
+    }
+    plan = _plan(source_foreign_keys=source)
+    dest = ForeignKeys(
+        dialect="postgresql",
+        status="measured",
+        items=[
+            ForeignKey(
+                name="orders_customer_fk",
+                columns=["customer_id"],
+                referenced_schema="public",
+                referenced_table="customers",
+                referenced_columns=["id"],
+                on_delete="CASCADE",
+                validated=True,
+                match="simple",
+            )
+        ],
+    )
+    settled = verify_foreign_keys(plan.decisions, dest)
+    assert settled[0].status == "unsupported"
+    assert "MATCH SIMPLE" in settled[0].reason
+    assert "MATCH FULL" in settled[0].reason
+    dest.items[0] = ForeignKey(
+        name="orders_customer_fk",
+        columns=["customer_id"],
+        referenced_schema="public",
+        referenced_table="customers",
+        referenced_columns=["id"],
+        on_delete="CASCADE",
+        validated=True,
+        match="full",
+    )
+    assert verify_foreign_keys(plan.decisions, dest)[0].status == "carried"
+
+
 def test_unreported_action_matches_only_the_engine_default():
     source = {
         "status": "measured",
