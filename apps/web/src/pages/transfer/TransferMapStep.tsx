@@ -13,7 +13,7 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
-import { ruleCensus, ruleReportSummary } from "../../lib/businessRules";
+import { ruleCensus } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
@@ -238,6 +238,14 @@ export function TransferMapStep({
     && (uniqueKeySuggestions.length > 0 || compositeKeySuggestions.length > 0),
   );
 
+  // Census stays on the closed summary so review/conflict counts are visible
+  // without pushing the mapping table below the fold.
+  const ruleBannerLine = useMemo(() => {
+    if (!ruleReport) return "";
+    const census = ruleCensus(ruleReport);
+    return `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
+  }, [ruleReport]);
+
   const continueToValidate = (
     <button
       type="button"
@@ -311,43 +319,6 @@ export function TransferMapStep({
         </details>
       )}
 
-      {ruleReport && (
-        <details
-          className="df2-rule-map-banner"
-          open={ruleReport.buckets.needs_confirmation > 0 || ruleReport.buckets.conflict > 0}
-        >
-          <summary>
-            <DtIcon name="book" size={16} />
-            <strong>Business rules applied on this map</strong>
-            <span>
-              {" · "}
-              {(() => {
-                const census = ruleCensus(ruleReport);
-                return `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
-              })()}
-            </span>
-          </summary>
-          <div className="df2-rule-map-body">
-            <p className="df2-rule-map-kicker">
-              Destination names, write transforms, and lookups land here.
-              Transform kept the pre-load image. Validate contracts never write.
-              Click a rule for provenance — customer document → compiled IR → dest.
-            </p>
-            {ruleReport.honesty ? (
-              <details className="df2-rule-honesty">
-                <summary>Compiler contract</summary>
-                <p>{ruleReport.honesty}</p>
-              </details>
-            ) : null}
-            <BusinessRuleLedger
-              report={ruleReport}
-              embedded
-              onAcceptDirect={onAcceptRuleDirect}
-            />
-          </div>
-        </details>
-      )}
-
       {streamNames.length > 1 && (
         <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
           {streamNames.map((name) => (
@@ -392,6 +363,34 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
+        {ruleReport && (
+          <details className="df2-rule-map-banner">
+            <summary title={ruleBannerLine}>
+              <span className="df2-rule-map-chevron" aria-hidden="true" />
+              <DtIcon name="book" size={16} />
+              <strong>Business rules</strong>
+              <span className="df2-rule-map-census">{ruleBannerLine}</span>
+            </summary>
+            <div className="df2-rule-map-body">
+              <p className="df2-rule-map-kicker">
+                Destination names, write transforms, and lookups land here.
+                Transform kept the pre-load image. Validate contracts never write.
+                Click a rule for provenance — customer document → compiled IR → dest.
+              </p>
+              {ruleReport.honesty ? (
+                <details className="df2-rule-honesty">
+                  <summary>Compiler contract</summary>
+                  <p>{ruleReport.honesty}</p>
+                </details>
+              ) : null}
+              <BusinessRuleLedger
+                report={ruleReport}
+                embedded
+                onAcceptDirect={onAcceptRuleDirect}
+              />
+            </div>
+          </details>
+        )}
         {blockerSummary.blockers.length > 0 && (
           <div className="df2-map-blocker-bar" role="status">
             <div className="df2-map-blocker-bar-head">

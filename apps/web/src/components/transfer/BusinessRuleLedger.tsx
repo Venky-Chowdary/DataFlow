@@ -85,13 +85,15 @@ export function BusinessRuleLedger({
   onAcceptDirect,
 }: BusinessRuleLedgerProps) {
   const open = defaultOpen
-    ?? (report.buckets.needs_confirmation > 0 || report.buckets.conflict > 0);
+    ?? ((report.buckets?.needs_confirmation ?? 0) > 0 || (report.buckets?.conflict ?? 0) > 0);
   const census = ruleCensus(report);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "executable" | "needs_confirmation" | "conflict">("all");
-  const listed = report.rules
+  const rules = Array.isArray(report.rules) ? report.rules : [];
+  const listed = rules
     .map((rule, index) => ({ rule, index }))
     .filter(({ rule }) => filter === "all" || rule.status === filter);
+  const unusedDestColumns = Array.isArray(report.unused_dest_columns) ? report.unused_dest_columns : [];
 
   const body = (
     <>
@@ -244,8 +246,8 @@ export function BusinessRuleLedger({
         <p className="df2-rule-ledger-unused">
           {report.unused_dest_count} destination column
           {report.unused_dest_count === 1 ? "" : "s"} unused and not written
-          {report.unused_dest_columns.length
-            ? `: ${report.unused_dest_columns.slice(0, 12).join(", ")}${
+          {unusedDestColumns.length
+            ? `: ${unusedDestColumns.slice(0, 12).join(", ")}${
               report.unused_dest_count > 12 ? ` +${report.unused_dest_count - 12} more` : ""
             }`
             : "."}

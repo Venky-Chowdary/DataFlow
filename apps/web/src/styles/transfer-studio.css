@@ -9033,13 +9033,22 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 .df2-rule-map-banner {
-  margin: 0.75rem 1.25rem 0;
-  padding: 10px 12px;
+  /* Same content column as the mapping table (lives in .df2-map-step-body).
+     The old 1.25rem side margin sat inside the panel and drew a narrower box
+     than the table and the blocker bar. Closed by default — the summary
+     carries the census; expanding is the operator's choice. */
+  margin: 0 0 8px;
+  padding: 8px 10px;
   border: 1px solid #99f6e4;
   border-radius: 8px;
   background: #f0fdfa;
   font-size: 13px;
   min-width: 0;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  align-self: stretch;
+  flex: 0 0 auto;
 }
 
 .df2-rule-map-banner[open] {
@@ -9070,20 +9079,52 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-rule-map-banner > summary {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   cursor: pointer;
   list-style: none;
   color: var(--df-text-primary, #0f172a);
   flex: 0 0 auto;
+  min-width: 0;
   background: #f0fdfa;
 }
 
 .df2-rule-map-banner > summary::-webkit-details-marker { display: none; }
+.df2-rule-map-banner > summary::marker { content: ""; }
+
+.df2-rule-map-chevron {
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 5px;
+  border-color: transparent transparent transparent currentColor;
+  flex: 0 0 auto;
+}
+
+.df2-rule-map-banner[open] > summary .df2-rule-map-chevron {
+  transform: rotate(90deg);
+}
+
+.df2-rule-map-banner > summary strong {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.df2-rule-map-banner > summary .dt-nav-icon {
+  flex: 0 0 auto;
+}
 
 .df2-rule-map-banner > summary span {
   color: var(--df-text-secondary, #475569);
   font-size: 12px;
+}
+
+.df2-rule-map-census {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .df2-rule-map-body {
@@ -9126,6 +9167,9 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-rule-map-banner .df2-rule-ledger {
   margin-top: 8px;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
   background: var(--df-surface, #ffffff);
 }
 

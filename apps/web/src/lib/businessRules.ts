@@ -119,9 +119,9 @@ export function namedRuleDisplay(rule: CompiledRule): string {
 }
 
 export function proofRuleClaim(report: RuleCompileReport): string {
-  const executable = report.coverage?.executable ?? report.buckets.executable;
-  const review = report.coverage?.review ?? report.buckets.needs_confirmation;
-  const conflict = report.coverage?.conflict ?? report.buckets.conflict;
+  const executable = report.coverage?.executable ?? report.buckets?.executable ?? 0;
+  const review = report.coverage?.review ?? report.buckets?.needs_confirmation ?? 0;
+  const conflict = report.coverage?.conflict ?? report.buckets?.conflict ?? 0;
   if (review || conflict) {
     return `Migration compiled ${executable} executable business rule(s); review remains`;
   }
@@ -305,10 +305,10 @@ export function ruleCensus(report: RuleCompileReport): RuleCensus {
   const validation = rules.filter((rule) => rule.kind === "contract").length;
   const namedMapping = rules.filter((rule) => rule.named_rule && rule.kind !== "contract").length;
   const namedValidation = rules.filter((rule) => rule.named_rule && rule.kind === "contract").length;
-  const executable = report.coverage?.executable ?? report.buckets.executable;
-  const review = report.coverage?.review ?? report.buckets.needs_confirmation;
-  const conflict = report.coverage?.conflict ?? report.buckets.conflict;
-  const total = report.coverage?.detected ?? report.rule_count;
+  const executable = report.coverage?.executable ?? report.buckets?.executable ?? 0;
+  const review = report.coverage?.review ?? report.buckets?.needs_confirmation ?? 0;
+  const conflict = report.coverage?.conflict ?? report.buckets?.conflict ?? 0;
+  const total = report.coverage?.detected ?? report.rule_count ?? rules.length;
   return {
     total,
     mapping,

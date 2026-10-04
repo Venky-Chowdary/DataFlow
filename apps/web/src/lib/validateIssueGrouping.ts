@@ -10,6 +10,7 @@
 import { blockerTitle, gateLabel } from "./preflightGates.js";
 import type {
   CoercionColumn,
+  CoercionSampleFailure,
   PreflightGate,
   PreflightResult,
   ValidationIssue,
@@ -459,6 +460,22 @@ export function partitionExplainIssues(issues: ValidationIssue[]): {
     else warnings.push(issue);
   }
   return { blockers, warnings, isoGroup };
+}
+
+/**
+ * Offending cells on a coercion column.
+ * Preflight columns from older jobs and partial payloads omit `sample_failures`.
+ * Reading `.length` on that hole crashed the whole Transfer Studio tree.
+ */
+export function coercionSampleFailures(col: {
+  sample_failures?: CoercionSampleFailure[] | null;
+}): CoercionSampleFailure[] {
+  return Array.isArray(col.sample_failures) ? col.sample_failures : [];
+}
+
+/** Coercion counters are optional on partial payloads. Missing is zero, not a throw. */
+export function coercionCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 /** True when samples look green but declared types still collapse fidelity. */

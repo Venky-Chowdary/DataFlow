@@ -393,6 +393,12 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(mapStep, /df2-rule-map-body/);
     assert.match(mapStep, /df2-rule-honesty/);
     assert.match(mapStep, /embedded/);
+    // Closed until the operator expands. An open rules ledger hid the mapping table.
+    assert.doesNotMatch(mapStep, /df2-rule-map-banner[\s\S]{0,240}open=\{/);
+    assert.match(mapStep, /<details className="df2-rule-map-banner">/);
+    assert.match(studio, /\.df2-rule-map-banner \{[\s\S]*width:\s*100%/);
+    assert.match(studio, /\.df2-rule-map-banner \{[\s\S]*margin:\s*0 0 8px/);
+    assert.doesNotMatch(studio, /\.df2-rule-map-banner \{[\s\S]*margin:\s*0\.75rem 1\.25rem/);
     assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*max-height:\s*min\(58vh, 560px\)/);
     assert.match(studio, /df2-rule-map-banner\[open\][\s\S]*overflow-y:\s*scroll/);
     assert.match(studio, /df2-rule-map-banner\[open\]::-webkit-scrollbar/);

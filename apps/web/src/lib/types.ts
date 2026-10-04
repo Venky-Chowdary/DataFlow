@@ -824,7 +824,11 @@ export interface CoercionColumn {
   wire_failures?: number;
   /** Bare scalars wrapped as JSON string literals (domain change — Accept risk). */
   json_scalar_wraps?: number;
-  sample_failures: CoercionSampleFailure[];
+  /**
+   * Offending sample cells. Older and partial preflight payloads omit this;
+   * readers must treat a missing list as empty — never assume `.length`.
+   */
+  sample_failures?: CoercionSampleFailure[];
   sentinel_examples?: { row: number; value: string }[];
   wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
   wrap_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
