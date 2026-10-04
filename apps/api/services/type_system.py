@@ -6307,19 +6307,20 @@ def unique_key_row_in_scope(
 ) -> bool:
     """True when sample row participates in at least one covering unique key.
 
+    An unfiltered covering key applies to every row. A partial key applies
+    only where its predicate matches. The row is in scope when any of those
+    keys applies, so a full unique sibling is not cancelled by a partial one.
     Rows outside every covering filter are skipped for that column's duplicate
-    probe (partial unique index honesty).
+    probe.
     """
     covering = unique_keys_covering_column(column, unique_keys)
     if not covering:
         return True
-    filtered = [uk for uk in covering if str(uk.get("filter_predicate") or "").strip()]
-    if not filtered:
+    if any(not str(uk.get("filter_predicate") or "").strip() for uk in covering):
         return True
-    # Row is in scope if it matches any covering partial unique (OR of filters).
     return any(
         row_matches_unique_filter(row, str(uk.get("filter_predicate") or ""))
-        for uk in filtered
+        for uk in covering
     )
 
 

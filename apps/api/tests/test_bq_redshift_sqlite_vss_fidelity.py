@@ -151,6 +151,28 @@ def test_sqlite_fetch_unique_keys_from_pragma():
     names = {u["name"]: u for u in meta["unique_keys"]}
     assert names["PRIMARY"]["enforced"] is True
     assert names["uq_email"]["columns"] == ["email"]
+    assert names["uq_email"]["filter_predicate"] == ""
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" not in executed
+
+
+def test_sqlite_short_index_list_does_not_invent_a_partial_predicate():
+    """A four-column PRAGMA row did not measure partial. Do not query WHERE."""
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(0, "uq_email", 1, "u")],
+        [(0, 0, "email")],
+    ]
+    info_rows = [
+        (0, "id", "INTEGER", 1, None, 1),
+        (1, "email", "TEXT", 0, None, 0),
+    ]
+    meta = _sqlite_fetch_unique_keys(cur, '"users"', info_rows)
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["uq_email"]["filter_predicate"] == ""
+    assert names["uq_email"]["enforced"] is True
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" not in executed
 
 
 def test_sqlite_refuses_utf8_invent_on_invalid_base64():

@@ -948,10 +948,135 @@ def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
+def _sqlite_index_is_partial(row: Any) -> bool | None:
+    """PRAGMA index_list partial bit. None when that column was not returned.
+
+    A four-column row is an older or trimmed read. It is not proof the index
+    is partial, and it is not proof the index is whole.
+    """
+    try:
+        if len(row) < 5:
+            return None
+    except TypeError:
+        return None
+    raw = row[4]
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    try:
+        return int(raw) == 1
+    except (TypeError, ValueError):
+        text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+
+def _sqlite_index_where(sql: str) -> str:
+    """WHERE expression on a CREATE INDEX statement, or empty when absent.
+
+    ``sqlite_master.sql`` is the statement SQLite stored. PRAGMA index_list
+    only says the index is partial. The predicate is the WHERE at parenthesis
+    depth 0, after the column list. A WHERE inside a quote or inside the
+    indexed expression is not that clause.
+    """
+    text = (sql or "").strip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    if not text:
+        return ""
+    depth = 0
+    in_squote = False
+    in_dquote = False
+    in_bracket = False
+    where_at: int | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_squote:
+            if ch == "'":
+                if i + 1 < n and text[i + 1] == "'":
+                    i += 2
+                    continue
+                in_squote = False
+            i += 1
+            continue
+        if in_dquote:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    i += 2
+                    continue
+                in_dquote = False
+            i += 1
+            continue
+        if in_bracket:
+            if ch == "]":
+                in_bracket = False
+            i += 1
+            continue
+        if ch == "'":
+            in_squote = True
+        elif ch == '"':
+            in_dquote = True
+        elif ch == "[":
+            in_bracket = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth:
+                depth -= 1
+        elif (
+            depth == 0
+            and text[i : i + 5].upper() == "WHERE"
+            and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+        ):
+            end = i + 5
+            if end >= n or not (text[end].isalnum() or text[end] == "_"):
+                where_at = end
+        i += 1
+    if where_at is None:
+        return ""
+    return text[where_at:].strip()
+
+
+def _sqlite_partial_predicate(cur: Any, index_name: str) -> str:
+    """WHERE text for one partial index. Empty when sqlite_master has none.
+
+    An empty result does not invent a table-wide predicate. The caller keeps
+    the key and leaves the filter blank, so the duplicate probe still includes
+    every row rather than guessing which rows SQLite ignores.
+    """
+    try:
+        cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (index_name,),
+        )
+        row = cur.fetchone()
+    except Exception as exc:
+        logger.debug("sqlite partial index sql unread: %s", exc, exc_info=exc)
+        return ""
+    if not row:
+        return ""
+    try:
+        sql = row[0]
+    except Exception:
+        sql = None
+    return _sqlite_index_where(str(sql or ""))
+
+
 def _sqlite_fetch_unique_keys(
     cur: Any, table_quoted: str, info_rows: list[Any]
 ) -> dict[str, Any]:
-    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write)."""
+    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write).
+
+    A partial unique index still rejects a new duplicate, but only for rows
+    that match its WHERE. The predicate comes from ``sqlite_master.sql`` when
+    PRAGMA index_list says the index is partial. The key stays enforced.
+    """
     pk_ord: list[tuple[int, str]] = []
     for row in info_rows or []:
         # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
@@ -987,6 +1112,7 @@ def _sqlite_fetch_unique_keys(
                 idx_name = str(idx[1])
                 is_unique = int(idx[2] or 0) == 1
                 origin = str(idx[3] or "").lower() if len(idx) > 3 else ""
+                partial = _sqlite_index_is_partial(idx)
             except Exception:
                 continue
             if not is_unique:
@@ -1005,6 +1131,10 @@ def _sqlite_fetch_unique_keys(
                     cols.append(str(col))
             if not cols:
                 continue
+            # partial is True only when PRAGMA measured it. A missing column
+            # stays a full key. The WHERE is read after index_info so a
+            # column-less expression index is still skipped.
+            predicate = _sqlite_partial_predicate(cur, idx_name) if partial is True else ""
             unique_keys.append(
                 {
                     "name": idx_name,
@@ -1013,7 +1143,7 @@ def _sqlite_fetch_unique_keys(
                     "expression": "",
                     "expression_columns": [],
                     "case_insensitive": False,
-                    "filter_predicate": "",
+                    "filter_predicate": predicate,
                     "enforced": True,
                 }
             )

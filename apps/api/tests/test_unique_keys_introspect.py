@@ -586,3 +586,129 @@ def test_composite_unique_blocks_full_tuple_dupes():
     )
     assert result["passed"] is False
     assert any("uq_org_code" in i or "UNIQUE" in i for i in result["issues"])
+
+
+def test_sqlite_partial_unique_where_limits_the_write_block(tmp_path: Path) -> None:
+    """A SQLite partial unique index blocks only rows that match its WHERE.
+
+    Proved against a real sqlite_master catalog, then through the duplicate
+    probe. A full unique on the same columns still blocks the other rows.
+    """
+    import sqlite3
+
+    from services.data_integrity import _check_duplicate_keys
+    from services.unique_key_introspect import (
+        _sqlite_fetch_unique_keys,
+        _sqlite_index_where,
+    )
+
+    where_in_literal = (
+        "CREATE UNIQUE INDEX u ON t (email) "
+        "WHERE note != 'x) WHERE y' AND status = 'active'"
+    )
+    assert _sqlite_index_where(where_in_literal) == (
+        "note != 'x) WHERE y' AND status = 'active'"
+    )
+    assert _sqlite_index_where("CREATE UNIQUE INDEX u ON t (email)") == ""
+
+    db = tmp_path / "partial.db"
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT, status TEXT)"
+        )
+        con.execute(
+            "CREATE UNIQUE INDEX ux_email ON people (email) "
+            "WHERE status = 'active'"
+        )
+        con.execute("CREATE UNIQUE INDEX ux_status ON people (status)")
+        cur = con.cursor()
+        info = list(cur.execute('PRAGMA table_info("people")'))
+        meta = _sqlite_fetch_unique_keys(cur, '"people"', info)
+    finally:
+        con.close()
+
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux_email"]["filter_predicate"] == "status = 'active'"
+    assert names["ux_email"]["enforced"] is True
+    assert names["ux_email"]["columns"] == ["email"]
+    assert names["ux_status"]["filter_predicate"] == ""
+    assert names["PRIMARY"]["filter_predicate"] == ""
+
+    partial_only = [names["ux_email"]]
+    out_of_filter = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "archived"},
+            {"email": "same@x.com", "status": "archived"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=partial_only,
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert out_of_filter["passed"] is True
+    in_filter = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "active"},
+            {"email": "same@x.com", "status": "active"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=partial_only,
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert in_filter["passed"] is False
+    assert in_filter["blocks_transfer"] is True
+
+    sibling = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "archived"},
+            {"email": "same@x.com", "status": "archived"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[
+            names["ux_email"],
+            {"name": "uq_email", "columns": ["email"], "filter_predicate": ""},
+        ],
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert sibling["passed"] is False
+    assert sibling["blocks_transfer"] is True
+
+
+def test_sqlite_partial_bit_without_where_stays_in_the_duplicate_probe() -> None:
+    """Partial flag with no stored WHERE does not drop the write block."""
+    from services.unique_key_introspect import _sqlite_fetch_unique_keys
+
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(0, "ux", 1, "c", 1)],
+        [(0, 0, "email")],
+    ]
+    cur.fetchone.return_value = (None,)
+    info_rows = [(0, "email", "TEXT", 0, None, 0)]
+    meta = _sqlite_fetch_unique_keys(cur, '"people"', info_rows)
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux"]["filter_predicate"] == ""
+    assert names["ux"]["enforced"] is True
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" in executed
