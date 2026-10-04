@@ -136,11 +136,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_jobs",
-        "description": "List recent transfer jobs with status, IDs, and record counts.",
+        "description": (
+            "List recent transfer jobs with status, IDs, and record counts. "
+            "``total`` is the whole history for ``scope`` (default ``workspace``, "
+            "the same population as brief_workspace). Pass ``scope=all`` only when "
+            "you explicitly need every workspace."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "all"],
+                    "default": "workspace",
+                    "description": "workspace = this workspace; all = every workspace",
+                },
             },
             "required": [],
         },
@@ -347,7 +358,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a transfer between two saved connectors for the operator to Confirm. "
             "Runs the plan and preflight first and refuses when any gate blocks. "
-            "This never moves data on its own — execution happens only after Confirm."
+            "This never moves data on its own — execution happens only after confirm_action."
         ),
         "input_schema": {
             "type": "object",
@@ -472,7 +483,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "run_schedule_now",
         "description": (
             "Propose an immediate run of a pipeline schedule. Returns a pending action — "
-            "the UI must confirm before the run starts."
+            "confirm_action must be called with the returned ack_id before the run starts."
         ),
         "input_schema": {
             "type": "object",
@@ -491,7 +502,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "preflight to clear, and stores the approved mapping on the schedule. "
             "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
             "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
-            "nothing on its own: the schedule exists only after Confirm."
+            "nothing on its own: the schedule exists only after confirm_action."
         ),
         "input_schema": {
             "type": "object",
@@ -522,8 +533,37 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "confirm_action",
+        "description": (
+            "Consume a pending approval (ack_id) and perform the mutation the operator "
+            "already staged: create_connector, start_transfer, create_schedule, "
+            "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
+            "quarantine, delete connector, enable or delete a schedule). "
+            "This is the same gate as Confirm in the product. Calling the staging "
+            "tool does not move data; confirm_action does. Replaying a consumed "
+            "ack_id returns the original result and does not run the mutation twice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ack_id": {
+                    "type": "string",
+                    "description": "ack_id returned by the staging tool",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Audit note stored with the approval",
+                },
+            },
+            "required": ["ack_id"],
+        },
+    },
+    {
         "name": "list_contracts",
-        "description": "List data contracts available in the workspace.",
+        "description": (
+            "List data contracts. ``count`` is this page. ``total`` is the whole "
+            "store from the status census, not the page length."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 50}},
@@ -866,6 +906,7 @@ TOOL_FAMILIES: list[dict] = [
             "get_schedule",
             "run_schedule_now",
             "create_schedule",
+            "confirm_action",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -928,6 +969,7 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "create_connector": self._create_connector,
+            "confirm_action": self._confirm_action,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
@@ -1267,12 +1309,29 @@ class DataPilotTools:
             },
         )
 
-    def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from .job_reads import list_transfer_jobs
+    def _confirm_action(self, ack_id: str = "", reason: str = "") -> ToolResult:
+        from .confirm_ack import confirm_from_tool
 
-        summary, counts, source = list_transfer_jobs(limit=limit)
-        # "How many jobs?" must be answered from the whole history — the page we
-        # read here is only the window we can show.
+        body = confirm_from_tool(ack_id, reason or "")
+        if not body.get("ok"):
+            return ToolResult(
+                name="confirm_action",
+                success=False,
+                output=body,
+                error=str(body.get("error") or "Confirm failed"),
+            )
+        return ToolResult(name="confirm_action", success=True, output=body)
+
+    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from .job_reads import job_list_workspace_scope, list_transfer_jobs
+
+        try:
+            workspace_id = job_list_workspace_scope(scope)
+        except ValueError as exc:
+            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
+        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
+        # "How many jobs?" must be answered from the whole history for this scope.
+        # The page we read here is only the window we can show.
         return ToolResult(
             name="list_jobs",
             success=True,
@@ -1282,6 +1341,7 @@ class DataPilotTools:
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
                 "store": source,
+                "scope": "all" if workspace_id is None else "workspace",
             },
         )
 
@@ -2344,7 +2404,23 @@ class DataPilotTools:
                 "status": d.get("status"),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        return ToolResult(name="list_contracts", success=True, output={"contracts": rows, "count": len(rows)})
+        census: dict = {}
+        try:
+            census = store.count_contracts_by_status() or {}
+        except Exception:
+            census = {}
+        total = sum(int(n) for n in census.values()) if census else len(rows)
+        return ToolResult(
+            name="list_contracts",
+            success=True,
+            output={
+                "contracts": rows,
+                "count": len(rows),
+                "total": total,
+                "truncated": total > len(rows),
+                "by_status": census,
+            },
+        )
 
     def _open_job(self, job_id: str = "") -> ToolResult:
         jid = (job_id or "").strip()

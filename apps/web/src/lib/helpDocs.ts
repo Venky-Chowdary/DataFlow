@@ -1075,10 +1075,10 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Paste into Cursor Settings → MCP",
             pin: "Cursor → Settings → MCP",
-            body: "Add the server entry, restart MCP if prompted, then call governed tools (connectors, preflight, jobs). Every agent-initiated transfer appears in **Job Theater** with an audit trail.",
+            body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until `confirm_action`. Every confirmed transfer appears in **Job Theater** with an audit trail. The key's role is the same gate as the UI: an editor key can create connectors, transfers, and schedules.",
           },
         ],
-        code: '{\n  "mcpServers": {\n    "dataflow": {\n      "url": "https://api.datawrap.io/api/v1/mcp"\n    }\n  }\n}',
+        code: '{\n  "mcpServers": {\n    "dataflow": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
       },
       {
         id: "security",
@@ -1273,8 +1273,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "auth",
         title: "Authentication",
-        body: "Bearer tokens scoped to workspace. Enterprise uses SSO-backed service accounts.",
-        code: 'curl -H "Authorization: Bearer $TOKEN" https://api.datawrap.io/api/v1/connectors',
+        body: "Bearer tokens scoped to workspace. `$TENANT_ORIGIN` is the host in the browser address bar (the path is `/api/v1`). A workspace API key from **Settings → API Keys** is the same credential MCP uses. Its role decides what it may change. Enterprise uses SSO-backed service accounts.",
+        code: 'curl -H "Authorization: Bearer $TOKEN" "$TENANT_ORIGIN/api/v1/connectors"',
       },
       {
         id: "endpoints",

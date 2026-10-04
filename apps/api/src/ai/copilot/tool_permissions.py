@@ -87,6 +87,10 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "create_connector": (Permission.CONNECTOR_WRITE, MUTATE),
     "run_schedule_now": (Permission.SCHEDULE_MANAGE, MUTATE),
     "create_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    # One permission cannot cover every ack kind (an operator may confirm a
+    # transfer and must not confirm a connector). The dispatcher lets a reader
+    # in; can_confirm_kind refuses the kind before the ack is claimed.
+    "confirm_action": (Permission.WORKSPACE_READ, READ),
     # Lifecycle operations mirror /connectors/jobs/{id}/{cancel,retry,resume,
     # quarantine/replay}, /saved-connectors/{id}/{test,DELETE} and
     # /schedules/{id} PATCH|DELETE.
