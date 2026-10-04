@@ -41,6 +41,31 @@ def _honest_api(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def test_railway_api_keeps_cadence_without_a_scheduler_service(monkeypatch):
+    """The shipped Railway API is one replica and does not set PROCESS_ROLE.
+
+    MULTI_REPLICA=1 there means leases fail closed. It does not mean a
+    scheduler service exists. The API must keep firing pipelines.
+    """
+    monkeypatch.setenv("DATAFLOW_MULTI_REPLICA", "1")
+    monkeypatch.delenv("DATAWRAP_MULTI_REPLICA", raising=False)
+    monkeypatch.setenv("DATAFLOW_WORKER_FLEET", "1")
+    monkeypatch.delenv("DATAWRAP_WORKER_FLEET", raising=False)
+    monkeypatch.delenv("DATAFLOW_PROCESS_ROLE", raising=False)
+    monkeypatch.delenv("DATAWRAP_PROCESS_ROLE", raising=False)
+    monkeypatch.delenv("DATAFLOW_SCHEDULE_LOOP", raising=False)
+    monkeypatch.delenv("DATAWRAP_SCHEDULE_LOOP", raising=False)
+    monkeypatch.delenv("DATAFLOW_API_CLAIM_LOOP", raising=False)
+    monkeypatch.delenv("DATAWRAP_API_CLAIM_LOOP", raising=False)
+    monkeypatch.delenv("DATAFLOW_ACK_BACKEND", raising=False)
+    monkeypatch.delenv("DATAWRAP_ACK_BACKEND", raising=False)
+    assert process_role() == "api"
+    assert schedule_loop_enabled() is True
+    assert api_executes_transfers() is True
+    assert ack_backend() == "mongo"
+    assert topology_errors() == []
+
+
 def test_single_process_has_no_topology_errors(monkeypatch):
     monkeypatch.delenv("DATAFLOW_MULTI_REPLICA", raising=False)
     monkeypatch.delenv("DATAWRAP_MULTI_REPLICA", raising=False)
@@ -73,7 +98,12 @@ def test_multi_replica_api_must_name_the_split_explicitly(monkeypatch):
     errors = topology_errors()
     assert any("SCHEDULE_LOOP" in msg for msg in errors)
     assert any("API_CLAIM_LOOP" in msg for msg in errors)
-    assert any("ACK_BACKEND" in msg for msg in errors)
+    # Unset ACK_BACKEND already resolves to mongo. Only an explicit file ledger
+    # is a split brain.
+    assert not any("ACK_BACKEND" in msg for msg in errors)
+    monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "file")
+    assert any("ACK_BACKEND" in msg for msg in topology_errors())
+    monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "mongo")
 
     _honest_api(monkeypatch)
     assert topology_errors() == []
@@ -286,7 +316,7 @@ def _restore_process_env(before: dict[str, str | None]) -> None:
 
 def test_scheduler_process_exits_when_acks_are_not_shared(monkeypatch):
     monkeypatch.setenv("DATAFLOW_MULTI_REPLICA", "1")
-    monkeypatch.delenv("DATAFLOW_ACK_BACKEND", raising=False)
+    monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "file")
     monkeypatch.delenv("DATAWRAP_ACK_BACKEND", raising=False)
     keys = (
         "DATAFLOW_PROCESS_ROLE",
@@ -305,7 +335,7 @@ def test_scheduler_process_exits_when_acks_are_not_shared(monkeypatch):
 
 def test_worker_process_exits_when_acks_are_not_shared(monkeypatch):
     monkeypatch.setenv("DATAFLOW_MULTI_REPLICA", "1")
-    monkeypatch.delenv("DATAFLOW_ACK_BACKEND", raising=False)
+    monkeypatch.setenv("DATAFLOW_ACK_BACKEND", "file")
     monkeypatch.delenv("DATAWRAP_ACK_BACKEND", raising=False)
     keys = (
         "DATAFLOW_PROCESS_ROLE",

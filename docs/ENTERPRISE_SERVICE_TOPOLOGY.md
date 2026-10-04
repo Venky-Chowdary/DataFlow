@@ -14,6 +14,10 @@ Steps 1–4 of the order of work below are implemented on this branch. Step 5
 `apps/api/tests/test_worker_fleet.py`. That is a unit fixture, not a cluster
 soak and not a production deploy.
 
+Railway does not need a new service. `deploy/railway/api.toml` stays one API
+replica and keeps the cadence loop until an operator sets `PROCESS_ROLE`.
+`deploy/railway/scheduler.toml` is there for the day cadence should leave the API.
+
 What changed:
 
 | Process | Command | What it does now |

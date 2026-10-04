@@ -43,6 +43,16 @@ def process_role() -> str:
     return role
 
 
+def process_role_explicit() -> bool:
+    """True when the operator named the role.
+
+    Railway's API service does not set this. It keeps the in-process cadence
+    loop and the API claim loop. Helm sets ``PROCESS_ROLE`` on every pod, and
+    that is what turns the split checks on.
+    """
+    return bool(_raw("PROCESS_ROLE"))
+
+
 def schedule_loop_enabled() -> bool:
     """Whether this process may run the pipeline cadence loop.
 
@@ -145,31 +155,37 @@ def topology_errors() -> list[str]:
             "so replicas enqueue onto transfer_job_queue."
         )
 
-    role = process_role()
-    if role == "api" and schedule_loop_enabled():
-        errors.append(
-            "API process must set DATAFLOW_SCHEDULE_LOOP=0 when DATAFLOW_MULTI_REPLICA=1. "
-            "The scheduler process owns cadence."
-        )
-    if role == "api" and api_claim_loop_enabled():
-        errors.append(
-            "API process must set DATAFLOW_API_CLAIM_LOOP=0 when DATAFLOW_MULTI_REPLICA=1 "
-            "so only worker processes execute transfers."
-        )
-    if role == "worker" and schedule_loop_enabled():
-        errors.append(
-            "Worker process must set DATAFLOW_SCHEDULE_LOOP=0. Cadence belongs to the scheduler."
-        )
-    if role == "scheduler" and not schedule_loop_enabled():
-        errors.append(
-            "Scheduler process has DATAFLOW_SCHEDULE_LOOP=0, so no process fires due pipelines."
-        )
+    # Role checks apply only after the operator names a role. An API that
+    # never set PROCESS_ROLE is the current Railway service: one replica, the
+    # cadence loop and the claim loop stay in that process, and pipelines
+    # keep firing. Helm sets the role, so a chart that drops SCHEDULE_LOOP=0
+    # still fails closed.
+    if process_role_explicit():
+        role = process_role()
+        if role == "api" and schedule_loop_enabled():
+            errors.append(
+                "API process must set DATAFLOW_SCHEDULE_LOOP=0 when DATAFLOW_MULTI_REPLICA=1 "
+                "and DATAFLOW_PROCESS_ROLE=api. The scheduler process owns cadence."
+            )
+        if role == "api" and api_claim_loop_enabled():
+            errors.append(
+                "API process must set DATAFLOW_API_CLAIM_LOOP=0 when DATAFLOW_MULTI_REPLICA=1 "
+                "and DATAFLOW_PROCESS_ROLE=api so only worker processes execute transfers."
+            )
+        if role == "worker" and schedule_loop_enabled():
+            errors.append(
+                "Worker process must set DATAFLOW_SCHEDULE_LOOP=0. Cadence belongs to the scheduler."
+            )
+        if role == "scheduler" and not schedule_loop_enabled():
+            errors.append(
+                "Scheduler process has DATAFLOW_SCHEDULE_LOOP=0, so no process fires due pipelines."
+            )
 
-    explicit_ack = _raw("ACK_BACKEND").lower()
-    if explicit_ack != "mongo":
+    if ack_backend() == "file":
         errors.append(
-            "Set DATAFLOW_ACK_BACKEND=mongo when DATAFLOW_MULTI_REPLICA=1. "
+            "DATAFLOW_ACK_BACKEND=file cannot be used when DATAFLOW_MULTI_REPLICA=1. "
             "A file ack ledger is pod-local, so a confirm staged on one API replica "
-            "is invisible to the replica that receives the click."
+            "is invisible to the replica that receives the click. "
+            "Unset the variable or set DATAFLOW_ACK_BACKEND=mongo."
         )
     return errors
