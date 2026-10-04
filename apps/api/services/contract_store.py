@@ -27,6 +27,10 @@ class ContractStore(ABC):
     def list_contracts(self, limit: int = 200) -> list[DataContract]:
         raise NotImplementedError
 
+    def count_contracts_by_status(self) -> dict[str, int]:
+        """Whole-store status census. A list page is not a population count."""
+        raise NotImplementedError
+
     @abstractmethod
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         raise NotImplementedError
@@ -57,6 +61,13 @@ class InMemoryContractStore(ContractStore):
             reverse=True,
         )
         return items[:limit]
+
+    def count_contracts_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for contract in self._contracts.values():
+            status = str(getattr(contract.status, "value", contract.status) or "unknown").lower()
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         self._breakers[breaker.contract_id] = breaker
@@ -149,6 +160,27 @@ class MongoContractStore(ContractStore):
             reverse=True,
         )
         return items[:limit]
+
+    def count_contracts_by_status(self) -> dict[str, int]:
+        by_id = self._fallback.status_by_id()
+        db = self._get_db()
+        if db is not None:
+            try:
+                for doc in db["contracts"].find({}, {"id": 1, "status": 1}):
+                    contract_id = str(doc.get("id") or "")
+                    if not contract_id:
+                        continue
+                    by_id[contract_id] = str(doc.get("status") or "unknown").lower()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Contract census could not read MongoDB (%s); using the file mirror",
+                    exc,
+                    exc_info=exc,
+                )
+        counts: dict[str, int] = {}
+        for status in by_id.values():
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         self._fallback.save_breaker(breaker)
