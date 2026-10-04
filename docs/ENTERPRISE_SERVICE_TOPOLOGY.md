@@ -6,7 +6,30 @@ Capability evidence stays in `docs/ENTERPRISE_ARCHITECTURE_AUDIT.md`. This
 document is the process and state plan. It does not claim a soak, an SLA, or
 a compliance certification.
 
-## What runs today
+## Status
+
+Steps 1–4 of the order of work below are implemented on this branch. Step 5
+(process pool or columnar batch, then the 1M-row harness) is not. Proof is
+`apps/api/tests/test_process_topology.py` and the claim/reclaim cases in
+`apps/api/tests/test_worker_fleet.py`. That is a unit fixture, not a cluster
+soak and not a production deploy.
+
+What changed:
+
+| Process | Command | What it does now |
+| --- | --- | --- |
+| API | `scripts/start-api.sh` | With `WORKER_FLEET=1`, `API_CLAIM_LOOP=0`, `SCHEDULE_LOOP=0` it enqueues and still re-enqueues orphans. It does not start the thread-pool executor or the cadence loop. Single-process installs that leave those variables unset keep today's local executor. |
+| Scheduler | `python -m src.scheduler_main` | Cadence only. Helm Deployment `scheduler-deployment.yaml`, compose service `scheduler`. Replica count 1. Not on the HPA. |
+| Batch worker | `python -m src.worker_main` with `WORKER_MODE=batch` | Claims every queued row except `workload=cdc`. |
+| CDC worker | same module, `WORKER_MODE=cdc` | Claims only CDC. Fixed replicas. Not on the batch HPA. |
+| Confirm acks | `ACK_BACKEND=mongo` | `pilot_acks` collection. Two processes, one claim wins, a replay returns the first result. |
+| File bytes | `BLOB_ROOT` or S3 | `stage_bytes` writes the shared root first when `BLOB_ROOT` is set and returns `s3://local/…`. The worker hydrates into its own upload dir. Helm keeps `DATAFLOW_S3_BUCKET` and does not set `BLOB_ROOT`. |
+
+`MULTI_REPLICA=1` refuses to serve (API) or exits (worker, scheduler) until the API has stopped executing, the scheduler is the only cadence, and acks are mongo. Mapping, preflight, quarantine, reconcile, and dest-exists-by-column-name stay inside the worker. There is still one transfer engine.
+
+CDC remains at-least-once upsert. Redis is still not the job queue.
+
+## What ran before this change
 
 One Python image. Three intended roles. Only two of them are deployed, and
 the API role still does the work of the other two.
@@ -63,7 +86,7 @@ Same image, different command. Do not split mapping, preflight, and the writer i
 | Service | Replicas | Command / duty | Must not do |
 | --- | --- | --- | --- |
 | Web | 2+ | Static UI, already separate | Call warehouses |
-| Control-plane API | 2+, HPA on request CPU | Auth, connectors, schedules CRUD, mapping preview, preflight, MCP, confirm | Run `run_schedule_loop`. Run `ThreadPoolExecutor` transfers. Start RAG training. Scan and resume orphans. |
+| Control-plane API | 2+, HPA on request CPU | Auth, connectors, schedules CRUD, mapping preview, preflight, MCP, confirm. On start, re-enqueue orphans (`run_transfer_async` upserts the queue row; it does not execute). | Run `run_schedule_loop`. Run `ThreadPoolExecutor` transfers. Run the API claim loop when workers are deployed. |
 | Scheduler | 1 (a second replica may run only as lock standby) | The cadence loop only. Enqueue due pipelines onto `transfer_job_queue`. | Execute a transfer. Serve HTTP traffic. |
 | Batch workers | HPA on queue depth, not API CPU | `src.worker_main` claiming batch jobs | Hold a CDC slot |
 | CDC workers | Fixed small pool, one owner per source slot, **not** on the batch HPA | Claim only CDC jobs. Slot, LSN, and binlog stay with the lease. | Steal batch jobs to fill idle CPU |
@@ -89,10 +112,10 @@ Postgres in `docker-compose.prod.yml` under the `full` profile is a sample wareh
 
 Each step is done when the named proof is green. Chat confidence is not the proof.
 
-1. **Make the fleet honest.** API enqueues and does not execute when workers are deployed. One integration test: two processes, one queue, the API thread pool does not run the job, one worker does, a second worker does not. Helm API env matches that mode.
-2. **Move the cadence loop out of the API.** One scheduler process. Two API replicas with the loop disabled do not start a pipeline. The Mongo lock remains for the standby. Proof: kill the scheduler, no new run starts; restart it, the due pipeline enqueues once.
-3. **Put acks and uploads where both roles can see them.** Confirm an ack staged on process A from process B. A file staged on the API is read by the worker. No shared local disk in that test.
-4. **Split CDC from batch** by claim filter, with a test that a batch HPA scale-down does not drop a held CDC lease.
-5. **Only then** raise worker parallelism with a process pool or a columnar batch, and re-run the existing 1M-row harness. Publish before and after on that fixture. Do not quote the new number as an SLA.
+1. **Make the fleet honest.** Done for the enqueue path. `test_run_transfer_async_enqueues_and_does_not_execute` asserts the API thread pool is not called and the queue payload is `workload=cdc` for `cdc_incremental`. Helm API env is `WORKER_FLEET=1`, `API_CLAIM_LOOP=0`, `SCHEDULE_LOOP=0`, `PROCESS_ROLE=api`, `ACK_BACKEND=mongo`. A second worker not receiving the same job is the claim lease (`test_claim_next_job_acquires_lease_and_requeues_on_lease_fail`), not a second OS process in this fixture.
+2. **Move the cadence loop out of the API.** Done as a process boundary. `schedule_loop_enabled()` is false on the honest API and true only on `src.scheduler_main`. `test_scheduler_without_a_loop_is_refused` fails closed when that process is told not to run. This fixture does not kill a live scheduler pod.
+3. **Put acks and uploads where both roles can see them.** Done. `test_two_api_processes_share_one_ack` (first claim wins, replay is idempotent). `test_blob_root_is_readable_from_another_upload_dir` deletes the API upload path and reads the bytes from a different upload directory via `s3://local/`.
+4. **Split CDC from batch.** Done. `test_batch_worker_skips_cdc_and_claims_batch`, `test_cdc_worker_claims_only_cdc`, `test_reclaim_leaves_a_held_cdc_lease`, `test_batch_reclaim_does_not_touch_cdc_rows`. A held CDC lease is not requeued. A batch worker does not reclaim a CDC row.
+5. **Only then** raise worker parallelism with a process pool or a columnar batch, and re-run the existing 1M-row harness. Publish before and after on that fixture. Do not quote the new number as an SLA. Not this change.
 
 Mapping, preflight, quarantine, reconcile, and dest-exists-by-column-name stay inside the worker that already calls them. The enterprise gap is which process is allowed to call them, and where the bytes and the acks live — not a new mapper.

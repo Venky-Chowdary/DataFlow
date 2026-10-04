@@ -31,8 +31,16 @@ spec:
               protocol: TCP
           env:
             {{- include "dataflow.commonEnv" . | nindent 12 }}
+            - name: DATAFLOW_PROCESS_ROLE
+              value: api
             - name: DATAFLOW_WORKER_FLEET
+              value: "1"
+            - name: DATAFLOW_API_CLAIM_LOOP
               value: "0"
+            - name: DATAFLOW_SCHEDULE_LOOP
+              value: "0"
+            - name: DATAFLOW_ACK_BACKEND
+              value: mongo
           {{- include "dataflow.secretEnvFrom" . | nindent 10 }}
           livenessProbe:
             httpGet:

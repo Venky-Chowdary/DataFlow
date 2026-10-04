@@ -37,6 +37,14 @@ worker:
   image:
     tag: stable
   replicas: 3
+  mode: batch
+
+cdcWorker:
+  enabled: true
+  image:
+    tag: stable
+  replicas: 1
+  mode: cdc
 
 scheduler:
   image:

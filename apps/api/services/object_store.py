@@ -143,10 +143,55 @@ def _ensure_bucket(client: Any) -> bool:
         return False
 
 
+_LOCAL_BUCKET = "local"
+
+
+def blob_root() -> Path | None:
+    """Shared filesystem stand-in for object storage.
+
+    Set ``BLOB_ROOT`` when the install has no S3 bucket and more than one
+    process must read the same upload. Unset it when ``S3_BUCKET`` is the
+    store — a set root is used first so a compose volume does not depend on
+    MinIO being up.
+    """
+    raw = (getenv_brand("BLOB_ROOT", "") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _local_blob_path(key: str) -> Path | None:
+    root = blob_root()
+    if root is None or not key:
+        return None
+    parts = Path(key).parts
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        return None
+    dest = (root / key).resolve()
+    root_resolved = root.resolve()
+    if dest != root_resolved and root_resolved not in dest.parents:
+        return None
+    return dest
+
+
+def _stage_blob_root(key: str, content: bytes) -> str | None:
+    dest = _local_blob_path(key)
+    if dest is None:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(content)
+    return f"s3://{_LOCAL_BUCKET}/{key}"
+
+
 def stage_bytes(key: str, content: bytes, content_type: str = "application/octet-stream") -> str | None:
     """Upload bytes to object store. Returns s3:// URI or None if unavailable."""
     if _disabled():
         return None
+    rooted = _stage_blob_root(key, content)
+    if rooted:
+        return rooted
     client = _get_client()
     if not client or not _ensure_bucket(client):
         return None
@@ -177,6 +222,12 @@ def fetch_bytes(uri: str) -> bytes | None:
     """Download object bytes from an s3:// URI."""
     if not uri or not uri.startswith("s3://"):
         return None
+    parsed = urlparse(uri)
+    if parsed.netloc == _LOCAL_BUCKET:
+        path = _local_blob_path(parsed.path.lstrip("/"))
+        if path is None or not path.is_file():
+            return None
+        return path.read_bytes()
     client = _get_client()
     if not client:
         return None
