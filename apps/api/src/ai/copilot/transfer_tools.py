@@ -853,6 +853,25 @@ def _source_primary_key(src_info: dict[str, Any]) -> str:
     return ",".join(cols)
 
 
+def _preflight_issue_lines(details: dict[str, Any]) -> list[str]:
+    """The sentences an operator can act on, not the gate's count summary."""
+    lines: list[str] = []
+    for issue in (details.get("issues") or [])[:1]:
+        text = str(issue).strip()
+        if text:
+            lines.append(text)
+    for row in (details.get("issues_detail") or [])[:2]:
+        if not isinstance(row, dict):
+            continue
+        for failure in (row.get("sample_failures") or [])[:1]:
+            if not isinstance(failure, dict):
+                continue
+            reason = str(failure.get("reason") or "").strip()
+            if reason and reason not in lines:
+                lines.append(reason)
+    return lines[:3]
+
+
 def _run_preflight(
     *,
     src_conn: dict[str, Any],
@@ -1033,7 +1052,10 @@ def _run_preflight(
                 # Only the fix travels from the details blob: without it the chat
                 # refusal names a problem and no way out of it.
                 "details": {
-                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or "")
+                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or ""),
+                    # The gate summary is "1 type coercion issue(s)". The issue
+                    # sentence names the column; the sample reason names the value.
+                    "issues": _preflight_issue_lines(b.get("details") or {}),
                 },
             }
             for b in (result.get("blockers") or [])

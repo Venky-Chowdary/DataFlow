@@ -24,7 +24,7 @@ def _digest(path: Path) -> bytes | None:
     return path.read_bytes()
 
 
-def _mcp(client, name: str, arguments: dict) -> dict:
+def _call(client, name: str, arguments: dict) -> tuple[bool, Any]:
     response = client.post(
         "/api/v1/mcp",
         headers={"Accept": "application/json, text/event-stream"},
@@ -40,10 +40,17 @@ def _mcp(client, name: str, arguments: dict) -> dict:
     assert "error" not in body, body
     result = body["result"]
     text = result["content"][0]["text"]
-    assert result["isError"] is False, text
+    if result["isError"]:
+        return True, text
     parsed = json.loads(text)
     assert isinstance(parsed, dict)
-    return parsed
+    return False, parsed
+
+
+def _mcp(client, name: str, arguments: dict) -> dict:
+    failed, payload = _call(client, name, arguments)
+    assert failed is False, payload
+    return payload
 
 
 def _wait_job(job_id: str, timeout_s: float = 90.0) -> dict:
@@ -67,7 +74,14 @@ def mcp_client(tmp_path, monkeypatch):
     before = {name: _digest(real / name) for name in ("connectors.json", "schedules.json", "pilot_acks.json")}
     uploads = tmp_path / "uploads"
     uploads.mkdir()
-    shutil.copy(Path(__file__).resolve().parent / "fixtures" / "sample_payments.csv", uploads / "sample_payments.csv")
+    fixtures = Path(__file__).resolve().parent / "fixtures"
+    for name in (
+        "sample_payments.csv",
+        "sample_payments.tsv",
+        "sample_hr.json",
+        "sample_mixed_types.jsonl",
+    ):
+        shutil.copy(fixtures / name, uploads / name)
     sqlite_root = tmp_path / "sqlite"
     sqlite_root.mkdir()
 
@@ -218,3 +232,173 @@ def test_mcp_loads_sample_payments_into_sqlite(mcp_client):
     assert replay_run["job_id"] == started["job_id"]
     with sqlite3.connect(warehouse) as conn:
         assert conn.execute('SELECT COUNT(*) FROM "payments_wh"').fetchone()[0] == 10
+
+
+def _load(client, dataset: str, table: str, **extra) -> str:
+    staged = _mcp(
+        client,
+        "start_dataset_transfer",
+        {
+            "dataset_name": dataset,
+            "dest_connector_name": "qe-mcp-files",
+            "dest_table": table,
+            "sync_mode": "full_refresh_append",
+            **extra,
+        },
+    )
+    assert staged["requires_confirm"] is True, staged
+    confirmed = _mcp(client, "confirm_action", {"ack_id": staged["ack_id"], "reason": "qe"})
+    assert confirmed["ok"] is True, confirmed
+    job = _wait_job(confirmed["job_id"])
+    assert str(job.get("status") or "") == "completed", {
+        "dataset": dataset,
+        "status": job.get("status"),
+        "error": job.get("error") or job.get("message"),
+        "phase": job.get("phase"),
+        "rejected": job.get("rejected_rows"),
+    }
+    return confirmed["job_id"]
+
+
+def test_mcp_loads_tsv_json_and_jsonl_then_pauses_and_deletes_the_schedule(mcp_client):
+    """TSV, JSON, and JSONL through the same MCP door, then pause and delete.
+
+    The TSV is 3 payment rows, the JSON array is 5 employees, and the JSONL
+    file is 3 mixed-type rows including a nested object. Pause and delete are
+    confirm_action calls against the schedule that was just created.
+    """
+    client, db_path = mcp_client
+    staged = _mcp(
+        client,
+        "create_connector",
+        {
+            "name": "qe-mcp-files",
+            "type": "sqlite",
+            "database": str(db_path),
+            "test_first": True,
+        },
+    )
+    saved = _mcp(client, "confirm_action", {"ack_id": staged["ack_id"], "reason": "qe"})
+    assert saved["ok"] is True, saved
+
+    _load(client, "sample_payments.tsv", "payments_tsv")
+    _load(client, "sample_hr", "hr")
+
+    refused, reason = _call(
+        client,
+        "start_dataset_transfer",
+        {
+            "dataset_name": "sample_mixed_types",
+            "dest_connector_name": "qe-mcp-files",
+            "dest_table": "mixed",
+            "sync_mode": "full_refresh_append",
+        },
+    )
+    assert refused is True, reason
+    assert "created_at" in reason
+    assert "naive wall-clock" in reason
+    assert "source_timezone" in reason
+    unknown, unknown_reason = _call(
+        client,
+        "start_dataset_transfer",
+        {
+            "dataset_name": "sample_mixed_types",
+            "dest_connector_name": "qe-mcp-files",
+            "dest_table": "mixed",
+            "sync_mode": "full_refresh_append",
+            "source_timezone": "Not/AZone",
+        },
+    )
+    assert unknown is True, unknown_reason
+    assert "Not/AZone" in unknown_reason
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "mixed" not in tables
+
+    _load(client, "sample_mixed_types", "mixed", source_timezone="UTC")
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM "payments_tsv"').fetchone()[0] == 3
+        assert str(conn.execute('SELECT "CUST_ID" FROM "payments_tsv" ORDER BY "CUST_ID"').fetchone()[0]) == "2001"
+        assert conn.execute('SELECT COUNT(*) FROM "hr"').fetchone()[0] == 5
+        assert conn.execute('SELECT "emp_id" FROM "hr" ORDER BY "emp_id"').fetchone()[0] == "E001"
+        mixed_count = conn.execute('SELECT COUNT(*) FROM "mixed"').fetchone()[0]
+        nested = conn.execute('SELECT "metadata_json" FROM "mixed" ORDER BY "row_id"').fetchone()[0]
+        declared = {
+            row[1]: str(row[2] or "")
+            for row in conn.execute('PRAGMA table_info("mixed")')
+        }
+        stamps = [
+            str(row[0])
+            for row in conn.execute('SELECT "created_at" FROM "mixed" ORDER BY "row_id"')
+        ]
+    assert mixed_count == 3
+    assert "us-east" in str(nested)
+    # SQLite keeps the TIMESTAMPTZ token so the offset round-trips. BINARY
+    # lands in BLOB. Anonymous TEXT for either column is a fidelity collapse.
+    assert "TIMESTAMPTZ" in declared["created_at"].upper()
+    assert declared["payload_b64"].upper() == "BLOB"
+    # SQLite stores the UTC clock under the TIMESTAMPTZ token. The operator
+    # declared UTC, so the wall-clock digits are that instant. The Z on the
+    # middle row is the same instant and is not shifted.
+    assert stamps == [
+        "2024-06-01 12:00:00",
+        "2024-06-02 15:30:00",
+        "2024-06-03 08:00:00",
+    ]
+
+    warehouse = db_path.with_name("hr_warehouse.db")
+    dest = _mcp(
+        client,
+        "create_connector",
+        {
+            "name": "qe-mcp-hr-warehouse",
+            "type": "sqlite",
+            "database": str(warehouse),
+            "test_first": True,
+        },
+    )
+    assert _mcp(client, "confirm_action", {"ack_id": dest["ack_id"], "reason": "qe"})["ok"] is True
+
+    scheduled = _mcp(
+        client,
+        "create_schedule",
+        {
+            "name": "qe-mcp-hr-nightly",
+            "source_connector_name": "qe-mcp-files",
+            "source_table": "hr",
+            "dest_connector_name": "qe-mcp-hr-warehouse",
+            "dest_table": "hr_wh",
+            "sync_mode": "full_refresh_append",
+            "cadence": "daily at 02:00 UTC",
+        },
+    )
+    created = _mcp(client, "confirm_action", {"ack_id": scheduled["ack_id"], "reason": "qe"})
+    assert created["ok"] is True, created
+    assert created["enabled"] is True
+
+    paused = _mcp(
+        client,
+        "set_schedule_enabled",
+        {"name": "qe-mcp-hr-nightly", "enabled": False},
+    )
+    assert paused["requires_confirm"] is True, paused
+    pause_done = _mcp(client, "confirm_action", {"ack_id": paused["ack_id"], "reason": "qe"})
+    assert pause_done["ok"] is True, pause_done
+    assert pause_done["enabled"] is False
+
+    from services.schedule_store import get_schedule, list_schedules
+
+    stored = get_schedule(created["schedule_id"])
+    assert stored is not None
+    assert stored.enabled is False
+
+    removed = _mcp(client, "delete_schedule", {"name": "qe-mcp-hr-nightly"})
+    assert removed["requires_confirm"] is True, removed
+    deleted = _mcp(client, "confirm_action", {"ack_id": removed["ack_id"], "reason": "qe"})
+    assert deleted["ok"] is True, deleted
+    assert get_schedule(created["schedule_id"]) is None
+    assert list_schedules() == []
+
+    listed = _mcp(client, "list_schedules", {})
+    assert listed.get("count") == 0

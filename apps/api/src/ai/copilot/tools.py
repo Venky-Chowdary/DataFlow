@@ -341,6 +341,13 @@ TOOL_DEFINITIONS: list[dict] = [
                         "incremental_upsert, or cdc_incremental"
                     ),
                 },
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -374,6 +381,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged. "
+                        "Values that already carry an offset are not rewritten."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -536,10 +551,13 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "start_dataset_transfer",
         "description": (
-            "Stage a transfer from an uploaded file (csv, tsv, json) into a saved "
-            "connector. Resolves the file by the name analyze_dataset uses, maps "
-            "columns with the same pipeline as Transfer Studio, and runs preflight. "
-            "Nothing is written until confirm_action. A template with no file is refused."
+            "Stage a transfer from an uploaded file (csv, tsv, json, jsonl, and the "
+            "other formats the file parser reads) into a saved connector. Resolves "
+            "the file by the name analyze_dataset uses, maps columns with the same "
+            "pipeline as Transfer Studio, and runs preflight. Nothing is written "
+            "until confirm_action. A template with no file is refused. A timestamp "
+            "column that mixes offsets with wall-clock values is refused until "
+            "source_timezone names the zone for the values that have none."
         ),
         "input_schema": {
             "type": "object",
@@ -555,6 +573,14 @@ TOOL_DEFINITIONS: list[dict] = [
                     "enum": ["manual_review", "type_locked", "pause_on_change"],
                 },
                 "limit": {"type": "integer"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for timestamp values that have no offset. "
+                        "Required when a column mixes those values with offset-bearing "
+                        "ones. Empty does not invent UTC. Offset-bearing values stay as written."
+                    ),
+                },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
             },
@@ -2734,6 +2760,7 @@ class DataPilotTools:
         limit: int = 0,
         contract_id: str = "",
         require_signed_contract: Any = None,
+        source_timezone: str = "",
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -2748,6 +2775,7 @@ class DataPilotTools:
             limit=limit,
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
+            source_timezone=source_timezone,
         )
 
     def _create_schedule(
