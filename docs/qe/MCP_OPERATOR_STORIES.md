@@ -10,6 +10,7 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 4. **As an operator**, asking about an uploaded file by its name analyzes that file. An industry template is used only when no upload matches.
 5. **As a viewer**, I can read jobs and connectors. I cannot spend an approval my role does not hold.
 6. **As an admin**, I choose the role on a workspace API key. A key that has no role stored is an editor, so MCP can create connectors, transfers, and schedules. A viewer key cannot.
+7. **As an operator**, I can load an uploaded file into a saved connector from MCP. The file is the one I named. Confirm writes it. A template with no file is refused.
 
 ## Bug stories
 
@@ -22,6 +23,7 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 | BUG-5 | 10 of 11 saved connectors failed a live retest (MySQL reset, Postgres closed the connection, Snowflake account/role, Redis reset). `PostgresVenkat` connected. | Not a code change. The saved endpoints did not accept a connection. Destination counts on the live Postgres still matched completed jobs: `kilo` 10, `mm` 5, `were` 5. |
 | BUG-6 | Help and the MCP page told an operator to dial `https://api.datawrap.io` or a relative `/api/v1/mcp`, and Claude's snippet ran a package this product does not ship. | The snippet is the absolute URL of the signed-in host plus `Authorization: Bearer`. Claude and VS Code use that same HTTP endpoint. |
 | BUG-7 | A workspace API key stored no role. The request gate treated it as a viewer, so MCP could not create a connector, a transfer, or a schedule once the caller's role was bound. | The key has a role. A key minted before the field existed resolves to editor. Settings lets an admin choose viewer, operator, editor, or admin. `confirm_action` still re-checks that role against the ack kind. |
+| BUG-8 | An uploaded file could be analyzed and could not be loaded. Confirm also rebuilt every transfer as `kind=database` and required a source connector, so a file ack could not run on the engine that already reads files. | `start_dataset_transfer` resolves the upload, maps with `run_mapping_pipeline`, runs the same preflight, and stages a `start_transfer` ack with `kind=file`. Confirm keeps that kind, keeps `source_path`, and refuses a path outside the upload tree. |
 
 ## Test stories
 
@@ -36,6 +38,8 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 | TS-7 | Live connector test matrix | Record pass/fail per saved connector. Do not treat a refused host as an engine defect. |
 | TS-8 | Legacy API key with no role field | Resolves to editor. An unknown label resolves to viewer. Creating a key with `owner` is refused. |
 | TS-9 | MCP URL from `/api/v1` on `https://www.datawrap.io` | `https://www.datawrap.io/api/v1/mcp`, with a Bearer placeholder. No `api.datawrap.io`. No `mcp-bridge`. |
+| TS-10 | Confirm a database ack and a file ack | Database stays database. `skip_preflight` stays false. A file ack keeps `kind=file` and the upload path. `/etc/passwd` and a `xfer_` spill are refused. |
+| TS-11 | Stage `payments.csv` into a connector | Ack kind is `start_transfer`, source kind is `file`, destination connector is kept, and the mapping pipeline produced mappings. A template name is refused. Nothing is written. |
 
 TS-5 and TS-6 run where the API process and its stores are up. This runner did not boot that process. Production does not have `confirm_action` until this build is deployed, so it was not executed against the live workspace.
 
@@ -43,11 +47,11 @@ TS-5 and TS-6 run where the API process and its stores are up. This runner did n
 
 Read: datasets, connectors, schemas, samples, aggregates, queries, jobs, contracts, schedules, preflight, product explanations.
 
-Stage, then `confirm_action`: create a connector, start a transfer, create a schedule, run a schedule now, cancel / retry / resume a job, replay quarantine, delete a connector (admin key), enable or delete a schedule. `test_connector` is immediate and does not need an ack.
+Stage, then `confirm_action`: create a connector, start a transfer between connectors, start a transfer from an uploaded file (`start_dataset_transfer`), create a schedule, run a schedule now, cancel / retry / resume a job, replay quarantine, delete a connector (admin key), enable or delete a schedule. `test_connector` is immediate and does not need an ack.
 
 The key's role is the gate. Editor can create connectors, transfers, and schedules. Operator can run jobs and cannot author connectors or schedules. Viewer can read. Confirm checks the role again, against the ack kind, and does not consume the ack when the role cannot perform it.
 
-File uploads are analyzed by dataset name. A file-to-warehouse transfer still starts from Transfer Studio or from a saved connector that can read the file. MCP does not invent a second transfer engine for that path.
+File uploads are analyzed by dataset name. `start_dataset_transfer` loads that file into a saved connector through the same mapping pipeline, the same preflight, and the same confirm ack as a connector transfer. A name that resolves to an industry template is refused. The file path has to sit in an upload directory.
 
 ## Not claimed
 

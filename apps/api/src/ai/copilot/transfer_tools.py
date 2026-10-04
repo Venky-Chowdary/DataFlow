@@ -874,6 +874,8 @@ def _run_preflight(
     source_read_mode: str = "",
     source_filter: dict[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
+    source_kind: str = "database",
+    known_row_count: int | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -901,7 +903,9 @@ def _run_preflight(
     column_types = {r["name"]: r["inferred_type"] for r in src_rows}
     # G7 capacity sizes batches from the real volume, so send the exact count
     # rather than the sample size, which would understate a large table.
-    if (source_read_mode or "").strip().lower() in {"procedure", "query"}:
+    if known_row_count is not None:
+        row_count = max(0, int(known_row_count))
+    elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
         # COUNT(*) against a procedure stream name would hit a colliding table.
         row_count = len(sample_rows)
     else:
@@ -919,7 +923,7 @@ def _run_preflight(
             source_columns=columns,
             dest_type=dest_db_type,
             source_type=src_db_type,
-            source_kind="database",
+            source_kind=source_kind or "database",
             # G12 must match Studio / Execute — Pilot cannot soft-skip staging policy.
             write_via_staging=bool(write_via_staging),
             source_read_mode=source_read_mode,
@@ -962,7 +966,7 @@ def _run_preflight(
             destination_can_create=can_create if isinstance(can_create, bool) else None,
             destination_db_type=dest_db_type,
             destination_table=dst_table,
-            source_kind="database",
+            source_kind=source_kind or "database",
             source_format=src_db_type,
             source_table=src_table,
             source_connector_id=str(src_conn.get("id") or ""),

@@ -170,31 +170,16 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     is forced off here as well as at staging time — a tampered ack still cannot
     bypass the gates.
     """
+    from services.confirmed_transfer import transfer_request_from_ack
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
 
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
-    if not src.get("connector_id") or not dst.get("connector_id"):
-        raise HTTPException(status_code=400, detail="Transfer approval is missing its endpoints.")
-
-    request_obj = TransferRequest(
-        source=EndpointConfig.from_dict("database", src),
-        destination=EndpointConfig.from_dict("database", dst),
-        mappings=list(payload.get("mappings") or []),
-        column_types=dict(payload.get("column_types") or {}),
-        sync_mode=str(payload.get("sync_mode") or "full_refresh_append"),
-        schema_policy=str(payload.get("schema_policy") or "manual_review"),
-        validation_mode=str(payload.get("validation_mode") or "balanced"),
-        limit=max(0, int(payload.get("limit") or 0)),
-        # The row rules the operator stated in chat and confirmed in the preview.
-        # Dropping them here would write rows they excluded, under a green proof.
-        source_filter=dict(payload.get("source_filter") or {}),
-        stream_contracts=list(payload.get("stream_contracts") or []),
-        skip_preflight=False,
-        triggered_by="data-pilot",
-    )
+    try:
+        request_obj = transfer_request_from_ack(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from ..transfer.contract_engine import stamp_bound_contract
 
     try:
@@ -208,10 +193,14 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request_obj)
     run_transfer_async(job_id, request_obj)
+    if request_obj.source.kind == "file":
+        source_label = request_obj.source_filename or request_obj.source.table or "file"
+    else:
+        source_label = f"{src.get('connector_id')}.{src.get('table')}"
     return {
         "job_id": job_id,
         "status": "queued",
-        "source": f"{src.get('connector_id')}.{src.get('table')}",
+        "source": source_label,
         "destination": f"{dst.get('connector_id')}.{dst.get('table')}",
         "sync_mode": request_obj.sync_mode,
         "preflight_run_id": payload.get("preflight_run_id") or "",

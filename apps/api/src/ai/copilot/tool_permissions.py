@@ -84,6 +84,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     # Mutations. Each of these also stages a Confirm ack — permission decides
     # whether the operator may stage it at all.
     "start_transfer": (Permission.JOB_RUN, MUTATE),
+    "start_dataset_transfer": (Permission.JOB_RUN, MUTATE),
     "create_connector": (Permission.CONNECTOR_WRITE, MUTATE),
     "run_schedule_now": (Permission.SCHEDULE_MANAGE, MUTATE),
     "create_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),

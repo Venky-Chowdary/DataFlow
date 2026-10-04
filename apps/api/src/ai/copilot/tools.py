@@ -358,7 +358,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a transfer between two saved connectors for the operator to Confirm. "
             "Runs the plan and preflight first and refuses when any gate blocks. "
-            "This never moves data on its own — execution happens only after confirm_action."
+            "This never moves data on its own — execution happens only after confirm_action. "
+            "An uploaded file uses start_dataset_transfer, not this tool."
         ),
         "input_schema": {
             "type": "object",
@@ -533,10 +534,38 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "start_dataset_transfer",
+        "description": (
+            "Stage a transfer from an uploaded file (csv, tsv, json) into a saved "
+            "connector. Resolves the file by the name analyze_dataset uses, maps "
+            "columns with the same pipeline as Transfer Studio, and runs preflight. "
+            "Nothing is written until confirm_action. A template with no file is refused."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_name": {"type": "string", "description": "Uploaded dataset name"},
+                "dest_connector_name": {"type": "string"},
+                "dest_connector_id": {"type": "string"},
+                "dest_table": {"type": "string", "description": "Destination table; defaults to the file name"},
+                "sync_mode": {"type": "string"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "limit": {"type": "integer"},
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+            },
+            "required": ["dataset_name"],
+        },
+    },
+    {
         "name": "confirm_action",
         "description": (
             "Consume a pending approval (ack_id) and perform the mutation the operator "
-            "already staged: create_connector, start_transfer, create_schedule, "
+            "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
             "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
             "quarantine, delete connector, enable or delete a schedule). "
             "This is the same gate as Confirm in the product. Calling the staging "
@@ -884,6 +913,7 @@ TOOL_FAMILIES: list[dict] = [
             "plan_transfer_route",
             "plan_transfer",
             "start_transfer",
+            "start_dataset_transfer",
             "get_transfer_capabilities",
             "recommend_sync_mode",
         ],
@@ -984,6 +1014,7 @@ class DataPilotTools:
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
+            "start_dataset_transfer": self._start_dataset_transfer,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
             "inspect_schema_policy": self._inspect_schema_policy,
@@ -2689,6 +2720,34 @@ class DataPilotTools:
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+        )
+
+    def _start_dataset_transfer(
+        self,
+        dataset_name: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        limit: int = 0,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+    ) -> ToolResult:
+        from .dataset_transfer import stage_dataset_transfer
+
+        return stage_dataset_transfer(
+            dataset_name=dataset_name,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            limit=limit,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
         )
 
     def _create_schedule(
