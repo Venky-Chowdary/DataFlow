@@ -550,18 +550,25 @@ def _snowflake_index_status_reason(index_status: str, *, foreign_key: bool) -> s
     )
 
 
-def sqlserver_disabled_unique_gap(disabled: bool | None) -> str:
-    """Existing-row gap from ``sys.indexes.is_disabled``.
+def sqlserver_disabled_unique_gap(
+    disabled: bool | None, filtered: bool | None = None
+) -> str:
+    """Existing-row gap from ``is_disabled`` and ``filter_definition``.
 
-    An enabled unique index is the check SQL Server reports. A disabled
-    index was measured and is not that proof, and it does not reject a new
-    duplicate. A missing cell stays unreported.
+    An enabled unique index with no filter is the check SQL Server reports.
+    A non-empty ``filter_definition`` is ``partial``: the index rejects a
+    new duplicate only for rows that match it, and it does not prove every
+    stored row is unique. A disabled index was measured and is not that
+    proof, and it does not reject a new duplicate. Disabled wins inside
+    one index. A missing disabled cell stays unreported.
     """
-    if disabled is False:
-        return ""
     if disabled is True:
         return "not_checked"
-    return "unreported"
+    if disabled is None:
+        return "unreported"
+    if filtered is True:
+        return "partial"
+    return ""
 
 
 def sqlserver_disabled_unique_reason(gap: str) -> str:
@@ -572,6 +579,13 @@ def sqlserver_disabled_unique_reason(gap: str) -> str:
             "sys.indexes.is_disabled is 1. The index does not reject a "
             "new duplicate and does not prove the rows already stored "
             "are unique."
+        )
+    if gap == "partial":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.filter_definition is set. The index rejects a "
+            "new duplicate only for rows that match that predicate. It "
+            "does not prove every stored row is unique."
         )
     if gap == "unreported":
         return (
@@ -693,17 +707,27 @@ def postgres_index_catalog(dialect: str) -> bool:
     return normalize_driver(dialect) in _POSTGRES_INDEX_DIALECTS
 
 
-def postgres_unique_index_gap(valid: bool | None, ready: bool | None) -> str:
-    """Existing-row gap from ``pg_index.indisvalid`` and ``indisready``.
+def postgres_unique_index_gap(
+    valid: bool | None,
+    ready: bool | None,
+    partial: bool | None = None,
+) -> str:
+    """Existing-row gap from ``pg_index`` validity, readiness, and predicate.
 
-    A valid index is the check. ``indisvalid`` false is ``not_checked``:
-    a failed ``CREATE INDEX CONCURRENTLY`` does not prove stored rows, and
-    inserts still maintain the index while ``indisready`` is true.
-    ``indisready`` false is ``not_ready``: inserts ignore the index, so it
-    is not a write rule either. A missing validity cell stays unreported.
+    A valid index with no ``indpred`` is the check. A predicate is
+    ``partial``: the index rejects a new duplicate only for rows that
+    match it, and it does not prove every stored row is unique.
+    ``indisvalid`` false is ``not_checked``: a failed ``CREATE INDEX
+    CONCURRENTLY`` does not prove stored rows, and inserts still maintain
+    the index while ``indisready`` is true. ``indisready`` false is
+    ``not_ready``: inserts ignore the index, so it is not a write rule
+    either. A missing validity cell stays unreported. An absent predicate
+    cell does not invent ``partial``.
     """
     if ready is False:
         return "not_ready"
+    if partial is True and valid is True:
+        return "partial"
     if valid is True:
         return ""
     if valid is False:
@@ -841,6 +865,13 @@ def postgres_unique_index_reason(gap: str) -> str:
             "pg_index.indisready is false. The index does not reject a "
             "new duplicate and does not prove the rows already stored "
             "are unique."
+        )
+    if gap == "partial":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indpred is set. The index rejects a new duplicate "
+            "only for rows that match that predicate. It does not prove "
+            "every stored row is unique."
         )
     if gap == "not_checked":
         return (

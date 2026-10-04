@@ -327,13 +327,14 @@ class PhysicalState:
     #: Existing-row gap for each primary-key or unique column set.
     #: ``(folded columns, gap)``. Oracle ``""`` is ``VALIDATED`` and
     #: ``not_checked`` is ``NOT VALIDATED``. ``disabled`` is ``STATUS``
-    #: ``DISABLED``. SQL Server ``""`` is an enabled
-    #: unique index and ``not_checked`` is ``is_disabled = 1``. PostgreSQL
-    #: ``""`` is ``indisvalid``. ``not_checked`` is an invalid index that
-    #: still rejects a new row. ``not_ready`` is ``indisready`` false.
-    #: ``unreported`` means this read did not see the bit. An empty tuple
-    #: means this comparison did not measure it. A live read attaches one
-    #: entry for each reflected key.
+    #: ``DISABLED``. SQL Server ``""`` is an enabled unique index with no
+    #: filter. ``partial`` is ``filter_definition``. ``not_checked`` is
+    #: ``is_disabled = 1``. PostgreSQL ``""`` is ``indisvalid`` with no
+    #: predicate. ``partial`` is ``indpred``. ``not_checked`` is an invalid
+    #: index that still rejects a new row. ``not_ready`` is ``indisready``
+    #: false. ``unreported`` means this read did not see the bit. An empty
+    #: tuple means this comparison did not measure it. A live read attaches
+    #: one entry for each reflected key.
     uniqueness_proof: tuple[tuple[tuple[str, ...], str], ...] = ()
     #: Existing-row gap for each normalized CHECK predicate.
     #: ``(predicate, gap)``. PostgreSQL ``""`` means ``pg_get_constraintdef``
@@ -1015,7 +1016,8 @@ def _postgres_uniqueness_proof(
 
     ``rows is None`` means ``indisvalid`` was not read. Each reflected key
     stays ``unreported``. ``indisvalid`` false is ``not_checked``.
-    ``indisready`` false is ``not_ready``. A valid index is an empty gap.
+    ``indisready`` false is ``not_ready``. ``indpred`` is ``partial``.
+    A valid index with no predicate is an empty gap.
     """
     from services.foreign_key_metadata import postgres_index_catalog
     from services.unique_key_introspect import postgres_uniqueness_proof
@@ -1034,8 +1036,8 @@ def _sqlserver_uniqueness_proof(
     """One gap per reflected SQL Server key.
 
     ``rows is None`` means ``is_disabled`` was not read. Each reflected key
-    stays ``unreported``. ``is_disabled = 1`` is ``not_checked``. An enabled
-    index is an empty gap.
+    stays ``unreported``. ``is_disabled = 1`` is ``not_checked``. A filter
+    is ``partial``. An enabled index with no filter is an empty gap.
     """
     from services.unique_key_introspect import sqlserver_uniqueness_proof
 
@@ -2003,10 +2005,11 @@ def _diff_uniqueness(
     ``ALL_CONSTRAINTS.VALIDATED`` is ``VALIDATED``. ``STATUS`` ``DISABLED``
     does not reject a new duplicate. A SQL Server unique
     index with ``is_disabled = 1`` does not reject a new duplicate and is
-    not existing-row proof. A PostgreSQL unique index proves existing rows
-    only when ``pg_index.indisvalid`` is true. ``indisready`` false is not
-    a write rule either. An empty proof tuple means this comparison did
-    not measure that column.
+    not existing-row proof. A filter predicate is not table-wide proof.
+    A PostgreSQL unique index proves existing rows only when
+    ``pg_index.indisvalid`` is true and ``indpred`` is null. ``indisready``
+    false is not a write rule either. An empty proof tuple means this
+    comparison did not measure that column.
 
     ``UNIQUE (b, a)`` is the same constraint as ``UNIQUE (a, b)``. A primary
     key is the same rule. Catalog ordinal is not a second key. Index order,

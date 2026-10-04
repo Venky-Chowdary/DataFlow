@@ -105,6 +105,18 @@ def test_pg_invalid_unique_index_stays_visible_and_splits_the_write_rule():
     assert postgres_uniqueness_proof(
         [("users_pkey", "id")]
     ) == {frozenset({"id"}): "unreported"}
+    assert postgres_uniqueness_proof(
+        [("users_active_email", "email", True, True, "(status = 'active'::text)")]
+    ) == {frozenset({"email"}): "partial"}
+    assert postgres_uniqueness_proof(
+        [("users_email_key", "email", True, True)]
+    ) == {frozenset({"email"}): ""}
+    assert postgres_uniqueness_proof(
+        [
+            ("users_active_email", "email", True, True, "(status = 'active'::text)"),
+            ("users_email_key", "email", True, True, None),
+        ]
+    ) == {frozenset({"email"}): ""}
 
     cur = MagicMock()
     cur.fetchall.side_effect = [
@@ -163,6 +175,12 @@ def test_pg_invalid_unique_index_stays_visible_and_splits_the_write_rule():
             raise RuntimeError("pg_index unavailable")
 
     assert read_postgres_uniqueness_rows(_Broken(), "public", "users") is None
+    proof_conn = MagicMock()
+    proof_conn.execute.return_value.fetchall.return_value = []
+    assert read_postgres_uniqueness_rows(proof_conn, "", "users") == []
+    proof_sql = str(proof_conn.execute.call_args.args[0]).lower()
+    assert "pg_get_expr(i.indpred" in proof_sql
+    assert "and i.indisvalid" not in proof_sql
 
     assert _unique_constraint_enforced(
         {"name": "users_email_invalid", "columns": ["email"], "index_valid": False},
@@ -295,6 +313,21 @@ def test_sqlserver_disabled_unique_index_does_not_block():
     assert sqlserver_uniqueness_proof(
         [("PK_users", True, "id", 1, None, None)]
     ) == {frozenset({"id"}): "unreported"}
+    assert sqlserver_uniqueness_proof(
+        [("UQ_active", False, "email", 1, None, "([active]=(1))", 0)]
+    ) == {frozenset({"email"}): "partial"}
+    assert sqlserver_uniqueness_proof(
+        [
+            ("UQ_active", False, "email", 1, None, "([active]=(1))", 0),
+            ("UQ_email", False, "email", 1, None, None, 0),
+        ]
+    ) == {frozenset({"email"}): ""}
+    assert sqlserver_uniqueness_proof(
+        [
+            ("UQ_active", False, "email", 1, None, "([active]=(1))", 0),
+            ("UQ_off", False, "email", 1, None, None, 1),
+        ]
+    ) == {frozenset({"email"}): "partial"}
 
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = [
@@ -448,6 +481,32 @@ def test_integrity_partial_unique_ignores_out_of_filter_dupes():
         target_types={"email": "VARCHAR(100)"},
     )
     assert result["passed"] is True
+
+
+def test_integrity_partial_unique_blocks_in_filter_dupes():
+    from services.data_integrity import _check_duplicate_keys
+
+    result = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [
+            {"email": "same@x.com", "status": "active"},
+            {"email": "same@x.com", "status": "active"},
+        ],
+        "strict",
+        dest_kind="postgresql",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "uq_active_email",
+                "columns": ["email"],
+                "filter_predicate": "(status = 'active'::text)",
+            }
+        ],
+        target_types={"email": "VARCHAR(100)"},
+    )
+    assert result["passed"] is False
+    assert result["blocks_transfer"] is True
 
 
 def test_integrity_nulls_not_distinct_blocks_multi_null():

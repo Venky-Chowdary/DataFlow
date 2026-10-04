@@ -222,12 +222,13 @@ def _pg_index_bool(value: Any) -> bool | None:
 
 
 def postgres_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
-    """Column set to existing-row gap from ``indisvalid`` and ``indisready``.
+    """Column set to existing-row gap from ``pg_index`` bits and ``indpred``.
 
-    Columns are folded. A valid index on the same columns keeps the proof:
-    a second invalid index does not cancel it. ``not_ready`` is the only
-    gap that is also not a new-write rule. A row that omits the cells is
-    ``unreported`` for that index.
+    Columns are folded. A valid index with no predicate on the same columns
+    keeps the proof: a partial or invalid sibling does not cancel it.
+    ``partial`` means ``indpred`` is set. A four-column row did not ask.
+    ``not_ready`` is the only gap that is also not a new-write rule. A row
+    that omits the validity cells is ``unreported`` for that index.
     """
     from services.foreign_key_metadata import postgres_unique_index_gap
 
@@ -238,7 +239,7 @@ def postgres_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
             continue
         name = str(fields[0])
         bucket = by_name.setdefault(
-            name, {"columns": [], "valid": None, "ready": None}
+            name, {"columns": [], "valid": None, "ready": None, "partial": None}
         )
         bucket["columns"].append(str(fields[1]).strip().casefold())
         if len(fields) > 2:
@@ -253,13 +254,21 @@ def postgres_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
                 bucket["ready"] = False
             elif ready is True and bucket["ready"] is not False:
                 bucket["ready"] = True
+        if len(fields) > 4:
+            predicate = str(fields[4] or "").strip()
+            if predicate:
+                bucket["partial"] = True
+            elif bucket["partial"] is not True:
+                bucket["partial"] = False
     proof: dict[frozenset[str], str] = {}
-    rank = {"": 3, "not_checked": 2, "not_ready": 1, "unreported": 0}
+    rank = {"": 4, "not_checked": 3, "partial": 2, "not_ready": 1, "unreported": 0}
     for bucket in by_name.values():
         columns = frozenset(col for col in bucket["columns"] if col)
         if not columns:
             continue
-        gap = postgres_unique_index_gap(bucket["valid"], bucket["ready"])
+        gap = postgres_unique_index_gap(
+            bucket["valid"], bucket["ready"], bucket["partial"]
+        )
         if columns not in proof or rank[gap] > rank[proof[columns]]:
             proof[columns] = gap
     return proof
@@ -285,7 +294,8 @@ def read_postgres_uniqueness_rows(
                     SELECT ic.relname AS index_name,
                            a.attname AS column_name,
                            i.indisvalid,
-                           i.indisready
+                           i.indisready,
+                           pg_get_expr(i.indpred, i.indrelid) AS pred
                     FROM pg_catalog.pg_index i
                     JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                     JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
@@ -325,10 +335,12 @@ def _sqlserver_index_disabled(value: Any) -> bool | None:
 
 
 def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
-    """Column set to existing-row gap from ``sys.indexes.is_disabled``.
+    """Column set to existing-row gap from disabled and filter bits.
 
     Columns are folded. Disabled wins across the column rows of one index.
-    A row that omits the cell is ``unreported`` for that set.
+    A non-empty ``filter_definition`` on an enabled index is ``partial``.
+    Across two indexes on the same columns, an enabled unfiltered index
+    keeps the proof. A six-column row did not ask for ``is_disabled``.
     """
     from services.foreign_key_metadata import sqlserver_disabled_unique_gap
 
@@ -338,8 +350,16 @@ def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
         if len(fields) < 3 or not fields[0] or not fields[2]:
             continue
         name = str(fields[0])
-        bucket = by_name.setdefault(name, {"columns": [], "disabled": None})
+        bucket = by_name.setdefault(
+            name, {"columns": [], "disabled": None, "filtered": None}
+        )
         bucket["columns"].append(str(fields[2]).strip().casefold())
+        if len(fields) > 5:
+            predicate = str(fields[5] or "").strip()
+            if predicate:
+                bucket["filtered"] = True
+            elif bucket["filtered"] is not True:
+                bucket["filtered"] = False
         if len(fields) > 6:
             disabled = _sqlserver_index_disabled(fields[6])
             if disabled is True:
@@ -347,12 +367,14 @@ def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
             elif disabled is False and bucket["disabled"] is not True:
                 bucket["disabled"] = False
     proof: dict[frozenset[str], str] = {}
-    rank = {"": 0, "unreported": 1, "not_checked": 2}
+    # An enabled unfiltered index is the check. A filtered or disabled
+    # sibling on the same columns does not erase it.
+    rank = {"": 3, "partial": 2, "unreported": 1, "not_checked": 0}
     for bucket in by_name.values():
         columns = frozenset(col for col in bucket["columns"] if col)
         if not columns:
             continue
-        gap = sqlserver_disabled_unique_gap(bucket["disabled"])
+        gap = sqlserver_disabled_unique_gap(bucket["disabled"], bucket["filtered"])
         if columns not in proof or rank[gap] > rank[proof[columns]]:
             proof[columns] = gap
     return proof

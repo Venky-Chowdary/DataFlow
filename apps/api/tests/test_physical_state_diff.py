@@ -1864,6 +1864,104 @@ def test_postgres_invalid_unique_index_is_not_existing_row_proof() -> None:
     ) == ()
 
 
+def test_partial_unique_index_is_not_table_wide_proof() -> None:
+    """A predicate covers matching rows. It is not uniqueness of the table.
+
+    A four-column PostgreSQL row and a six-column SQL Server row do not
+    invent the predicate. A full index on the same columns keeps the proof.
+    """
+    from services.physical_state_diff import _measured_uniqueness_proof
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        primary_key=("id",),
+        unique_constraints=frozenset({("email",)}),
+    )
+    partial = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="postgres",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "partial")),
+        ),
+    )
+    unique = partial["aspects"]["unique_constraints"]
+    assert unique["status"] == "unchecked"
+    assert unique["missing"] == []
+    assert "email" in unique["unchecked"]
+    assert "indpred" in unique["reasons"][0]
+    assert "does not prove every stored row" in unique["reasons"][0]
+    assert partial["aspects"]["primary_key"]["status"] == "carried"
+    assert partial["verified"] is False
+
+    filtered = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="sqlserver",
+            primary_key=("id",),
+            unique_constraints=frozenset({("email",)}),
+            uniqueness_proof=((("id",), ""), (("email",), "partial")),
+        ),
+    )
+    filtered_unique = filtered["aspects"]["unique_constraints"]
+    assert filtered_unique["status"] == "unchecked"
+    assert "filter_definition" in filtered_unique["reasons"][0]
+    assert filtered["verified"] is False
+
+    pg = _measured_uniqueness_proof(
+        "azure_postgres",
+        ("id",),
+        {("email",)},
+        None,
+        None,
+        [
+            ("users_pkey", "id", True, True, None),
+            ("users_active_email", "email", True, True, "(status = 'active'::text)"),
+        ],
+    )
+    assert dict(pg) == {("email",): "partial", ("id",): ""}
+    kept = _measured_uniqueness_proof(
+        "postgresql",
+        ("id",),
+        {("email",)},
+        None,
+        None,
+        [
+            ("users_active_email", "email", True, True, "(status = 'active'::text)"),
+            ("users_email_key", "email", True, True, None),
+        ],
+    )
+    assert dict(kept) == {("email",): "", ("id",): "unreported"}
+    ss = _measured_uniqueness_proof(
+        "azure_sql",
+        ("id",),
+        {("email",)},
+        None,
+        [
+            ("PK_ID", True, "ID", 1, None, None, 0),
+            ("UQ_ACTIVE", False, "EMAIL", 1, None, "([active]=(1))", 0),
+        ],
+    )
+    assert dict(ss) == {("email",): "partial", ("id",): ""}
+    ss_kept = _measured_uniqueness_proof(
+        "mssql",
+        ("id",),
+        {("email",)},
+        None,
+        [
+            ("UQ_ACTIVE", False, "EMAIL", 1, None, "([active]=(1))", 0),
+            ("UQ_EMAIL", False, "EMAIL", 1, None, None, 0),
+        ],
+    )
+    assert dict(ss_kept) == {("email",): "", ("id",): "unreported"}
+
+
 def test_postgres_not_valid_check_is_not_existing_row_proof() -> None:
     """``NOT VALID`` is not a dropped check. New rows are still rejected.
 
