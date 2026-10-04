@@ -292,20 +292,261 @@ class PilotAckLedger:
             self._persist()
 
 
-_ledger: PilotAckLedger | None = None
+class MongoAckLedger:
+    """Same one-shot contract as :class:`PilotAckLedger`, stored in Mongo.
+
+    Two API replicas share one collection. ``claim`` is a single
+    ``find_one_and_update`` so the second replica cannot apply the same ack.
+    A consumed ack with a stamped result replays that result.
+    """
+
+    def __init__(self, collection: Any | None = None, ttl_sec: int = _DEFAULT_TTL_SEC):
+        self.ttl_sec = max(60, int(ttl_sec))
+        self.path = None  # file-ledger attribute; unused on this backend
+        if collection is not None:
+            self._coll = collection
+        else:
+            from services.control_plane_store import mongo_collection
+
+            self._coll = mongo_collection("pilot_acks")
+        if self._coll is None:
+            raise RuntimeError(
+                "ACK_BACKEND=mongo requires the shared pilot_acks collection. "
+                "Refusing a pod-local file ledger."
+            )
+
+    def _gc(self) -> None:
+        now = _now()
+        try:
+            self._coll.delete_many({"consumed_at": None, "expires_at": {"$lte": now}})
+        except Exception:
+            _log.debug("pilot ack gc skipped", exc_info=True)
+
+    def put(
+        self,
+        *,
+        kind: str,
+        payload: dict[str, Any],
+        preview: dict[str, Any] | None = None,
+        ttl_sec: int | None = None,
+        actor_hint: str = "",
+    ) -> str:
+        aid = _new_id()
+        ttl = max(60, int(ttl_sec if ttl_sec is not None else self.ttl_sec))
+        now = _now()
+        doc = {
+            "_id": aid,
+            "ack_id": aid,
+            "kind": kind,
+            "payload": dict(payload or {}),
+            "preview": dict(preview or redact_payload(payload or {})),
+            "created_at": now,
+            "expires_at": now + ttl,
+            "actor_hint": (actor_hint or "").strip(),
+            "consumed_at": None,
+            "consumed_by": None,
+            "consume_reason": None,
+            "result": None,
+        }
+        self._gc()
+        self._coll.insert_one(doc)
+        return aid
+
+    def _find(self, ack_id: str) -> dict[str, Any] | None:
+        aid = (ack_id or "").strip()
+        if not aid:
+            return None
+        doc = self._coll.find_one({"_id": aid})
+        return dict(doc) if doc else None
+
+    def peek(self, ack_id: str) -> dict[str, Any] | None:
+        self._gc()
+        doc = self._find(ack_id)
+        if not doc:
+            return None
+        if doc.get("consumed_at") is None and float(doc.get("expires_at") or 0) <= _now():
+            return None
+        return {
+            "ack_id": doc["ack_id"],
+            "kind": doc["kind"],
+            "preview": dict(doc.get("preview") or {}),
+            "expires_at": doc.get("expires_at"),
+            "consumed": bool(doc.get("consumed_at")),
+            "consumed_at": doc.get("consumed_at"),
+        }
+
+    def _idempotent(self, doc: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str] | None:
+        if not doc or not doc.get("consumed_at"):
+            return None
+        prior = doc.get("result")
+        if isinstance(prior, dict) and prior:
+            return {"_idempotent": True, **prior}, ""
+        return None, "This approval was already used."
+
+    def get_pending_payload(self, ack_id: str) -> tuple[dict[str, Any] | None, str]:
+        aid = (ack_id or "").strip()
+        if not aid:
+            return None, "ack_id required"
+        self._gc()
+        doc = self._find(aid)
+        if not doc:
+            return None, "Approval not found or expired. Ask Pilot to create the connector again."
+        replay = self._idempotent(doc)
+        if replay is not None:
+            return replay
+        if float(doc.get("expires_at") or 0) <= _now():
+            self._coll.delete_one({"_id": aid})
+            return None, "Approval expired. Ask Pilot to create the connector again."
+        return dict(doc.get("payload") or {}), ""
+
+    def claim(
+        self,
+        ack_id: str,
+        *,
+        actor: str = "",
+        reason: str = "",
+        claim_ttl_sec: float = 60.0,
+    ) -> tuple[dict[str, Any] | None, str]:
+        aid = (ack_id or "").strip()
+        if not aid:
+            return None, "ack_id required"
+        actor = (actor or "").strip() or "pilot-ui"
+        reason = (reason or "").strip() or "confirmed"
+        now = _now()
+        doc = self._find(aid)
+        if not doc:
+            return None, "Approval not found or expired. Ask Pilot to create the connector again."
+        replay = self._idempotent(doc)
+        if replay is not None:
+            return replay
+        if float(doc.get("expires_at") or 0) <= now:
+            self._coll.delete_one({"_id": aid})
+            return None, "Approval expired. Ask Pilot to create the connector again."
+        window = now - max(5.0, float(claim_ttl_sec))
+        try:
+            from pymongo import ReturnDocument
+
+            return_doc = ReturnDocument.AFTER
+        except Exception:
+            return_doc = True
+        updated = self._coll.find_one_and_update(
+            {
+                "_id": aid,
+                "consumed_at": None,
+                "expires_at": {"$gt": now},
+                "$or": [
+                    {"claimed_at": {"$exists": False}},
+                    {"claimed_at": None},
+                    {"claimed_at": {"$lt": window}},
+                ],
+            },
+            {"$set": {"claimed_at": now, "claimed_by": actor, "consume_reason": reason}},
+            return_document=return_doc,
+        )
+        if not updated:
+            again = self._find(aid)
+            replay = self._idempotent(again)
+            if replay is not None:
+                return replay
+            return None, "This approval is already being confirmed. Wait a moment and retry."
+        return dict(updated.get("payload") or {}), ""
+
+    def release_claim(self, ack_id: str) -> None:
+        aid = (ack_id or "").strip()
+        self._coll.update_one(
+            {"_id": aid, "consumed_at": None},
+            {"$unset": {"claimed_at": "", "claimed_by": ""}},
+        )
+
+    def finalize(
+        self,
+        ack_id: str,
+        *,
+        actor: str = "",
+        reason: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        aid = (ack_id or "").strip()
+        actor = (actor or "").strip() or "pilot-ui"
+        reason = (reason or "").strip() or "confirmed"
+        doc = self._find(aid)
+        if not doc:
+            return
+        self._coll.update_one(
+            {"_id": aid},
+            {
+                "$set": {
+                    "consumed_at": _now(),
+                    "consumed_by": actor,
+                    "consume_reason": reason or doc.get("consume_reason") or "confirmed",
+                    "result": dict(result or {}),
+                    "payload": redact_payload(doc.get("payload") or {}),
+                },
+                "$unset": {"claimed_at": "", "claimed_by": ""},
+            },
+        )
+
+    def consume(
+        self,
+        ack_id: str,
+        *,
+        actor: str = "",
+        reason: str = "",
+    ) -> tuple[dict[str, Any] | None, str]:
+        payload, err = self.claim(ack_id, actor=actor, reason=reason)
+        if err or payload is None:
+            return None, err or "Approval not found"
+        if payload.get("_idempotent"):
+            return payload, ""
+        self.finalize(ack_id, actor=actor, reason=reason, result={})
+        return payload, ""
+
+    def stamp_result(self, ack_id: str, result: dict[str, Any]) -> None:
+        aid = (ack_id or "").strip()
+        doc = self._find(aid)
+        if not doc:
+            return
+        fields: dict[str, Any] = {
+            "result": dict(result or {}),
+            "payload": redact_payload(doc.get("payload") or {}),
+        }
+        if not doc.get("consumed_at"):
+            fields["consumed_at"] = _now()
+            fields["consumed_by"] = doc.get("claimed_by") or doc.get("consumed_by") or "pilot-ui"
+            fields["consume_reason"] = doc.get("consume_reason") or "confirmed"
+        self._coll.update_one(
+            {"_id": aid},
+            {"$set": fields, "$unset": {"claimed_at": "", "claimed_by": ""}},
+        )
+
+    def clear_for_tests(self) -> None:
+        self._coll.delete_many({})
+
+
+_ledger: PilotAckLedger | MongoAckLedger | None = None
 _ledger_lock = threading.Lock()
 
 
-def get_ack_ledger() -> PilotAckLedger:
-    """Return the process ledger, rebinding when ``PILOT_ACK_PATH`` changes.
+def get_ack_ledger() -> PilotAckLedger | MongoAckLedger:
+    """Return the process ledger.
 
-    Tests (and rare ops overrides) set the brand env after first import; a
-    sticky singleton would stage acks on the default path while callers peek
-    a tmp_path ledger — silent Confirm loss.
+    File mode rebinds when ``PILOT_ACK_PATH`` changes so a test tmp path is
+    not shadowed by the default file. Mongo mode is one collection shared by
+    every API replica; a missing collection raises instead of falling back
+    to a pod-local file.
     """
     global _ledger
     with _ledger_lock:
+        from services.process_role import ack_backend
+
+        if ack_backend() == "mongo":
+            if not isinstance(_ledger, MongoAckLedger):
+                _ledger = MongoAckLedger()
+            return _ledger
         desired = _default_path()
-        if _ledger is None or Path(_ledger.path).resolve() != Path(desired).resolve():
+        if (
+            not isinstance(_ledger, PilotAckLedger)
+            or Path(_ledger.path).resolve() != Path(desired).resolve()
+        ):
             _ledger = PilotAckLedger(path=desired)
         return _ledger

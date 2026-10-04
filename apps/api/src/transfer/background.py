@@ -144,9 +144,15 @@ def run_transfer_async(
         from services.worker_leases import requires_distributed_backend
 
         if fleet_enabled():
+            from services.process_role import workload_for_sync_mode
+
             ok = enqueue_job(
                 job_id,
-                payload={"resume": resume, "resume_from_job_id": resume_from_job_id or ""},
+                payload={
+                    "resume": resume,
+                    "resume_from_job_id": resume_from_job_id or "",
+                    "workload": workload_for_sync_mode(request.sync_mode),
+                },
             )
             if ok:
                 logger.info(

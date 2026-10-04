@@ -42,14 +42,28 @@ def fleet_enabled() -> bool:
     return claim_queue_enabled()
 
 
+def _workload_of(payload: dict[str, Any] | None) -> str:
+    raw = str((payload or {}).get("workload") or "batch").strip().lower()
+    if raw not in ("cdc", "batch"):
+        return "batch"
+    return raw
+
+
 def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
-    """Enqueue a job for a fleet worker. Returns False if queue unavailable."""
+    """Enqueue a job for a fleet worker. Returns False if queue unavailable.
+
+    ``workload`` is stamped on the queue document so a batch worker can skip
+    CDC rows without reading the transfer payload.
+    """
     coll = _queue_coll()
     if coll is None:
         if requires_distributed_backend() and fleet_enabled():
             _logger.error("Fleet enabled but Mongo queue unavailable; refuse enqueue for %s", job_id)
             return False
         return False
+    body = dict(payload or {})
+    workload = _workload_of(body)
+    body["workload"] = workload
     try:
         coll.update_one(
             {"_id": job_id},
@@ -57,7 +71,8 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
                 "$set": {
                     "job_id": job_id,
                     "status": "queued",
-                    "payload": payload or {},
+                    "payload": body,
+                    "workload": workload,
                     "updated_at": datetime.now(timezone.utc),
                 },
                 "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
@@ -70,8 +85,36 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
         return False
 
 
+def _queued_claim_filter() -> dict[str, Any]:
+    """Oldest-queued filter limited to this process's workloads.
+
+    Unset ``WORKER_MODE`` (or both tokens) keeps ``{status: queued}`` so a
+    single worker still drains the whole queue. Batch-only uses ``$ne: cdc``
+    so a row written before workloads existed is still batch work.
+    """
+    from services.process_role import worker_workloads
+
+    loads = worker_workloads()
+    filt: dict[str, Any] = {"status": "queued"}
+    if loads == frozenset({"batch"}):
+        filt["workload"] = {"$ne": "cdc"}
+    elif loads == frozenset({"cdc"}):
+        filt["workload"] = "cdc"
+    return filt
+
+
+def _can_reclaim_workload(doc: dict[str, Any]) -> bool:
+    from services.process_role import worker_workloads
+
+    loads = worker_workloads()
+    workload = str(doc.get("workload") or "batch")
+    if workload == "cdc":
+        return "cdc" in loads
+    return "batch" in loads
+
+
 def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int = 60) -> str | None:
-    """Claim the oldest queued job under a worker lease. Returns job_id or None."""
+    """Claim the oldest queued job this worker is allowed to run."""
     coll = _queue_coll()
     if coll is None:
         return None
@@ -84,7 +127,7 @@ def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int
         except Exception:
             return_doc = True  # type: ignore[assignment]
         doc = coll.find_one_and_update(
-            {"status": "queued"},
+            _queued_claim_filter(),
             {
                 "$set": {
                     "status": "claimed",
@@ -135,17 +178,32 @@ def _mark_transfer_job_claimed(job_id: str, store: WorkerLeaseStore) -> None:
         _logger.debug("transfer_jobs claim stamp skipped for %s: %s", job_id, exc)
 
 
-def reclaim_stale_claims(*, older_than_seconds: int = 120) -> int:
-    """Re-queue claimed jobs whose worker died before finishing."""
+def reclaim_stale_claims(
+    *,
+    older_than_seconds: int = 120,
+    lease_store: WorkerLeaseStore | None = None,
+) -> int:
+    """Re-queue claimed jobs whose worker died before finishing.
+
+    A live lease is not stale, even when ``claimed_at`` is old — CDC holds
+    that lease for the life of the slot. A batch worker also leaves CDC rows
+    alone so a batch scale-down cannot requeue a capture it does not own.
+    """
     coll = _queue_coll()
     if coll is None:
         return 0
+    store = lease_store or WorkerLeaseStore(worker_id())
     cutoff = datetime.now(timezone.utc).timestamp() - max(30, int(older_than_seconds))
     try:
         # claimed_at may be datetime; compare loosely via updated_at when present.
         stale = list(coll.find({"status": "claimed"}).limit(200))
         n = 0
         for doc in stale:
+            if not _can_reclaim_workload(doc):
+                continue
+            job_id = str(doc.get("job_id") or doc.get("_id") or "")
+            if job_id and store.is_held(job_id):
+                continue
             claimed = doc.get("claimed_at") or doc.get("updated_at")
             ts = None
             if isinstance(claimed, datetime):

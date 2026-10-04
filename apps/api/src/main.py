@@ -73,7 +73,9 @@ async def lifespan(app: FastAPI):
     # Do not sys.exit here. The socket is not accepting yet, so a fatal
     # config used to fail Railway's /health probe as "service unavailable"
     # for the whole window. Liveness stays up; other routes return 503.
-    config_errors = validate_production_config()
+    from services.process_role import topology_errors
+
+    config_errors = validate_production_config() + topology_errors()
     app.state.config_errors = config_errors
     if config_errors:
         for msg in config_errors:
@@ -150,86 +152,104 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
 
-        # Scheduler must start even when RAG warm-up fails — otherwise due
-        # pipelines sit on Next run forever with Runs=0.
+        # Cadence stays up when RAG warm-up fails — otherwise due pipelines
+        # sit on Next run forever with Runs=0. Multi-replica API pods set
+        # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.
         try:
+            from services.process_role import schedule_loop_enabled
             from services.schedule_store import import_file_schedules_into_mongo
 
             imported = await asyncio.to_thread(import_file_schedules_into_mongo)
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
-            from .services.schedule_runner import run_schedule_loop
+            if schedule_loop_enabled():
+                from .services.schedule_runner import run_schedule_loop
 
-            asyncio.create_task(run_schedule_loop())
-            print("[+] Pipeline scheduler started")
+                asyncio.create_task(run_schedule_loop())
+                print("[+] Pipeline scheduler started")
+            else:
+                print("[+] Pipeline scheduler not started in this process (SCHEDULE_LOOP off)")
         except Exception as e:
             print(f"[!] Pipeline scheduler failed to start: {e}")
 
         try:
-            from services.transfer_scheduler import start as start_transfer_scheduler
+            from services.process_role import api_executes_transfers, orphan_resume_enabled
+            from services.scheduler_mode import scheduler_mode
 
-            start_transfer_scheduler()
+            if api_executes_transfers():
+                from services.transfer_scheduler import start as start_transfer_scheduler
 
-            # Phase F5 — claim-queue pull on API when SCHEDULER_MODE resolves to claim.
-            try:
-                from services.scheduler_mode import scheduler_mode
-                from services.worker_fleet import start_api_claim_loop
+                start_transfer_scheduler()
 
-                if start_api_claim_loop():
-                    print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
-                else:
-                    print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
-            except Exception as claim_exc:
-                print(f"[!] API claim loop not started: {claim_exc}")
+                # Phase F5 — claim-queue pull on API when the operator left the
+                # API claim loop on (single replica, or no worker Deployment yet).
+                try:
+                    from services.worker_fleet import start_api_claim_loop
 
-            from .services.mongodb_service import get_mongodb_service
-            from .services.worker_leases import get_worker_lease_store
-            from .transfer.background import run_transfer_async
-            from .transfer.models import transfer_request_from_dict
+                    if start_api_claim_loop():
+                        print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
+                    else:
+                        print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
+                except Exception as claim_exc:
+                    print(f"[!] API claim loop not started: {claim_exc}")
+            else:
+                print(
+                    "[+] This process enqueues transfers only "
+                    f"(scheduler_mode={scheduler_mode()})"
+                )
 
-            mongo = get_mongodb_service()
-            lease_store = get_worker_lease_store()
-            resumed = 0
-            for job in mongo.list_jobs(limit=200):
-                if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
-                    payload = job["transfer_request"]
-                    if lease_store.is_held(job["_id"]):
-                        continue
-                    request = transfer_request_from_dict(payload)
-                    try:
-                        from services.transfer_file_staging import (
-                            file_source_bytes_available,
-                            hydrate_file_source,
-                        )
+            if orphan_resume_enabled():
+                from .services.mongodb_service import get_mongodb_service
+                from .services.worker_leases import get_worker_lease_store
+                from .transfer.background import run_transfer_async
+                from .transfer.models import transfer_request_from_dict
 
-                        hydrate_file_source(request)
-                        if request.source.kind == "file" and not file_source_bytes_available(
-                            request
-                        ):
-                            mongo.update_job_status(
-                                job["_id"],
-                                "failed",
-                                error="File re-upload required after restart",
-                            )
+                mongo = get_mongodb_service()
+                lease_store = get_worker_lease_store()
+                resumed = 0
+                for job in mongo.list_jobs(limit=200):
+                    if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
+                        payload = job["transfer_request"]
+                        if lease_store.is_held(job["_id"]):
                             continue
-                    except Exception as hydrate_exc:
-                        logging.getLogger(__name__).warning(
-                            "Orphan resume hydrate failed for %s: %s",
-                            job.get("_id"),
-                            hydrate_exc,
-                        )
-                    from services.execution_engine_contract import resolve_reclaim_resume
+                        request = transfer_request_from_dict(payload)
+                        try:
+                            from services.transfer_file_staging import (
+                                file_source_bytes_available,
+                                hydrate_file_source,
+                            )
 
-                    # Fresh pending / zero-progress reclaim → resume=False.
-                    # Forcing resume=True on append/Excel falsely fails Module 14.
-                    run_transfer_async(
-                        job["_id"],
-                        request,
-                        resume=resolve_reclaim_resume(job),
-                    )
-                    resumed += 1
-            print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
+                            hydrate_file_source(request)
+                            if request.source.kind == "file" and not file_source_bytes_available(
+                                request
+                            ):
+                                mongo.update_job_status(
+                                    job["_id"],
+                                    "failed",
+                                    error="File re-upload required after restart",
+                                )
+                                continue
+                        except Exception as hydrate_exc:
+                            logging.getLogger(__name__).warning(
+                                "Orphan resume hydrate failed for %s: %s",
+                                job.get("_id"),
+                                hydrate_exc,
+                            )
+                        from services.execution_engine_contract import resolve_reclaim_resume
+
+                        # Fresh pending / zero-progress reclaim → resume=False.
+                        # Forcing resume=True on append/Excel falsely fails Module 14.
+                        # Claim mode enqueues here; it does not start a local executor.
+                        run_transfer_async(
+                            job["_id"],
+                            request,
+                            resume=resolve_reclaim_resume(job),
+                        )
+                        resumed += 1
+                print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
+            else:
+                print("[+] Orphan resume scan skipped")
         except Exception as e:
             print(f"[!] Orphaned job resume warning: {e}")
         finally:
