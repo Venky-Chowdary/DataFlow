@@ -941,6 +941,18 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
             f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
         )
+    if name == "update_schedule":
+        bits = []
+        if p.get("cadence"):
+            bits.append(f"cadence becomes **{p.get('cadence')}**")
+        if p.get("name_after"):
+            bits.append(f"name becomes **{p.get('name_after')}**")
+        change = " and ".join(bits) or "will be updated"
+        note = f"\n{p['timezone_note']}" if p.get("timezone_note") else ""
+        return (
+            f"Pipeline **{p.get('name')}** {change}. The route and the mapping stay as they are."
+            f"{note}\n\nConfirm to proceed: **{label}**."
+        )
     return f"Confirm to proceed: **{label}**."
 
 

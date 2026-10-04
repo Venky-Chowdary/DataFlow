@@ -136,11 +136,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_jobs",
-        "description": "List recent transfer jobs with status, IDs, and record counts.",
+        "description": (
+            "List recent transfer jobs with status, IDs, and record counts. "
+            "``total`` is the whole history for ``scope`` (default ``workspace``, "
+            "the same population as brief_workspace). Pass ``scope=all`` only when "
+            "you explicitly need every workspace."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "all"],
+                    "default": "workspace",
+                    "description": "workspace = this workspace; all = every workspace",
+                },
             },
             "required": [],
         },
@@ -330,6 +341,13 @@ TOOL_DEFINITIONS: list[dict] = [
                         "incremental_upsert, or cdc_incremental"
                     ),
                 },
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -347,7 +365,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a transfer between two saved connectors for the operator to Confirm. "
             "Runs the plan and preflight first and refuses when any gate blocks. "
-            "This never moves data on its own — execution happens only after Confirm."
+            "This never moves data on its own — execution happens only after confirm_action. "
+            "An uploaded file uses start_dataset_transfer, not this tool."
         ),
         "input_schema": {
             "type": "object",
@@ -362,6 +381,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged. "
+                        "Values that already carry an offset are not rewritten."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -472,7 +499,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "run_schedule_now",
         "description": (
             "Propose an immediate run of a pipeline schedule. Returns a pending action — "
-            "the UI must confirm before the run starts."
+            "confirm_action must be called with the returned ack_id before the run starts."
         ),
         "input_schema": {
             "type": "object",
@@ -491,7 +518,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "preflight to clear, and stores the approved mapping on the schedule. "
             "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
             "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
-            "nothing on its own: the schedule exists only after Confirm."
+            "nothing on its own: the schedule exists only after confirm_action."
         ),
         "input_schema": {
             "type": "object",
@@ -522,8 +549,76 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "start_dataset_transfer",
+        "description": (
+            "Stage a transfer from an uploaded file (csv, tsv, json, jsonl, and the "
+            "other formats the file parser reads) into a saved connector. Resolves "
+            "the file by the name analyze_dataset uses, maps columns with the same "
+            "pipeline as Transfer Studio, and runs preflight. Nothing is written "
+            "until confirm_action. A template with no file is refused. A timestamp "
+            "column that mixes offsets with wall-clock values is refused until "
+            "source_timezone names the zone for the values that have none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_name": {"type": "string", "description": "Uploaded dataset name"},
+                "dest_connector_name": {"type": "string"},
+                "dest_connector_id": {"type": "string"},
+                "dest_table": {"type": "string", "description": "Destination table; defaults to the file name"},
+                "sync_mode": {"type": "string"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "limit": {"type": "integer"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for timestamp values that have no offset. "
+                        "Required when a column mixes those values with offset-bearing "
+                        "ones. Empty does not invent UTC. Offset-bearing values stay as written."
+                    ),
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+            },
+            "required": ["dataset_name"],
+        },
+    },
+    {
+        "name": "confirm_action",
+        "description": (
+            "Consume a pending approval (ack_id) and perform the mutation the operator "
+            "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
+            "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
+            "quarantine, delete connector, enable, update, or delete a schedule). "
+            "This is the same gate as Confirm in the product. Calling the staging "
+            "tool does not move data; confirm_action does. Replaying a consumed "
+            "ack_id returns the original result and does not run the mutation twice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ack_id": {
+                    "type": "string",
+                    "description": "ack_id returned by the staging tool",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Audit note stored with the approval",
+                },
+            },
+            "required": ["ack_id"],
+        },
+    },
+    {
         "name": "list_contracts",
-        "description": "List data contracts available in the workspace.",
+        "description": (
+            "List data contracts. ``count`` is this page. ``total`` is the whole "
+            "store from the status census, not the page length."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 50}},
@@ -844,6 +939,7 @@ TOOL_FAMILIES: list[dict] = [
             "plan_transfer_route",
             "plan_transfer",
             "start_transfer",
+            "start_dataset_transfer",
             "get_transfer_capabilities",
             "recommend_sync_mode",
         ],
@@ -866,6 +962,7 @@ TOOL_FAMILIES: list[dict] = [
             "get_schedule",
             "run_schedule_now",
             "create_schedule",
+            "confirm_action",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -880,6 +977,7 @@ TOOL_FAMILIES: list[dict] = [
             "delete_connector",
             "set_schedule_enabled",
             "delete_schedule",
+            "update_schedule",
         ],
     },
 ]
@@ -928,6 +1026,7 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "create_connector": self._create_connector,
+            "confirm_action": self._confirm_action,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
@@ -942,6 +1041,7 @@ class DataPilotTools:
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
+            "start_dataset_transfer": self._start_dataset_transfer,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
             "inspect_schema_policy": self._inspect_schema_policy,
@@ -974,6 +1074,7 @@ class DataPilotTools:
             "delete_connector": self._delete_connector,
             "set_schedule_enabled": self._set_schedule_enabled,
             "delete_schedule": self._delete_schedule,
+            "update_schedule": self._update_schedule,
         }
         handler = handlers.get(name)
         if not handler:
@@ -1267,12 +1368,29 @@ class DataPilotTools:
             },
         )
 
-    def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from .job_reads import list_transfer_jobs
+    def _confirm_action(self, ack_id: str = "", reason: str = "") -> ToolResult:
+        from .confirm_ack import confirm_from_tool
 
-        summary, counts, source = list_transfer_jobs(limit=limit)
-        # "How many jobs?" must be answered from the whole history — the page we
-        # read here is only the window we can show.
+        body = confirm_from_tool(ack_id, reason or "")
+        if not body.get("ok"):
+            return ToolResult(
+                name="confirm_action",
+                success=False,
+                output=body,
+                error=str(body.get("error") or "Confirm failed"),
+            )
+        return ToolResult(name="confirm_action", success=True, output=body)
+
+    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from .job_reads import job_list_workspace_scope, list_transfer_jobs
+
+        try:
+            workspace_id = job_list_workspace_scope(scope)
+        except ValueError as exc:
+            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
+        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
+        # "How many jobs?" must be answered from the whole history for this scope.
+        # The page we read here is only the window we can show.
         return ToolResult(
             name="list_jobs",
             success=True,
@@ -1282,6 +1400,7 @@ class DataPilotTools:
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
                 "store": source,
+                "scope": "all" if workspace_id is None else "workspace",
             },
         )
 
@@ -2325,6 +2444,17 @@ class DataPilotTools:
 
         return delete_schedule(self._resolve_schedule, schedule_id, name)
 
+    def _update_schedule(
+        self,
+        schedule_id: str = "",
+        name: str = "",
+        cadence: str = "",
+        new_name: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_schedule
+
+        return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
+
     def _list_contracts(self, limit: int = 50) -> ToolResult:
         from services.contract_store import get_contract_store
 
@@ -2344,7 +2474,23 @@ class DataPilotTools:
                 "status": d.get("status"),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        return ToolResult(name="list_contracts", success=True, output={"contracts": rows, "count": len(rows)})
+        census: dict = {}
+        try:
+            census = store.count_contracts_by_status() or {}
+        except Exception:
+            census = {}
+        total = sum(int(n) for n in census.values()) if census else len(rows)
+        return ToolResult(
+            name="list_contracts",
+            success=True,
+            output={
+                "contracts": rows,
+                "count": len(rows),
+                "total": total,
+                "truncated": total > len(rows),
+                "by_status": census,
+            },
+        )
 
     def _open_job(self, job_id: str = "") -> ToolResult:
         jid = (job_id or "").strip()
@@ -2613,6 +2759,36 @@ class DataPilotTools:
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+        )
+
+    def _start_dataset_transfer(
+        self,
+        dataset_name: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        limit: int = 0,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_timezone: str = "",
+    ) -> ToolResult:
+        from .dataset_transfer import stage_dataset_transfer
+
+        return stage_dataset_transfer(
+            dataset_name=dataset_name,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            limit=limit,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_timezone=source_timezone,
         )
 
     def _create_schedule(

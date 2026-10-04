@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyRole } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -86,6 +86,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [apiKeyGenerating, setApiKeyGenerating] = useState(false);
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState("Production key");
+  const [newKeyRole, setNewKeyRole] = useState<WorkspaceApiKeyRole>("editor");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
@@ -401,11 +402,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     if (!mayAdminister()) return;
     setApiKeyGenerating(true);
     try {
-      const created = await createWorkspaceApiKey(newKeyName.trim() || "API key");
+      const created = await createWorkspaceApiKey(newKeyName.trim() || "API key", newKeyRole);
       const optimistic: WorkspaceApiKey = {
         id: created.id,
         name: created.name,
         prefix: created.prefix,
+        role: created.role || newKeyRole,
         created_at: created.created_at,
         last_used_at: null,
       };
@@ -1052,7 +1054,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>API keys</h2>
-                    <p>Authenticate programmatic transfers, schedules, and MCP agent calls.</p>
+                    <p>
+                      Authenticate programmatic transfers, schedules, and MCP. Editor can create
+                      connectors, transfers, and schedules. Admin can also delete connectors.
+                      A key created before roles were stored acts as an editor.
+                    </p>
                   </div>
                 </div>
                 <PermissionNotice
@@ -1080,6 +1086,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         onChange={(e) => setNewKeyName(e.target.value)}
                         placeholder="e.g. Production ETL"
                       />
+                    </div>
+                    <div className="df2-settings-field">
+                      <label htmlFor="api-key-role">Role</label>
+                      <select
+                        id="api-key-role"
+                        className="df2-select"
+                        value={newKeyRole}
+                        onChange={(e) => setNewKeyRole(e.target.value as WorkspaceApiKeyRole)}
+                      >
+                        <option value="viewer">Viewer — read jobs, connectors, and query</option>
+                        <option value="operator">Operator — run and manage jobs</option>
+                        <option value="editor">Editor — connectors, transfers, and schedules</option>
+                        <option value="admin">Admin — editor, plus delete and workspace admin</option>
+                      </select>
                     </div>
                     <button
                       type="button"
@@ -1135,6 +1155,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             <div className="df2-api-key-card-copy">
                               <strong>{key.name}</strong>
                               <code>{key.prefix}…</code>
+                              <span className="df2-api-key-card-meta">{key.role || "editor"}</span>
                               <span className="df2-api-key-card-meta">
                                 Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
                                 {" · "}

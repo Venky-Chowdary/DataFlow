@@ -131,7 +131,10 @@ def handle_jsonrpc(
                 "serverInfo": SERVER_INFO,
                 "instructions": (
                     "Datawrap universal data-movement tools. "
-                    "Use Authorization: Bearer <workspace API key or JWT> for tools/call."
+                    "Use Authorization: Bearer <workspace API key or JWT> for tools/call. "
+                    "create_connector, start_transfer, start_dataset_transfer, "
+                    "create_schedule, and lifecycle changes return an ack_id and do not "
+                    "mutate until confirm_action."
                 ),
             },
         )

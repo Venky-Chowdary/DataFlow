@@ -11,6 +11,8 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from services.dataset_resolve import pick_dataset
+
 from .. import analyze_schema_enhanced, generate_mappings_enhanced
 from ..training.universal_data_feeder import UniversalDataFeeder, UniversalSchema
 
@@ -60,37 +62,7 @@ class CopilotDataAnalyst:
 
     def resolve_dataset(self, hint: str | None) -> UniversalSchema | None:
         """Find a dataset by name hint from message or context."""
-        schemas = self.feeder.feed_all()
-        if not schemas:
-            return None
-
-        if not hint:
-            uploads = [s for s in schemas if s.source == "upload"]
-            return uploads[0] if uploads else schemas[0]
-
-        hint_lower = hint.lower().replace("_", " ").replace("-", " ")
-        for schema in schemas:
-            name_lower = schema.name.lower()
-            if hint_lower in name_lower or name_lower in hint_lower:
-                return schema
-            for col in schema.columns:
-                if hint_lower in col.lower():
-                    return schema
-
-        industry_map = {
-            "hr": "hr", "human": "hr", "employee": "hr",
-            "logistics": "logistics", "shipping": "logistics", "freight": "logistics",
-            "finance": "finance", "payment": "finance", "transaction": "finance",
-            "retail": "retail", "order": "retail", "customer": "retail",
-            "health": "healthcare", "patient": "healthcare", "medical": "healthcare",
-        }
-        for keyword, industry in industry_map.items():
-            if keyword in hint_lower:
-                for s in schemas:
-                    if s.industry == industry or industry in s.name.lower():
-                        return s
-
-        return None
+        return pick_dataset(self.feeder.feed_all(), hint)
 
     def analyze_schema(self, schema: UniversalSchema) -> DataInsight:
         cache_key = schema.name

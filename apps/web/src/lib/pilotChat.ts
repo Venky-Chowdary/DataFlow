@@ -305,5 +305,14 @@ function lifecycleToast(
       };
     case "delete_schedule":
       return { title: `Pipeline deleted${again}`, message: `“${res.subject}” was removed; its jobs stay in Jobs.` };
+    case "update_schedule": {
+      const cron = String(res.result.cron || "");
+      const interval = String(res.result.interval || "");
+      const clock = cron ? `${interval} · ${cron}` : interval || "its new cadence";
+      return {
+        title: `Pipeline updated${again}`,
+        message: `“${res.subject}” now runs ${clock}. The route and the mapping were not changed.`,
+      };
+    }
   }
 }

@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from services.api_key_role import parse_requested_api_key_role, resolve_stored_api_key_role
 from services.platform_config import data_dir, is_railway
 from services.secret_vault import SecretVaultError, decrypt_secret, encrypt_secret
 from services.value_serializer import json_default
@@ -467,6 +468,7 @@ def list_api_keys() -> list[dict[str, Any]]:
             "id": item["id"],
             "name": item.get("name", "API key"),
             "prefix": item.get("prefix", "dfk_"),
+            "role": resolve_stored_api_key_role(item.get("role")),
             "created_at": item.get("created_at"),
             "created_by": item.get("created_by"),
             "last_used_at": item.get("last_used_at"),
@@ -474,7 +476,8 @@ def list_api_keys() -> list[dict[str, Any]]:
     return rows
 
 
-def create_api_key(name: str, actor: str) -> dict[str, Any]:
+def create_api_key(name: str, actor: str, role: str = "editor") -> dict[str, Any]:
+    stored_role = parse_requested_api_key_role(role)
     data = _load_raw()
     raw = f"dfk_{secrets.token_urlsafe(32)}"
     prefix = raw[:12]
@@ -482,6 +485,7 @@ def create_api_key(name: str, actor: str) -> dict[str, Any]:
         "id": str(uuid.uuid4()),
         "name": name.strip()[:64] or "API key",
         "prefix": prefix,
+        "role": stored_role,
         "key_hash": _hash_api_key(raw),
         "created_at": _now(),
         "created_by": actor,
@@ -489,7 +493,14 @@ def create_api_key(name: str, actor: str) -> dict[str, Any]:
     }
     data.setdefault("api_keys", []).append(record)
     _save(data)
-    return {"id": record["id"], "name": record["name"], "prefix": prefix, "key": raw, "created_at": record["created_at"]}
+    return {
+        "id": record["id"],
+        "name": record["name"],
+        "prefix": prefix,
+        "role": stored_role,
+        "key": raw,
+        "created_at": record["created_at"],
+    }
 
 
 def revoke_api_key(key_id: str) -> bool:
@@ -511,5 +522,10 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
         if item.get("key_hash") == digest:
             item["last_used_at"] = _now()
             _save(data)
-            return {"id": item["id"], "name": item.get("name"), "created_by": item.get("created_by")}
+            return {
+                "id": item["id"],
+                "name": item.get("name"),
+                "created_by": item.get("created_by"),
+                "role": resolve_stored_api_key_role(item.get("role")),
+            }
     return None

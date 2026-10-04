@@ -77,26 +77,37 @@ async def mcp_streamable(http_request: Request):
             content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}},
         )
 
+    from src.ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
+    from src.ai.copilot.tool_permissions import caller_role
     from src.services.auth_service import auth_required
 
     authenticated = _mcp_authenticated(http_request)
     # When platform auth is off (local/dev), tools are callable without a Bearer token.
     allow_unauth_tools = not auth_required()
+    mcp_role = ""
+    if auth_required():
+        mcp_user = getattr(http_request.state, "user", None) or {}
+        mcp_role = str(mcp_user.get("role") or "viewer")
     session_id = http_request.headers.get("mcp-session-id") or new_session_id()
 
     messages = payload if isinstance(payload, list) else [payload]
     results: list[dict] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
-            continue
-        out = handle_jsonrpc(
-            message,
-            authenticated=authenticated,
-            allow_unauth_tools=allow_unauth_tools,
-        )
-        if out is not None:
-            results.append(out)
+    request_token = set_mcp_request(http_request)
+    try:
+        with caller_role(mcp_role):
+            for message in messages:
+                if not isinstance(message, dict):
+                    results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
+                    continue
+                out = handle_jsonrpc(
+                    message,
+                    authenticated=authenticated,
+                    allow_unauth_tools=allow_unauth_tools,
+                )
+                if out is not None:
+                    results.append(out)
+    finally:
+        reset_mcp_request(request_token)
 
     headers = {"Mcp-Session-Id": session_id}
 
@@ -176,6 +187,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     from services.mcp_rate_limit import check_mcp_rate_limit
     from src.services.auth_service import auth_required as mcp_auth_required
 
+    from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
     from ..ai.copilot.tool_permissions import caller_role
     from ..ai.copilot.tools import get_pilot_tools
 
@@ -203,8 +215,12 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         )
     start = time.perf_counter()
     try:
-        with caller_role(mcp_role):
-            result = get_pilot_tools().execute(request.name, request.arguments)
+        request_token = set_mcp_request(http_request)
+        try:
+            with caller_role(mcp_role):
+                result = get_pilot_tools().execute(request.name, request.arguments)
+        finally:
+            reset_mcp_request(request_token)
     except Exception as exc:
         receipt = log_mcp_invocation(
             tool=request.name,

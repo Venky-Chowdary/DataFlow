@@ -56,11 +56,7 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
     parked = [s for s in schedules if s.get("needs_approval") or s.get("approval_finding")]
     next_runs = [s for s in enabled if s.get("next_run_at")]
 
-    unsigned = [
-        c
-        for c in contracts
-        if str(c.get("status") or "").upper() not in {"SIGNED", "ACTIVE"}
-    ]
+    contract_total, contracts_unsigned_n = _contract_census(workspace_id, contracts)
 
     job_total = int(job_counts.get("total") or 0) or len(jobs)
     by_status = job_counts.get("by_status") or {}
@@ -82,8 +78,8 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         attention.append(f"{len(parked)} pipeline(s) waiting on approval")
     if failed_connectors:
         attention.append(f"{len(failed_connectors)} connector(s) failed their last test")
-    if unsigned:
-        attention.append(f"{len(unsigned)} contract(s) not signed")
+    if contracts_unsigned_n:
+        attention.append(f"{contracts_unsigned_n} contract(s) not signed")
 
     return {
         "connector_count": len(connectors),
@@ -104,8 +100,8 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         "schedules_parked": len(parked),
         "next_schedule": _schedule_line(next_runs[0]) if next_runs else "",
         "parked_names": [str(s.get("name") or "") for s in parked[:6] if s.get("name")],
-        "contract_count": len(contracts),
-        "contracts_unsigned": len(unsigned),
+        "contract_count": contract_total,
+        "contracts_unsigned": contracts_unsigned_n,
         "attention": attention,
         "empty_workspace": not connectors and job_total == 0 and not schedules,
     }
@@ -199,6 +195,36 @@ def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
         return out
     except Exception:
         return []
+
+
+_CONTRACT_PAGE = 50
+_SIGNED_STATUS = {"SIGNED", "ACTIVE"}
+
+
+def _contract_census(workspace_id: str, contracts: list[dict[str, Any]]) -> tuple[int, int]:
+    """Count the contract population. A full list page is not the population."""
+    unsigned = [
+        c
+        for c in contracts
+        if str(c.get("status") or "").upper() not in _SIGNED_STATUS
+    ]
+    if len(contracts) < _CONTRACT_PAGE or workspace_id:
+        return len(contracts), len(unsigned)
+    try:
+        from services.contract_store import get_contract_store
+
+        by_status = get_contract_store().count_contracts_by_status()
+    except Exception:
+        return len(contracts), len(unsigned)
+    total = sum(int(n) for n in by_status.values())
+    if total < len(contracts):
+        return len(contracts), len(unsigned)
+    unsigned_n = sum(
+        int(n)
+        for status, n in by_status.items()
+        if str(status).upper() not in _SIGNED_STATUS
+    )
+    return total, unsigned_n
 
 
 def _load_contracts(workspace_id: str) -> list[dict[str, Any]]:

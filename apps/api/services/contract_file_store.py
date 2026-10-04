@@ -131,6 +131,25 @@ class FileContractStore:
         items.sort(key=lambda c: c.updated_at or c.created_at or "", reverse=True)
         return items[:limit]
 
+    def status_by_id(self) -> dict[str, str]:
+        """Every contract id and status. Not limited to the newest page."""
+        found: dict[str, str] = {}
+        with self._lock:
+            for file in self._contracts_dir.glob("*.json"):
+                try:
+                    doc = json.loads(file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                contract_id = str(doc.get("id") or file.stem)
+                found[contract_id] = str(doc.get("status") or "unknown").lower()
+        return found
+
+    def count_contracts_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for status in self.status_by_id().values():
+            counts[status] = counts.get(status, 0) + 1
+        return counts
+
     def save_breaker(self, breaker: CircuitBreaker) -> None:
         with self._lock:
             self._write_record(

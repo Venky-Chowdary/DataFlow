@@ -170,31 +170,16 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     is forced off here as well as at staging time — a tampered ack still cannot
     bypass the gates.
     """
+    from services.confirmed_transfer import transfer_request_from_ack
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
 
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
-    if not src.get("connector_id") or not dst.get("connector_id"):
-        raise HTTPException(status_code=400, detail="Transfer approval is missing its endpoints.")
-
-    request_obj = TransferRequest(
-        source=EndpointConfig.from_dict("database", src),
-        destination=EndpointConfig.from_dict("database", dst),
-        mappings=list(payload.get("mappings") or []),
-        column_types=dict(payload.get("column_types") or {}),
-        sync_mode=str(payload.get("sync_mode") or "full_refresh_append"),
-        schema_policy=str(payload.get("schema_policy") or "manual_review"),
-        validation_mode=str(payload.get("validation_mode") or "balanced"),
-        limit=max(0, int(payload.get("limit") or 0)),
-        # The row rules the operator stated in chat and confirmed in the preview.
-        # Dropping them here would write rows they excluded, under a green proof.
-        source_filter=dict(payload.get("source_filter") or {}),
-        stream_contracts=list(payload.get("stream_contracts") or []),
-        skip_preflight=False,
-        triggered_by="data-pilot",
-    )
+    try:
+        request_obj = transfer_request_from_ack(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from ..transfer.contract_engine import stamp_bound_contract
 
     try:
@@ -208,10 +193,14 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request_obj)
     run_transfer_async(job_id, request_obj)
+    if request_obj.source.kind == "file":
+        source_label = request_obj.source_filename or request_obj.source.table or "file"
+    else:
+        source_label = f"{src.get('connector_id')}.{src.get('table')}"
     return {
         "job_id": job_id,
         "status": "queued",
-        "source": f"{src.get('connector_id')}.{src.get('table')}",
+        "source": source_label,
         "destination": f"{dst.get('connector_id')}.{dst.get('table')}",
         "sync_mode": request_obj.sync_mode,
         "preflight_run_id": payload.get("preflight_run_id") or "",
@@ -273,6 +262,31 @@ async def _run_lifecycle_confirm(
         sid = str(payload.get("schedule_id") or "").strip()
         out = await schedules_router.remove_pipeline_schedule(sid, http_request, workspace_id)
         return {**dict(out), "schedule_id": sid, "name": payload.get("name") or ""}
+    if kind == "update_schedule":
+        # Cadence and name only. Connectors, tables, mappings, and sync mode
+        # stay on the stored schedule — this patch must not re-plan the route.
+        sid = str(payload.get("schedule_id") or "").strip()
+        fields: dict = {}
+        if "interval" in payload:
+            fields["interval"] = payload.get("interval")
+        if "cron" in payload:
+            fields["cron"] = "" if payload.get("cron") is None else payload.get("cron")
+        if "timezone" in payload:
+            fields["timezone"] = payload.get("timezone")
+        renamed = str(payload.get("name") or "").strip()
+        if renamed:
+            fields["name"] = renamed
+        body = schedules_router.ScheduleUpdate(**fields)
+        sched = await schedules_router.patch_pipeline_schedule(sid, body, http_request, workspace_id)
+        return {
+            "schedule_id": sid,
+            "name": getattr(sched, "name", "") or renamed,
+            "enabled": bool(getattr(sched, "enabled", True)),
+            "interval": getattr(sched, "interval", "") or "",
+            "cron": getattr(sched, "cron", "") or "",
+            "timezone": getattr(sched, "timezone", "") or "",
+            "next_run_at": getattr(sched, "next_run_at", "") or "",
+        }
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
 
 

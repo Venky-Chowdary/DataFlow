@@ -3361,10 +3361,13 @@ export async function updatePilotEngine(engine: PilotEngineChoice): Promise<Pilo
   return res.json();
 }
 
+export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;
   last_used_at?: string | null;
@@ -3377,11 +3380,14 @@ export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
   return data.keys ?? [];
 }
 
-export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiKey & { key: string }> {
+export async function createWorkspaceApiKey(
+  name: string,
+  role: WorkspaceApiKeyRole = "editor",
+): Promise<WorkspaceApiKey & { key: string }> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, role }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
   return res.json();
