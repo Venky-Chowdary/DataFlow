@@ -506,6 +506,28 @@ def test_infer_header_roles_prefers_schema_over_name_hints():
     assert methods["Outbound name"] == "schema"
 
 
+def test_name_bind_refuses_shorter_column_and_midstring():
+    """A longer or mid-string name is a different column — never a silent remap."""
+    assert resolve_name("namespace_code", ["name", "code"]) == ""
+    assert resolve_name("namespace_code", ["name"]) == ""
+    assert resolve_name("customer_id_legacy", ["customer_id"]) == ""
+    assert resolve_name("email_address", ["email"]) == ""
+    assert resolve_name("order_total_amount", ["amount"]) == ""
+    assert resolve_name("amount", ["order_total_amount"]) == ""
+    assert resolve_name("cust", ["customer_id"]) == ""
+    # Unique leading-token extension still binds, including a qualified catalog name.
+    extended, method, score = resolve_name_ex("email", ["email_address", "phone"])
+    assert extended == "email_address"
+    assert method == "prefix"
+    assert score == 0.9
+    qualified, q_method, _q_score = resolve_name_ex("email", ["dbo.email_address"])
+    assert qualified == "dbo.email_address"
+    assert q_method == "prefix"
+    assert resolve_name_ex("customer", ["customer_id"])[0] == "customer_id"
+    # Two extensions stay unbound — the operator chooses.
+    assert resolve_name("email", ["email_address", "email_hash"]) == ""
+
+
 def test_linguistic_bind_is_cupid_unique_winner():
     cols = ["customer_id", "order_id", "first_name"]
     assert resolve_name("cust_id", cols) == "customer_id"

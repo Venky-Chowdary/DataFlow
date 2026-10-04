@@ -9053,7 +9053,7 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-rule-map-banner[open] {
   max-height: min(58vh, 560px);
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: scroll;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
@@ -9165,12 +9165,32 @@ button.df2-vd-assist-toggle:focus-visible {
   color: var(--df-text-secondary, #475569);
 }
 
+.df2-map-step-body > .df2-map-stream-bar,
+.df2-map-step-body > .df2-map-stream-diverge {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  margin: 0 0 8px;
+  flex: 0 0 auto;
+}
+
+.df2-map-step-body > .df2-map-stream-bar {
+  padding: 0 0 4px;
+}
+
 .df2-rule-map-banner .df2-rule-ledger {
   margin-top: 8px;
   width: 100%;
   max-width: none;
   box-sizing: border-box;
-  background: var(--df-surface, #ffffff);
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.df2-rule-map-banner .df2-rule-analysis-head,
+.df2-rule-map-banner .df2-rule-line-hit {
+  grid-template-columns: minmax(88px, 140px) minmax(0, 1.6fr) minmax(0, 1fr) minmax(2.5rem, 3.5rem) minmax(6.5rem, 11rem);
 }
 
 .df2-column-rule-why {

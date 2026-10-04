@@ -305,64 +305,64 @@ export function TransferMapStep({
         </div>
       </div>
 
-      {extraSourceColumns.length > 0 && (
-        <details className="df2-map-stream-diverge is-compact" role="status">
-          <summary>
-            <DtIcon name="layers" size={16} />
-            <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
-            <span> · {extraSourceColumns.length}</span>
-          </summary>
-          <p>
-            {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
-            These columns are not dropped. Use Remap dest or mark omit.
-          </p>
-        </details>
-      )}
-
-      {streamNames.length > 1 && (
-        <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
-          {streamNames.map((name) => (
-            <button
-              key={name}
-              type="button"
-              role="tab"
-              aria-selected={activeStream === name}
-              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
-              onClick={() => onActiveStreamChange?.(name)}
-              disabled={Boolean(streamBusy)}
-            >
-              {name}
-              {streamBusy === name ? "…" : ""}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {streamsDiverge && streamNames.length > 1 && (
-        <div className="df2-map-stream-diverge" role="alert">
-          <DtIcon name="alert" size={16} />
-          <div>
-            <strong>Stream schemas differ</strong>
-            <p>
-              Each tab has its own column mapping (sent as per-stream write contracts).
-              Review every stream before Validate — incompatible shared destinations still
-              need separate routes.
-            </p>
-            {onRematchAllStreams && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm"
-                disabled={Boolean(streamBusy)}
-                onClick={() => void onRematchAllStreams()}
-              >
-                {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className="df2-card-body df2-map-step-body">
+        {extraSourceColumns.length > 0 && (
+          <details className="df2-map-stream-diverge is-compact" role="status">
+            <summary>
+              <DtIcon name="layers" size={16} />
+              <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
+              <span> · {extraSourceColumns.length}</span>
+            </summary>
+            <p>
+              {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
+              These columns are not dropped. Use Remap dest or mark omit.
+            </p>
+          </details>
+        )}
+
+        {streamNames.length > 1 && (
+          <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
+            {streamNames.map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={activeStream === name}
+                className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
+                onClick={() => onActiveStreamChange?.(name)}
+                disabled={Boolean(streamBusy)}
+              >
+                {name}
+                {streamBusy === name ? "…" : ""}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {streamsDiverge && streamNames.length > 1 && (
+          <div className="df2-map-stream-diverge" role="alert">
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Stream schemas differ</strong>
+              <p>
+                Each tab has its own column mapping (sent as per-stream write contracts).
+                Review every stream before Validate — incompatible shared destinations still
+                need separate routes.
+              </p>
+              {onRematchAllStreams && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm"
+                  disabled={Boolean(streamBusy)}
+                  onClick={() => void onRematchAllStreams()}
+                >
+                  {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {ruleReport && (
           <details className="df2-rule-map-banner">
             <summary title={ruleBannerLine}>

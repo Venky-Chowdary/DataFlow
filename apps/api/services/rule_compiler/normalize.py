@@ -147,11 +147,45 @@ def resolve_name(needle: str, candidates: list[str]) -> str:
     return name
 
 
-def resolve_name_ex(needle: str, candidates: list[str]) -> tuple[str, str, float]:
-    """Bind a spoken name. Method is exact | prefix | contained | linguistic.
+def _column_tokens(value: str) -> list[str]:
+    """Tokens of the column part. ``dbo.email_address`` → ``['email', 'address']``."""
+    _table, column = split_qualified(value)
+    return [part for part in _SPLIT.split((column or value).strip().lower()) if part]
 
-    Cupid-style linguistic matching is last and fail-closed: unique winner,
-    threshold, and a score gap. Short tokens (``id``) never bind.
+
+def _token_prefix_extension(spoken: str, candidates: list[str]) -> list[str]:
+    """Catalog names whose tokens start with the spoken tokens and then continue.
+
+    ``email`` → ``email_address`` is an extension. ``namespace_code`` → ``name``
+    and ``amount`` → ``order_total_amount`` are different columns. A shorter
+    catalog name, or a name that only contains the spoken token in the middle,
+    is not identity.
+    """
+    from .match import _STOP
+
+    left = _column_tokens(spoken)
+    if not left:
+        return []
+    # Warehouse collisions (id / code / name-stem) are not a unique extension.
+    if len(left) == 1 and left[0] in _STOP:
+        return []
+    hits: list[str] = []
+    for candidate in candidates:
+        right = _column_tokens(candidate)
+        if len(right) > len(left) and right[:len(left)] == left:
+            hits.append(candidate)
+    return hits
+
+
+def resolve_name_ex(needle: str, candidates: list[str]) -> tuple[str, str, float]:
+    """Bind a spoken name. Method is exact | prefix | linguistic.
+
+    Exact fold wins. A unique token-prefix extension is next (``customer`` →
+    ``customer_id`` when that is the only extension). Cupid-style linguistic
+    matching is last and fail-closed: unique winner, threshold, and a score
+    gap. Short tokens (``id``) never bind. A longer spoken name does not
+    collapse onto a shorter column, and a mid-string containment
+    (``amount`` inside ``order_total_amount``) is not a match.
     """
     table, column = split_qualified(needle)
     spoken = column or needle
@@ -163,16 +197,9 @@ def resolve_name_ex(needle: str, candidates: list[str]) -> tuple[str, str, float
         return exact[0], "exact", 1.0
     if len(exact) > 1 or len(want) < 4:
         return "", "", 0.0
-    loose = [
-        c for c in candidates
-        if fold(c).startswith(want) or want.startswith(fold(c))
-    ]
+    loose = _token_prefix_extension(spoken, candidates)
     if len(loose) == 1:
         return loose[0], "prefix", 0.9
-    if len(want) >= 5:
-        contained = [c for c in candidates if want in fold(c) or fold(c) in want]
-        if len(contained) == 1:
-            return contained[0], "contained", 0.84
     from .match import unique_linguistic_match
     winner, score = unique_linguistic_match(spoken, candidates)
     if winner:
