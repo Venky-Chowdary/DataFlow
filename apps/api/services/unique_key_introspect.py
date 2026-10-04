@@ -319,8 +319,8 @@ def read_postgres_uniqueness_rows(
         return None
 
 
-def _sqlserver_index_disabled(value: Any) -> bool | None:
-    """``sys.indexes.is_disabled``. None when this cell did not say."""
+def _sqlserver_flag(value: Any) -> bool | None:
+    """A SQL Server bit. None when this cell did not say."""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -333,6 +333,11 @@ def _sqlserver_index_disabled(value: Any) -> bool | None:
     if text in {"0", "false", "no"}:
         return False
     return None
+
+
+def _sqlserver_index_disabled(value: Any) -> bool | None:
+    """``sys.indexes.is_disabled``. None when this cell did not say."""
+    return _sqlserver_flag(value)
 
 
 def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
@@ -384,9 +389,11 @@ def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
 def read_sqlserver_uniqueness_rows(
     conn: Any, schema: str, table: str
 ) -> list[Any] | None:
-    """Unique-index rows, or None when ``is_disabled`` was not read.
+    """Unique-index rows, or None when the catalog did not answer.
 
-    An empty list is a successful read of no unique index.
+    ``is_disabled`` and ``ignore_dup_key`` are on the row. An empty list
+    is a successful read of no unique index. A shorter fixture does not
+    invent either bit.
     """
     import sqlalchemy as sa
 
@@ -402,7 +409,8 @@ def read_sqlserver_uniqueness_rows(
                       ic.key_ordinal,
                       CONVERT(nvarchar(4000), cc.definition) AS computed_def,
                       CONVERT(nvarchar(4000), i.filter_definition) AS filter_def,
-                      i.is_disabled
+                      i.is_disabled,
+                      i.ignore_dup_key
                     FROM sys.indexes i
                     JOIN sys.index_columns ic
                       ON i.object_id = ic.object_id AND i.index_id = ic.index_id
@@ -466,6 +474,12 @@ def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str
         if len(fields) > 6 and _sqlserver_index_disabled(fields[6]) is True:
             bucket["disabled"] = True
             bucket["enforced"] = False
+        # A seven-column row asked for is_disabled only. Do not invent
+        # IGNORE_DUP_KEY. ON drops a duplicate insert instead of failing
+        # the statement. The index still rejects through the probe, and
+        # stored rows stay unique, so enforced stays true.
+        if len(fields) > 7 and _sqlserver_flag(fields[7]) is True:
+            bucket["ignore_dup_key"] = True
         if filter_def and not bucket.get("filter_predicate"):
             bucket["filter_predicate"] = str(filter_def).strip()
         expr = str(computed_def or "").strip()

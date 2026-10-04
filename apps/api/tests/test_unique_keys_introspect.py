@@ -378,6 +378,51 @@ def test_sqlserver_disabled_unique_index_does_not_block():
     assert any("disabled" in warning for warning in warned["warnings"])
 
 
+def test_sqlserver_ignore_dup_key_still_blocks_the_duplicate():
+    """``IGNORE_DUP_KEY`` drops the insert. It does not hide the key.
+
+    A seven-column row did not ask for the bit. Stored rows stay unique,
+    so the catalog gap stays empty and the probe still quarantines.
+    """
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import sqlserver_uniqueness_proof
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 0, 1),
+    ]
+    meta = _sqlserver_fetch_unique_keys(conn, "dbo", "users")
+    key = meta["unique_keys"][0]
+    assert key["ignore_dup_key"] is True
+    assert key.get("enforced") is not False
+    assert "disabled" not in key
+    assert "ignore_dup_key" in str(conn.execute.call_args.args[0]).lower()
+
+    short = MagicMock()
+    short.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 0),
+    ]
+    plain = _sqlserver_fetch_unique_keys(short, "dbo", "users")
+    assert "ignore_dup_key" not in plain["unique_keys"][0]
+
+    assert sqlserver_uniqueness_proof(
+        [("UQ_EMAIL", False, "email", 1, None, None, 0, 1)]
+    ) == {frozenset({"email"}): ""}
+    assert _unique_constraint_enforced(key, dest_kind="sqlserver") is True
+    blocked = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="sqlserver",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[key],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert blocked["passed"] is False
+    assert any("IGNORE_DUP_KEY" in warning for warning in blocked["warnings"])
+
+
 def test_oracle_fetch_unique_keys():
     conn = MagicMock()
     conn.execute.return_value.fetchall.side_effect = [

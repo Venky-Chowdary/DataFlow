@@ -687,6 +687,12 @@ def _advisory_unique_key_warnings(
             "New duplicates are still rejected while the index is ready for "
             "inserts. Existing rows were not checked."
         )
+    if any(uk.get("ignore_dup_key") is True for uk in keys):
+        warnings.append(
+            f"{kind} unique index has IGNORE_DUP_KEY. A duplicate insert "
+            "is dropped with a warning instead of failing the statement. "
+            "Validate still quarantines a duplicate it can see."
+        )
     if not advisory and not _destination_constraints_advisory(dest_kind, keys):
         return warnings
     if advisory:
