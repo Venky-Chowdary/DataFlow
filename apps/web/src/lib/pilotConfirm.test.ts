@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isDestructiveTransfer, transferOverwriteMessage } from "./pilotConfirm.js";
+import { isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, transferOverwriteMessage } from "./pilotConfirm.js";
 
 function transfer(syncMode: string, destructive = false) {
   return {
@@ -33,6 +33,19 @@ describe("pilotConfirm", () => {
 
   it("honours the explicit destructive flag from the backend", () => {
     assert.equal(isDestructiveTransfer(transfer("incremental_upsert", true)), true);
+  });
+
+  it("treats a cadence change as a schedule lifecycle confirm", () => {
+    assert.equal(isLifecycleOp("update_schedule"), true);
+    assert.equal(
+      isDestructiveLifecycle({
+        id: "s1",
+        type: "update_schedule",
+        destructive: false,
+        payload: { ack_id: "ack_1", preview: { name: "Nightly" } },
+      }),
+      false,
+    );
   });
 
   it("names the destination in the overwrite warning", () => {

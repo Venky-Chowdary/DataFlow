@@ -103,6 +103,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "delete_connector": (Permission.CONNECTOR_DELETE, MUTATE),
     "set_schedule_enabled": (Permission.SCHEDULE_MANAGE, MUTATE),
     "delete_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    "update_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
 }
 
 
@@ -121,6 +122,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "delete_connector": Permission.CONNECTOR_DELETE,
     "set_schedule_enabled": Permission.SCHEDULE_MANAGE,
     "delete_schedule": Permission.SCHEDULE_MANAGE,
+    "update_schedule": Permission.SCHEDULE_MANAGE,
 }
 
 

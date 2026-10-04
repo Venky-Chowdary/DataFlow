@@ -1,5 +1,5 @@
 """Lifecycle operations Pilot can stage: job cancel/retry/resume/replay, connector
-test/delete, schedule pause/resume/delete.
+test/delete, schedule pause/resume/cadence/delete.
 
 Every mutation here follows the same contract as ``run_schedule_now``: the tool
 resolves the object, writes a redacted preview, stages an ack on the server
@@ -155,6 +155,28 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "update_schedule",
+        "description": (
+            "Stage a cadence or name change on one existing pipeline. The route, "
+            "the mapping, and the sync mode stay as they are — this does not "
+            "re-plan the transfer. An interval with no clock (hourly) clears a "
+            "previous cron. Pending action until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "string"},
+                "name": {"type": "string", "description": "Current pipeline name"},
+                "cadence": {
+                    "type": "string",
+                    "description": "New cadence in the operator's words, e.g. daily at 03:00 UTC or hourly",
+                },
+                "new_name": {"type": "string", "description": "Rename the pipeline. Omit to keep the name."},
+            },
+            "required": [],
+        },
+    },
 ]
 
 LIFECYCLE_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in LIFECYCLE_TOOL_DEFINITIONS)
@@ -169,6 +191,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "delete_connector": "delete_connector",
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
+    "update_schedule": "update_schedule",
 }
 
 
@@ -410,6 +433,105 @@ def delete_schedule(resolver: Any, schedule_id: str = "", name: str = "") -> Too
     )
 
 
+def update_schedule(
+    resolver: Any,
+    schedule_id: str = "",
+    name: str = "",
+    cadence: str = "",
+    new_name: str = "",
+) -> ToolResult:
+    """Stage a clock or name change. The route is not re-planned.
+
+    Confirm applies the patch through ``patch_pipeline_schedule``. A cadence
+    that has no cron sends ``cron=""`` so a previous clock is cleared — omitting
+    the field would keep the old cron. Mappings, connectors, and sync mode are
+    left off the payload, so a down source cannot block a clock change and a
+    later re-map cannot replace the approved contract.
+    """
+    sched, err = _schedule("update_schedule", resolver, schedule_id, name)
+    if err:
+        return err
+    from .schedule_cadence import parse_cadence
+
+    cadence_text = (cadence or "").strip()
+    renamed = (new_name or "").strip()
+    current_name = str(getattr(sched, "name", "") or "")
+    if not cadence_text and not renamed:
+        return _tool_result(
+            "update_schedule",
+            success=False,
+            output=None,
+            error=(
+                "What should change? Give a cadence (hourly, daily at 03:00 UTC) "
+                "or a new name. The route and the mapping stay as they are."
+            ),
+        )
+
+    current_interval = str(getattr(sched, "interval", "") or "")
+    current_cron = str(getattr(sched, "cron", "") or "")
+    current_tz = str(getattr(sched, "timezone", "") or "UTC")
+    payload: dict[str, Any] = {"schedule_id": sched.id}
+    preview: dict[str, Any] = {
+        "schedule_id": sched.id,
+        "name": current_name,
+        "interval": current_interval,
+        "cron": current_cron,
+        "timezone": current_tz,
+        "enabled": bool(getattr(sched, "enabled", True)),
+    }
+    label_bits: list[str] = []
+
+    if cadence_text:
+        spec = parse_cadence(cadence_text)
+        if not spec.resolved:
+            return _tool_result("update_schedule", success=False, output=None, error=spec.question)
+        same_clock = (spec.interval, spec.cron, spec.timezone) == (
+            current_interval,
+            current_cron,
+            current_tz,
+        )
+        if not same_clock:
+            # cron is always present, including "" — an hourly spec must clear
+            # a previous "0 2 * * *" rather than leave it beside interval=hourly.
+            payload["interval"] = spec.interval
+            payload["cron"] = spec.cron
+            payload["timezone"] = spec.timezone
+            preview["interval_after"] = spec.interval
+            preview["cron_after"] = spec.cron
+            preview["timezone_after"] = spec.timezone
+            preview["cadence"] = spec.description
+            if spec.timezone_assumed:
+                preview["timezone_note"] = (
+                    "No timezone was given, so this is UTC. Say e.g. “in Asia/Kolkata” to change it."
+                )
+            label_bits.append(spec.description)
+
+    if renamed and renamed != current_name:
+        payload["name"] = renamed
+        preview["name_after"] = renamed
+        label_bits.append(f"rename to “{renamed}”")
+
+    if "interval" not in payload and "name" not in payload:
+        if cadence_text and renamed:
+            detail = f"Pipeline “{current_name}” already has that cadence and that name."
+        elif cadence_text:
+            detail = f"Pipeline “{current_name}” is already on that cadence."
+        else:
+            detail = f"Pipeline “{current_name}” already has that name."
+        return _tool_result("update_schedule", success=False, output=None, error=detail)
+
+    label = f"Update pipeline “{current_name}”"
+    if label_bits:
+        label = f"{label} — {', '.join(label_bits)}"
+    return _stage(
+        "update_schedule",
+        payload=payload,
+        preview=preview,
+        label=label,
+        destructive=False,
+    )
+
+
 # ----------------------------------------------------------------------------
 # Deterministic planner: verb + object grammar, not a phrase table.
 # ----------------------------------------------------------------------------
@@ -533,6 +655,38 @@ def plan_lifecycle_operation(message: str) -> list[tuple[str, dict[str, Any]]] |
         return [("delete_connector", {"name": name} if name else {})]
 
     # --- schedules ------------------------------------------------------
+    # Cadence and rename are a patch of the existing pipeline. They are
+    # matched before pause/delete so "change the cadence of pipeline X" is
+    # not read as a new schedule or as a delete.
+    rename = re.search(
+        rf"\brename\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<new>.+?)\s*$",
+        lower,
+    )
+    if rename:
+        new_label = text[rename.start("new"):rename.end("new")].strip(" .,!?\"'“”")
+        args: dict[str, Any] = {"new_name": new_label}
+        named = _named(text, rename)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+    cadence_change = re.search(
+        rf"\b(?:change|update|reschedule)\s+(?:the\s+)?cadence\s+of\s+{_ART}{_SCHED_NOUN}\s+"
+        rf"(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    ) or re.search(
+        rf"\breschedule\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    )
+    if cadence_change:
+        cadence_label = text[cadence_change.start("cadence"):cadence_change.end("cadence")].strip(
+            " .,!?\"'“”"
+        )
+        args = {"cadence": cadence_label}
+        named = _named(text, cadence_change)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+
     for tool, verb, enabled in (
         ("set_schedule_enabled", _PAUSE, False),
         ("set_schedule_enabled", _ENABLE, True),

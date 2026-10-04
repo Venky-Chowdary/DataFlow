@@ -262,6 +262,31 @@ async def _run_lifecycle_confirm(
         sid = str(payload.get("schedule_id") or "").strip()
         out = await schedules_router.remove_pipeline_schedule(sid, http_request, workspace_id)
         return {**dict(out), "schedule_id": sid, "name": payload.get("name") or ""}
+    if kind == "update_schedule":
+        # Cadence and name only. Connectors, tables, mappings, and sync mode
+        # stay on the stored schedule — this patch must not re-plan the route.
+        sid = str(payload.get("schedule_id") or "").strip()
+        fields: dict = {}
+        if "interval" in payload:
+            fields["interval"] = payload.get("interval")
+        if "cron" in payload:
+            fields["cron"] = "" if payload.get("cron") is None else payload.get("cron")
+        if "timezone" in payload:
+            fields["timezone"] = payload.get("timezone")
+        renamed = str(payload.get("name") or "").strip()
+        if renamed:
+            fields["name"] = renamed
+        body = schedules_router.ScheduleUpdate(**fields)
+        sched = await schedules_router.patch_pipeline_schedule(sid, body, http_request, workspace_id)
+        return {
+            "schedule_id": sid,
+            "name": getattr(sched, "name", "") or renamed,
+            "enabled": bool(getattr(sched, "enabled", True)),
+            "interval": getattr(sched, "interval", "") or "",
+            "cron": getattr(sched, "cron", "") or "",
+            "timezone": getattr(sched, "timezone", "") or "",
+            "next_run_at": getattr(sched, "next_run_at", "") or "",
+        }
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
 
 

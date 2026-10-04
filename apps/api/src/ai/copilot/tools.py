@@ -593,7 +593,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "Consume a pending approval (ack_id) and perform the mutation the operator "
             "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
             "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
-            "quarantine, delete connector, enable or delete a schedule). "
+            "quarantine, delete connector, enable, update, or delete a schedule). "
             "This is the same gate as Confirm in the product. Calling the staging "
             "tool does not move data; confirm_action does. Replaying a consumed "
             "ack_id returns the original result and does not run the mutation twice."
@@ -977,6 +977,7 @@ TOOL_FAMILIES: list[dict] = [
             "delete_connector",
             "set_schedule_enabled",
             "delete_schedule",
+            "update_schedule",
         ],
     },
 ]
@@ -1073,6 +1074,7 @@ class DataPilotTools:
             "delete_connector": self._delete_connector,
             "set_schedule_enabled": self._set_schedule_enabled,
             "delete_schedule": self._delete_schedule,
+            "update_schedule": self._update_schedule,
         }
         handler = handlers.get(name)
         if not handler:
@@ -2441,6 +2443,17 @@ class DataPilotTools:
         from .lifecycle_tools import delete_schedule
 
         return delete_schedule(self._resolve_schedule, schedule_id, name)
+
+    def _update_schedule(
+        self,
+        schedule_id: str = "",
+        name: str = "",
+        cadence: str = "",
+        new_name: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_schedule
+
+        return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
 
     def _list_contracts(self, limit: int = 50) -> ToolResult:
         from services.contract_store import get_contract_store

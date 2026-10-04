@@ -233,14 +233,86 @@ def test_mcp_loads_sample_payments_into_sqlite(mcp_client):
     with sqlite3.connect(warehouse) as conn:
         assert conn.execute('SELECT COUNT(*) FROM "payments_wh"').fetchone()[0] == 10
 
+    from services.schedule_store import get_schedule
 
-def _load(client, dataset: str, table: str, **extra) -> str:
+    current = _mcp(client, "get_schedule", {"name": "qe-mcp-payments-nightly"})
+    assert current["cron"] == "0 2 * * *"
+    schedule_id = current["id"]
+    stored = get_schedule(schedule_id)
+    assert stored is not None
+    mappings_before = list(stored.mappings or [])
+    assert mappings_before
+
+    same, same_reason = _call(
+        client,
+        "update_schedule",
+        {"name": "qe-mcp-payments-nightly", "cadence": "daily at 02:00 UTC"},
+    )
+    assert same is True, same_reason
+    assert "already" in same_reason.lower()
+
+    unresolved, question = _call(
+        client,
+        "update_schedule",
+        {"name": "qe-mcp-payments-nightly", "cadence": "whenever"},
+    )
+    assert unresolved is True, question
+
+    staged_clock = _mcp(
+        client,
+        "update_schedule",
+        {"name": "qe-mcp-payments-nightly", "cadence": "daily at 03:00 UTC"},
+    )
+    assert staged_clock["requires_confirm"] is True, staged_clock
+    assert staged_clock["preview"]["cron_after"] == "0 3 * * *"
+    assert "mappings" not in staged_clock["preview"]
+    moved = _mcp(client, "confirm_action", {"ack_id": staged_clock["ack_id"], "reason": "qe"})
+    assert moved["ok"] is True, moved
+    assert moved["idempotent"] is False
+    assert moved["schedule_id"] == schedule_id
+    assert moved["cron"] == "0 3 * * *"
+    assert moved["enabled"] is True
+    assert moved["name"] == "qe-mcp-payments-nightly"
+    assert moved["next_run_at"] != (stored.next_run_at or "")
+
+    after = get_schedule(schedule_id)
+    assert after is not None
+    assert after.cron == "0 3 * * *"
+    assert after.interval == "daily"
+    assert after.mappings == mappings_before
+    assert after.source_connector_id == stored.source_connector_id
+    assert after.dest_table == stored.dest_table
+
+    replay_clock = _mcp(client, "confirm_action", {"ack_id": staged_clock["ack_id"], "reason": "qe"})
+    assert replay_clock["idempotent"] is True
+    assert replay_clock["cron"] == "0 3 * * *"
+    assert get_schedule(schedule_id).cron == "0 3 * * *"
+
+    staged_hourly = _mcp(
+        client,
+        "update_schedule",
+        {"name": "qe-mcp-payments-nightly", "cadence": "hourly"},
+    )
+    assert staged_hourly["preview"]["cron_after"] == ""
+    hourly = _mcp(client, "confirm_action", {"ack_id": staged_hourly["ack_id"], "reason": "qe"})
+    assert hourly["ok"] is True, hourly
+    assert hourly["interval"] == "hourly"
+    assert hourly["cron"] == ""
+    assert hourly["schedule_id"] == schedule_id
+    cleared = get_schedule(schedule_id)
+    assert cleared is not None
+    assert cleared.cron == ""
+    assert cleared.interval == "hourly"
+    assert cleared.mappings == mappings_before
+
+
+def _load(client, dataset: str, table: str, dest: str = "qe-mcp-files", **extra) -> str:
     staged = _mcp(
         client,
         "start_dataset_transfer",
         {
             "dataset_name": dataset,
-            "dest_connector_name": "qe-mcp-files",
+            "dest_connector_name": dest,
             "dest_table": table,
             "sync_mode": "full_refresh_append",
             **extra,
@@ -402,3 +474,62 @@ def test_mcp_loads_tsv_json_and_jsonl_then_pauses_and_deletes_the_schedule(mcp_c
 
     listed = _mcp(client, "list_schedules", {})
     assert listed.get("count") == 0
+
+
+def test_mcp_file_load_into_existing_sqlite_writes_by_column_name(mcp_client):
+    """Dest-exists: reversed column order still lands CUST_ID in CUST_ID.
+
+    The CSV header is CUST_ID, AMT, TXN_DT, ACCT_NO, CCY, REF_NO, STS, DESC.
+    The table is created with those columns reversed, and with the carriers
+    Map reads from the file, before the load. A positional write would put
+    the description in CUST_ID.
+    """
+    client, db_path = mcp_client
+    staged = _mcp(
+        client,
+        "create_connector",
+        {
+            "name": "qe-mcp-landed",
+            "type": "sqlite",
+            "database": str(db_path),
+            "test_first": True,
+        },
+    )
+    saved = _mcp(client, "confirm_action", {"ack_id": staged["ack_id"], "reason": "qe"})
+    assert saved["ok"] is True, saved
+
+    # Declared types match the carriers Map reads from the file (integer,
+    # decimal, date, text). The order is the reverse of the CSV header. A
+    # TEXT sink for CUST_ID is a lossy coercion and stays blocked; this table
+    # is the same shape in a different physical order.
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE "landed" (
+                "DESC" TEXT,
+                "STS" TEXT,
+                "REF_NO" TEXT,
+                "CCY" TEXT,
+                "ACCT_NO" TEXT,
+                "TXN_DT" DATE,
+                "AMT" DECIMAL(8,2),
+                "CUST_ID" BIGINT
+            )
+            """
+        )
+
+    _load(client, "sample_payments", "landed", dest="qe-mcp-landed")
+
+    with sqlite3.connect(db_path) as conn:
+        order = [row[1] for row in conn.execute('PRAGMA table_info("landed")')]
+        row = conn.execute(
+            'SELECT "CUST_ID", "DESC", "AMT" FROM "landed" ORDER BY "CUST_ID"'
+        ).fetchone()
+        count = conn.execute('SELECT COUNT(*) FROM "landed"').fetchone()[0]
+    assert order[0] == "DESC"
+    assert order[-1] == "CUST_ID"
+    assert count == 10
+    assert row is not None
+    assert str(row[0]) in {"1001", "1001.0"}
+    assert "Wire" in str(row[1])
+    assert str(row[2]) in {"1500", "1500.0", "1500.00"}
