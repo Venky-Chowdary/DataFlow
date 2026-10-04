@@ -33,15 +33,20 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 | TS-2 | 80 contracts in the store, brief page size 50 | Census reports 80, not 50. |
 | TS-3 | `list_jobs` with no scope | `workspace_id=""`, matching the brief. `scope=all` passes `None`. |
 | TS-4 | `confirm_action` with no active request | Error, no mutation. Proven without booting the API. |
-| TS-5 | `confirm_action` with an `ack_id` from `start_transfer` | One job, through the transfer engine. A second confirm of that ack returns the first result. |
-| TS-6 | Viewer calls `confirm_action` on a `create_connector` ack | Refusal from the confirm route. The ack is not consumed. |
+| TS-5 | `confirm_action` with an `ack_id` from `start_transfer` | One job, through the transfer engine. A second confirm of that ack returns the first result. A tampered `skip_preflight` stays false. |
+| TS-6 | Viewer calls `confirm_action` on a `create_connector` ack | Refusal from the confirm route. The ack is not consumed. No connector row is written. |
 | TS-7 | Live connector test matrix | Record pass/fail per saved connector. Do not treat a refused host as an engine defect. |
 | TS-8 | Legacy API key with no role field | Resolves to editor. An unknown label resolves to viewer. Creating a key with `owner` is refused. |
 | TS-9 | MCP URL from `/api/v1` on `https://www.datawrap.io` | `https://www.datawrap.io/api/v1/mcp`, with a Bearer placeholder. No `api.datawrap.io`. No `mcp-bridge`. |
 | TS-10 | Confirm a database ack and a file ack | Database stays database. `skip_preflight` stays false. A file ack keeps `kind=file` and the upload path. `/etc/passwd` and a `xfer_` spill are refused. |
 | TS-11 | Stage `payments.csv` into a connector | Ack kind is `start_transfer`, source kind is `file`, destination connector is kept, and the mapping pipeline produced mappings. A template name is refused. Nothing is written. |
+| TS-12 | Editor `confirm_action` on a `create_connector` ack staged by the tool, `test_first` off | One connector in the file store. Replay returns the same id and does not write a second row. |
+| TS-13 | Editor `confirm_action` on a `create_schedule` ack whose mappings come from `run_mapping_pipeline` | One enabled schedule, cron kept, `next_run_at` set. Replay does not write a second schedule. |
+| TS-14 | Editor `confirm_action` on a `run_schedule` ack | The schedule runner is called once, `manual=True`, and returns one job id. Replay does not call it again. |
+| TS-15 | File ack whose path is not under an upload root | Confirm refuses. The engine is not called. The ack stays spendable. |
+| TS-16 | Stage `tests/fixtures/sample_payments.csv` (10 rows) and confirm | Parse and mapping are real. Confirm hands one `kind=file` request to the engine. Replay returns that job id. |
 
-TS-5 and TS-6 run where the API process and its stores are up. This runner did not boot that process. Production does not have `confirm_action` until this build is deployed, so it was not executed against the live workspace.
+TS-5, TS-6, and TS-12 through TS-16 are proven by `tests/test_mcp_confirm_route.py` (7 passed). Each one calls `confirm_from_tool`, which calls `copilot_confirm`. Stores are temporary files. The schedule mappings are the rows `run_mapping_pipeline` emitted for `id` and `amount`. The file case is `tests/fixtures/sample_payments.csv`. The engine records the request and does not dial a warehouse. Production does not have `confirm_action` until this build is deployed, so none of these were executed against the live workspace.
 
 ## What MCP can do after this change
 
