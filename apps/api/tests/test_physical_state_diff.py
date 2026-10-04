@@ -2304,3 +2304,141 @@ def test_oracle_not_validated_check_is_not_existing_row_proof() -> None:
     assert live.params == {"owner": "HR", "table": "orders"}
     assert read_oracle_check_rows(_Conn([]), "HR", "orders") == []
     assert read_oracle_check_rows(_Conn([], fail=True), "HR", "orders") is None
+
+
+def test_mysql_not_enforced_check_is_not_existing_row_proof() -> None:
+    """``ENFORCED = NO`` is not a dropped check and not a write rule.
+
+    A hand-built MySQL state with an empty proof tuple did not measure
+    ``ENFORCED``. MariaDB has no such column, so a ``NO`` row there does
+    not invent the gap. A clause-only row does not invent ``YES``.
+    """
+    from services.physical_state_diff import (
+        _measured_check_proof,
+        read_mysql_check_rows,
+    )
+
+    src = PhysicalState(
+        found=True,
+        readable=True,
+        check_constraints=frozenset({"qty>0"}),
+    )
+    unmeasured = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="mysql",
+            check_constraints=frozenset({"qty>0"}),
+        ),
+    )
+    assert unmeasured["aspects"]["check_constraints"]["status"] == "carried"
+    assert unmeasured["verified"] is True
+
+    not_enforced = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="amazon_rds_mysql",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "disabled"),),
+        ),
+    )
+    check = not_enforced["aspects"]["check_constraints"]
+    assert check["status"] == "unchecked"
+    assert check["missing"] == []
+    assert check["unchecked"] == ["qty>0"]
+    assert "enforced is NO" in check["reasons"][0]
+    assert "does not reject" in check["reasons"][0]
+    assert not_enforced["verified"] is False
+    assert "check_constraints" not in not_enforced["absent"]
+    assert "check_constraints" in not_enforced["unchecked"]
+
+    unread = compare_physical_state(
+        src,
+        PhysicalState(
+            found=True,
+            readable=True,
+            dialect="google_cloud_sql_mysql",
+            check_constraints=frozenset({"qty>0"}),
+            check_proof=(("qty>0", "unreported"),),
+        ),
+    )
+    assert unread["aspects"]["check_constraints"]["status"] == "unchecked"
+    assert "was not read" in unread["aspects"]["check_constraints"]["reasons"][0]
+
+    checks = [{"sqltext": "qty > 0"}, {"sqltext": "(email <> '')"}]
+    reflected = _measured_check_proof(
+        "mysql",
+        checks,
+        None,
+        [("qty > 0", "NO"), ("(email <> '')", "YES")],
+    )
+    assert dict(reflected) == {"qty>0": "disabled", "email<>''": ""}
+    clause_only = _measured_check_proof(
+        "mysql8",
+        [{"sqltext": "qty > 0"}],
+        None,
+        [("qty > 0",)],
+    )
+    assert dict(clause_only) == {"qty>0": "unreported"}
+    assert dict(
+        _measured_check_proof("mysql", checks, None, None)
+    ) == {"qty>0": "unreported", "email<>''": "unreported"}
+    worse = _measured_check_proof(
+        "azure_database_for_mysql",
+        [{"sqltext": "qty > 0"}],
+        None,
+        [("qty > 0", "YES"), ("(qty > 0)", "NO")],
+    )
+    assert dict(worse) == {"qty>0": "disabled"}
+    assert _measured_check_proof(
+        "mariadb",
+        checks,
+        None,
+        [("qty > 0", "NO")],
+    ) == ()
+    assert _measured_check_proof(
+        "sqlite",
+        checks,
+        None,
+        [("qty > 0", "NO")],
+    ) == ()
+
+    class _Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _Conn:
+        def __init__(self, rows, fail=False):
+            self.rows = rows
+            self.fail = fail
+            self.sql = ""
+            self.calls: list[dict] = []
+
+        def execute(self, sql, params=None):
+            if self.fail:
+                raise RuntimeError("ENFORCED unavailable")
+            self.sql = str(sql)
+            params = dict(params or {})
+            self.calls.append(params)
+            if params.get("schema") == "public":
+                return _Result([])
+            return _Result(self.rows)
+
+    live = _Conn([("(qty > 0)", "NO")])
+    assert read_mysql_check_rows(live, "public", "orders") == [("(qty > 0)", "NO")]
+    assert "check_clause" in live.sql
+    assert "enforced" in live.sql
+    assert "constraint_type = 'CHECK'" in live.sql
+    assert live.calls[0] == {"schema": "public", "table": "orders"}
+    assert live.calls[1] == {"schema": "", "table": "orders"}
+    direct = _Conn([("(qty > 0)", "YES")])
+    assert read_mysql_check_rows(direct, "app", "orders") == [("(qty > 0)", "YES")]
+    assert direct.calls == [{"schema": "app", "table": "orders"}]
+    assert read_mysql_check_rows(_Conn([]), "", "orders") == []
+    assert read_mysql_check_rows(_Conn([], fail=True), "app", "orders") is None

@@ -857,6 +857,93 @@ def oracle_check_validation_reason(gap: str) -> str:
     return ""
 
 
+# MySQL Server 8.0.16 stores CHECK enforcement on TABLE_CONSTRAINTS.ENFORCED.
+# MariaDB enforces CHECK and has no ENFORCED column. A session variable is
+# not a per-constraint bit. TiDB, SingleStore, and the analytical engines
+# that share a MySQL writer are not this catalog.
+_MYSQL_CHECK_ENFORCED_DIALECTS = frozenset(
+    {
+        "mysql",
+        "mysql8",
+        "amazon_rds_mysql",
+        "amazon_aurora_mysql",
+        "azure_mysql",
+        "azure_database_for_mysql",
+        "aurora_mysql",
+        "aurora-mysql",
+        "cloudsql_mysql",
+        "gcp_cloud_sql_mysql",
+        "google_cloud_sql_mysql",
+        "rds_mysql",
+        "mysql_rds",
+        "mysql_cloud_sql",
+        "mysql_azure",
+        "mysql_aurora_global",
+        "mysql_planetscale",
+        "percona",
+    }
+)
+
+
+def mysql_check_enforced_catalog(dialect: str) -> bool:
+    """True when CHECK enforcement is ``TABLE_CONSTRAINTS.ENFORCED``.
+
+    Hosted MySQL twins keep their own names and still use that column.
+    ``mariadb`` does not.
+    """
+    return normalize_driver(dialect) in _MYSQL_CHECK_ENFORCED_DIALECTS
+
+
+def mysql_check_enforced(value: Any) -> bool | None:
+    """``TABLE_CONSTRAINTS.ENFORCED``. None when this cell did not say.
+
+    MySQL stores ``YES`` or ``NO``. An empty cell is not ``NO``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().upper()
+    if text in {"YES", "Y", "1", "TRUE"}:
+        return True
+    if text in {"NO", "N", "0", "FALSE"}:
+        return False
+    return None
+
+
+def mysql_check_enforced_gap(enforced: bool | None) -> str:
+    """Existing-row gap from ``TABLE_CONSTRAINTS.ENFORCED``.
+
+    ``YES`` is the scan. ``NO`` is ``NOT ENFORCED``: the constraint does
+    not reject a new row and does not prove the rows already stored
+    match. A missing cell stays unreported. MySQL has no separate
+    ``NOT VALIDATED`` bit for CHECK.
+    """
+    if enforced is True:
+        return ""
+    if enforced is False:
+        return "disabled"
+    return "unreported"
+
+
+def mysql_check_enforced_reason(gap: str) -> str:
+    """Operator sentence for a non-empty MySQL check enforcement gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "information_schema.table_constraints.enforced is NO. The "
+            "constraint does not reject a new row and does not prove the "
+            "rows already stored match."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. ENFORCED was not "
+            "read. A MySQL check can be NOT ENFORCED, so this catalog "
+            "object is not proof the rows already stored match."
+        )
+    return ""
+
+
 def postgres_unique_index_reason(gap: str) -> str:
     """Operator sentence for a non-empty PostgreSQL unique-index gap."""
     if gap == "not_ready":

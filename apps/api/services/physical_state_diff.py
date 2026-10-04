@@ -343,9 +343,10 @@ class PhysicalState:
     #: ``not_checked`` is ``is_not_trusted`` on an enabled check.
     #: ``disabled`` is ``is_disabled``. Oracle ``""`` is ``ENABLED`` and
     #: ``VALIDATED``. ``not_checked`` is ``ENABLED`` and ``NOT VALIDATED``.
-    #: ``disabled`` is ``STATUS`` ``DISABLED``. ``unreported`` means this
-    #: read did not see the flag. An empty tuple means this comparison did
-    #: not measure it.
+    #: ``disabled`` is ``STATUS`` ``DISABLED``. MySQL ``""`` is
+    #: ``ENFORCED`` ``YES``. ``disabled`` is ``ENFORCED`` ``NO``.
+    #: ``unreported`` means this read did not see the flag. An empty tuple
+    #: means this comparison did not measure it.
     check_proof: tuple[tuple[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -903,6 +904,11 @@ def read_physical_state(
             from services.unique_key_introspect import read_postgres_uniqueness_rows
 
             postgres_rows = read_postgres_uniqueness_rows(conn, schema, name)
+        mysql_check_rows: list[Any] | None = None
+        from services.foreign_key_metadata import mysql_check_enforced_catalog
+
+        if mysql_check_enforced_catalog(db_type):
+            mysql_check_rows = read_mysql_check_rows(conn, schema, name)
         (
             fk_sets,
             fk_facts,
@@ -963,7 +969,9 @@ def read_physical_state(
             for c in checks or []
             if _normalize_predicate(c.get("sqltext"))
         ),
-        check_proof=_measured_check_proof(db_type, checks, oracle_check_rows),
+        check_proof=_measured_check_proof(
+            db_type, checks, oracle_check_rows, mysql_check_rows
+        ),
         triggers=frozenset(triggers or ()),
         views=frozenset(views or ()),
         routines=frozenset(routines or ()),
@@ -1259,6 +1267,44 @@ def read_oracle_check_rows(conn: Any, owner: str, table: str) -> list[Any] | Non
         for owner_try, table_try in attempts:
             rows = list(
                 conn.execute(sql, {"owner": owner_try, "table": table_try}).fetchall()
+            )
+            if rows:
+                return rows
+        return []
+    except Exception:
+        return None
+
+
+def read_mysql_check_rows(
+    conn: Any, schema: str, table: str
+) -> list[Any] | None:
+    """CHECK clause and ``ENFORCED``, or None when that column was not read.
+
+    An empty list is a successful read of no check. The exact schema is
+    tried before ``DATABASE()``. A one-column fixture is not this query.
+    MariaDB has no ``ENFORCED`` column; callers skip this read there.
+    """
+    sql = sa.text(
+        """
+        SELECT cc.check_clause, tc.enforced
+        FROM information_schema.check_constraints cc
+        JOIN information_schema.table_constraints tc
+          ON tc.constraint_schema = cc.constraint_schema
+         AND tc.constraint_name = cc.constraint_name
+        WHERE tc.constraint_type = 'CHECK'
+          AND tc.table_name = :table
+          AND tc.table_schema = COALESCE(NULLIF(:schema, ''), DATABASE())
+        """
+    )
+    attempts = [str(schema)] if str(schema or "").strip() else []
+    attempts.append("")
+    try:
+        rows: list[Any] = []
+        for schema_try in attempts:
+            rows = list(
+                conn.execute(
+                    sql, {"schema": schema_try, "table": str(table or "")}
+                ).fetchall()
             )
             if rows:
                 return rows
@@ -2168,15 +2214,21 @@ def _measured_check_proof(
     db_type: str,
     checks: list[Any] | None,
     oracle_rows: list[Any] | None = None,
+    mysql_rows: list[Any] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """CHECK existing-row gaps. Empty when this engine does not measure them.
 
     PostgreSQL uses ``dialect_options.not_valid``. SQL Server uses
     ``is_disabled`` and ``is_not_trusted`` on the check row. Oracle uses
-    ``ALL_CONSTRAINTS`` rows. SQLite and Redshift stay empty.
+    ``ALL_CONSTRAINTS`` rows. MySQL Server uses ``ENFORCED``. SQLite,
+    Redshift, and MariaDB stay empty.
     """
     from services.dialect_profiles import is_sqlserver_like
-    from services.foreign_key_metadata import _dialect_key, postgres_index_catalog
+    from services.foreign_key_metadata import (
+        _dialect_key,
+        mysql_check_enforced_catalog,
+        postgres_index_catalog,
+    )
 
     if postgres_index_catalog(db_type):
         return _postgres_check_proof(checks)
@@ -2184,6 +2236,8 @@ def _measured_check_proof(
         return _sqlserver_check_proof(checks)
     if _dialect_key(db_type) == "oracle":
         return _oracle_check_proof(checks, oracle_rows)
+    if mysql_check_enforced_catalog(db_type):
+        return _mysql_check_proof(checks, mysql_rows)
     return ()
 
 
@@ -2299,11 +2353,59 @@ def _oracle_check_proof(
     return tuple(sorted(proof.items()))
 
 
+def _mysql_check_proof(
+    checks: list[Any] | None,
+    rows: list[Any] | None,
+) -> tuple[tuple[str, str], ...]:
+    """One gap per reflected MySQL check.
+
+    ``rows is None`` means ``ENFORCED`` was not read. Each reflected
+    predicate stays ``unreported``. A successful read that does not name
+    a reflected predicate is the same gap. ``YES`` is an empty gap.
+    ``NO`` is ``disabled``. A row without the enforcement cell does not
+    invent ``YES``.
+    """
+    from services.foreign_key_metadata import (
+        mysql_check_enforced,
+        mysql_check_enforced_gap,
+    )
+
+    if not checks:
+        return ()
+    measured: dict[str, str] = {}
+    if rows is not None:
+        for row in rows:
+            fields = tuple(row)
+            if not fields:
+                continue
+            predicate = _normalize_predicate(fields[0])
+            if not predicate:
+                continue
+            enforced = mysql_check_enforced(fields[1]) if len(fields) > 1 else None
+            gap = mysql_check_enforced_gap(enforced)
+            _worse_check_gap(measured, predicate, gap)
+    proof: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, Mapping):
+            continue
+        predicate = _normalize_predicate(check.get("sqltext"))
+        if not predicate:
+            continue
+        if rows is None or predicate not in measured:
+            gap = "unreported"
+        else:
+            gap = measured[predicate]
+        _worse_check_gap(proof, predicate, gap)
+    return tuple(sorted(proof.items()))
+
+
 def _check_validation_reason(destination_dialect: str, gap: str) -> str:
     """Sentence for a measured check gap. Empty when this engine ignores it."""
     from services.dialect_profiles import is_sqlserver_like
     from services.foreign_key_metadata import (
         _dialect_key,
+        mysql_check_enforced_catalog,
+        mysql_check_enforced_reason,
         oracle_check_validation_reason,
         postgres_check_validation_reason,
         postgres_index_catalog,
@@ -2316,17 +2418,24 @@ def _check_validation_reason(destination_dialect: str, gap: str) -> str:
         return sqlserver_check_validation_reason(gap)
     if _dialect_key(destination_dialect) == "oracle":
         return oracle_check_validation_reason(gap)
+    if mysql_check_enforced_catalog(destination_dialect):
+        return mysql_check_enforced_reason(gap)
     return ""
 
 
 def _check_proof_applies(destination_dialect: str) -> bool:
     from services.dialect_profiles import is_sqlserver_like
-    from services.foreign_key_metadata import _dialect_key, postgres_index_catalog
+    from services.foreign_key_metadata import (
+        _dialect_key,
+        mysql_check_enforced_catalog,
+        postgres_index_catalog,
+    )
 
     return (
         postgres_index_catalog(destination_dialect)
         or is_sqlserver_like(destination_dialect)
         or _dialect_key(destination_dialect) == "oracle"
+        or mysql_check_enforced_catalog(destination_dialect)
     )
 
 
@@ -2340,7 +2449,8 @@ def _diff_check_constraints(
     """Carried when the predicates match and existing rows were checked.
 
     A ``NOT VALID``, untrusted, or ``NOT VALIDATED`` check still rejects a
-    new row. A disabled check does not. Neither write rule is this verdict
+    new row. A disabled or MySQL ``NOT ENFORCED`` check does not. Neither
+    write rule is this verdict
     by itself: the certificate says whether existing rows were checked.
     An empty proof tuple means this comparison did not measure the flag,
     so a hand-built state stays on the older carried verdict.
