@@ -10,6 +10,7 @@ so the reads live together here rather than inside the introspection walk.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
@@ -1043,13 +1044,8 @@ def _sqlite_index_where(sql: str) -> str:
     return text[where_at:].strip()
 
 
-def _sqlite_partial_predicate(cur: Any, index_name: str) -> str:
-    """WHERE text for one partial index. Empty when sqlite_master has none.
-
-    An empty result does not invent a table-wide predicate. The caller keeps
-    the key and leaves the filter blank, so the duplicate probe still includes
-    every row rather than guessing which rows SQLite ignores.
-    """
+def _sqlite_index_sql(cur: Any, index_name: str) -> str:
+    """CREATE INDEX text from sqlite_master, or empty when it was not read."""
     try:
         cur.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
@@ -1057,7 +1053,7 @@ def _sqlite_partial_predicate(cur: Any, index_name: str) -> str:
         )
         row = cur.fetchone()
     except Exception as exc:
-        logger.debug("sqlite partial index sql unread: %s", exc, exc_info=exc)
+        logger.debug("sqlite index sql unread: %s", exc, exc_info=exc)
         return ""
     if not row:
         return ""
@@ -1065,7 +1061,200 @@ def _sqlite_partial_predicate(cur: Any, index_name: str) -> str:
         sql = row[0]
     except Exception:
         sql = None
-    return _sqlite_index_where(str(sql or ""))
+    return str(sql or "")
+
+
+_SQLITE_INDEX_SUFFIX_RE = re.compile(
+    r"\s+(?:COLLATE\s+(?:\"(?:[^\"]|\"\")+\"|[A-Za-z_][\w$]*)|(?:ASC|DESC))\s*$",
+    re.I,
+)
+_SQLITE_PLAIN_IDENT_RE = re.compile(
+    r'^("(?:[^"]|"")+"|\[[^\]]+\]|`[^`]+`|[A-Za-z_][\w$]*)$'
+)
+_SQLITE_PURE_FOLD_RE = re.compile(
+    r'^(?:lower|upper|casefold)\s*\(\s*"?[A-Za-z_][\w$]*"?\s*\)$',
+    re.I,
+)
+
+
+def _sqlite_scan_quote(text: str, i: int, n: int, quote: str) -> int:
+    """Index after a quoted span that starts at ``i``. ``quote`` is the opener."""
+    i += 1
+    while i < n:
+        ch = text[i]
+        if quote == '"' and ch == '"':
+            if i + 1 < n and text[i + 1] == '"':
+                i += 2
+                continue
+            return i + 1
+        if quote == "'" and ch == "'":
+            if i + 1 < n and text[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        if quote == "[" and ch == "]":
+            return i + 1
+        if quote == "`" and ch == "`":
+            return i + 1
+        i += 1
+    return n
+
+
+def _sqlite_index_key_parts(sql: str) -> list[str]:
+    """Indexed expressions inside the first parenthesis list of CREATE INDEX.
+
+    Empty when that list was not in the statement. A comma inside ``lower(a)``
+    or inside a quote does not split the list.
+    """
+    text = (sql or "").strip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    if not text:
+        return []
+    depth = 0
+    start: int | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in {"'", '"', "[", "`"}:
+            i = _sqlite_scan_quote(text, i, n, ch)
+            continue
+        if ch == "(":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif ch == ")":
+            if depth == 1 and start is not None:
+                return _sqlite_split_key_list(text[start:i])
+            if depth:
+                depth -= 1
+        i += 1
+    return []
+
+
+def _sqlite_split_key_list(inner: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = 0
+    n = len(inner)
+    while i < n:
+        ch = inner[i]
+        if ch in {"'", '"', "[", "`"}:
+            end = _sqlite_scan_quote(inner, i, n, ch)
+            buf.append(inner[i:end])
+            i = end
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif ch == "," and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    part = "".join(buf).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _sqlite_strip_index_suffix(part: str) -> str:
+    text = (part or "").strip()
+    while True:
+        nxt = _SQLITE_INDEX_SUFFIX_RE.sub("", text).strip()
+        if nxt == text:
+            return text
+        text = nxt
+
+
+def _sqlite_plain_column(part: str) -> str | None:
+    """Bare indexed column, or None when the part is an expression."""
+    match = _SQLITE_PLAIN_IDENT_RE.match(_sqlite_strip_index_suffix(part))
+    if not match:
+        return None
+    ident = match.group(1)
+    if ident.startswith('"') and ident.endswith('"'):
+        return ident[1:-1].replace('""', '"')
+    if ident.startswith("[") and ident.endswith("]"):
+        return ident[1:-1]
+    if ident.startswith("`") and ident.endswith("`"):
+        return ident[1:-1]
+    return ident
+
+
+def _sqlite_classify_key_parts(
+    parts: list[str],
+) -> tuple[list[str], list[str], str, bool] | None:
+    """Split a key list into columns and pure ``lower``/``upper`` folds.
+
+    None when a part is an expression this probe cannot evaluate. The caller
+    must not publish the plain columns as if they were the whole unique key.
+    """
+    from services.type_system import parse_case_insensitive_index_expression
+
+    if not parts:
+        return None
+    columns: list[str] = []
+    expr_cols: list[str] = []
+    exprs: list[str] = []
+    folded = False
+    for part in parts:
+        core = _sqlite_strip_index_suffix(part)
+        plain = _sqlite_plain_column(core)
+        if plain:
+            columns.append(plain)
+            continue
+        if _SQLITE_PURE_FOLD_RE.match(core):
+            folded = True
+            exprs.append(core)
+            for col in parse_case_insensitive_index_expression(core):
+                if col not in expr_cols:
+                    expr_cols.append(col)
+            continue
+        return None
+    return columns, expr_cols, "; ".join(exprs), folded
+
+
+def _sqlite_xinfo_keys(rows: list[Any]) -> tuple[list[str], bool, bool]:
+    """Plain columns, whether an expression key is present, and NOCASE.
+
+    ``PRAGMA index_xinfo`` field 5 is 0 for the rowid companion. A shorter
+    ``index_info`` row did not measure that bit or the collation, so a name
+    stays a key column and NOCASE is not invented.
+    """
+    plain: list[str] = []
+    has_expr = False
+    nocase = False
+    for info in rows or []:
+        try:
+            name = info[2]
+        except Exception:
+            continue
+        is_key = True
+        coll = ""
+        if len(info) > 5 and info[5] is not None:
+            try:
+                is_key = int(info[5] or 0) == 1
+            except (TypeError, ValueError):
+                is_key = True
+        if len(info) > 4 and info[4] is not None:
+            coll = str(info[4]).strip().upper()
+        if not is_key:
+            continue
+        if name is None or str(name).strip() == "":
+            has_expr = True
+            continue
+        plain.append(str(name))
+        if coll == "NOCASE":
+            nocase = True
+    return plain, has_expr, nocase
 
 
 def _sqlite_fetch_unique_keys(
@@ -1075,7 +1264,10 @@ def _sqlite_fetch_unique_keys(
 
     A partial unique index still rejects a new duplicate, but only for rows
     that match its WHERE. The predicate comes from ``sqlite_master.sql`` when
-    PRAGMA index_list says the index is partial. The key stays enforced.
+    PRAGMA index_list says the index is partial. ``lower(email)`` and
+    ``COLLATE NOCASE`` casefold like the engine. An expression this probe
+    cannot evaluate stays on the key and is not reduced to its plain columns.
+    The key stays enforced.
     """
     pk_ord: list[tuple[int, str]] = []
     for row in info_rows or []:
@@ -1120,29 +1312,39 @@ def _sqlite_fetch_unique_keys(
             # PK already covered via table_info.
             if origin == "pk":
                 continue
-            cur.execute(f"PRAGMA index_info({quote_sql_identifier(idx_name)})")
-            cols: list[str] = []
-            for info in cur.fetchall() or []:
-                try:
-                    col = info[2]
-                except Exception:
-                    col = None
-                if col:
-                    cols.append(str(col))
-            if not cols:
+            cur.execute(f"PRAGMA index_xinfo({quote_sql_identifier(idx_name)})")
+            plain, has_expr, nocase = _sqlite_xinfo_keys(cur.fetchall() or [])
+            if not plain and not has_expr:
                 continue
-            # partial is True only when PRAGMA measured it. A missing column
-            # stays a full key. The WHERE is read after index_info so a
-            # column-less expression index is still skipped.
-            predicate = _sqlite_partial_predicate(cur, idx_name) if partial is True else ""
+            # partial is True only when PRAGMA measured it. The statement is
+            # read once when the WHERE or an expression key has to be parsed.
+            sql = ""
+            if partial is True or has_expr:
+                sql = _sqlite_index_sql(cur, idx_name)
+            predicate = _sqlite_index_where(sql) if partial is True else ""
+            cols = list(plain)
+            expr_cols: list[str] = []
+            expression = ""
+            case_insensitive = nocase
+            if has_expr:
+                classified = _sqlite_classify_key_parts(_sqlite_index_key_parts(sql))
+                if classified is None:
+                    cols = []
+                    case_insensitive = False
+                    expression = " ".join(_sqlite_index_key_parts(sql))
+                else:
+                    cols, expr_cols, expression, folded = classified
+                    case_insensitive = nocase or folded
+            if not cols and not expr_cols and not has_expr:
+                continue
             unique_keys.append(
                 {
                     "name": idx_name,
                     "columns": cols,
                     "primary": False,
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
+                    "expression": expression,
+                    "expression_columns": expr_cols,
+                    "case_insensitive": case_insensitive,
                     "filter_predicate": predicate,
                     "enforced": True,
                 }

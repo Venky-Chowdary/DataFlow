@@ -152,6 +152,7 @@ def test_sqlite_fetch_unique_keys_from_pragma():
     assert names["PRIMARY"]["enforced"] is True
     assert names["uq_email"]["columns"] == ["email"]
     assert names["uq_email"]["filter_predicate"] == ""
+    assert names["uq_email"]["case_insensitive"] is False
     executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
     assert "sqlite_master" not in executed
 

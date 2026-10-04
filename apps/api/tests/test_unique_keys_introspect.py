@@ -712,3 +712,89 @@ def test_sqlite_partial_bit_without_where_stays_in_the_duplicate_probe() -> None
     assert names["ux"]["enforced"] is True
     executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
     assert "sqlite_master" in executed
+
+
+def test_sqlite_expression_and_nocase_unique_casefold(tmp_path: Path) -> None:
+    """SQLite lower() and COLLATE NOCASE are the same write rule as the engine.
+
+    An expression the probe cannot evaluate stays on the key. It is not
+    rewritten as a unique constraint on the plain columns beside it.
+    """
+    import sqlite3
+
+    from services.data_integrity import _check_duplicate_keys
+    from services.unique_key_introspect import _sqlite_fetch_unique_keys
+
+    db = tmp_path / "expr.db"
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT, status TEXT)"
+        )
+        con.execute("CREATE UNIQUE INDEX ux_fold ON people (lower(email))")
+        con.execute(
+            "CREATE UNIQUE INDEX ux_nocase ON people (status COLLATE NOCASE)"
+        )
+        con.execute(
+            "CREATE UNIQUE INDEX ux_prefix ON people (substr(email, 1, 3), status)"
+        )
+        cur = con.cursor()
+        info = list(cur.execute('PRAGMA table_info("people")'))
+        meta = _sqlite_fetch_unique_keys(cur, '"people"', info)
+    finally:
+        con.close()
+
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux_fold"]["columns"] == []
+    assert names["ux_fold"]["expression_columns"] == ["email"]
+    assert names["ux_fold"]["case_insensitive"] is True
+    assert names["ux_fold"]["enforced"] is True
+    assert names["ux_nocase"]["columns"] == ["status"]
+    assert names["ux_nocase"]["case_insensitive"] is True
+    assert names["ux_nocase"]["expression"] == ""
+    assert names["ux_prefix"]["columns"] == []
+    assert names["ux_prefix"]["expression_columns"] == []
+    assert "substr" in names["ux_prefix"]["expression"]
+    assert names["ux_prefix"]["enforced"] is True
+
+    folded = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "A@x.com"}, {"email": "a@x.com"}],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_fold"]],
+        target_types={"email": "TEXT"},
+    )
+    assert folded["passed"] is False
+    assert folded["blocks_transfer"] is True
+    nocase = _check_duplicate_keys(
+        [{"source": "status", "target": "status"}],
+        [{"status": "Active"}, {"status": "active"}],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="status",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_nocase"]],
+        target_types={"status": "TEXT"},
+    )
+    assert nocase["passed"] is False
+    assert nocase["blocks_transfer"] is True
+    prefix = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "abc-1", "status": "open"},
+            {"email": "abc-2", "status": "open"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_prefix"]],
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert prefix["passed"] is True
