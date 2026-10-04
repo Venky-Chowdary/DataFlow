@@ -11,6 +11,7 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 5. **As a viewer**, I can read jobs and connectors. I cannot spend an approval my role does not hold.
 6. **As an admin**, I choose the role on a workspace API key. A key that has no role stored is an editor, so MCP can create connectors, transfers, and schedules. A viewer key cannot.
 7. **As an operator**, I can load an uploaded file into a saved connector from MCP. The file is the one I named. Confirm writes it. A template with no file is refused.
+8. **As an operator**, I can create a SQLite connector from MCP by giving the database file, with no host and no password. I can load an uploaded CSV into that file, then schedule that table into a second SQLite file. Confirm runs each step once.
 
 ## Bug stories
 
@@ -24,6 +25,7 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 | BUG-6 | Help and the MCP page told an operator to dial `https://api.datawrap.io` or a relative `/api/v1/mcp`, and Claude's snippet ran a package this product does not ship. | The snippet is the absolute URL of the signed-in host plus `Authorization: Bearer`. Claude and VS Code use that same HTTP endpoint. |
 | BUG-7 | A workspace API key stored no role. The request gate treated it as a viewer, so MCP could not create a connector, a transfer, or a schedule once the caller's role was bound. | The key has a role. A key minted before the field existed resolves to editor. Settings lets an admin choose viewer, operator, editor, or admin. `confirm_action` still re-checks that role against the ack kind. |
 | BUG-8 | An uploaded file could be analyzed and could not be loaded. Confirm also rebuilt every transfer as `kind=database` and required a source connector, so a file ack could not run on the engine that already reads files. | `start_dataset_transfer` resolves the upload, maps with `run_mapping_pipeline`, runs the same preflight, and stages a `start_transfer` ack with `kind=file`. Confirm keeps that kind, keeps `source_path`, and refuses a path outside the upload tree. |
+| BUG-9 | `create_connector` demanded a host for every type. SQLite and DuckDB are a file path. The probe also resolved that path with a second parser, so a path outside `DATAFLOW_SQLITE_ROOT` could pass Test and then be refused by the reader. | `draft_is_complete` uses `validate_probe_auth` for those two types. The SQLite probe uses `sqlite_file_path`, the same allowlist as the reader and the writer. |
 
 ## Test stories
 
@@ -45,14 +47,18 @@ Live evidence is the 2026-10-04 workspace run through `https://www.datawrap.io/a
 | TS-14 | Editor `confirm_action` on a `run_schedule` ack | The schedule runner is called once, `manual=True`, and returns one job id. Replay does not call it again. |
 | TS-15 | File ack whose path is not under an upload root | Confirm refuses. The engine is not called. The ack stays spendable. |
 | TS-16 | Stage `tests/fixtures/sample_payments.csv` (10 rows) and confirm | Parse and mapping are real. Confirm hands one `kind=file` request to the engine. Replay returns that job id. |
+| TS-17 | SQLite draft with a database path and no host, inside `DATAFLOW_SQLITE_ROOT` | The draft is complete. A path outside the root is refused. The probe refuses that same path. DuckDB is complete with a file path and no host. Postgres without a host is still refused. |
+| TS-18 | Streamable MCP: create a SQLite connector, load `sample_payments.csv`, schedule that table into a second SQLite file, run the schedule | 10 rows in `payments`. 10 rows in `payments_wh`. Replaying either confirm does not write the rows again. |
 
-TS-5, TS-6, and TS-12 through TS-16 are proven by `tests/test_mcp_confirm_route.py` (7 passed). Each one calls `confirm_from_tool`, which calls `copilot_confirm`. Stores are temporary files. The schedule mappings are the rows `run_mapping_pipeline` emitted for `id` and `amount`. The file case is `tests/fixtures/sample_payments.csv`. The engine records the request and does not dial a warehouse. Production does not have `confirm_action` until this build is deployed, so none of these were executed against the live workspace.
+TS-5, TS-6, and TS-12 through TS-16 are proven by `tests/test_mcp_confirm_route.py` (7 passed). Each one calls `confirm_from_tool`, which calls `copilot_confirm`. Stores are temporary files. The schedule mappings are the rows `run_mapping_pipeline` emitted for `id` and `amount`. The file case is `tests/fixtures/sample_payments.csv`. The engine records the request and does not dial a warehouse.
+
+TS-17 is `tests/test_pilot_create_connector.py`. TS-18 is `tests/test_mcp_sqlite_file_transfer.py`: the streamable `POST /api/v1/mcp` endpoint created a SQLite file, loaded the 10-row payments fixture through preflight and the transfer engine, created a daily schedule onto a second SQLite file, and ran that schedule. Both tables counted 10. Replay left the counts at 10. Production does not have `confirm_action` until this build is deployed, so none of these were executed against the live workspace.
 
 ## What MCP can do after this change
 
 Read: datasets, connectors, schemas, samples, aggregates, queries, jobs, contracts, schedules, preflight, product explanations.
 
-Stage, then `confirm_action`: create a connector, start a transfer between connectors, start a transfer from an uploaded file (`start_dataset_transfer`), create a schedule, run a schedule now, cancel / retry / resume a job, replay quarantine, delete a connector (admin key), enable or delete a schedule. `test_connector` is immediate and does not need an ack.
+Stage, then `confirm_action`: create a connector (including a SQLite or DuckDB file, with no host), start a transfer between connectors, start a transfer from an uploaded file (`start_dataset_transfer`), create a schedule, run a schedule now, cancel / retry / resume a job, replay quarantine, delete a connector (admin key), enable or delete a schedule. `test_connector` is immediate and does not need an ack.
 
 The key's role is the gate. Editor can create connectors, transfers, and schedules. Operator can run jobs and cannot author connectors or schedules. Viewer can read. Confirm checks the role again, against the ack kind, and does not consume the ack when the role cannot perform it.
 

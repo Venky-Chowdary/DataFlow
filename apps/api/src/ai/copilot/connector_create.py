@@ -342,8 +342,48 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
     return merged
 
 
+def _path_connector_complete(draft: dict[str, Any]) -> tuple[bool, str]:
+    """SQLite and DuckDB are a file, not a host.
+
+    Completeness is ``validate_probe_auth`` — the same required-field check the
+    probe uses — and a SQLite path is confined by ``sqlite_file_path``, the
+    same allowlist the reader and writer already enforce.
+    """
+    from services.connector_auth import validate_probe_auth
+
+    ctype = str(draft.get("type") or "")
+    reason = validate_probe_auth(
+        driver=ctype,
+        auth_mode=str(draft.get("auth_mode") or ""),
+        host=str(draft.get("host") or ""),
+        port=int(draft.get("port") or 0),
+        database=str(draft.get("database") or ""),
+        username=str(draft.get("username") or ""),
+        password=str(draft.get("password") or ""),
+        connection_string=str(draft.get("connection_string") or ""),
+    )
+    if reason:
+        return False, reason
+    if ctype == "sqlite":
+        from connectors.sqlite_common import sqlite_file_path
+
+        try:
+            resolved = sqlite_file_path(
+                str(draft.get("database") or ""),
+                str(draft.get("connection_string") or ""),
+                str(draft.get("host") or ""),
+            )
+        except ValueError as exc:
+            return False, str(exc)
+        if not resolved:
+            return False, "File path or database name is required for SQLite/DuckDB."
+    return True, ""
+
+
 def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:
     ctype = draft.get("type") or ""
+    if ctype in {"sqlite", "duckdb"}:
+        return _path_connector_complete(draft)
     if draft.get("connection_string"):
         # Snowflake URLs are not fully supported yet — require structured fields.
         if ctype == "snowflake" and "snowflake" in str(draft.get("connection_string") or "").lower():

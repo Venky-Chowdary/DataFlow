@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.ai.copilot.connector_create import (
     build_connector_draft,
+    draft_is_complete,
     extract_url_credentials,
     wants_create_connector,
 )
@@ -51,6 +52,64 @@ def test_build_draft_from_fields():
     assert draft["port"] == 32253
     assert draft["username"] == "root"
     assert draft["name"] == "Railway MySQL"
+
+
+def test_sqlite_draft_is_a_file_path_not_a_host(tmp_path, monkeypatch):
+    root = tmp_path / "sqlite"
+    root.mkdir()
+    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
+    inside = root / "payments.db"
+    ok, err = draft_is_complete({"type": "sqlite", "database": str(inside)})
+    assert ok is True, err
+    assert err == ""
+
+    ok, err = draft_is_complete({"type": "sqlite"})
+    assert ok is False
+    assert "path" in err.lower() or "database" in err.lower()
+
+    ok, err = draft_is_complete({"type": "sqlite", "database": str(tmp_path / "outside.db")})
+    assert ok is False
+    assert "SQLITE_ROOT" in err
+
+    ok, err = draft_is_complete({"type": "duckdb", "database": str(root / "warehouse.duckdb")})
+    assert ok is True, err
+
+    ok, err = draft_is_complete({"type": "postgresql", "database": "app"})
+    assert ok is False
+    assert "host" in err.lower()
+
+
+def test_sqlite_probe_uses_the_same_path_allowlist(tmp_path, monkeypatch):
+    from connectors.sqlite import test_sqlite
+
+    root = tmp_path / "sqlite"
+    root.mkdir()
+    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
+    refused = test_sqlite(
+        host="",
+        port=0,
+        database=str(tmp_path / "outside.db"),
+        username="",
+        password="",
+        schema="",
+        connection_string="",
+        ssl=False,
+    )
+    assert refused.ok is False
+    assert "SQLITE_ROOT" in (refused.error or "")
+
+    opened = test_sqlite(
+        host="",
+        port=0,
+        database=str(root / "probe.db"),
+        username="",
+        password="",
+        schema="",
+        connection_string="",
+        ssl=False,
+    )
+    assert opened.ok is True, opened.error
+    assert (root / "probe.db").is_file()
 
 
 def test_build_draft_from_inline_prose():
