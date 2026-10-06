@@ -446,3 +446,93 @@ def test_interrupted_log_snapshot_keeps_the_open_dump_token(tmp_path, monkeypatc
         assert "phase=streaming" in str(calls["acks"][-1])
 
 
+def test_checkpoint_does_not_rewind_a_stored_cdc_cursor(tmp_path, monkeypatch):
+    """A throttled job checkpoint must not replace the cursor store.
+
+    The store holds the keyset tie-break. The checkpoint still has the scalar
+    cursor. After an idle poll the store is unchanged, and the read seeks
+    with the tie-break.
+    """
+    from services.keyset_pagination import encode_keyset_bookmark
+    from services.sync_cursor import get_watermark, set_watermark
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    stored = encode_keyset_bookmark(["2024-01-01", "2"])
+    cursor_key = "generic_sql:test:src→generic_sql:test:dst:stream"
+    set_watermark(cursor_key, stored)
+    seen: list[dict] = []
+
+    def _read(*_args, **kwargs):
+        seen.append(dict(kwargs))
+        return _batch(["id", "updated_at"], []), None
+
+    source = EndpointConfig(kind="database", format="generic_sql", database="test", table="src")
+    destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="dst")
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "updated_at", "target": "updated_at"},
+            ],
+            schema={"id": "integer", "updated_at": "string"},
+            stream_contracts=[{
+                "sync_mode": "cdc",
+                "primary_key": "id",
+                "cursor_field": "updated_at",
+                "snapshot_mode": "initial",
+            }],
+            job_id="cdc-rewind",
+            checkpoint={"watermark": "2024-01-01", "chunk_index": 2},
+        )
+    assert get_watermark(cursor_key) == stored
+    assert seen
+    assert seen[0].get("cursor_after") == stored
+    assert seen[0].get("cursor_primary_key") == "id"
+
+
+def test_empty_store_resumes_from_the_job_checkpoint(tmp_path, monkeypatch):
+    """The cursor file is gone. The job checkpoint still has the position."""
+    from services.checkpoint_service import Checkpoint
+    from services.sync_cursor import get_watermark
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    seen: list[dict] = []
+
+    def _read(*_args, **kwargs):
+        seen.append(dict(kwargs))
+        return _batch(["id"], []), None
+
+    source = EndpointConfig(kind="database", format="generic_sql", database="test", table="src")
+    destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="dst")
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "integer"},
+            stream_contracts=[{
+                "sync_mode": "cdc",
+                "primary_key": "id",
+                "cursor_field": "id",
+                "snapshot_mode": "initial",
+            }],
+            job_id="cdc-recover",
+            checkpoint=Checkpoint(job_id="cdc-recover", cursor_value="4"),
+        )
+    assert seen
+    assert seen[0].get("cursor_after") == "4"
+    assert get_watermark("generic_sql:test:src→generic_sql:test:dst:stream") == "4"
+
+

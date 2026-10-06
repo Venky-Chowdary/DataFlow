@@ -817,6 +817,50 @@ def max_cursor_value(
     return best
 
 
+def checkpoint_watermark(checkpoint: Any) -> str | None:
+    """Cursor saved on a job checkpoint, if that record has one.
+
+    CDC payloads use ``watermark``. The checkpoint record uses
+    ``cursor_value``. A nested ``cdc.watermark`` is the same position.
+    An empty string is a real cursor, not a missing one.
+    """
+    if checkpoint is None:
+        return None
+    data: Any = checkpoint
+    if not isinstance(data, dict):
+        if hasattr(data, "to_dict"):
+            try:
+                data = data.to_dict()
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            raw = getattr(checkpoint, "cursor_value", None)
+            if raw is None:
+                raw = getattr(checkpoint, "watermark", None)
+            return None if raw is None else str(raw)
+    wm = data.get("watermark")
+    if wm is None and isinstance(data.get("cdc"), dict):
+        wm = data["cdc"].get("watermark")
+    if wm is None:
+        wm = data.get("cursor_value")
+    if wm is None:
+        return None
+    return str(wm)
+
+
+def resume_watermark(stored: str | None, checkpoint: Any) -> str | None:
+    """Resume cursor. The cursor store wins when it has a value.
+
+    A job checkpoint is throttled and can be older than the store. Copying
+    it over the store rewinds the next poll and drops a keyset tie-break.
+    When the store is empty, the checkpoint is the only record that a
+    previous run already applied rows.
+    """
+    if stored is not None:
+        return str(stored)
+    return checkpoint_watermark(checkpoint)
+
+
 def advance_stored_cursor(
     current: str | None,
     candidate: str | None,

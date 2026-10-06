@@ -76,6 +76,7 @@ from services.sync_cursor import (
     map_source_to_target,
     resolve_selected_sync_contracts,
     resolve_sync_contract,
+    resume_watermark,
     set_watermark,
 )
 from services.value_serializer import cell_to_string
@@ -2430,6 +2431,11 @@ def _run_cdc_single_stream(
 
         persist_dest_keyset_on_signal(opened.resume)
 
+    # The reader and the snapshot plan must share this cursor. A checkpoint
+    # fills a missing store only. It must not rewind a cursor the store
+    # already advanced.
+    watermark = resume_watermark(watermark, checkpoint)
+
     from services.multi_stream_plan import reader_columns_for_stream
 
     headers = reader_columns_for_stream(
@@ -2760,21 +2766,14 @@ def _run_cdc_single_stream(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
-    # Resume from durable job checkpoint watermark when present.
+    # Chunk progress only. The cursor itself was resolved before the reader
+    # was opened, and a checkpoint must not replace it here.
     cp_dict: dict[str, Any] = {}
     if checkpoint is not None:
         if isinstance(checkpoint, dict):
             cp_dict = checkpoint
         elif hasattr(checkpoint, "to_dict"):
             cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
-    if cp_dict:
-        cp_wm = cp_dict.get("watermark")
-        if cp_wm is None and isinstance(cp_dict.get("cdc"), dict):
-            cp_wm = cp_dict["cdc"].get("watermark")
-        if cp_wm is not None:
-            state.running_cursor = str(cp_wm)
-            state.watermark = str(cp_wm)
-            watermark = str(cp_wm)
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
 

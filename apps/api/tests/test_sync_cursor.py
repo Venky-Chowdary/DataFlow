@@ -118,6 +118,23 @@ def test_stored_cursor_advances_onto_a_tie_break():
     ) > 0
 
 
+def test_resume_watermark_keeps_the_store_ahead_of_a_checkpoint():
+    from services.checkpoint_service import Checkpoint
+    from services.keyset_pagination import encode_keyset_bookmark
+    from services.sync_cursor import checkpoint_watermark, resume_watermark
+
+    stored = encode_keyset_bookmark(["2024-01-01", "2"])
+    assert resume_watermark(stored, {"watermark": "2024-01-01"}) == stored
+    assert resume_watermark(None, {"watermark": "4"}) == "4"
+    assert resume_watermark(None, {"cdc": {"watermark": "0/1A"}}) == "0/1A"
+    assert resume_watermark(None, Checkpoint(cursor_value="slot=s|phase=streaming|lsn=0/2")) == (
+        "slot=s|phase=streaming|lsn=0/2"
+    )
+    assert resume_watermark(None, None) is None
+    assert resume_watermark("", {"watermark": "4"}) == ""
+    assert checkpoint_watermark({"cursor_value": "9"}) == "9"
+
+
 def test_composite_tiebreak_compares_typed_not_lexically():
     from services.keyset_pagination import encode_keyset_bookmark
 

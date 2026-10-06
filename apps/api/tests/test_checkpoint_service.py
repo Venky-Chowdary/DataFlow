@@ -102,3 +102,15 @@ def test_has_failed_saves_and_require_save_fail_closed():
         service.require_save(cp)
     assert service.failed_saves == 2
     assert CHECKPOINT_PERSISTENCE_FAILED.startswith("Checkpoint persistence failed")
+
+
+def test_cdc_watermark_survives_checkpoint_load():
+    """A CDC job stores ``watermark``. Resume must not drop that cursor."""
+    loaded = Checkpoint.from_dict(
+        {"job_id": "job-cdc", "watermark": "slot=s|phase=streaming|lsn=0/1A", "chunk_index": 3}
+    )
+    assert loaded.cursor_value == "slot=s|phase=streaming|lsn=0/1A"
+    assert loaded.chunk_index == 3
+    # An explicit cursor_value stays the record. The watermark key does not replace it.
+    kept = Checkpoint.from_dict({"cursor_value": "10", "watermark": "4"})
+    assert kept.cursor_value == "10"

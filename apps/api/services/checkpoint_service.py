@@ -182,7 +182,12 @@ class Checkpoint:
     def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
         if not data:
             return cls()
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        # CDC writes ``watermark``. That key is not a column on this record,
+        # so a resume used to drop the log position and snapshot again.
+        if fields.get("cursor_value") is None and data.get("watermark") is not None:
+            fields["cursor_value"] = data.get("watermark")
+        return cls(**fields)
 
 
 class CheckpointService:
