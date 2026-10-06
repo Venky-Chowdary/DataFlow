@@ -405,4 +405,7 @@ def run_non_cdc_multi_stream_sequential(
                 "dest_ddl"
             ):
                 ddl_log.append(f"{decision['status'].upper()} FK: {decision['dest_ddl']}")
+    from services.reconcile_coverage import annotate_last_stream_checksum_note
+
+    annotate_last_stream_checksum_note(last_summary)
     return total_rows, ddl_log, last_summary, headers

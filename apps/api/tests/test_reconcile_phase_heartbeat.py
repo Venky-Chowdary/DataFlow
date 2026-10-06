@@ -12,6 +12,7 @@ for p in (str(_API_ROOT), str(_SRC)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from src.transfer.reconcile_heartbeat import reconcile_heartbeat_scope  # noqa: E402
 from transfer.engine import _reconcile_phase_heartbeat  # noqa: E402
 
 
@@ -64,3 +65,30 @@ def test_write_pass_heartbeat_does_not_claim_migration_proven():
     assert "write-pass" in first.lower()
     assert "not migration_proven" in first.lower()
     assert any("write-pass" in (c.get("message") or "").lower() for c in mongo.calls[1:])
+
+
+def test_multi_stream_heartbeat_does_not_call_the_job_total_checksum_proof():
+    mongo = _FakeMongo()
+    scope = reconcile_heartbeat_scope({
+        "checksum_mode": "source_reread",
+        "multi_stream": True,
+        "table": "orders",
+        "streams": [{"name": "customers"}, {"name": "orders"}],
+    })
+    with _reconcile_phase_heartbeat(
+        mongo,
+        "job-multi",
+        processed=4,
+        total=4,
+        interval_s=0.05,
+        **scope,
+    ):
+        time.sleep(0.12)
+
+    first = mongo.calls[0]["message"]
+    assert "4 rows written across 2 tables" in first
+    assert "last stream (orders)" in first
+    assert "not this total" in first
+    assert "counts + checksum proof" not in first
+    assert any("Reconciling data" in (c.get("message") or "") for c in mongo.calls[1:])
+    assert any("not the whole job" in (c.get("message") or "") for c in mongo.calls[1:])

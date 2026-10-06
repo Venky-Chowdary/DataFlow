@@ -16,7 +16,7 @@ import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8Ke
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
-import { formatStreamNames, presentStoredExplanation, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
+import { formatStreamNames, presentStoredEventLog, presentStoredExplanation, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../jobs/RunCarryNotes";
@@ -160,10 +160,13 @@ export function TransferResultDashboard({
     : `${sourceLabel} → ${destLabel}`;
 
   const eventLog = useMemo(() => {
-    if (result.event_log?.length) return result.event_log;
-    if (result.job_id) return readJobEventLog(result.job_id);
-    return [];
-  }, [result.event_log, result.job_id]);
+    const raw = result.event_log?.length
+      ? result.event_log
+      : result.job_id
+        ? readJobEventLog(result.job_id)
+        : [];
+    return presentStoredEventLog(raw, result);
+  }, [result]);
 
   useEffect(() => {
     if (!result.job_id) return;

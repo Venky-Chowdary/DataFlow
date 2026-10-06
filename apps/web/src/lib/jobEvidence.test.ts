@@ -7,6 +7,8 @@ import {
   foreignKeyProblems,
   formatJobRoute,
   identityAlignmentSentence,
+  presentChecksumNote,
+  presentStoredEventLog,
   presentStoredExplanation,
   isRestoredEndpointTitle,
   readCoercedNullRows,
@@ -204,6 +206,54 @@ describe("presentStoredExplanation", () => {
       destination_collection: "orders",
     });
     assert.equal(text, stored);
+  });
+});
+
+describe("presentStoredEventLog", () => {
+  const job = {
+    destination_summary: {
+      multi_stream: true,
+      table: "orders",
+      streams: [{ name: "customers" }, { name: "orders" }],
+    },
+  };
+  const stored = [
+    "15:19:52 — Analyzing source table…",
+    "15:19:52 — Streaming 2 rows in batches…",
+    "15:19:53 — Writing batch 1/1 (2 rows)…",
+    "15:19:53 — All rows written — reconciling destination (4 rows: counts + checksum proof)…",
+    "15:19:53 — Checksum matches orders (2 rows). Job destination population is 4 across 2 streams (each COUNT(*)). This digest is not the whole job.",
+  ];
+
+  it("names the last stream on a stored checksum sentence and does not invent the missing table", () => {
+    const lines = presentStoredEventLog(stored, job);
+    assert.match(lines[0], /Analyzing the restored endpoint/);
+    assert.match(lines[1], /restored endpoint, then each of 2 tables/);
+    assert.match(lines[2], /one table's batch, not the job total/);
+    assert.doesNotMatch(lines[2], /orders/);
+    assert.match(lines[3], /4 rows written across 2 tables/);
+    assert.match(lines[3], /last stream \(orders\), not this total/);
+    assert.doesNotMatch(lines[3], /counts \+ checksum proof/);
+    assert.match(lines[4], /not the whole job/);
+  });
+
+  it("leaves a second pass and a single-table log unchanged", () => {
+    const once = presentStoredEventLog(stored, job);
+    assert.deepEqual(presentStoredEventLog(once, job), once);
+    assert.deepEqual(presentStoredEventLog(stored, { source_name: "orders" }), stored);
+  });
+
+  it("qualifies a last-stream re-read note that claims migration_proven", () => {
+    const note = presentChecksumNote(
+      "Independent source re-read after the write pass (scan pagination) — dest read-back can earn full_checksum / migration_proven.",
+      job,
+    );
+    assert.match(note, /does not earn migration_proven for the job/);
+    assert.equal(presentChecksumNote(note, job), note);
+    assert.doesNotMatch(
+      presentChecksumNote("write-pass fingerprints only", job),
+      /migration_proven for the job/,
+    );
   });
 });
 

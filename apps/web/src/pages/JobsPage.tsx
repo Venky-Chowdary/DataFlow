@@ -34,7 +34,7 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentChecksumNote, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -612,7 +612,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
   const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
-  const eventLog = (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [];
+  const eventLog = presentStoredEventLog(
+    (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [],
+    liveJob,
+  );
   const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
   const streamHealth = readJobStreams(liveJob);
@@ -661,6 +664,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
+  const checksumNote = presentChecksumNote(destSummary.checksum_note, liveJob);
   const loadHistory =
     liveJob?.load_history_report
     || (destSummary.load_history_report && typeof destSummary.load_history_report === "object"
@@ -1731,6 +1735,12 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               <div>
                 <dt>{multiStream ? "Last stream writer checksum" : "Writer checksum"}</dt>
                 <dd className="df2-mono">{String(destSummary.checksum)}</dd>
+              </div>
+            )}
+            {checksumNote && (
+              <div>
+                <dt>{multiStream ? "Last stream checksum note" : "Checksum note"}</dt>
+                <dd>{checksumNote}</dd>
               </div>
             )}
           </dl>

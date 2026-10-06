@@ -418,3 +418,31 @@ def append_row_count_report(
         assurance_level="row_count",
         **common,
     )
+
+
+_LAST_STREAM_NOTE_SUFFIX = (
+    " This note is the last stream. It does not earn migration_proven for the job."
+)
+
+
+def annotate_last_stream_checksum_note(dest_summary: dict[str, Any] | None) -> None:
+    """Keep a last-stream re-read note from reading as job proof.
+
+    The stream writer stamps ``checksum_note`` on the table it just read.
+    On a multi-table run that object is the restored endpoint. A sentence
+    that says the re-read can earn ``migration_proven`` is true for that
+    table and false for the job. Append the job limit once.
+    """
+    if not isinstance(dest_summary, dict) or dest_summary.get("multi_stream") is not True:
+        return
+    streams = dest_summary.get("streams")
+    if not isinstance(streams, list) or len(streams) < 2:
+        return
+    note = str(dest_summary.get("checksum_note") or "").strip()
+    if not note:
+        return
+    if "full_checksum" not in note and "migration_proven" not in note:
+        return
+    if "does not earn migration_proven for the job" in note:
+        return
+    dest_summary["checksum_note"] = note + _LAST_STREAM_NOTE_SUFFIX

@@ -511,3 +511,79 @@ export function presentStoredExplanation(
   }
   return next;
 }
+
+const EVENT_STAMP = /^(\d{1,2}:\d{2}:\d{2}(?:\s*[AP]M)?)\s*[—\-–]\s*(.*)$/i;
+
+/**
+ * Stored event lines were written before the multi-table scope was named.
+ * The reconcile sentence used the job row total as if the checksum covered it.
+ * New runs already say the digest is the last stream. This rewrites only
+ * those stored sentences. It does not invent a table a line never named.
+ */
+export function presentStoredEventLog(
+  lines: readonly string[] | null | undefined,
+  job: JobEvidenceCarrier | null | undefined,
+): string[] {
+  const raw = Array.isArray(lines) ? lines.map((line) => String(line)) : [];
+  const names = readJobStreamNames(job);
+  if (names.length < 2 || raw.length === 0) return raw;
+  const summary = summaryOf(job);
+  const table = typeof summary?.table === "string" ? summary.table.trim() : "";
+  const last = (table && names.includes(table) ? table : "") || names[names.length - 1];
+  const tables = names.length;
+  return raw.map((line) => rewriteStoredEventLine(line, last, tables));
+}
+
+function rewriteStoredEventLine(line: string, last: string, tables: number): string {
+  const stamped = line.match(EVENT_STAMP);
+  const body = stamped ? stamped[2] : line;
+  const next = rewriteStoredEventBody(body, last, tables);
+  if (next === body) return line;
+  return stamped ? `${stamped[1]} — ${next}` : next;
+}
+
+function rewriteStoredEventBody(body: string, last: string, tables: number): string {
+  const checksum = body.match(
+    /^All rows written — reconciling destination \(([\d,]+) rows: counts \+ checksum proof\)…$/,
+  );
+  if (checksum) {
+    return (
+      `All rows written — reconciling destination (${checksum[1]} rows written across ${tables} tables). `
+      + `Checksum proof is the last stream (${last}), not this total…`
+    );
+  }
+  const pulse = body.match(
+    /^Reconciling data \((\d+)s\) — verifying row counts and checksums for ([\d,]+) rows…$/,
+  );
+  if (pulse) {
+    return (
+      `Reconciling data (${pulse[1]}s) — ${pulse[2]} rows written across the job. `
+      + `Checksum is the last stream (${last}), not the whole job…`
+    );
+  }
+  const streaming = body.match(/^Streaming (.+) rows in batches…$/);
+  if (streaming) {
+    return `Streaming ${streaming[1]} rows on the restored endpoint, then each of ${tables} tables…`;
+  }
+  if (body === "Analyzing source table…") {
+    return "Analyzing the restored endpoint…";
+  }
+  const batch = body.match(/^Writing batch (\d+\/\d+) \(([\d,]+) rows\)…$/);
+  if (batch) {
+    return `Writing batch ${batch[1]} (${batch[2]} rows) — one table's batch, not the job total…`;
+  }
+  return body;
+}
+
+/** Last-stream re-read notes must not read as job proof. */
+export function presentChecksumNote(
+  note: unknown,
+  job: JobEvidenceCarrier | null | undefined,
+): string {
+  const text = typeof note === "string" ? note.trim() : "";
+  if (!text) return "";
+  if (readJobStreamNames(job).length < 2) return text;
+  if (/does not earn migration_proven for the job/i.test(text)) return text;
+  if (!/full_checksum|migration_proven/i.test(text)) return text;
+  return `${text} This note is the last stream. It does not earn migration_proven for the job.`;
+}

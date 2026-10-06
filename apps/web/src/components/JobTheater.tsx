@@ -36,7 +36,7 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
-import { presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
@@ -497,6 +497,10 @@ export function JobTheaterView({
     () => readJobLineage(job.lineage_events, { checksumScope: gate8View?.checksum_scope }),
     [job.lineage_events, gate8View?.checksum_scope],
   );
+  const presentedLog = useMemo(() => {
+    const texts = presentStoredEventLog(log.map((entry) => entry.text), job);
+    return texts.map((text, i) => ({ id: log[i]?.id ?? i + 1, text }));
+  }, [log, job]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -1926,7 +1930,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
         <LiveEventLog
-          lines={log}
+          lines={presentedLog}
           live={isRunning}
           variant="theater"
           title="Live event log"
