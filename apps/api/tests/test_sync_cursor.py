@@ -191,6 +191,21 @@ def test_resume_watermark_stays_on_the_stream_it_names():
     ) is None
 
 
+def test_isolate_stream_checkpoint_copies_only_the_named_table():
+    from services.checkpoint_service import Checkpoint
+    from services.sync_cursor import isolate_stream_checkpoint
+
+    job = Checkpoint(job_id="j", offset=50, cursor_value="50", cdc_stream="orders")
+    orders = isolate_stream_checkpoint(job, "orders")
+    assert orders is not job
+    assert orders.offset == 50
+    assert orders.cursor_value == "50"
+    assert isolate_stream_checkpoint(job, "users") is None
+    unnamed = Checkpoint(job_id="j", offset=50, cursor_value="50")
+    assert isolate_stream_checkpoint(unnamed, "orders") is None
+    assert isolate_stream_checkpoint(None, "orders") is None
+
+
 def test_composite_tiebreak_compares_typed_not_lexically():
     from services.keyset_pagination import encode_keyset_bookmark
 

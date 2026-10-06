@@ -97,10 +97,12 @@ def run_non_cdc_multi_stream_sequential(
 
     Mirrors CDC ``_run_cdc_multi_stream_sequential``: remap source/dest per stream,
     prefer per-stream mappings, aggregate ``streams[]`` health. Overwrite DROP is
-    per remapped destination (not once on the primary). Delivery remains
-    **at-least-once** on resume (shared job checkpoint).
+    per remapped destination (not once on the primary). A job checkpoint is
+    applied only to the stream it names. Any other table reads from the start
+    (at-least-once upsert of rows already written).
     """
     from services.sync_cursor import (
+        isolate_stream_checkpoint,
         resolve_effective_sync_mode,
         resolve_selected_sync_contracts,
         should_drop_destination_for_sync,
@@ -229,6 +231,10 @@ def run_non_cdc_multi_stream_sequential(
             if remaining_limit == 0 and limit > 0:
                 break
             stream_name = (contract.name or "").strip() or "stream"
+            # Copy this table's resume position before the shared ledger is
+            # cleared. The clear stops the next table inheriting an offset.
+            # The copy is what lets the table that owns the checkpoint seek.
+            stream_checkpoint = isolate_stream_checkpoint(checkpoint, stream_name)
             begin_table_population(checkpoint)
             if getattr(source, "format", "") == "mongodb" or original_collection:
                 source.collection = stream_name
@@ -299,7 +305,7 @@ def run_non_cdc_multi_stream_sequential(
                         sync_mode=sync_mode,
                         stream_contracts=single_contracts,
                         job_id=job_id,
-                        checkpoint=checkpoint,
+                        checkpoint=stream_checkpoint,
                         checkpoint_service=checkpoint_service,
                         retry_budget=retry_budget,
                         backfill_new_fields=backfill_new_fields,

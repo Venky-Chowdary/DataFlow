@@ -1016,6 +1016,33 @@ def resume_watermark(
     return wm
 
 
+def isolate_stream_checkpoint(checkpoint: Any, stream_name: str) -> Any:
+    """Resume record for one table in a multi-table load.
+
+    The job checkpoint is one position. Passing that same object into the
+    next table seeks it with the previous table's offset or keyset, and the
+    write then stores the new position back onto the shared object. A
+    checkpoint is applied only when it names this stream, and only as a
+    copy. An unnamed checkpoint is not applied: each table reads from the
+    start instead of skipping rows.
+    """
+    if checkpoint is None:
+        return None
+    name = str(stream_name or "").strip()
+    if not name:
+        return None
+    owner = checkpoint_stream_name(checkpoint)
+    if not owner or not _same_table(owner, name):
+        return None
+    from services.checkpoint_service import Checkpoint
+
+    if isinstance(checkpoint, Checkpoint):
+        return Checkpoint.from_dict(checkpoint.to_dict())
+    if isinstance(checkpoint, dict):
+        return Checkpoint.from_dict(checkpoint)
+    return None
+
+
 def advance_stored_cursor(
     current: str | None,
     candidate: str | None,

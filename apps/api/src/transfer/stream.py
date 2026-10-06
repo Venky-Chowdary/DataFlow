@@ -3198,6 +3198,7 @@ def _stream_database_transfer_impl(
         checkpoint.qdrant_offset = qdrant_offset
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
+        checkpoint.cdc_stream = table or checkpoint.cdc_stream or ""
         if dest_summary.get(PRECOUNT_KEY) is not None:
             checkpoint.target_rows_before = int(dest_summary[PRECOUNT_KEY])
         checkpoint.chunk_total = chunks
