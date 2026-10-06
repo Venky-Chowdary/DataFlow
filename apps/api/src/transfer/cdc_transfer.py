@@ -1771,6 +1771,10 @@ def _run_cdc_shared_multi_table(
     # barrier makes the whole transaction advance together or not at all.
     pending_table_watermarks: dict[str, str] = {}
     pending_eos_bundle: list[Any] = []
+    # Tables whose latest stored token is still an open dump. The streaming
+    # handoff moves them to that log position. Leaving phase=snapshot would
+    # make a later per-table run reopen the dump.
+    open_snapshot_tables: set[str] = set()
     # Cursor this run has made durable. A phase=snapshot token is an open
     # dump (table + last primary key), not "snapshot finished".
     published_shared = shared_wm
@@ -1936,11 +1940,20 @@ def _run_cdc_shared_multi_table(
                 # commit keeps its previous position.
                 if change.total_changes:
                     pending_table_watermarks[stream] = token_s
+                    if snapshot_dump_open(token_s):
+                        open_snapshot_tables.add(stream)
                 if should_ack_shared_batch(change) and not skip_ack:
                     # Barrier reached: the whole transaction is applied, so the
                     # per-table cursors and the shared log position may both move.
                     # A position-only barrier (heartbeat, or a commit that touched
                     # no captured table) advances the log but no table cursor.
+                    # A streaming handoff closes every table still marked as an
+                    # open dump. Their snapshot token is not a finished cursor.
+                    if not snapshot_dump_open(token_s):
+                        for name in open_snapshot_tables:
+                            if name in stream_cfg:
+                                pending_table_watermarks[name] = token_s
+                        open_snapshot_tables.clear()
                     _flush_table_watermarks()
                     set_watermark(
                         shared_key,

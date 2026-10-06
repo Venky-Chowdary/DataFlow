@@ -470,3 +470,133 @@ def test_sqlserver_shared_snapshot_crash_keeps_the_open_dump(tmp_path, monkeypat
         assert "streaming" in str(summary["cdc"]["watermark"])
         assert calls["acks"]
         assert "streaming" in str(calls["acks"][-1])
+
+
+def test_finished_shared_snapshot_closes_per_table_cursors(tmp_path, monkeypatch) -> None:
+    """The streaming handoff closes every table that was still phase=snapshot.
+
+    A later run of one table must stream from that log position. Reopening
+    the dump would read only the keyset tail and could miss changes that
+    already happened under the shared cursor.
+    """
+    import json
+
+    from src.transfer.cdc_transfer import (
+        _run_cdc_shared_multi_table,
+        run_cdc_database_transfer,
+    )
+    from src.transfer.models import EndpointConfig
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+
+    calls = {"snapshot_calls": 0}
+    mode = {"single": False}
+
+    class FakeCdc:
+        def __init__(self, *args, **kwargs):
+            self.resume = kwargs.get("resume_token")
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            calls["snapshot_calls"] += 1
+            if mode["single"]:
+                raise AssertionError(
+                    f"per-table run reopened a finished snapshot (resume={self.resume!r})"
+                )
+            yield ChangeBatch(
+                inserts=[{"id": "1"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1",
+                table="orders",
+            )
+            yield ChangeBatch(
+                inserts=[{"id": "9"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1|table=users|last_pk=9",
+                table="users",
+            )
+            yield ChangeBatch(
+                resume_token="slot=s|phase=streaming|lsn=0/1",
+                ack_barrier=True,
+            )
+
+        def poll(self):
+            if False:
+                yield ChangeBatch()
+
+        def ack(self, token=None):
+            return None
+
+        def close(self):
+            pass
+
+    source = EndpointConfig(
+        kind="database", format="postgresql", database="app", table="orders", schema="public"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "dst.db"), table="orders"
+    )
+    selected = [
+        SyncContract(name="orders", primary_key="id", sync_mode="cdc"),
+        SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+    ]
+
+    def fake_apply(*args, **kwargs):
+        change = args[4]
+        return (len(change.inserts) + len(change.updates), "ck", {}, len(change.deletes))
+
+    with patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc), \
+         patch("src.transfer.cdc_transfer._apply_change_batch", side_effect=fake_apply), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}):
+        _run_cdc_shared_multi_table(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "string"},
+            None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": "orders", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+                {"name": "users", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+            ],
+            selected=selected,
+            job_id="job-close",
+            checkpoint=None,
+            checkpoint_service=None,
+            backfill_new_fields=False,
+            validation_mode="strict",
+            limit=0,
+        )
+        data = json.loads((tmp_path / "cursors.json").read_text(encoding="utf-8"))
+        entries = [
+            (str(entry.get("key") or ""), str(entry.get("watermark") or ""))
+            for entry in data.get("cursors") or []
+        ]
+        assert entries
+        assert all("phase=streaming" in token for _key, token in entries)
+        assert any(":orders" in key and not key.startswith("cdc-shared:") for key, _token in entries)
+        assert any(":users" in key and not key.startswith("cdc-shared:") for key, _token in entries)
+        assert any(key.startswith("cdc-shared:") for key, _token in entries)
+
+        finished = calls["snapshot_calls"]
+        mode["single"] = True
+        source.table = "orders"
+        destination.table = "orders"
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "string"},
+            stream_contracts=[{
+                "name": "orders",
+                "selected": True,
+                "sync_mode": "cdc",
+                "primary_key": "id",
+                "cursor_field": "id",
+                "snapshot_mode": "initial",
+            }],
+            job_id="job-orders-only",
+        )
+        assert calls["snapshot_calls"] == finished
