@@ -652,3 +652,38 @@ def test_unnamed_checkpoint_is_not_applied_to_every_table(tmp_path, monkeypatch)
     assert all(row["cursor_after"] is None for row in seen)
 
 
+def test_single_table_does_not_seek_a_shared_route_token(tmp_path, monkeypatch):
+    """A shared streaming handoff names no table. One table must snapshot.
+
+    Seeking that LSN would skip the dump. The rows already written are
+    upserted again (at-least-once).
+    """
+    seen, _read = _cdc_reads(monkeypatch, tmp_path)
+    source = EndpointConfig(kind="database", format="generic_sql", database="test", table="orders")
+    destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="orders")
+    token = "slot=s|phase=streaming|lsn=0/1A"
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "integer"},
+            stream_contracts=[{
+                "name": "orders",
+                "sync_mode": "cdc",
+                "primary_key": "id",
+                "cursor_field": "id",
+                "snapshot_mode": "initial",
+            }],
+            job_id="cdc-one-route",
+            checkpoint={"watermark": token, "cdc_shared_reader": True},
+        )
+    assert seen
+    assert all(row["cursor_after"] is None for row in seen)
+    assert all(token not in str(row["cursor_after"]) for row in seen)
+
+

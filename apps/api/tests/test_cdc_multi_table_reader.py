@@ -733,3 +733,79 @@ def test_shared_reader_does_not_adopt_a_table_query_cursor(tmp_path, monkeypatch
         )
     assert captured["resume"] in (None, "")
     assert captured["snapshot"] == 1
+
+
+def test_shared_reader_does_not_adopt_one_tables_snapshot_token(tmp_path, monkeypatch) -> None:
+    """Orders' open dump is not the shared log position.
+
+    Resuming the route at ``table=orders|last_pk=1`` would skip ``users``
+    or seek the wrong keyset. The shared reader snapshots from the start.
+    """
+    from src.transfer.cdc_transfer import _run_cdc_shared_multi_table
+    from src.transfer.models import EndpointConfig
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    token = "slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1"
+    captured: dict[str, object] = {"snapshot": 0}
+
+    class FakeCdc:
+        def __init__(self, *args, **kwargs):
+            captured["resume"] = kwargs.get("resume_token")
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            captured["snapshot"] = int(captured["snapshot"]) + 1
+            if captured["resume"] not in (None, ""):
+                raise AssertionError(
+                    f"shared reader resumed a per-table dump ({captured['resume']!r})"
+                )
+            return iter(())
+
+        def poll(self):
+            if False:
+                yield ChangeBatch()
+
+        def ack(self, token=None):
+            return None
+
+        def close(self):
+            pass
+
+    source = EndpointConfig(
+        kind="database", format="postgresql", database="app", table="orders", schema="public"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "dst.db"), table="orders"
+    )
+    selected = [
+        SyncContract(name="orders", primary_key="id", sync_mode="cdc"),
+        SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+    ]
+    with patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc), \
+         patch("src.transfer.cdc_transfer._apply_change_batch", return_value=(0, "c", {})), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}):
+        _run_cdc_shared_multi_table(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "string"},
+            None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": "orders", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+                {"name": "users", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+            ],
+            selected=selected,
+            job_id="job-shared-not-orders",
+            checkpoint={"watermark": token, "stream": "orders"},
+            checkpoint_service=None,
+            backfill_new_fields=False,
+            validation_mode="strict",
+            limit=0,
+        )
+    assert captured["resume"] in (None, "")
+    assert captured["snapshot"] == 1

@@ -970,31 +970,48 @@ def resume_watermark(
     it to every stream. Pass ``stream`` and ``allow_unnamed=False`` so an
     unnamed scalar, or a token that names another table, is left behind
     and that stream snapshots. A single stream may still adopt an unnamed
-    checkpoint (``allow_unnamed=True``). The shared log reader adopts a
-    route token onto its one key (``shared=True``) and leaves a per-table
-    query cursor alone.
+    checkpoint (``allow_unnamed=True``).
+
+    The shared log reader (``shared=True``) adopts a route token onto its
+    one key. A token that names one table is that table's keyset, not the
+    route position, unless the checkpoint is marked ``cdc_shared_reader``.
+    A route streaming token names no table. A single table must not seek
+    it: the next run snapshots (at-least-once upsert) instead of skipping
+    the dump.
     """
     if stored is not None:
         return str(stored)
     wm = checkpoint_watermark(checkpoint)
     if wm is None:
         return None
-    if shared:
-        if _checkpoint_is_shared(checkpoint) or _looks_like_log_resume(wm):
-            return wm
-        return None
     named = checkpoint_stream_name(checkpoint)
     token_table = cursor_owner_table(wm)
     if named and token_table and not _same_table(named, token_table):
         return None
     owner = named or token_table
+    route = _checkpoint_is_shared(checkpoint)
+    if shared:
+        if route:
+            return wm
+        # A log token with no table and no stream can be a legacy route
+        # cursor. One that names a table belongs to that table.
+        if owner:
+            return None
+        if _looks_like_log_resume(wm):
+            return wm
+        return None
     if stream and str(stream).strip():
         if owner and _same_table(owner, stream):
             return wm
         if owner:
             return None
+        # Shared handoff: phase=streaming, no table. Not this table's cursor.
+        if route:
+            return None
         if allow_unnamed:
             return wm
+        return None
+    if route and not owner:
         return None
     return wm
 

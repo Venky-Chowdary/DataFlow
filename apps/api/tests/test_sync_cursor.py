@@ -152,6 +152,37 @@ def test_resume_watermark_stays_on_the_stream_it_names():
     route = "slot=s|phase=streaming|lsn=0/1A"
     assert resume_watermark(None, {"watermark": route, "cdc_shared_reader": True}, shared=True) == route
     assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, shared=True) is None
+    # Orders' open dump is not the shared route cursor.
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "stream": "orders"},
+        shared=True,
+    ) is None
+    # The same open dump still resumes when the shared reader published it.
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        shared=True,
+    ) == orders
+    # A route streaming token must not become one table's keyset.
+    assert resume_watermark(
+        None,
+        {"watermark": route, "cdc_shared_reader": True},
+        stream="orders",
+        allow_unnamed=True,
+    ) is None
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        stream="orders",
+        allow_unnamed=True,
+    ) == orders
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        stream="users",
+        allow_unnamed=True,
+    ) is None
     assert resume_watermark(
         None,
         {"watermark": orders, "stream": "users"},

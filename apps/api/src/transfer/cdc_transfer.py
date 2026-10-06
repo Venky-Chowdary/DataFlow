@@ -1562,7 +1562,7 @@ def _run_cdc_shared_multi_table(
 
     # One route cursor. The shared store wins. An empty store may resume
     # from the job checkpoint when that record is the shared log position.
-    # A scalar that names one table is not this route's cursor.
+    # A token that names one table is that table's keyset, not this route.
     shared_wm = resume_watermark(shared_wm, checkpoint, shared=True)
 
     cdc: Any
