@@ -628,3 +628,62 @@ def test_one_stream_does_not_emit_the_replay_gate():
     )
     assert all(g["id"] != "g23_stream_procedures" for g in gates)
 
+
+def test_validate_blocks_cdc_destination_call_on_one_stream():
+    """Validate and Execute share the refusal. One stream is not a replay, but CDC cannot CALL."""
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "orders", "selected": True, "primary_key": "id"}],
+        destination_endpoint={
+            "format": "postgresql",
+            "dest_write_mode": "procedure",
+            "dest_procedure_call": "CALL public.land(:id)",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert gate["details"]["reason"] == "dest_procedure_refuses_history_sync"
+    assert "CALL" in gate["message"]
+
+
+def test_validate_blocks_cdc_call_named_on_the_stream_contract():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "primary_key": "id",
+                "dest_write_mode": "procedure",
+                "dest_procedure_call": "CALL public.land(:id)",
+            }
+        ],
+        destination_endpoint={"format": "postgresql"},
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert "CALL" in gate["message"]
+
+
+def test_validate_allows_cdc_table_hooks_on_one_stream():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "orders", "selected": True, "primary_key": "id"}],
+        destination_endpoint={
+            "format": "postgresql",
+            "dest_write_mode": "table",
+            "dest_procedure_before": "CALL public.prep()",
+            "dest_procedure_after": "CALL public.finish()",
+        },
+    )
+    assert all(g["id"] != "g23_stream_procedures" for g in gates)
+

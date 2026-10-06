@@ -8,6 +8,8 @@ once around the loop rather than once per batch.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .models import EndpointConfig
@@ -159,3 +161,124 @@ def append_procedure_warnings(ddl_log: list[str], incoming: dict) -> None:
         return
     for line in incoming.get("warnings") or []:
         ddl_log.append(str(line))
+
+
+class CdcDestinationSessionError(ValueError):
+    """CDC refused a destination CALL/INSERT, or a session hook failed.
+
+    This is not a shared-reader outage. The multi-table fallback must not
+    treat it as "reader unavailable" and start a second apply.
+    """
+
+
+def refuse_cdc_destination_row_apply(
+    destination: Any,
+    sync_mode: str,
+    contracts: list[Any] | None = None,
+) -> None:
+    """Fail closed before a CDC reader opens.
+
+    A destination CALL or INSERT is one statement per row, not a table
+    identity. Writing the change log with the table upsert would drop the
+    statement and still advance the watermark. Hooks are parsed here so a
+    file sink or a bad CALL fails before a slot or binlog reader starts.
+    A statement named on one stream's contract is the same refusal — it
+    must not be ignored while the table upsert runs.
+    """
+    _refuse_one_cdc_destination(destination, sync_mode)
+    if not contracts:
+        return
+    fmt = ""
+    if hasattr(destination, "format"):
+        fmt = str(getattr(destination, "format", "") or "")
+    elif isinstance(destination, dict):
+        fmt = str(destination.get("format") or destination.get("type") or "")
+    from services.multi_stream_plan import patches_for_stream
+
+    for raw in contracts:
+        _source_patch, dest_patch = patches_for_stream(raw if isinstance(raw, dict) else None)
+        if not dest_patch:
+            continue
+        extra: dict[str, Any] = {}
+        live = getattr(destination, "extra", None)
+        if isinstance(live, dict):
+            extra.update(live)
+        extra.update(dest_patch)
+        _refuse_one_cdc_destination({"format": fmt, "type": fmt, "extra": extra}, sync_mode)
+
+
+def _refuse_one_cdc_destination(destination: Any, sync_mode: str) -> None:
+    from services.procedure_destination import (
+        MODE_HOOKS,
+        ProcedureDestinationError,
+        assert_dest_procedure_sync_allowed,
+        dest_write_mode_of,
+        plan_dest_procedure,
+    )
+
+    try:
+        assert_dest_procedure_sync_allowed(sync_mode or "cdc", destination)
+        if dest_write_mode_of(destination) == MODE_HOOKS:
+            plan_dest_procedure(destination)
+    except ProcedureDestinationError as exc:
+        raise CdcDestinationSessionError(str(exc)) from exc
+
+
+@contextmanager
+def cdc_destination_hooks(destination: Any, ddl_log: list[str]) -> Iterator[None]:
+    """Run before/after once around CDC apply. Not once per change batch.
+
+    Row-apply was already refused. A before-hook failure does not run the
+    after hook. An after-hook failure after a successful apply is the job
+    error; after a failed apply it is logged and the apply error stands.
+    """
+    from services.procedure_destination import ProcedureDestinationError, plan_dest_procedure
+
+    try:
+        plan = plan_dest_procedure(destination)
+    except ProcedureDestinationError as exc:
+        raise CdcDestinationSessionError(str(exc)) from exc
+    run_after = False
+    write_ok = False
+    try:
+        try:
+            run_after = run_session_before(destination, plan, ddl_log)
+        except Exception as exc:
+            raise CdcDestinationSessionError(str(exc)) from exc
+        yield
+        write_ok = True
+    finally:
+        if run_after:
+            try:
+                run_session_after(destination, plan, ddl_log, write_ok=write_ok)
+            except Exception as exc:
+                if write_ok:
+                    raise CdcDestinationSessionError(str(exc)) from exc
+
+
+@contextmanager
+def hide_session_hooks(destination: Any) -> Iterator[None]:
+    """Clear before/after on the live extra so an inner stream cannot replay them.
+
+    The session plan already captured the statements. A shared TRUNCATE in
+    the before hook must not run again on the second table.
+    """
+    extra = getattr(destination, "extra", None)
+    if not isinstance(extra, dict):
+        yield
+        return
+    saved_before = extra.get("dest_procedure_before")
+    saved_after = extra.get("dest_procedure_after")
+    extra["dest_procedure_before"] = ""
+    extra["dest_procedure_after"] = ""
+    try:
+        yield
+    finally:
+        if saved_before:
+            extra["dest_procedure_before"] = saved_before
+        else:
+            extra.pop("dest_procedure_before", None)
+        if saved_after:
+            extra["dest_procedure_after"] = saved_after
+        else:
+            extra.pop("dest_procedure_after", None)

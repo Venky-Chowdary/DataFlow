@@ -124,7 +124,7 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     id: "g23_stream_procedures",
     label: "Stream procedures",
     icon: "gate",
-    rule: "Each selected table has its own read and write. One CALL is not replayed onto every table.",
+    rule: "Each selected table has its own read and write. One CALL is not replayed onto every table. CDC, SCD2, and mirror refuse a destination CALL or INSERT; before/after hooks on a table write stay allowed.",
   },
   {
     id: "g22_dest_referential_integrity",

@@ -371,6 +371,59 @@ def _sync_callable_refusal(sync_mode: str, *, kind: str) -> str:
     )
 
 
+def _cdc_row_apply_gate(
+    sync_mode: str,
+    destination: Any,
+    names: list[str],
+) -> dict[str, Any] | None:
+    """Block a destination CALL/INSERT on CDC. Hooks and table writes pass."""
+    if destination is None:
+        return None
+    from services.procedure_destination import dest_procedure_sync_refusal
+
+    refusal = dest_procedure_sync_refusal(sync_mode, destination)
+    if not refusal:
+        return None
+    return {
+        "id": "g23_stream_procedures",
+        "status": "block",
+        "message": refusal,
+        "duration_ms": 0,
+        "details": {
+            "reason": "dest_procedure_refuses_history_sync",
+            "streams": names,
+            "remediation": (
+                "Use upsert/append, or a table write with before/after hooks."
+            ),
+        },
+    }
+
+
+def _cdc_contract_row_apply_gate(
+    sync_mode: str,
+    destination: Any,
+    contracts: list[Mapping[str, Any]] | None,
+    names: list[str],
+) -> dict[str, Any] | None:
+    """One stream can name its own CALL. That is the same CDC refusal."""
+    if not names or not contracts:
+        return None
+    raw = contract_for_stream(contracts, names[0])
+    _source_patch, dest_patch = patches_for_stream(raw)
+    if not dest_patch:
+        return None
+    fmt = ""
+    if isinstance(destination, Mapping):
+        fmt = str(destination.get("format") or destination.get("type") or "")
+    elif destination is not None:
+        fmt = str(getattr(destination, "format", "") or "")
+    return _cdc_row_apply_gate(
+        sync_mode,
+        {"format": fmt, "type": fmt, "extra": dest_patch},
+        names,
+    )
+
+
 def stream_procedure_policy_gate(
     contracts: list[Mapping[str, Any]] | None,
     *,
@@ -380,9 +433,12 @@ def stream_procedure_policy_gate(
 ) -> dict[str, Any] | None:
     """Validate gate for a CALL that would be replayed onto every selected table.
 
-    One stream returns ``None`` — the existing procedure path is unchanged.
-    Two or more streams always return a pass or a block, so Validate and
-    Execute name the same refusal before any row is written.
+    One non-CDC stream returns ``None`` — a single CALL stays on the
+    procedure path. One CDC / SCD2 / mirror stream with a destination
+    CALL or INSERT returns a block, the same refusal Execute raises
+    before opening a log reader. Two or more streams always return a
+    pass or a block, so Validate and Execute name the same refusal
+    before any row is written.
     """
     names = [
         str(row.get("name") or "").strip()
@@ -390,7 +446,10 @@ def stream_procedure_policy_gate(
         if isinstance(row, Mapping) and str(row.get("name") or "").strip()
     ]
     if len(names) < 2:
-        return None
+        blocked = _cdc_row_apply_gate(sync_mode, destination_endpoint, names)
+        if blocked:
+            return blocked
+        return _cdc_contract_row_apply_gate(sync_mode, destination_endpoint, contracts, names)
     refusal = review_stream_procedures(
         source_endpoint,
         destination_endpoint,
