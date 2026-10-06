@@ -330,3 +330,119 @@ def test_interrupted_offset_snapshot_does_not_publish_a_resume_cursor(tmp_path, 
     assert get_watermark(cursor_key) == "2"
 
 
+def test_interrupted_log_snapshot_keeps_the_open_dump_token(tmp_path, monkeypatch):
+    """A phase=snapshot page is a keyset resume, unlike an offset page.
+
+    The crash stores table + last primary key and does not ack. The next run
+    calls snapshot() with that token and then stores the streaming handoff.
+    """
+    import json
+
+    from services.cdc_engine import ChangeBatch
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    calls = {"n": 0, "acks": [], "resumes": []}
+
+    class FakeCdc:
+        def __init__(self, *args, **kwargs):
+            self.resume = kwargs.get("resume_token")
+            calls["resumes"].append(self.resume)
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield ChangeBatch(
+                    inserts=[{"id": "1"}],
+                    resume_token="slot=s|phase=snapshot|lsn=0/1|table=src|last_pk=1",
+                    table="src",
+                )
+                raise RuntimeError("log snapshot died after the first page")
+            assert "phase=snapshot" in str(self.resume)
+            yield ChangeBatch(
+                inserts=[{"id": "2"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1|table=src|last_pk=2",
+                table="src",
+            )
+            yield ChangeBatch(
+                resume_token="slot=s|phase=streaming|lsn=0/1",
+                table="src",
+            )
+
+        def poll(self):
+            if False:
+                yield ChangeBatch()
+
+        def ack(self, token=None):
+            calls["acks"].append(token)
+
+        def close(self):
+            pass
+
+    source = EndpointConfig(
+        kind="database", format="postgresql", database="app", table="src", schema="public"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "dst.db"), table="dst"
+    )
+    checkpoints: list[object] = []
+    applied: list[str] = []
+
+    def fake_apply(*args, **kwargs):
+        change = args[4]
+        applied.extend(row.get("id", "") for row in change.inserts)
+        return (len(change.inserts), "ck", {}, 0)
+
+    def stored() -> list[str]:
+        path = tmp_path / "sync_cursors.json"
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [str(entry.get("watermark") or "") for entry in data.get("cursors") or []]
+
+    def run():
+        return run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "string"},
+            stream_contracts=[{
+                "name": "src",
+                "sync_mode": "cdc",
+                "primary_key": "id",
+                "cursor_field": "id",
+                "snapshot_mode": "initial",
+            }],
+            job_id="cdc-log-snap",
+            on_checkpoint=lambda _chunk, _total, _rows, payload: checkpoints.append(
+                payload.get("watermark")
+            ),
+        )
+
+    with (
+        patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc),
+        patch("src.transfer.cdc_transfer._apply_change_batch", side_effect=fake_apply),
+        patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}),
+    ):
+        with pytest.raises(RuntimeError, match="log snapshot died after the first page"):
+            run()
+        assert calls["n"] == 1
+        assert calls["acks"] == []
+        assert applied == ["1"]
+        assert any("phase=snapshot" in token and "last_pk=1" in token for token in stored())
+        assert any("phase=snapshot" in str(mark) for mark in checkpoints)
+
+        checkpoints.clear()
+        rows_written, _ddl, summary, _columns = run()
+        assert calls["n"] == 2
+        assert "2" in applied
+        assert rows_written >= 1
+        final = str((summary.get("cdc") or {}).get("watermark") or "")
+        assert "phase=streaming" in final
+        assert calls["acks"]
+        assert "phase=streaming" in str(calls["acks"][-1])
+
+

@@ -336,3 +336,137 @@ def test_interrupted_shared_snapshot_still_dumps_the_unread_table(tmp_path, monk
         before = calls["snapshot_calls"]
         run()
         assert calls["snapshot_calls"] == before
+
+
+def test_sqlserver_shared_snapshot_crash_keeps_the_open_dump(tmp_path, monkeypatch) -> None:
+    """SQL Server snapshot pages are not a log barrier, and they are a resume.
+
+    ack_barrier stays false, so the page is not acked. The phase=snapshot
+    token is still stored. The next run continues snapshot() at last_pk
+    instead of re-reading every table from the start.
+    """
+    import json
+
+    import pytest
+
+    from connectors.sqlserver_cdc_native import encode_mssql_cdc_token
+    from src.transfer.cdc_transfer import _run_cdc_shared_multi_table
+    from src.transfer.models import EndpointConfig
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+
+    page = encode_mssql_cdc_token(
+        "0000001a", table="orders", phase="snapshot", offset=1, last_pk="1"
+    )
+    calls = {"snapshot_calls": 0, "acks": [], "resumes": []}
+    applied: list[str] = []
+
+    class FakeCdc:
+        def __init__(self, *args, **kwargs):
+            self.resume = kwargs.get("resume_token")
+            calls["resumes"].append(self.resume)
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            calls["snapshot_calls"] += 1
+            if calls["snapshot_calls"] == 1:
+                yield ChangeBatch(
+                    inserts=[{"id": "1"}],
+                    resume_token=page,
+                    table="orders",
+                    ack_barrier=False,
+                )
+                raise RuntimeError("sqlserver snapshot died after orders")
+            assert "snapshot" in str(self.resume)
+            assert "orders" in str(self.resume)
+            yield ChangeBatch(
+                inserts=[{"id": "9"}],
+                resume_token=encode_mssql_cdc_token(
+                    "0000001a", table="users", phase="snapshot", offset=1, last_pk="9"
+                ),
+                table="users",
+                ack_barrier=False,
+            )
+            yield ChangeBatch(
+                resume_token=encode_mssql_cdc_token(
+                    "0000001a", table="orders,users", phase="streaming"
+                ),
+                ack_barrier=True,
+            )
+
+        def poll(self):
+            if False:
+                yield ChangeBatch()
+
+        def ack(self, token=None):
+            calls["acks"].append(token)
+
+        def close(self):
+            pass
+
+    source = EndpointConfig(
+        kind="database", format="sqlserver", database="app", table="orders", schema="dbo"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "dst.db"), table="orders"
+    )
+    selected = [
+        SyncContract(name="orders", primary_key="id", sync_mode="cdc"),
+        SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+    ]
+
+    def fake_apply(*args, **kwargs):
+        change = args[4]
+        applied.append(change.table or "")
+        return (len(change.inserts) + len(change.updates), "ck", {}, len(change.deletes))
+
+    def run():
+        return _run_cdc_shared_multi_table(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "string"},
+            None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": "orders", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+                {"name": "users", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+            ],
+            selected=selected,
+            job_id="job-ss-crash",
+            checkpoint=None,
+            checkpoint_service=None,
+            backfill_new_fields=False,
+            validation_mode="strict",
+            limit=0,
+        )
+
+    def stored() -> list[str]:
+        path = tmp_path / "cursors.json"
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [str(entry.get("watermark") or "") for entry in data.get("cursors") or []]
+
+    with patch("src.transfer.cdc_transfer.SqlServerNativeCdc", FakeCdc), \
+         patch("src.transfer.cdc_transfer._apply_change_batch", side_effect=fake_apply), \
+         patch("src.transfer.cdc_transfer.resolve_dest_table", side_effect=lambda *_a, **_k: "t"), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}):
+        with pytest.raises(RuntimeError, match="sqlserver snapshot died after orders"):
+            run()
+        assert calls["snapshot_calls"] == 1
+        assert calls["acks"] == []
+        assert applied == ["orders"]
+        assert any('"phase":"snapshot"' in token and "orders" in token for token in stored())
+
+        _rows, _ddl, summary, _errs = run()
+        assert calls["snapshot_calls"] == 2
+        assert "users" in applied
+        assert "phase" in str(summary.get("cdc", {}).get("watermark") or "")
+        assert "streaming" in str(summary["cdc"]["watermark"])
+        assert calls["acks"]
+        assert "streaming" in str(calls["acks"][-1])

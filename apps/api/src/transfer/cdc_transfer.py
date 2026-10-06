@@ -1965,6 +1965,40 @@ def _run_cdc_shared_multi_table(
                                 "Shared CDC ack failed (at-least-once redelivery): %s",
                                 ack_exc,
                             )
+                elif (
+                    snapshot_dump_open(token_s)
+                    and not skip_ack
+                    and not eos_active
+                ):
+                    # SQL Server and Oracle snapshot pages are not a log
+                    # barrier. The page is still the keyset resume (table +
+                    # last primary key). Store it without acking: a crash
+                    # continues the dump, and the streaming handoff remains
+                    # the only ack. Exactly-once waits for that barrier so
+                    # the cursor cannot move before the destination commit.
+                    if change.total_changes and stream in stream_cfg:
+                        set_watermark(
+                            stream_cfg[stream]["cursor_key"],
+                            token_s,
+                            metadata={
+                                "job_id": job_id,
+                                "sync_mode": sync_mode,
+                                "shared_reader": True,
+                                "snapshot_dump_open": True,
+                            },
+                        )
+                    set_watermark(
+                        shared_key,
+                        token_s,
+                        metadata={
+                            "job_id": job_id,
+                            "sync_mode": sync_mode,
+                            "tables": tables,
+                            "shared_reader": True,
+                            "snapshot_dump_open": True,
+                        },
+                    )
+                    published_shared = token_s
         if on_checkpoint:
             on_checkpoint(
                 chunk_idx,
@@ -2743,8 +2777,13 @@ def _run_cdc_single_stream(
 
         An offset snapshot page is not a resume position: rows still unread
         can sort before the page's cursor. ``publish_resume`` stays false
-        until the snapshot has read the table. A crash then runs the snapshot
+        until that dump has read the table. A crash then runs the snapshot
         again and upserts what already landed.
+
+        A log snapshot token (``phase=snapshot``, table + last primary key)
+        is a resume position. It is stored immediately and not acked. The
+        next run continues ``snapshot()`` from that key. The slot or LSN is
+        acked when the dump finishes.
         """
         nonlocal chunk_idx, total_chunks
         from services.cdc_resume_tokens import (
@@ -2871,7 +2910,12 @@ def _run_cdc_single_stream(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        if publish_resume and state.running_cursor:
+        from services.cdc_snapshot_mode import snapshot_dump_open
+
+        open_dump = bool(
+            state.running_cursor and snapshot_dump_open(state.running_cursor)
+        )
+        if state.running_cursor and (publish_resume or open_dump):
             set_watermark(
                 cursor_key,
                 state.running_cursor,
@@ -2879,11 +2923,13 @@ def _run_cdc_single_stream(
                     "job_id": job_id,
                     "sync_mode": sync_mode,
                     "chunk": chunk_idx,
+                    "snapshot_dump_open": bool(open_dump and not publish_resume),
                     **lag_fields,
                 },
             )
         # Ack source only AFTER a durable resume cursor (peek→apply→ack).
-        # Snapshot pages are withheld: the slot stays until the dump finishes.
+        # An open snapshot token is stored above so the next run can continue
+        # the dump. The slot stays until that dump finishes.
         if publish_resume and hasattr(cdc, "ack") and not skip_ack:
             try:
                 cdc.ack(change.resume_token)
@@ -2893,9 +2939,13 @@ def _run_cdc_single_stream(
                     ack_exc,
                 )
         if on_checkpoint:
-            # While the snapshot is open, the checkpoint keeps the cursor this
-            # run started with. The in-progress page max is not a resume token.
-            checkpoint_watermark = state.running_cursor if publish_resume else watermark
+            # An offset page max is not a resume token, so the checkpoint keeps
+            # the cursor this run started with. A phase=snapshot log token is
+            # the resume position and is recorded with the cursor store.
+            if publish_resume or open_dump:
+                checkpoint_watermark = state.running_cursor
+            else:
+                checkpoint_watermark = watermark
             on_checkpoint(
                 chunk_idx,
                 total_chunks,
@@ -2991,13 +3041,17 @@ def _run_cdc_single_stream(
             # The dump finished. This cursor is the handoff: every snapshot
             # row was applied, so a later poll may seek past it.
             if state.running_cursor:
+                from services.cdc_snapshot_mode import snapshot_dump_open
+
+                still_open = snapshot_dump_open(state.running_cursor)
                 set_watermark(
                     cursor_key,
                     state.running_cursor,
                     metadata={
                         "job_id": job_id,
                         "sync_mode": sync_mode,
-                        "snapshot_complete": True,
+                        "snapshot_complete": not still_open,
+                        "snapshot_dump_open": still_open,
                     },
                 )
             if snapshot_resume is not None and hasattr(cdc, "ack"):
