@@ -3633,10 +3633,28 @@ class UniversalTransferEngine:
                 progress_pct=5,
                 message="Analyzing source table…",
             )
-            columns, schema, total_rows, sample_rows = peek_stream_source(
-                request.source
+            # Several tables: the primary sample is that stream's CALL or
+            # SELECT when it has one. Peeking the table would map columns the
+            # writer never reads.
+            from services.multi_stream_plan import (
+                design_source_patch,
+                patched_endpoint_extra,
             )
-            schema = _authoritative_source_schema(request.source, schema, columns)
+
+            peek_names = [
+                (c.name or "").strip()
+                for c in resolve_selected_sync_contracts(request.stream_contracts)
+            ]
+            peek_patch = design_source_patch(request.stream_contracts, peek_names)
+            with patched_endpoint_extra(request.source, peek_patch):
+                columns, schema, total_rows, sample_rows = peek_stream_source(
+                    request.source
+                )
+            if peek_patch:
+                # The result set is the declaration. Table DDL must not overlay it.
+                schema = dict(schema)
+            else:
+                schema = _authoritative_source_schema(request.source, schema, columns)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:

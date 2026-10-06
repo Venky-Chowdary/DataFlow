@@ -869,6 +869,35 @@
 
 .df2-xform-steps > li.is-disabled { opacity: 0.6; }
 
+.df2-xform-steps > li.is-other-stream { opacity: 0.55; }
+
+.df2-xform-stream-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.df2-xform-stream-tabs button {
+  appearance: none;
+  border: 1px solid var(--df-border, #e4e8ee);
+  background: var(--df-surface-muted, #f8fafc);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-stream-tabs button[aria-selected="true"] {
+  background: var(--df-brand-muted, #ccfbf1);
+  border-color: #99f6e4;
+  color: var(--df-brand-strong, #115e59);
+}
+
 .df2-xform-steps > li.is-refused {
   border-color: var(--df-danger, #b91c1c);
   box-shadow: 0 0 0 1px var(--df-danger, #b91c1c);

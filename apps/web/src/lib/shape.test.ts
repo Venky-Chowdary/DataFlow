@@ -20,6 +20,7 @@ import {
   kitchenSampleValues,
   recipePayload,
   removeStep,
+  stampStepSourceTable,
   sameRecipe,
   sortSuggestions,
   summarizeEffect,
@@ -328,6 +329,20 @@ test("a removed cell is not highlighted as a change in the after grid", () => {
   assert.ok(index.has("0:name"));
   assert.ok(index.has("1:total"));
   assert.ok(!index.has("1:gone"));
+});
+
+test("a new step among several tables is stamped with the table on screen", () => {
+  const step = { op: "trim", column: "email" };
+  assert.deepEqual(stampStepSourceTable(step, "orders", 2), {
+    op: "trim",
+    column: "email",
+    source_table: "orders",
+  });
+  assert.equal(stampStepSourceTable(step, "orders", 1), step);
+  assert.deepEqual(
+    stampStepSourceTable({ ...step, source_table: "customers" }, "orders", 2).source_table,
+    "customers",
+  );
 });
 
 test("a recipe of only disabled steps sends nothing, so an untouched draft is untouched", () => {

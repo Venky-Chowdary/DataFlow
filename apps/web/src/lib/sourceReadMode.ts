@@ -68,6 +68,34 @@ export function bindNamesFromSql(text: string): string[] {
   return names;
 }
 
+/** Last identifier of a simple table name, so a placeholder never names a different stream. */
+function exampleIdent(streamName: string): string {
+  const name = String(streamName || "").trim();
+  if (!IDENT.test(name)) return "";
+  const last = name.split(".").pop() || "";
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(last) ? last : "";
+}
+
+/** Empty-state hint for one stream's source extract. Uses that stream's name. */
+export function streamExtractPlaceholder(streamName: string, offersProcedures: boolean): string {
+  const ident = exampleIdent(streamName);
+  if (offersProcedures) {
+    return ident
+      ? `CALL schema.get_${ident}() or SELECT id, email FROM ${ident}`
+      : "CALL schema.procedure() or SELECT id, email FROM this_table";
+  }
+  return ident ? `SELECT id, email FROM ${ident}` : "SELECT id, email FROM this_table";
+}
+
+/** Empty-state hint for one stream's destination CALL or INSERT. */
+export function destStreamPlaceholder(streamName: string): string {
+  const ident = exampleIdent(streamName);
+  if (!ident) {
+    return "CALL schema.land_row(:id) or INSERT INTO dest_table (id) VALUES (:id)";
+  }
+  return `CALL schema.land_${ident}(:id) or INSERT INTO ${ident} (id) VALUES (:id)`;
+}
+
 export function queryHint(driver: string | undefined | null): string {
   const d = String(driver || "").toLowerCase();
   if (d === "sqlite" || d === "duckdb") {

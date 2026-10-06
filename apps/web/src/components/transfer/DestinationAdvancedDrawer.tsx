@@ -10,6 +10,7 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import { destStreamPlaceholder } from "../../lib/sourceReadMode";
 import {
   CURSOR_SEMANTICS,
   CURSOR_SEMANTICS_LABELS,
@@ -1040,7 +1041,7 @@ export function DestinationAdvancedDrawer({
                       rows={2}
                       spellCheck={false}
                       value={fields.destProcedure || ""}
-                      placeholder="CALL schema.land_customer(:id, :email) or INSERT INTO customers (id, email) VALUES (:id, :email)"
+                      placeholder={destStreamPlaceholder(streamName)}
                       onChange={(e) => onStreamDestProcedureChange(streamName, e.target.value)}
                     />
                   </label>

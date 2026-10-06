@@ -10,6 +10,7 @@ from __future__ import annotations
 from services.multi_stream_plan import (
     approved_recipe_refusal,
     contract_for_stream,
+    design_source_patch,
     full_recipe_hash,
     partition_shape_steps,
     patches_for_stream,
@@ -292,6 +293,23 @@ def test_unbound_source_parameter_is_refused_before_a_write() -> None:
     )
     assert "customers" in refusal
     assert "since" in refusal
+
+
+def test_design_peek_uses_the_primary_streams_statement_only() -> None:
+    contracts = [
+        {"name": "customers", "source_query": "SELECT id, email FROM customers WHERE active"},
+        {"name": "orders", "procedure_call": "CALL public.get_orders()"},
+    ]
+    patch = design_source_patch(contracts, ["customers", "orders"])
+    assert patch is not None
+    assert patch["source_read_mode"] == "query"
+    assert patch["source_query"].startswith("SELECT id, email")
+    assert "get_orders" not in patch["source_query"]
+    assert design_source_patch(contracts, ["customers"]) is None
+    assert design_source_patch(
+        [{"name": "customers"}, {"name": "orders"}],
+        ["customers", "orders"],
+    ) is None
 
 
 def test_contract_lookup_folds_the_stream_name() -> None:

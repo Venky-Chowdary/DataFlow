@@ -492,6 +492,24 @@ def patches_for_stream(
     return source_patch, dest_patch
 
 
+def design_source_patch(
+    contracts: list[Mapping[str, Any]] | None,
+    stream_names: list[str],
+) -> dict[str, Any] | None:
+    """The primary stream's extract, when several tables are selected.
+
+    Design-time peek, Map, and preflight read one sample. That sample has to
+    be this stream's statement when it has one — the table behind a
+    ``SELECT`` is not the result the writer will map. Other streams are
+    peeked on their own read. One stream is the existing endpoint path.
+    """
+    names = [str(name).strip() for name in stream_names if str(name).strip()]
+    if len(names) < 2:
+        return None
+    source_patch, _dest = patches_for_stream(contract_for_stream(contracts, names[0]))
+    return source_patch
+
+
 @contextmanager
 def patched_endpoint_extra(endpoint: Any, patch: Mapping[str, Any] | None) -> Iterator[None]:
     """Apply ``patch`` onto ``endpoint.extra`` for one stream, then restore it.

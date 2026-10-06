@@ -12,8 +12,10 @@ import {
   destWriteReady,
   isCallableDestMode,
   isCallableSourceMode,
+  destStreamPlaceholder,
   procedureStreamName,
   sourceExtractReady,
+  streamExtractPlaceholder,
 } from "./sourceReadMode.js";
 
 describe("sourceReadMode", () => {
@@ -108,6 +110,25 @@ describe("sourceReadMode", () => {
       sourceReadMode: "query",
       procedureCall: "SELECT 1",
     }), false);
+  });
+
+  it("names each stream in its own empty extract hint", () => {
+    assert.equal(
+      streamExtractPlaceholder("orders", true),
+      "CALL schema.get_orders() or SELECT id, email FROM orders",
+    );
+    assert.equal(
+      streamExtractPlaceholder("public.customers", true),
+      "CALL schema.get_customers() or SELECT id, email FROM customers",
+    );
+    assert.equal(streamExtractPlaceholder("orders", false), "SELECT id, email FROM orders");
+    assert.match(streamExtractPlaceholder("odd name", true), /this_table/);
+    assert.doesNotMatch(streamExtractPlaceholder("orders", true), /get_customers/);
+    assert.equal(
+      destStreamPlaceholder("orders"),
+      "CALL schema.land_orders(:id) or INSERT INTO orders (id) VALUES (:id)",
+    );
+    assert.match(destStreamPlaceholder("a b"), /dest_table/);
   });
 
   it("stamps Execute source_extra for CALL/SELECT and leaves tables alone", () => {
