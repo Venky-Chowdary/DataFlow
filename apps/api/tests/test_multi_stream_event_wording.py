@@ -61,6 +61,30 @@ def test_heartbeat_scope_marks_last_stream_checksum():
     assert reconcile_heartbeat_scope(None) == {"proof_kind": "full"}
 
 
+def test_stream_written_note_names_the_table(monkeypatch):
+    calls: list[tuple] = []
+
+    class _Mongo:
+        def update_job_status(self, job_id, status, **kwargs):
+            calls.append((job_id, status, kwargs))
+            return True
+
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service",
+        lambda: _Mongo(),
+    )
+    from src.transfer.stream_multi import _publish_stream_written
+
+    _publish_stream_written("job-1", "customers", 2)
+    _publish_stream_written("", "orders", 2)
+    assert len(calls) == 1
+    assert calls[0][0] == "job-1"
+    assert calls[0][1] == "running"
+    assert calls[0][2]["message"] == "Wrote 2 rows on customers…"
+    assert calls[0][2]["phase"] == "writing"
+    assert "records_processed" not in calls[0][2]
+
+
 def test_last_stream_checksum_note_refuses_job_migration_proven():
     summary = {
         "multi_stream": True,
