@@ -1882,12 +1882,19 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     f"Target DDL compatible — append batch probed against stored "
                     f"{key} values, no collision"
                 )
-            else:
+            elif getattr(collision, "key_enforced", True):
                 collision_unproven = (
                     f"Append key collision on {key} was not probed "
                     f"({getattr(collision, 'message', '') or collision_evidence['status']}) "
                     "— the destination enforces this key, so Execute re-probes it "
                     "and refuses the run if a stored key repeats."
+                )
+            else:
+                collision_unproven = (
+                    f"Append duplicate check on {key} did not run "
+                    f"({getattr(collision, 'message', '') or collision_evidence['status']}). "
+                    "A second copy of a stored row would land. Re-run Validate once "
+                    "the destination can be read."
                 )
     if collision is not None and getattr(collision, "findings", None):
         found = list(collision.findings)
@@ -1920,6 +1927,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 ),
             )
         delta_scope = getattr(collision, "delta_scope", {}) or {}
+        enforced = bool(getattr(collision, "key_enforced", True))
         if delta_scope:
             # The collision is inside the delta this cursor will re-read, so the
             # operator needs to know the key returns with a newer cursor value —
@@ -1927,15 +1935,22 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             cause = (
                 f"The rows after watermark {delta_scope.get('watermark')} on "
                 f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
-                f"destination already stores on {key}, so an append aborts. "
-                "Switch this sync to upsert/merge (key-resolved), which is how an "
-                "updated row is meant to land."
+                f"destination already stores on {key}, so an append cannot store "
+                "them again. Switch this sync to upsert/merge (key-resolved), "
+                "which is how an updated row is meant to land."
             )
-        else:
+        elif enforced:
             cause = (
                 f"Append would duplicate {len(found)} existing destination key(s) on "
                 f"{key} — the destination enforces uniqueness, so the insert aborts. "
                 "Switch this sync to upsert/merge (key-resolved) or overwrite."
+            )
+        else:
+            cause = (
+                f"Append would store a second copy of {len(found)} row(s) the "
+                f"destination already holds on {key}. The destination does not "
+                "reject that insert, so the duplicate would land. Use upsert/merge "
+                "(key-resolved) or overwrite."
             )
         return _block(
             GateId.G6_TARGET_DDL,
@@ -1957,10 +1972,36 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             ),
         )
 
-    # Canonical identity key uniqueness probe for SQL destinations.
-    # Append/overwrite: skip unless the destination introspected a real PK
-    # (INSERT would then fail — fail closed with a clear gate).
+    # Append/overwrite without a destination key still compared the batch above.
+    # A finished probe owns the verdict. Falling through to "uniqueness not
+    # required" hid both a clean check and a probe that never ran.
     if not require_unique and not (getattr(ctx.plan, "destination_pk_columns", None) or []):
+        if collision_proven:
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                collision_proven,
+                start,
+                _scope(
+                    {"scrubbed_drift_issues": scrubbed, "collision_probe": collision_evidence},
+                    coverage="sample",
+                    note="Destination collision probe on append batch",
+                ),
+            )
+        if collision_unproven:
+            return _warn(
+                GateId.G6_TARGET_DDL,
+                collision_unproven,
+                start,
+                _scope(
+                    {
+                        "scrubbed_drift_issues": scrubbed,
+                        "rule_id": "g6_target_ddl.append_collision_unproven",
+                        "collision_probe": collision_evidence,
+                    },
+                    coverage="none",
+                    note="Destination collision probe did not run",
+                ),
+            )
         return _pass(
             GateId.G6_TARGET_DDL,
             "Target DDL compatible (uniqueness not required for this sync mode)",
