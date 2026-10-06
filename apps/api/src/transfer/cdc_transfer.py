@@ -2732,8 +2732,14 @@ def _run_cdc_single_stream(
     max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
     txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
-    def _apply_and_checkpoint(change: ChangeBatch) -> bool:
-        """Apply one batch, persist watermark, ack source. Returns True if data moved."""
+    def _apply_and_checkpoint(change: ChangeBatch, *, publish_resume: bool = True) -> bool:
+        """Apply one batch. A finished page may become the resume cursor.
+
+        An offset snapshot page is not a resume position: rows still unread
+        can sort before the page's cursor. ``publish_resume`` stays false
+        until the snapshot has read the table. A crash then runs the snapshot
+        again and upserts what already landed.
+        """
         nonlocal chunk_idx, total_chunks
         from services.cdc_resume_tokens import (
             is_durable_log_resume_token,
@@ -2859,7 +2865,7 @@ def _run_cdc_single_stream(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        if state.running_cursor:
+        if publish_resume and state.running_cursor:
             set_watermark(
                 cursor_key,
                 state.running_cursor,
@@ -2870,8 +2876,9 @@ def _run_cdc_single_stream(
                     **lag_fields,
                 },
             )
-        # Ack source only AFTER durable watermark (peek→apply→ack).
-        if hasattr(cdc, "ack") and not skip_ack:
+        # Ack source only AFTER a durable resume cursor (peek→apply→ack).
+        # Snapshot pages are withheld: the slot stays until the dump finishes.
+        if publish_resume and hasattr(cdc, "ack") and not skip_ack:
             try:
                 cdc.ack(change.resume_token)
             except Exception as ack_exc:
@@ -2880,13 +2887,16 @@ def _run_cdc_single_stream(
                     ack_exc,
                 )
         if on_checkpoint:
+            # While the snapshot is open, the checkpoint keeps the cursor this
+            # run started with. The in-progress page max is not a resume token.
+            checkpoint_watermark = state.running_cursor if publish_resume else watermark
             on_checkpoint(
                 chunk_idx,
                 total_chunks,
                 state.rows_written,
                 {
                     "chunk_index": chunk_idx,
-                    "watermark": state.running_cursor,
+                    "watermark": checkpoint_watermark,
                     "rows_written": state.rows_written,
                     "cdc_lag_seconds": lag_fields.get("cdc_lag_seconds"),
                     "replication_lag_bytes": lag_fields.get("replication_lag_bytes"),
@@ -2965,10 +2975,33 @@ def _run_cdc_single_stream(
         )
 
     with cdc_destination_hooks(destination, ddl_log):
+        snapshot_resume = None
         if run_snapshot:
             with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
                 for change in cdc.snapshot():
-                    _apply_and_checkpoint(change)
+                    if change.resume_token is not None:
+                        snapshot_resume = change.resume_token
+                    _apply_and_checkpoint(change, publish_resume=False)
+            # The dump finished. This cursor is the handoff: every snapshot
+            # row was applied, so a later poll may seek past it.
+            if state.running_cursor:
+                set_watermark(
+                    cursor_key,
+                    state.running_cursor,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": sync_mode,
+                        "snapshot_complete": True,
+                    },
+                )
+            if snapshot_resume is not None and hasattr(cdc, "ack"):
+                try:
+                    cdc.ack(snapshot_resume)
+                except Exception as ack_exc:
+                    logger.warning(
+                        "CDC snapshot ack failed (at-least-once redelivery): %s",
+                        ack_exc,
+                    )
 
         # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
         # continuously poll until idle so a single job drains the slot/binlog/CT stream.

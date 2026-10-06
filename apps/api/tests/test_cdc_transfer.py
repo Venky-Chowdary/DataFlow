@@ -247,3 +247,86 @@ def test_query_cdc_restart_keeps_the_tie_break(tmp_path, monkeypatch):
     assert resume_calls[0]["cursor_primary_key"] == "id"
     assert [row["id"] for row in resumed[0].inserts] == ["3"]
 
+
+def test_interrupted_offset_snapshot_does_not_publish_a_resume_cursor(tmp_path, monkeypatch):
+    """Page 1 of an offset dump is not a resume cursor.
+
+    Id 2 is on the next page. Publishing id 1 would make snapshot_mode=initial
+    skip the rest of the table. A crash leaves no watermark, and the next run
+    snapshots both rows.
+    """
+    from services.sync_cursor import get_watermark
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    orig_init = CdcEngine.__init__
+
+    def _one_row_pages(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        self.batch_size = 1
+
+    monkeypatch.setattr(CdcEngine, "__init__", _one_row_pages)
+    source = EndpointConfig(kind="database", format="generic_sql", database="test", table="src")
+    destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="dst")
+    headers = ["id", "value"]
+    pages = {0: [["1", "a"]], 1: [["2", "b"]]}
+    checkpoints: list[object] = []
+
+    def _read(*args, **_kwargs):
+        offset = args[4]
+        return _batch(headers, pages.get(offset, [])), None
+
+    writes = {"n": 0}
+
+    def _write(*_args, **_kwargs):
+        writes["n"] += 1
+        if writes["n"] >= 2:
+            raise RuntimeError("snapshot died on the second page")
+        return 1, "abc", {}
+
+    mock_write = MagicMock(side_effect=_write)
+    cursor_key = "generic_sql:test:src→generic_sql:test:dst:stream"
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", mock_write),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+        pytest.raises(RuntimeError, match="second page"),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}, {"source": "value", "target": "value"}],
+            schema={"id": "integer", "value": "string"},
+            stream_contracts=[{"sync_mode": "cdc", "primary_key": "id", "cursor_field": "id"}],
+            job_id="cdc-snap",
+            on_checkpoint=lambda _chunk, _total, _rows, payload: checkpoints.append(
+                payload.get("watermark")
+            ),
+        )
+    assert get_watermark(cursor_key) is None
+    assert checkpoints
+    assert all(mark is None for mark in checkpoints)
+
+    written: list[list] = []
+
+    def _write_all(*args, **_kwargs):
+        written.extend(args[5])
+        return 1, "abc", {}
+
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", side_effect=_write_all),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        rows_written, _ddl, _summary, _columns = run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}, {"source": "value", "target": "value"}],
+            schema={"id": "integer", "value": "string"},
+            stream_contracts=[{"sync_mode": "cdc", "primary_key": "id", "cursor_field": "id"}],
+            job_id="cdc-snap-2",
+        )
+    assert rows_written == 2
+    assert [row[0] for row in written] == ["1", "2"]
+    assert get_watermark(cursor_key) == "2"
+
+
