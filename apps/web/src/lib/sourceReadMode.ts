@@ -102,6 +102,28 @@ export function procedureHint(driver: string | undefined | null): string {
   return "CALL schema.name(...) or EXEC schema.name — one statement. Result columns map on the next step.";
 }
 
+const SELECT_FUNC = /^\s*select\s+\*\s+from\s+[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2}\s*\(/i;
+
+/**
+ * The same split the API uses. A PostgreSQL `SELECT * FROM schema.fn()` is a
+ * procedure. A general SELECT is a source extract. INSERT/MERGE is a dest write.
+ */
+export function statementKind(sql: string): "procedure" | "query" | "dest_dml" | "" {
+  const stripped = String(sql || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ")
+    .trim();
+  if (!stripped) return "";
+  if (/^create\s+(?:or\s+(?:replace|alter)\s+)?(?:temp(?:orary)?\s+|secure\s+)?(?:procedure|proc|function|table|view)\b/i.test(stripped)) {
+    return "";
+  }
+  if (SELECT_FUNC.test(stripped) || /^(?:call|exec(?:ute)?)\b/i.test(stripped)) return "procedure";
+  if (/^(?:select|with|values)\b/i.test(stripped)) return "query";
+  if (/^(?:insert|merge|update|upsert|replace)\b/i.test(stripped)) return "dest_dml";
+  if (/^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2};?$/.test(stripped)) return "procedure";
+  return "";
+}
+
 export function isCallableSourceMode(mode: SourceReadMode | string | undefined): boolean {
   return mode === "procedure" || mode === "query";
 }

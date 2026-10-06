@@ -184,6 +184,13 @@ class DestProcedurePlan:
 def dest_write_mode_of(dest: Any) -> str:
     extra = _extra(dest)
     raw = str(extra.get("dest_write_mode") or extra.get("dest_read_mode") or "").strip().lower()
+    # An explicit table write wins over a leftover CALL. Multi-stream uses that
+    # to keep one stream a table while a sibling stream names its own procedure.
+    # Before/after hooks still run — they are not a row-apply.
+    if raw == MODE_TABLE:
+        if extra.get("dest_procedure_before") or extra.get("dest_procedure_after"):
+            return MODE_HOOKS
+        return MODE_TABLE
     if raw in {MODE_QUERY, "dest_query", "sql"}:
         return MODE_QUERY
     if raw in {MODE_ROW_APPLY, "procedure", "stored_procedure"}:

@@ -136,6 +136,20 @@ def test_hooks_plan_without_row_apply() -> None:
     assert dest_write_mode_of({"type": "postgresql", "extra": {}}) == "table"
 
 
+def test_explicit_table_mode_ignores_a_leftover_call() -> None:
+    """A stream that says table must not inherit a sibling's CALL."""
+    dest = {
+        "type": "postgresql",
+        "extra": {
+            "dest_write_mode": "table",
+            "dest_procedure_call": "CALL land(:id)",
+            "dest_query_sql": "INSERT INTO t (id) VALUES (:id)",
+        },
+    }
+    assert dest_write_mode_of(dest) == "table"
+    assert plan_dest_procedure(dest) is None
+
+
 def test_row_apply_refuses_cdc() -> None:
     dest = {
         "type": "postgresql",

@@ -232,6 +232,7 @@ import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
   firstStreamContractIssue,
+  resolveStreamFields,
   seedStreamFieldsFromCandidates,
   type StreamFieldContract,
 } from "../lib/streamContracts";
@@ -6598,7 +6599,7 @@ export function TransferPage({
               </div>
 
               {!isCallableSourceMode(sourceReadMode) && (
-              <div className="df2-source-multistream" role="note">
+              <div className="df2-source-multistream">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />
                   <strong>
@@ -6609,8 +6610,8 @@ export function TransferPage({
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each name is a separate table/collection with its own watermark. Configure identity in Destination → Advanced."
-                    : "Use commas for multi-table sync (example: sessions, users)."}
+                    ? "Each name is its own table, with its own watermark, mapping, and transform. Write that table's extract below — a CALL, a function (SELECT * FROM schema.fn()), or a read-only SELECT. Leave it blank to copy the table. One statement is not copied onto the other tables. A procedure that joins these tables is one extract: switch Source extract to Stored procedure and paste that one CALL. A destination CALL or INSERT/MERGE is in Destination → Advanced."
+                    : "Use commas for multi-table sync (example: sessions, users). Each table is its own stream."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -6633,6 +6634,49 @@ export function TransferPage({
                       );
                     })}
                   </ul>
+                )}
+                {isMultiStreamSource && (dialectOffersProcedures(sourceConnector?.type) || dialectOffersQuery(sourceConnector?.type)) && (
+                  <div className="df2-stream-procedures">
+                    {multiStreamNames.map((streamName) => {
+                      const fields = resolveStreamFields(
+                        streamName,
+                        streamFields,
+                        cursorField,
+                        primaryKeyField,
+                        cursorSemantics,
+                      );
+                      return (
+                        <label className="df2-label" htmlFor={`src-extract-${streamName}`} key={`src-extract-${streamName}`}>
+                          {streamName} extract
+                          <textarea
+                            id={`src-extract-${streamName}`}
+                            className="df2-input"
+                            rows={2}
+                            spellCheck={false}
+                            value={fields.sourceProcedure || ""}
+                            placeholder={
+                              dialectOffersProcedures(sourceConnector?.type)
+                                ? "CALL schema.get_customers('2024-01-01') or SELECT id, email FROM customers"
+                                : "SELECT id, email FROM customers"
+                            }
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setStreamFields((prev) => ({
+                                ...prev,
+                                [streamName]: {
+                                  ...prev[streamName],
+                                  cursorField: prev[streamName]?.cursorField ?? cursorField,
+                                  primaryKeyField: prev[streamName]?.primaryKeyField ?? primaryKeyField,
+                                  cursorSemantics: prev[streamName]?.cursorSemantics ?? cursorSemantics,
+                                  sourceProcedure: value,
+                                },
+                              }));
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
               )}
@@ -7411,7 +7455,16 @@ export function TransferPage({
           destRouteLabel={mapDestRouteLabel}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           steps={shapeSteps}
-          onChangeSteps={setShapeSteps}
+          onChangeSteps={(next) => {
+            if (!isMultiStreamSource) {
+              setShapeSteps(next);
+              return;
+            }
+            const active = (mapActiveStream || primarySourceStream || "").trim();
+            setShapeSteps(next.map((step) => (
+              step.source_table || !active ? step : { ...step, source_table: active }
+            )));
+          }}
           onIdentity={setShapeIdentity}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
@@ -7432,8 +7485,10 @@ export function TransferPage({
             setBusinessRuleReport(report);
             const primary = primarySourceStream || sourceTable || undefined;
             if (report.shape_steps.length) {
+              // Several tables: keep every stamped step. Filtering to the
+              // primary table dropped orders' transforms before Execute.
               setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
-                sourceTable: primary,
+                sourceTable: multiStreamNames.length > 1 ? undefined : primary,
               }));
             }
             setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
@@ -8164,6 +8219,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: value,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
               // A new column is a new question: the previous column's declared
@@ -8180,6 +8236,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
               cursorSemantics: value,
@@ -8193,6 +8250,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: value,
               cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
@@ -8202,6 +8260,22 @@ export function TransferPage({
             setPrimaryKeyField(value);
           }
         }}
+        onStreamDestProcedureChange={
+          isMultiStreamSource && (dialectOffersProcedures(destDriverType || destType) || dialectOffersQuery(destDriverType || destType))
+            ? (stream, value) => {
+                setStreamFields((prev) => ({
+                  ...prev,
+                  [stream]: {
+                    ...prev[stream],
+                    cursorField: prev[stream]?.cursorField ?? cursorField,
+                    primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+                    cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
+                    destProcedure: value,
+                  },
+                }));
+              }
+            : undefined
+        }
       />
       </PageFrame>
     </PageShell>

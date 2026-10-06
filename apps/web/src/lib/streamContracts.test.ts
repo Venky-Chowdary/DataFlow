@@ -51,6 +51,69 @@ describe("buildStreamContracts", () => {
     assert.equal(contracts[0].primary_key, "pk");
   });
 
+  it("stamps a per-stream CALL and does not copy it onto the other stream", () => {
+    const contracts = buildStreamContracts({
+      streamNames: ["customers", "orders"],
+      syncMode: "full_refresh_append",
+      schemaPolicy: "manual_review",
+      validationMode: "strict",
+      fieldCount: 3,
+      requiresCursor: false,
+      requiresPrimaryKey: false,
+      defaultCursor: "",
+      defaultPrimaryKey: "",
+      streamFields: {
+        customers: {
+          cursorField: "",
+          primaryKeyField: "id",
+          sourceProcedure: "CALL public.get_customers()",
+          destProcedure: "CALL public.land_customer(:id)",
+        },
+        orders: { cursorField: "", primaryKeyField: "id" },
+      },
+    });
+    assert.equal(contracts[0].procedure_call, "CALL public.get_customers()");
+    assert.equal(contracts[0].source_read_mode, "procedure");
+    assert.equal(contracts[0].dest_procedure_call, "CALL public.land_customer(:id)");
+    assert.equal(contracts[1].procedure_call, undefined);
+    assert.equal(contracts[1].dest_procedure_call, undefined);
+  });
+
+  it("classifies a SELECT as the extract and an INSERT as the dest write", () => {
+    const contracts = buildStreamContracts({
+      streamNames: ["customers", "orders"],
+      syncMode: "full_refresh_append",
+      schemaPolicy: "manual_review",
+      validationMode: "strict",
+      fieldCount: 2,
+      requiresCursor: false,
+      requiresPrimaryKey: false,
+      defaultCursor: "",
+      defaultPrimaryKey: "",
+      streamFields: {
+        customers: {
+          cursorField: "",
+          primaryKeyField: "id",
+          sourceProcedure: "SELECT id, email FROM customers WHERE active",
+          destProcedure: "INSERT INTO customers (id, email) VALUES (:id, :email)",
+        },
+        orders: {
+          cursorField: "",
+          primaryKeyField: "id",
+          sourceProcedure: "SELECT * FROM public.get_orders()",
+        },
+      },
+    });
+    assert.equal(contracts[0].source_read_mode, "query");
+    assert.equal(contracts[0].source_query, "SELECT id, email FROM customers WHERE active");
+    assert.equal(contracts[0].procedure_call, undefined);
+    assert.equal(contracts[0].dest_write_mode, "query");
+    assert.match(String(contracts[0].dest_query_sql), /^INSERT INTO customers/);
+    assert.equal(contracts[1].source_read_mode, "procedure");
+    assert.match(String(contracts[1].procedure_call), /^SELECT \* FROM public\.get_orders/);
+    assert.equal(contracts[1].dest_procedure_call, undefined);
+  });
+
   it("stamps snapshot_mode on CDC contracts", () => {
     const contracts = buildStreamContracts({
       streamNames: ["orders"],

@@ -197,6 +197,8 @@ export interface ShapePreviewResponse {
   refusal: ShapeRefusal | null;
   shaped_profile: ShapeColumnProfile[];
   suggestions: ShapeSuggestion[];
+  /** Set when the sample is one stream of a multi-table recipe. */
+  preview_note?: string;
 }
 
 /** Move one applied step, returning a new list (out-of-range moves are no-ops). */

@@ -3660,26 +3660,88 @@ class UniversalTransferEngine:
             # will receive. A separate throwaway runner shapes the design-time
             # sample: those effects are not the population's.
             _settle_locales(request, sample_rows, columns)
-            shape_runner = _open_shape_runner(request, columns)
             declared_contract = resolve_sync_contract(request.stream_contracts)
-            shape_refusal = _shape_stream_refusal(
-                shape_runner,
-                effective_sync=resolve_effective_sync_mode(
-                    request.sync_mode,
-                    declared_contract.sync_mode if declared_contract else None,
-                ),
-                multi_stream=len(
-                    resolve_selected_sync_contracts(request.stream_contracts)
-                ) > 1,
-                cursor_field=(
-                    declared_contract.cursor_field if declared_contract else ""
-                ),
-                key_columns=(
-                    declared_contract.primary_key_columns()
-                    if declared_contract and declared_contract.primary_key
-                    else []
-                ),
+            selected_for_shape = resolve_selected_sync_contracts(request.stream_contracts)
+            shape_sync = resolve_effective_sync_mode(
+                request.sync_mode,
+                declared_contract.sync_mode if declared_contract else None,
             )
+            shape_cursor = declared_contract.cursor_field if declared_contract else ""
+            shape_keys = (
+                declared_contract.primary_key_columns()
+                if declared_contract and declared_contract.primary_key
+                else []
+            )
+            shape_by_stream: dict[str, list] = {}
+            approved_shape_hash = ""
+            # design_runner shapes the primary sample and the preflight scan.
+            # The sequential writer builds one runner per stream from
+            # shape_by_stream, so a customers step is not applied to orders.
+            design_runner = None
+            multi_shape = len(selected_for_shape) > 1
+            from services.multi_stream_plan import (
+                approved_recipe_refusal,
+                enabled_recipe_steps,
+                full_recipe_hash,
+                history_shape_refusal,
+                partition_shape_steps,
+            )
+            from services.shape_models import ShapeError
+
+            recipe_payload = getattr(request, "shape_recipe", None)
+            if multi_shape and enabled_recipe_steps(recipe_payload):
+                shape_runner = None
+                shape_refusal = history_shape_refusal(shape_sync)
+                if not shape_refusal:
+                    shape_by_stream, shape_refusal = partition_shape_steps(
+                        recipe_payload,
+                        [c.name or "" for c in selected_for_shape],
+                    )
+                if not shape_refusal:
+                    shape_refusal = approved_recipe_refusal(
+                        recipe_payload,
+                        str(getattr(request, "approved_shape_recipe_hash", "") or ""),
+                    )
+                if not shape_refusal:
+                    approved_shape_hash = str(
+                        getattr(request, "approved_shape_recipe_hash", "") or ""
+                    ).strip()
+                    if not approved_shape_hash:
+                        try:
+                            approved_shape_hash = full_recipe_hash(recipe_payload)
+                        except ShapeError as exc:
+                            shape_refusal = str(exc)
+                    primary_name = (selected_for_shape[0].name or "").strip()
+                    primary_steps = shape_by_stream.get(primary_name) or []
+                    if primary_steps and not shape_refusal:
+                        try:
+                            from services.shape_apply import build_shape_runner
+
+                            design_runner = build_shape_runner(
+                                {"steps": primary_steps},
+                                source_columns=list(columns),
+                            )
+                        except ShapeError as exc:
+                            shape_refusal = f"{primary_name}: {exc}"
+                            design_runner = None
+                    if design_runner is not None and not shape_refusal:
+                        shape_refusal = _shape_stream_refusal(
+                            design_runner,
+                            effective_sync=shape_sync,
+                            multi_stream=False,
+                            cursor_field=shape_cursor,
+                            key_columns=shape_keys,
+                        )
+            else:
+                shape_runner = _open_shape_runner(request, columns)
+                design_runner = shape_runner
+                shape_refusal = _shape_stream_refusal(
+                    shape_runner,
+                    effective_sync=shape_sync,
+                    multi_stream=multi_shape,
+                    cursor_field=shape_cursor,
+                    key_columns=shape_keys,
+                )
             if shape_refusal:
                 mongo.update_job_status(
                     job_id,
@@ -3694,15 +3756,19 @@ class UniversalTransferEngine:
                     error_details={
                         "reason": "shape_route_unsupported",
                         "remediation": (
-                            "Remove the Shape recipe for this sync mode, or shape "
-                            "on a full-refresh / incremental-append route."
+                            "Name the source table on each transform step, or run one stream."
+                            if "source table" in shape_refusal
+                            else (
+                                "Remove the Shape recipe for this sync mode, or shape "
+                                "on a full-refresh / incremental-append route."
+                            )
                         ),
                     },
                     operation=request.operation,
                     job_id=job_id,
                 )
             sample_probe = (
-                ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+                ShapeRunner(design_runner.recipe) if design_runner is not None else None
             )
             if sample_probe is not None:
                 sample_rows = sample_probe.records(sample_rows)
@@ -3714,8 +3780,8 @@ class UniversalTransferEngine:
                 # The rewrites emptied the first page, not the table. Read on
                 # rather than let the gates judge a run on no rows at all.
                 widened_probe = (
-                    ShapeRunner(shape_runner.recipe)
-                    if shape_runner is not None
+                    ShapeRunner(design_runner.recipe)
+                    if design_runner is not None
                     else None
                 )
                 sample_rows = _widen_design_sample(
@@ -3803,7 +3869,7 @@ class UniversalTransferEngine:
                             column_types=schema,
                             dest_types=dest_schema_types,
                             dest_db=dst_fmt.lower(),
-                            shape_runner=shape_runner,
+                            shape_runner=design_runner,
                         )
                     ),
                     rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
@@ -4114,6 +4180,37 @@ class UniversalTransferEngine:
             stream_contract = resolve_sync_contract(request.stream_contracts)
             selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
             multi_non_cdc = len(selected_streams) > 1
+            if len(selected_streams) > 1:
+                from services.multi_stream_plan import review_stream_procedures
+
+                procedure_refusal = review_stream_procedures(
+                    request.source,
+                    request.destination,
+                    request.stream_contracts,
+                    [c.name or "" for c in selected_streams],
+                    sync_mode=request.sync_mode,
+                )
+                if procedure_refusal:
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        error=procedure_refusal,
+                        phase="failed",
+                        progress_pct=0,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=procedure_refusal,
+                        error_details={
+                            "reason": "multi_stream_procedure_refused",
+                            "remediation": (
+                                "Put a CALL on each selected stream, or run the "
+                                "procedure as a single stream."
+                            ),
+                        },
+                        operation=request.operation,
+                        job_id=job_id,
+                    )
             # Overwrite DROP once on primary is wrong for multi-stream — sequential
             # path drops each remapped destination instead.
             if not multi_non_cdc and should_drop_destination_for_sync(
@@ -4244,6 +4341,8 @@ class UniversalTransferEngine:
                         source_filter=request.source_filter,
                         limit=request.limit,
                         skip_preflight=request.skip_preflight,
+                        shape_by_stream=shape_by_stream or None,
+                        approved_shape_hash=approved_shape_hash,
                     )
                 )
             else:

@@ -227,6 +227,9 @@ export function TransferTransformStep({
         source_columns: sourceColumns,
         column_types: sourceSchema,
         target_schema: targetSchema,
+        focus_table: sourceTables.length > 1 ? sourceTable : undefined,
+        source_tables: sourceTables.length > 1 ? sourceTables : undefined,
+        source_catalog: sourceTables.length > 1 ? sourceCatalog : undefined,
       })
         .then((next) => {
           if (cancelled) return;
@@ -256,7 +259,18 @@ export function TransferTransformStep({
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|"), previewRetry]);
+  }, [
+    plan.allowed,
+    rowsKey,
+    stepsKey,
+    schemaKey,
+    sourceSchemaKey,
+    sourceColumns.join("|"),
+    previewRetry,
+    sourceTable,
+    sourceTables.join("|"),
+    sourceTables.map((name) => `${name}:${(sourceCatalog[name] || []).join(",")}`).join("|"),
+  ]);
 
   useEffect(() => {
     const step = preview?.refusal?.step;
@@ -626,6 +640,9 @@ export function TransferTransformStep({
             </button>
           </header>
 
+          {preview?.preview_note && (
+            <p className="df2-label-hint">{preview.preview_note}</p>
+          )}
           {steps.length === 0 ? (
             <p className="df2-xform-empty">
               <DtIcon name="check" size={16} />

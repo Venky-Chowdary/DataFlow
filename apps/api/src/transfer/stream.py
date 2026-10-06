@@ -825,6 +825,7 @@ def stream_database_transfer(
     limit: int = 0,
     skip_preflight: bool = False,
     shape_runner: ShapeRunner | None = None,
+    shape_steps: list[dict] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -833,6 +834,9 @@ def stream_database_transfer(
     ``shape_runner`` is the recipe Validate approved, applied to every page as it
     is read — so the writer, the DDL, the digest and the destination all describe
     the shaped rows, and the recipe's effects are counted once for the whole run.
+    ``shape_steps`` is the same recipe for one stream of a multi-table run,
+    built into a runner once that stream's columns are known. A server-side
+    COPY cannot apply either, so both decline the fast path.
 
     Property 3: full-refresh PostgreSQL/SQLite reads bind one snapshot session
     for the whole pagination lifetime (see ``services.source_snapshot``).
@@ -857,6 +861,7 @@ def stream_database_transfer(
             limit=limit,
             skip_preflight=skip_preflight,
             shape_runner=shape_runner,
+            shape_steps=shape_steps,
         )
         ok = True
         return result
@@ -941,11 +946,16 @@ def _stream_database_transfer_impl(
     limit: int = 0,
     skip_preflight: bool = False,
     shape_runner: ShapeRunner | None = None,
+    shape_steps: list[dict] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
     """
+    # A recipe that arrives as steps is built after this stream's columns are
+    # known. Until then it still has to keep the run off a server-side COPY,
+    # which would write the raw rows the operator asked to change.
+    pending_shape = shape_runner is not None or bool(shape_steps)
     from .connector_capabilities import resolve_bind_dialect, resolve_driver_type
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
@@ -1055,7 +1065,7 @@ def _stream_database_transfer_impl(
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
-    if incremental and cursor_source_col and shape_runner is None:
+    if incremental and cursor_source_col and not pending_shape:
         _tbl = _source_name(source)
         if _tbl and not (is_callable_source(source) or is_callable_source(src_cfg)):
             from services.preflight_cursor_gate import refuse_unusable_cursor_state
@@ -1099,7 +1109,7 @@ def _stream_database_transfer_impl(
     # destination's current shape and fail on the column the source just grew.
     # An occupied destination under backfill therefore stays on the row path.
     writer_owns_evolution = bool(backfill_new_fields) and pre_write_rows_before is not None
-    if writer_owns_evolution and shape_runner is None:
+    if writer_owns_evolution and not pending_shape:
         logger.info(
             "COPY fast path declined: backfill_new_fields on an existing %s "
             "destination — schema evolution runs on the writer path",
@@ -1108,7 +1118,7 @@ def _stream_database_transfer_impl(
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
-        fast = None if (shape_runner is not None or writer_owns_evolution) else _try_copy_fast_path(
+        fast = None if (pending_shape or writer_owns_evolution) else _try_copy_fast_path(
             source=source,
             destination=destination,
             mappings=mappings,
@@ -1653,6 +1663,33 @@ def _stream_database_transfer_impl(
         columns = list(schema.keys())
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
+
+    if shape_steps and shape_runner is None:
+        from services.shape_apply import build_shape_runner
+        from services.shape_models import ShapeError
+
+        try:
+            built = build_shape_runner(
+                {"steps": list(shape_steps)},
+                source_columns=list(columns),
+            )
+        except ShapeError as exc:
+            raise ValueError(
+                f"{table}: {exc}"
+            ) from exc
+        if built is not None:
+            from .engine_shape import _shape_stream_refusal
+
+            stream_refusal = _shape_stream_refusal(
+                built,
+                effective_sync=effective_sync,
+                multi_stream=False,
+                cursor_field=cursor_source_col or "",
+                key_columns=pk_source_cols,
+            )
+            if stream_refusal:
+                raise ValueError(f"{table}: {stream_refusal}")
+            shape_runner = built
 
     # Schemaless sources — absorb sparse attrs discovered mid-transfer so they
     # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
