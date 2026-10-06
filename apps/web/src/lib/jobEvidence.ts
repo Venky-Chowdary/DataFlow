@@ -16,6 +16,9 @@ type SummaryCarrier = {
   coerced_null_rows?: unknown;
   rejected_details?: unknown;
   rejected_details_total?: unknown;
+  warnings?: unknown;
+  warnings_suppressed?: unknown;
+  foreign_keys?: unknown;
 };
 
 export type JobEvidenceCarrier = {
@@ -111,4 +114,89 @@ export function readRejectedDetailsTotal(job: JobEvidenceCarrier | null | undefi
   const nested = finiteNumber(summaryOf(job)?.rejected_details_total);
   if (nested != null) return nested;
   return readRejectedDetails(job)?.length ?? 0;
+}
+
+export type WriterWarnings = {
+  messages: string[];
+  /** Engine dropped this many past the sample. They are not in `messages`. */
+  suppressed: number;
+};
+
+/** Destination writer messages. They live on destination_summary, not the job root. */
+export function readWriterWarnings(job: JobEvidenceCarrier | null | undefined): WriterWarnings {
+  const summary = summaryOf(job);
+  const raw = summary?.warnings;
+  const messages = Array.isArray(raw)
+    ? raw.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const suppressed = finiteNumber(summary?.warnings_suppressed);
+  return { messages, suppressed: suppressed != null && suppressed > 0 ? suppressed : 0 };
+}
+
+export type ForeignKeyDecisionView = {
+  name: string;
+  status: string;
+  reason: string;
+  destTable: string;
+  referencedTable: string;
+  integrityViolation: boolean;
+};
+
+export type ForeignKeyCarryView = {
+  verdict: string;
+  carried: number;
+  integrityViolations: number;
+  cycle: string[];
+  /** Null when the job predates cycle_resolved — treat a cycle as unresolved. */
+  cycleResolved: boolean | null;
+  cycleNote: string;
+  error: string;
+  decisions: ForeignKeyDecisionView[];
+};
+
+/**
+ * Post-load foreign-key carry (`services.foreign_key_orchestration.summarize`).
+ * Returns null when the run did not record a carry.
+ */
+export function readForeignKeyCarry(job: JobEvidenceCarrier | null | undefined): ForeignKeyCarryView | null {
+  const raw = summaryOf(job)?.foreign_keys;
+  if (!isRecord(raw)) return null;
+  const decisions: ForeignKeyDecisionView[] = [];
+  if (Array.isArray(raw.decisions)) {
+    for (const item of raw.decisions) {
+      if (!isRecord(item)) continue;
+      decisions.push({
+        name: String(item.name || ""),
+        status: String(item.status || "unknown"),
+        reason: String(item.reason || item.source_detail || ""),
+        destTable: String(item.dest_table || item.table || ""),
+        referencedTable: String(item.referenced_table || ""),
+        integrityViolation: item.integrity_violation === true,
+      });
+    }
+  }
+  const cycle = Array.isArray(raw.cycle)
+    ? raw.cycle.map((name) => String(name).trim()).filter(Boolean)
+    : [];
+  const carried = finiteNumber(raw.carried) ?? decisions.filter((d) => d.status === "carried").length;
+  const integrityViolations = finiteNumber(raw.integrity_violations)
+    ?? decisions.filter((d) => d.integrityViolation).length;
+  const verdict = String(raw.verdict || "");
+  const error = String(raw.error || "");
+  if (!verdict && !error && decisions.length === 0 && cycle.length === 0) return null;
+  return {
+    verdict,
+    carried,
+    integrityViolations,
+    cycle,
+    cycleResolved: raw.cycle_resolved == null ? null : Boolean(raw.cycle_resolved),
+    cycleNote: String(raw.cycle_note || ""),
+    error,
+    decisions,
+  };
+}
+
+/** Decisions that are not a quiet successful recreate. */
+export function foreignKeyProblems(carry: ForeignKeyCarryView): ForeignKeyDecisionView[] {
+  return carry.decisions.filter((d) => d.integrityViolation || d.status !== "carried");
 }

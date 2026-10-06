@@ -4,10 +4,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  foreignKeyProblems,
   readCoercedNullRows,
+  readForeignKeyCarry,
   readJobStreams,
   readRejectedDetails,
   readRejectedRows,
+  readWriterWarnings,
 } from "./jobEvidence.js";
 
 const orders = {
@@ -89,6 +92,55 @@ describe("quarantine evidence", () => {
       destination_summary: { rejected_rows: 9 },
     };
     assert.equal(readRejectedRows(job), 2);
+  });
+
+  it("reads writer warnings and a partial foreign-key carry from the summary", () => {
+    const job = {
+      destination_summary: {
+        warnings: ["batch checksum skipped", ""],
+        warnings_suppressed: 2,
+        foreign_keys: {
+          verdict: "partial",
+          carried: 1,
+          integrity_violations: 0,
+          cycle: ["orders", "customers"],
+          cycle_resolved: false,
+          cycle_note: "Cycle orders, customers is not fully enforced",
+          decisions: [
+            { name: "fk_ok", status: "carried", dest_table: "orders", referenced_table: "customers" },
+            {
+              name: "fk_bad",
+              status: "unsupported",
+              dest_table: "orders",
+              referenced_table: "customers",
+              reason: "parent type differs",
+            },
+          ],
+        },
+      },
+    };
+    const warnings = readWriterWarnings(job);
+    assert.deepEqual(warnings.messages, ["batch checksum skipped"]);
+    assert.equal(warnings.suppressed, 2);
+    const carry = readForeignKeyCarry(job);
+    assert.equal(carry?.verdict, "partial");
+    assert.equal(carry?.cycleResolved, false);
+    assert.deepEqual(foreignKeyProblems(carry!).map((d) => d.status), ["unsupported"]);
+    assert.equal(foreignKeyProblems(carry!)[0].reason, "parent type differs");
+  });
+
+  it("treats a missing cycle_resolved flag as unresolved", () => {
+    const carry = readForeignKeyCarry({
+      destination_summary: {
+        foreign_keys: { verdict: "partial", cycle: ["a", "b"], decisions: [] },
+      },
+    });
+    assert.equal(carry?.cycleResolved, null);
+  });
+
+  it("returns null when the run recorded no foreign-key carry", () => {
+    assert.equal(readForeignKeyCarry({ destination_summary: {} }), null);
+    assert.deepEqual(readWriterWarnings({}), { messages: [], suppressed: 0 });
   });
 
   it("shows summary findings when the job root has no sample", () => {

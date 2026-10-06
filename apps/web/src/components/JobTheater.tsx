@@ -36,7 +36,8 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
-import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -615,20 +616,12 @@ export function JobTheaterView({
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
-  const writerWarnings = Array.isArray(destinationSummary.warnings)
-    ? destinationSummary.warnings.map((item) => String(item)).filter(Boolean)
-    : [];
-  const warningCount = writerWarnings.length;
-  const warningsSuppressed = Number(destinationSummary.warnings_suppressed ?? 0) || 0;
+  const writerWarnings = readWriterWarnings(job);
+  const warningCount = writerWarnings.messages.length;
+  const warningsSuppressed = writerWarnings.suppressed;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
-  const fkSummary = (destinationSummary.foreign_keys ?? null) as {
-    cycle?: string[];
-    cycle_resolved?: boolean;
-    cycle_strategy?: string;
-    cycle_note?: string;
-    carried?: number;
-  } | null;
-  const fkCycle = Array.isArray(fkSummary?.cycle) ? fkSummary.cycle : [];
+  const fkCarry = readForeignKeyCarry(job);
+  const fkCycle = fkCarry?.cycle ?? [];
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
@@ -1648,20 +1641,20 @@ export function JobTheaterView({
         <article className={`df2-theater-v3-sla-card${warningCount > 0 ? " is-warn" : ""}`}>
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
-          <small title={writerWarnings.join("\n")}>
+          <small>
             {warningCount
-              ? `${writerWarnings[0]}${warningCount > 1 ? ` · +${warningCount - 1} more` : ""}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} not listed` : ""}`
+              ? `${warningCount} destination message${warningCount === 1 ? "" : "s"}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} more not listed` : ""}`
               : "No destination warnings"}
           </small>
         </article>
         {fkCycle.length > 0 && (
-        <article className={`df2-theater-v3-sla-card${fkSummary?.cycle_resolved ? "" : " is-warn"}`}>
+        <article className={`df2-theater-v3-sla-card${fkCarry?.cycleResolved ? "" : " is-warn"}`}>
           <span>FK cycle</span>
-          <strong>{fkSummary?.cycle_resolved ? "Recreated" : "Not enforced"}</strong>
+          <strong>{fkCarry?.cycleResolved ? "Recreated" : "Not enforced"}</strong>
           <small>
-            {fkSummary?.cycle_resolved
+            {fkCarry?.cycleResolved
               ? `Post-load ALTER on ${fkCycle.join(", ")} — destination validated the rows`
-              : fkSummary?.cycle_note
+              : fkCarry?.cycleNote
                 || `Cycle ${fkCycle.join(", ")} is not fully enforced on the destination`}
           </small>
         </article>
@@ -1706,6 +1699,8 @@ export function JobTheaterView({
         </article>
       </div>
       )}
+
+      {!earlyFail && <RunCarryNotes job={job} hideCycle />}
 
       {isComplete && job.reconciliation && (
         <Gate8ProofCard

@@ -36,6 +36,7 @@ import { ConservationLedgerCard } from "../components/transfer/ConservationLedge
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
+import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -983,6 +984,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               job={liveJob}
                               onOpenValidate={() => openValidateInStudio()}
                             />
+                            <RunCarryNotes job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
                               onOpenQuarantine={

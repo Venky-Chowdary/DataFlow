@@ -18,6 +18,7 @@ import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { readJobStreams } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
+import { RunCarryNotes } from "../jobs/RunCarryNotes";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
@@ -779,20 +780,7 @@ export function TransferResultDashboard({
           </section>
         )}
 
-        {ds?.warnings && ds.warnings.length > 0 && (
-          <section className="df2-result-warnings-block" role="status" aria-label="Writer warnings">
-            <p className="df2-result-warnings-note">
-              {ds.warnings.length} writer message{ds.warnings.length === 1 ? "" : "s"}
-              {ds.warnings_suppressed && ds.warnings_suppressed > 0
-                ? ` · ${ds.warnings_suppressed.toLocaleString()} more not listed`
-                : ""}
-              .
-            </p>
-            <ul className="df2-result-warnings">
-              {ds.warnings.map((w) => <li key={w}>{w}</li>)}
-            </ul>
-          </section>
-        )}
+        <RunCarryNotes job={{ destination_summary: ds }} />
 
         {showMore && (
           <details className="df2-result-more">
