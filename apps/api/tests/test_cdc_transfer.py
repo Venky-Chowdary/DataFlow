@@ -96,7 +96,11 @@ def test_run_cdc_database_transfer_requires_pk_and_cursor():
         )
 
 
-def test_run_cdc_database_transfer_performs_initial_snapshot():
+def test_run_cdc_database_transfer_performs_initial_snapshot(tmp_path, monkeypatch):
+    # A previous run of this test left watermark "2" in the workspace cursor
+    # file. Resume then seeks past 2, the mock still returns those rows, and
+    # the engine refuses the spin. The scenario is an initial snapshot.
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
     source = EndpointConfig(kind="database", format="generic_sql", database="test", table="src")
     destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="dst")
     headers = ["id", "value"]
@@ -128,8 +132,9 @@ def test_run_cdc_database_transfer_performs_initial_snapshot():
 
 
 @pytest.mark.fake_mongo
-def test_run_cdc_database_transfer_uses_mongodb_change_stream():
+def test_run_cdc_database_transfer_uses_mongodb_change_stream(tmp_path, monkeypatch):
     """Exercise the MongoDB change-stream branch of the CDC runner."""
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
     from services.cdc_engine import ChangeBatch
 
     source = EndpointConfig(kind="database", format="mongodb", database="test", table="orders")
@@ -169,3 +174,76 @@ def test_run_cdc_database_transfer_uses_mongodb_change_stream():
     assert rows_written == 2
     assert dest_summary["cdc"]["inserts"] == 2
     assert any("change_stream" in line for line in ddl_log)
+
+
+def test_query_cdc_restart_keeps_the_tie_break(tmp_path, monkeypatch):
+    """Rows sharing updated_at must survive a restart.
+
+    The page applied ids 1 and 2. Id 3 has the same timestamp and was not in
+    that page. A cursor-only watermark would seek past the timestamp and drop
+    it. The stored token is (updated_at, id), and the next poll seeks with it.
+    """
+    from services.keyset_pagination import split_cursor_bookmark
+    from services.sync_cursor import get_watermark
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    source = EndpointConfig(kind="database", format="generic_sql", database="test", table="src")
+    destination = EndpointConfig(kind="database", format="generic_sql", database="test", table="dst")
+    headers = ["id", "updated_at"]
+    page = [["1", "2024-01-01"], ["2", "2024-01-01"]]
+    mock_read = MagicMock(side_effect=[(_batch(headers, page), None), (_batch(headers, []), None)])
+    mock_write = MagicMock(return_value=(2, "abc", {}))
+
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", mock_read),
+        patch("src.transfer.cdc_transfer._write_batch", mock_write),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        rows_written, _ddl, summary, _columns = run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "updated_at", "target": "updated_at"},
+            ],
+            schema={"id": "integer", "updated_at": "timestamp"},
+            stream_contracts=[
+                {
+                    "sync_mode": "cdc",
+                    "primary_key": "id",
+                    "cursor_field": "updated_at",
+                }
+            ],
+            job_id="cdc-tie",
+        )
+
+    assert rows_written == 2
+    assert summary["cdc"]["inserts"] == 2
+    stored = get_watermark("generic_sql:test:src→generic_sql:test:dst:stream")
+    assert stored is not None
+    cursor_part, pk_part = split_cursor_bookmark(stored, has_tiebreak=True)
+    assert cursor_part == "2024-01-01"
+    assert pk_part == "2"
+
+    resume_calls: list[dict] = []
+
+    def _resume_read(*_args, **kwargs):
+        resume_calls.append(kwargs)
+        return _batch(headers, [["3", "2024-01-01"]]), None
+
+    engine = CdcEngine(
+        src_cfg={"database": "test"},
+        src_type="generic_sql",
+        table_name="src",
+        cursor_field="updated_at",
+        primary_key="id",
+        watermark=stored,
+        columns=headers,
+        batch_size=2,
+    )
+    with patch("src.transfer.cdc_transfer._read_batch", side_effect=_resume_read):
+        resumed = list(engine.poll())
+    assert resume_calls[0]["cursor_after"] == stored
+    assert resume_calls[0]["cursor_primary_key"] == "id"
+    assert [row["id"] for row in resumed[0].inserts] == ["3"]
+

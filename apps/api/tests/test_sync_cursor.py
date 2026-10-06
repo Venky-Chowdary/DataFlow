@@ -84,6 +84,40 @@ def test_compare_cursor_values_uses_typed_order():
     assert compare_cursor_values("500", None) == 1
 
 
+def test_stored_cursor_advances_onto_a_tie_break():
+    """A restart must seek past the last peer, not past the whole timestamp."""
+    from services.keyset_pagination import encode_keyset_bookmark
+    from services.sync_cursor import advance_stored_cursor, query_cdc_resume_watermark
+
+    tied = encode_keyset_bookmark(["2024-01-01", "5"])
+    later_pk = encode_keyset_bookmark(["2024-01-01", "9"])
+    next_day = encode_keyset_bookmark(["2024-01-02", "1"])
+    ten = encode_keyset_bookmark(["10", "1"])
+
+    assert advance_stored_cursor(None, ten) == (ten, True)
+    # "10" must not lose to "9" because the bookmark contains a separator.
+    assert advance_stored_cursor("9", ten) == (ten, True)
+    assert advance_stored_cursor("2024-01-01", tied) == (tied, True)
+    assert advance_stored_cursor(tied, later_pk) == (later_pk, True)
+    assert advance_stored_cursor(later_pk, tied) == (later_pk, False)
+    assert advance_stored_cursor(tied, next_day) == (next_day, True)
+
+    stored = query_cdc_resume_watermark(
+        [
+            {"id": "1", "updated_at": "2024-01-01"},
+            {"id": "2", "updated_at": "2024-01-01"},
+        ],
+        "updated_at",
+        "id",
+        None,
+    )
+    assert stored == encode_keyset_bookmark(["2024-01-01", "2"])
+    # The peer that was not in the page is still after the stored pair.
+    assert compare_cursor_values(
+        encode_keyset_bookmark(["2024-01-01", "3"]), stored
+    ) > 0
+
+
 def test_composite_tiebreak_compares_typed_not_lexically():
     from services.keyset_pagination import encode_keyset_bookmark
 

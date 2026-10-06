@@ -817,6 +817,66 @@ def max_cursor_value(
     return best
 
 
+def advance_stored_cursor(
+    current: str | None,
+    candidate: str | None,
+) -> tuple[str | None, bool]:
+    """Move a stored cursor forward, including a tie-break the old value lacked.
+
+    A composite candidate is compared on its cursor part, then its tie-break.
+    Comparing the whole bookmark as text ranks ``10`` behind ``9`` and would
+    leave the stored cursor on the old value, so the next poll re-reads the
+    same page. A scalar watermark and a composite with the same cursor advance
+    to the composite: the scalar cannot name which peer row was last applied.
+    """
+    if candidate is None or not str(candidate).strip():
+        return current, False
+    cand = str(candidate)
+    if current is None or not str(current).strip():
+        return cand, True
+    cur = str(current)
+    cand_cur, cand_pk = split_cursor_bookmark(cand, has_tiebreak=_is_composite(cand))
+    cur_cur, cur_pk = split_cursor_bookmark(cur, has_tiebreak=_is_composite(cur))
+    base = compare_cursor_values(cand_cur, cur_cur)
+    if base > 0:
+        return cand, True
+    if base < 0:
+        return cur, False
+    if cand_pk and not cur_pk:
+        return cand, True
+    if cand_pk and cur_pk and compare_cursor_values(cand_pk, cur_pk) > 0:
+        return cand, True
+    return cur, False
+
+
+def query_cdc_resume_watermark(
+    records: list[dict[str, Any]],
+    cursor_field: str,
+    tiebreak: str,
+    current: str | None,
+) -> str | None:
+    """Watermark after one query-CDC page.
+
+    When the primary key is not the cursor, the stored value is
+    ``(cursor, pk)``. The next poll seeks past that pair. A cursor-only
+    value would drop every peer row that shared the page's cursor and was
+    not in the page.
+    """
+    field = (cursor_field or "").strip()
+    if not field:
+        return current
+    pk = (tiebreak or "").strip()
+    headers = [field] + ([pk] if pk and pk != field else [])
+    matrix: list[list[str]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        matrix.append(["" if rec.get(col) is None else str(rec.get(col)) for col in headers])
+    batch_max = max_cursor_value(matrix, headers, field, pk or None)
+    new, advanced = advance_stored_cursor(current, batch_max)
+    return new if advanced else current
+
+
 def compare_cursor_values(a: str | None, b: str | None) -> int:
     """Compare two cursor values using the same typed watermark logic.
 

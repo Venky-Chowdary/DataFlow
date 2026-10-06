@@ -56,7 +56,6 @@ from services.tombstone import (
 from services.cdc_engine import (
     ChangeBatch,
     WatermarkType,
-    advance_watermark,
     infer_watermark_type,
     max_watermark,
 )
@@ -2830,20 +2829,20 @@ def _run_cdc_single_stream(
                 except TypeError:
                     state.running_cursor = str(change.resume_token)
         elif change.inserts or change.updates:
-            values = [
-                r.get(cursor_field)
-                for r in (change.inserts + change.updates)
-                if r.get(cursor_field) is not None
-            ]
-            if values:
-                wm_type = infer_watermark_type([str(v) for v in values])
-                batch_max = max_watermark([str(v) for v in values], wm_type)
-                if batch_max:
-                    new_watermark, advanced = advance_watermark(
-                        state.running_cursor, [batch_max], wm_type
-                    )
-                    if advanced and new_watermark is not None:
-                        state.running_cursor = new_watermark
+            # Query CDC has no log token. Store (cursor, pk) when the cursor
+            # is not unique so a restart seeks past the last applied peer
+            # instead of dropping every row that shares that cursor value.
+            from services.sync_cursor import query_cdc_resume_watermark
+
+            tiebreak = cdc._keyset_tiebreak() if isinstance(cdc, CdcEngine) else ""
+            resumed = query_cdc_resume_watermark(
+                [r for r in (change.inserts + change.updates) if isinstance(r, dict)],
+                cursor_field,
+                tiebreak,
+                state.running_cursor,
+            )
+            if resumed and resumed != state.running_cursor:
+                state.running_cursor = resumed
 
         chunk_idx += 1
         total_chunks = max(total_chunks, chunk_idx)
