@@ -34,7 +34,7 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentChecksumNote, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -733,7 +733,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             completedAt: liveJob.completed_at,
             status: selected.status,
             retryOf: selected.retry_of,
-            phases: liveJob.phases,
+            phases: presentJobPhases(liveJob.phases, liveJob),
             notifications: liveJob.notifications,
             rejectedRows: liveJob.rejected_rows,
             coercedNullRows: coercedCount,

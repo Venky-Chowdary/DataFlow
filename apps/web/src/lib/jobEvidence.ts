@@ -575,6 +575,31 @@ function rewriteStoredEventBody(body: string, last: string, tables: number): str
   return body;
 }
 
+const WROTE_ONE_TABLE = /^Wrote [\d,]+ rows on (.+)…$/;
+
+/**
+ * The load phase keeps the last status update. On a multi-table run that
+ * update names one table. The sentence stays, and it says that table is not
+ * the only one written.
+ */
+export function presentJobPhases<T extends { name?: string; message?: string }>(
+  phases: readonly T[] | null | undefined,
+  job: JobEvidenceCarrier | null | undefined,
+): T[] {
+  const list = Array.isArray(phases) ? [...phases] : [];
+  if (readJobStreamNames(job).length < 2) return list;
+  return list.map((phase) => {
+    if (phase.name !== "load") return phase;
+    const message = String(phase.message || "");
+    const wrote = message.match(WROTE_ONE_TABLE);
+    if (!wrote || /not the only table/i.test(message)) return phase;
+    return {
+      ...phase,
+      message: `${message.replace(/…$/, "")} — last table updated, not the only table.`,
+    };
+  });
+}
+
 /** Last-stream re-read notes must not read as job proof. */
 export function presentChecksumNote(
   note: unknown,

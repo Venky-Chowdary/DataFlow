@@ -51,6 +51,7 @@ from services.foreign_key_identity import (
     foreign_key_wire,
     parse_foreign_key,
     render_foreign_key_fact,
+    same_local_parent_after_move,
     same_relationship,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "PhysicalState",
     "read_physical_state",
     "compare_physical_state",
+    "requalify_schema_move_foreign_keys",
     "verify_physical_state",
     "resolve_stored_name",
     "catalog_table_names",
@@ -348,6 +350,10 @@ class PhysicalState:
     #: ``unreported`` means this read did not see the flag. An empty tuple
     #: means this comparison did not measure it.
     check_proof: tuple[tuple[str, str], ...] = ()
+    #: Schema of the table this catalog describes. A local foreign key is a
+    #: parent in this schema. Empty when the caller built the state by hand
+    #: and did not name the schema; the diff then keeps qualified names apart.
+    schema: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         from services.foreign_key_metadata import (
@@ -359,6 +365,7 @@ class PhysicalState:
             "readable": self.readable,
             "found": self.found,
             "reason": self.reason,
+            "schema": self.schema,
             "dialect": self.dialect,
             "table_kind": _reported_table_kind(self.table_kind),
             "index_status": normalize_snowflake_index_status(self.index_status),
@@ -952,6 +959,7 @@ def read_physical_state(
         readable=not collector.errors,
         found=True,
         reason="" if not collector.errors else "partial catalog read",
+        schema=schema or "",
         primary_key=_cols((pk or {}).get("constrained_columns")),
         unique_constraints=frozenset(unique_sets),
         foreign_keys=frozenset(fk_sets),
@@ -1875,6 +1883,8 @@ def _diff_foreign_keys(
     destination_deferral: tuple[str, ...] = (),
     destination_table_kind: str = "",
     index_detail: str = "",
+    source_schema: str = "",
+    dest_schema: str = "",
 ) -> dict[str, Any]:
     """Carried only when the destination relationship proves the source rule.
 
@@ -1934,7 +1944,21 @@ def _diff_foreign_keys(
         for index, other in enumerate(destination):
             if index in used:
                 continue
-            if same_relationship(ident, fk_identity(_as_mapping(other))):
+            other_ident = fk_identity(_as_mapping(other))
+            if same_relationship(ident, other_ident):
+                match = index
+                break
+            if (
+                ident is not None
+                and other_ident is not None
+                and ident[1] == other_ident[1]
+                and same_local_parent_after_move(
+                    ident[0],
+                    other_ident[0],
+                    left_table_schema=source_schema,
+                    right_table_schema=dest_schema,
+                )
+            ):
                 match = index
                 break
         if match is None:
@@ -2536,6 +2560,8 @@ def compare_physical_state(
         "foreign_keys": _diff_foreign_keys(
             source.foreign_key_facts,
             destination.foreign_key_facts,
+            source_schema=source.schema,
+            dest_schema=destination.schema,
             destination_proof=destination.foreign_key_proof,
             destination_dialect=destination.dialect,
             destination_table_kind=destination.table_kind,
@@ -2666,6 +2692,86 @@ def _cutover_recreate(advisory: dict[str, Any]) -> list[dict[str, str]]:
                 }
             )
     return items
+
+
+def requalify_schema_move_foreign_keys(
+    schema_objects: dict[str, Any] | None,
+    *,
+    source_schema: str,
+    dest_schema: str,
+) -> dict[str, Any]:
+    """A stored diff that called a moved local parent missing.
+
+    Runs written before the child schema was part of the comparison stored
+    ``public.customers`` as missing and ``live.customers`` as extra. The
+    parent moved with the child. This rewrites that one aspect. A parent in
+    some other schema stays missing. The job document is not edited here.
+    """
+    report = dict(schema_objects or {})
+    if not str(source_schema or "").strip() or not str(dest_schema or "").strip():
+        return report
+    aspects = report.get("aspects")
+    if not isinstance(aspects, dict):
+        return report
+    foreign_keys = aspects.get("foreign_keys")
+    if not isinstance(foreign_keys, dict) or foreign_keys.get("status") != "absent":
+        return report
+    if foreign_keys.get("unchecked") or foreign_keys.get("reasons"):
+        return report
+    if foreign_keys.get("proof_reasons") or foreign_keys.get("match_reasons"):
+        return report
+    if foreign_keys.get("action_reasons") or foreign_keys.get("deferral_reasons"):
+        return report
+    missing = [str(item) for item in foreign_keys.get("missing") or []]
+    extra = [str(item) for item in foreign_keys.get("extra") or []]
+    if not missing or len(missing) != len(extra):
+        return report
+    used: set[int] = set()
+    for item in missing:
+        parsed, error = decode_foreign_key_item(item)
+        if error or parsed is None:
+            return report
+        ident = fk_identity(parsed)
+        found = False
+        for index, other in enumerate(extra):
+            if index in used:
+                continue
+            other_parsed, other_error = decode_foreign_key_item(other)
+            if other_error or other_parsed is None:
+                continue
+            other_ident = fk_identity(other_parsed)
+            if (
+                ident is not None
+                and other_ident is not None
+                and ident[1] == other_ident[1]
+                and same_local_parent_after_move(
+                    ident[0],
+                    other_ident[0],
+                    left_table_schema=source_schema,
+                    right_table_schema=dest_schema,
+                )
+            ):
+                used.add(index)
+                found = True
+                break
+        if not found:
+            return report
+    if len(used) != len(extra):
+        return report
+    aspects = dict(aspects)
+    aspects["foreign_keys"] = {
+        **foreign_keys,
+        "status": "carried",
+        "missing": [],
+        "extra": [],
+    }
+    absent = [name for name in report.get("absent") or [] if name != "foreign_keys"]
+    unchecked = list(report.get("unchecked") or [])
+    unreadable = list(report.get("unreadable") or [])
+    report["aspects"] = aspects
+    report["absent"] = absent
+    report["verified"] = not absent and not unchecked and not unreadable
+    return report
 
 
 def verify_physical_state(

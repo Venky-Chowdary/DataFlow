@@ -8,6 +8,7 @@ import {
   formatJobRoute,
   identityAlignmentSentence,
   presentChecksumNote,
+  presentJobPhases,
   presentStoredEventLog,
   presentStoredExplanation,
   isRestoredEndpointTitle,
@@ -254,6 +255,28 @@ describe("presentStoredEventLog", () => {
       presentChecksumNote("write-pass fingerprints only", job),
       /migration_proven for the job/,
     );
+  });
+});
+
+describe("presentJobPhases", () => {
+  it("says the load line is the last table when several tables were written", () => {
+    const phases = presentJobPhases(
+      [
+        { name: "extract", status: "done" as const, message: "Analyzing the restored endpoint…" },
+        { name: "load", status: "done" as const, message: "Wrote 2 rows on orders…" },
+      ],
+      { destination_summary: { streams: [{ name: "customers" }, { name: "orders" }] } },
+    );
+    assert.equal(phases[0].message, "Analyzing the restored endpoint…");
+    assert.match(phases[1].message || "", /Wrote 2 rows on orders — last table updated, not the only table/);
+    assert.equal(presentJobPhases(phases, {
+      destination_summary: { streams: [{ name: "customers" }, { name: "orders" }] },
+    })[1].message, phases[1].message);
+  });
+
+  it("leaves a single-table load line unchanged", () => {
+    const phases = [{ name: "load", status: "done" as const, message: "Wrote 2 rows on orders…" }];
+    assert.equal(presentJobPhases(phases, { source_name: "orders" })[0].message, phases[0].message);
   });
 });
 

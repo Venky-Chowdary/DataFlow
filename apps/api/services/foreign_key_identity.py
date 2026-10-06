@@ -55,6 +55,37 @@ def same_parent_table(left: str, right: str) -> bool:
     return left_schema == right_schema
 
 
+def same_local_parent_after_move(
+    left_parent: str,
+    right_parent: str,
+    *,
+    left_table_schema: str,
+    right_table_schema: str,
+) -> bool:
+    """A parent in the child's own schema is the same parent after a schema move.
+
+    ``public.customers`` on a table in ``public`` and ``live.customers`` on a
+    table in ``live`` are one local relationship: the parent moved with the
+    child. ``sales.parent`` and ``archive.parent`` stay different. This does
+    not run when the caller did not name both child schemas, and it does not
+    treat an unqualified name as a moved local parent.
+    """
+    left_own = fold(left_table_schema)
+    right_own = fold(right_table_schema)
+    if not left_own or not right_own or left_own == right_own:
+        return False
+    left_schema, left_table = table_parts(left_parent)
+    right_schema, right_table = table_parts(right_parent)
+    if (
+        not left_schema
+        or not right_schema
+        or not left_table
+        or left_table != right_table
+    ):
+        return False
+    return left_schema == left_own and right_schema == right_own
+
+
 def relationship_identity(
     child_columns: list[str] | tuple[str, ...],
     parent_table: str,

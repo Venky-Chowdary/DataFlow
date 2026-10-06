@@ -147,7 +147,12 @@ def _rejected_details(
     return hydrated if len(hydrated) > len(rows) else rows
 
 
-def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
+def physical_state_findings(
+    recon: dict[str, Any],
+    *,
+    source_schema: str = "",
+    dest_schema: str = "",
+) -> dict[str, Any]:
     """Destination state a row checksum cannot prove, as certificate evidence.
 
     Today that is generator watermarks: keys can be byte-identical while the
@@ -163,6 +168,14 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
         "verified": False,
         "reason": "constraints and indexes were not compared for this run",
     }
+    if source_schema and dest_schema:
+        from services.physical_state_diff import requalify_schema_move_foreign_keys
+
+        schema_objects = requalify_schema_move_foreign_keys(
+            schema_objects,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
     referential = _dict(state.get("referential_integrity")) or {
         "verified": False,
         "reason": "destination referential integrity was not scanned for this run",
@@ -464,7 +477,16 @@ def build_migration_certificate(
         expected=_as_int(ledger.get("rows_quarantined")),
     )
     recon = _dict(job.get("reconciliation"))
-    physical = physical_state_findings(recon)
+    request = _dict(job.get("transfer_request"))
+    source_schema = str(_dict(request.get("source")).get("schema") or "")
+    dest_schema = str(
+        dest.get("schema") or _dict(request.get("destination")).get("schema") or ""
+    )
+    physical = physical_state_findings(
+        recon,
+        source_schema=source_schema,
+        dest_schema=dest_schema,
+    )
     status = str(job.get("status") or "")
 
     body: dict[str, Any] = {
