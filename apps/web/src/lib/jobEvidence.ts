@@ -196,7 +196,13 @@ export function readForeignKeyCarry(job: JobEvidenceCarrier | null | undefined):
   };
 }
 
-/** Decisions that are not a quiet successful recreate. */
+/**
+ * Decisions the operator must see. A measured table with no foreign keys is
+ * `skipped` — that is a quiet result, same as `carried`. Unsupported, unknown,
+ * and still-planned constraints are the findings.
+ */
 export function foreignKeyProblems(carry: ForeignKeyCarryView): ForeignKeyDecisionView[] {
-  return carry.decisions.filter((d) => d.integrityViolation || d.status !== "carried");
+  return carry.decisions.filter(
+    (d) => d.integrityViolation || (d.status !== "carried" && d.status !== "skipped"),
+  );
 }

@@ -54,4 +54,35 @@ describe("RunCarryNotes", () => {
     assert.match(html, /2 foreign keys recreated on the destination/);
     assert.doesNotMatch(html, /orders → customers/);
   });
+
+  it("does not warn when a parent table was measured and has no foreign keys", () => {
+    const html = renderToStaticMarkup(
+      <RunCarryNotes
+        job={{
+          destination_summary: {
+            foreign_keys: {
+              verdict: "carried",
+              carried: 1,
+              decisions: [
+                {
+                  status: "carried",
+                  dest_table: "orders",
+                  referenced_table: "customers",
+                  reason: "Destination catalog reports the constraint.",
+                },
+                {
+                  status: "skipped",
+                  dest_table: "customers",
+                  reason: "Source table declares no foreign keys (measured).",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    assert.match(html, /1 foreign key recreated on the destination/);
+    assert.doesNotMatch(html, /skipped/);
+    assert.doesNotMatch(html, /no foreign keys/);
+  });
 });
