@@ -492,6 +492,24 @@ def patches_for_stream(
     return source_patch, dest_patch
 
 
+def reader_columns_for_stream(
+    schema_columns: list[str],
+    *,
+    inherited: bool,
+) -> list[str]:
+    """Columns a stream may project before it has been read.
+
+    The request schema belongs to the primary table. Using it as the SELECT
+    list of every selected table drops columns that table does not share
+    (``customers.id, email`` applied to ``orders`` omits ``amount``). An
+    inherited stream returns an empty list, which readers treat as the table
+    itself. A stream that declared its own map keeps the schema it was given.
+    """
+    if inherited:
+        return []
+    return [str(col).strip() for col in schema_columns or [] if str(col).strip()]
+
+
 def adopt_inherited_mappings(
     mappings: list[Mapping[str, Any]] | None,
     columns: list[str],

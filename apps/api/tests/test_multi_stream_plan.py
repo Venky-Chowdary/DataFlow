@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from services.multi_stream_plan import (
     adopt_inherited_mappings,
+    reader_columns_for_stream,
     approved_recipe_refusal,
     contract_for_stream,
     design_source_patch,
@@ -313,6 +314,11 @@ def test_design_peek_uses_the_primary_streams_statement_only() -> None:
         [{"name": "customers"}, {"name": "orders"}],
         ["customers", "orders"],
     ) is None
+
+
+def test_inherited_stream_does_not_project_the_primary_schema() -> None:
+    assert reader_columns_for_stream(["id", "email"], inherited=True) == []
+    assert reader_columns_for_stream(["id", " email "], inherited=False) == ["id", "email"]
 
 
 def test_inherited_map_is_kept_only_when_the_column_set_matches() -> None:

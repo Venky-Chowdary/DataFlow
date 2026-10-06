@@ -749,6 +749,13 @@ class CdcEngine:
         for h, rows in reader:
             if not headers:
                 headers = h
+                # An inherited multi-table stream reads the table (no column
+                # list). Soft-delete detection needs those real names; the
+                # primary table's schema must not decide them.
+                if not self.tombstone_column and not self.columns:
+                    self.tombstone_column = _detect_tombstone_column(
+                        self.schema, headers
+                    )
             for row in rows:
                 buffer.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
                 if len(buffer) >= self.batch_size:
@@ -908,6 +915,85 @@ def _stamp_unparsed_sql_redo_summary(
     return out
 
 
+def _change_column_names(change: ChangeBatch) -> list[str]:
+    """Column names present on this batch's inserts and updates, in first-seen order.
+
+    ``_df_lsn`` is stamped later and is not part of the table's own set.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for record in list(change.inserts or []) + list(change.updates or []):
+        if not isinstance(record, dict):
+            continue
+        for key in record:
+            name = str(key).strip()
+            folded = name.casefold()
+            if not name or folded in seen or folded == "_df_lsn":
+                continue
+            seen.add(folded)
+            ordered.append(name)
+    return ordered
+
+
+def _note_inherited_map(summary: dict[str, Any] | None, note: str) -> dict[str, Any]:
+    """Surface why another table's column map was not applied. Once per note."""
+    out = dict(summary or {})
+    text = (note or "").strip()
+    if not text:
+        return out
+    warnings = [str(item) for item in (out.get("warnings") or [])]
+    if text not in warnings:
+        warnings.append(text)
+    out["warnings"] = warnings
+    return out
+
+
+def _align_inherited_batch(
+    mappings: list[dict[str, Any]],
+    headers: list[str],
+    change: ChangeBatch,
+    pk_target_col: str | list[str],
+    pk_source_cols: list[str],
+    lock: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str], str | list[str], str]:
+    """Keep this batch's columns when the map was borrowed from another table.
+
+    A later delete-only batch has no row image. ``lock`` remembers the first
+    image so that batch does not fall back to the primary table's schema and
+    rename the delete key.
+    """
+    from services.multi_stream_plan import adopt_inherited_mappings
+    from services.sync_cursor import map_source_to_target
+
+    imaged = _change_column_names(change)
+    note = ""
+    if imaged:
+        mappings, note = adopt_inherited_mappings(mappings, imaged)
+        headers = imaged
+        if lock is not None:
+            if lock.get("noted"):
+                note = ""
+            elif note:
+                lock["noted"] = True
+            lock["mappings"] = list(mappings)
+            lock["headers"] = list(headers)
+    elif lock and lock.get("mappings"):
+        mappings = list(lock["mappings"])
+        headers = list(lock.get("headers") or headers)
+    elif pk_source_cols:
+        # No row image yet, and none remembered. Another table's schema must
+        # not become this batch's column list or its delete key.
+        mappings = [
+            {"source": col, "target": col, "confidence": 0.95}
+            for col in pk_source_cols
+        ]
+        headers = list(pk_source_cols)
+    if pk_source_cols:
+        resolved = [map_source_to_target(col, mappings) or col for col in pk_source_cols]
+        pk_target_col = resolved[0] if len(resolved) == 1 else ",".join(resolved)
+    return list(mappings), list(headers), pk_target_col, note
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -928,6 +1014,9 @@ def _apply_change_batch(
     cursor_key: str = "",
     stream_name: str = "",
     writer_fence: int = 0,
+    mappings_inherited: bool = False,
+    pk_source_cols: list[str] | None = None,
+    align_lock: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import normalize_delivery_guarantee
@@ -952,6 +1041,20 @@ def _apply_change_batch(
             rejected=rejected_details,
         )
 
+    inherit_note = ""
+    if mappings_inherited:
+        mappings, headers, pk_target_col, inherit_note = _align_inherited_batch(
+            mappings,
+            headers,
+            change,
+            pk_target_col,
+            list(pk_source_cols or []),
+            align_lock,
+        )
+        column_types = dict(column_types or {})
+        for name in headers:
+            column_types.setdefault(name, "string")
+
     if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
         from connectors.cdc_eos_sql import apply_change_batch_exactly_once
 
@@ -968,8 +1071,9 @@ def _apply_change_batch(
             stream_name=stream_name,
             writer_fence=writer_fence,
         )
-        return rows, checksum, _stamp_unparsed_sql_redo_summary(
-            dest_summary, rejected_details
+        return rows, checksum, _note_inherited_map(
+            _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
+            inherit_note,
         ), deleted
 
     # Normalize once so every writer and the delete path see a real column list.
@@ -1151,7 +1255,10 @@ def _apply_change_batch(
         from services.row_conservation import CENSUS_KEY
 
         dest_summary[CENSUS_KEY] = census_payload
-    dest_summary = _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details)
+    dest_summary = _note_inherited_map(
+        _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
+        inherit_note,
+    )
 
     return rows_written, last_checksum, dest_summary, deleted
 
@@ -1396,13 +1503,15 @@ def _run_cdc_shared_multi_table(
             continue
         raw = next((c for c in stream_contracts if c.get("name") == name), {}) or {}
         stream_maps = raw.get("mappings")
-        use_maps = stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
+        declared = isinstance(stream_maps, list) and bool(stream_maps)
+        use_maps = stream_maps if declared else mappings
         stream_cfg[name] = {
             "primary_key": _cdc_pk_str(
                 contract.primary_key or primary_keys.get(name), name
             ),
             "cursor_field": str(contract.cursor_field or ""),
             "mappings": use_maps,
+            "mappings_inherited": not declared,
             "cursor_key": build_cursor_key(
                 source_type=src_type,
                 source_database=str(src_cfg.get("database") or ""),
@@ -1672,10 +1781,22 @@ def _run_cdc_shared_multi_table(
         stream = _resolve_stream(change)
         cfg = stream_cfg[stream]
         use_maps = cfg["mappings"]
+        inherit_note = ""
         from services.cdc_snapshot_window import _pk_columns
 
         pk_source = _pk_columns(cfg["primary_key"])
-        pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
+        if cfg.get("mappings_inherited"):
+            use_maps, headers, pk_joined, inherit_note = _align_inherited_batch(
+                use_maps,
+                headers,
+                change,
+                cfg["primary_key"],
+                pk_source,
+                cfg.setdefault("align_lock", {}),
+            )
+            pk_target = _pk_columns(pk_joined)
+        else:
+            pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
         if original_dest_table is not None or original_dest_collection is not None:
             if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
                 destination.collection = stream
@@ -1688,9 +1809,11 @@ def _run_cdc_shared_multi_table(
             aliases=(stream,),
         )
         col_types = dict(schema)
-        if change.inserts or change.updates:
+        if change.inserts or change.updates and not cfg.get("mappings_inherited"):
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
+        for name in headers:
+            col_types.setdefault(name, "string")
         _assert_cdc_lease_before_apply(cdc)
         rows_written = 0
         deleted = 0
@@ -1769,6 +1892,7 @@ def _run_cdc_shared_multi_table(
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
+        dest_summary = _note_inherited_map(dest_summary, inherit_note)
         if dest_summary:
             last_summary = _merge_cdc_dest_summary(
                 shared_accum,
@@ -2010,7 +2134,8 @@ def _run_cdc_multi_stream_sequential(
             ]
             # Prefer per-stream mappings when the operator mapped each stream on Map.
             stream_maps = single_contracts[0].get("mappings")
-            use_mappings = stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
+            declared_maps = isinstance(stream_maps, list) and bool(stream_maps)
+            use_mappings = stream_maps if declared_maps else mappings
             status = "completed"
             error: str | None = None
             rows = 0
@@ -2033,6 +2158,7 @@ def _run_cdc_multi_stream_sequential(
                     delivery_guarantee=delivery_guarantee,
                     workspace_id=workspace_id,
                     schedule_id=schedule_id,
+                    mappings_inherited=not declared_maps,
                 )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
@@ -2112,6 +2238,7 @@ def _run_cdc_single_stream(
     delivery_guarantee: str = "at_least_once",
     workspace_id: str = "",
     schedule_id: str = "",
+    mappings_inherited: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer for a single stream contract."""
     # Driver type is used for generic read/write; CDC source kind uses the
@@ -2219,8 +2346,13 @@ def _run_cdc_single_stream(
 
         persist_dest_keyset_on_signal(opened.resume)
 
-    headers = list(schema.keys())
+    from services.multi_stream_plan import reader_columns_for_stream
+
+    headers = reader_columns_for_stream(
+        list(schema.keys()), inherited=mappings_inherited
+    )
     column_types = {c: schema.get(c, "string") for c in headers}
+    align_lock: dict[str, Any] = {}
     # Non-empty only when log capture was refused and cursor polling took over.
     capture_downgrade: dict[str, str | bool] = {}
 
@@ -2622,6 +2754,9 @@ def _run_cdc_single_stream(
                 delivery_guarantee=eos_guarantee,
                 cursor_key=cursor_key,
                 stream_name=str(table_name or dest_table or ""),
+                mappings_inherited=mappings_inherited,
+                pk_source_cols=pk_source_cols,
+                align_lock=align_lock,
                 writer_fence=int(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),
