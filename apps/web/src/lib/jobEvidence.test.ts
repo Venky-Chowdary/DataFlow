@@ -5,9 +5,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   foreignKeyProblems,
+  formatJobRoute,
+  identityAlignmentSentence,
+  isRestoredEndpointTitle,
   readCoercedNullRows,
   readForeignKeyCarry,
+  readIdentityAlignment,
   readJobMappings,
+  readJobStreamNames,
   readJobStreams,
   readRejectedDetails,
   readRejectedRows,
@@ -78,6 +83,90 @@ describe("readJobStreams", () => {
     });
     assert.equal(streams[0].name, "payments");
     assert.equal(streams[0].error, "timeout");
+  });
+});
+
+describe("multi-table route", () => {
+  it("names every stream instead of the restored endpoint", () => {
+    const job = {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+      destination_summary: {
+        multi_stream: true,
+        table: "orders",
+        streams: [{ name: "customers" }, { name: "orders" }],
+      },
+    };
+    assert.deepEqual(readJobStreamNames(job), ["customers", "orders"]);
+    assert.equal(formatJobRoute(job), "customers, orders → dataflow (2 tables)");
+    assert.equal(isRestoredEndpointTitle("orders → orders", job), true);
+    assert.equal(isRestoredEndpointTitle("Nightly customers", job), false);
+  });
+
+  it("reads list-only stream names when the summary was stripped", () => {
+    const job = {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+      stream_names: ["customers", "orders", "orders", " "],
+    };
+    assert.deepEqual(readJobStreamNames(job), ["customers", "orders"]);
+    assert.match(formatJobRoute(job), /customers, orders/);
+  });
+
+  it("keeps a single-table route on the stored endpoint", () => {
+    const job = {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+      destination_summary: { streams: [{ name: "orders" }] },
+    };
+    assert.equal(formatJobRoute(job), "orders → dataflow.orders");
+  });
+});
+
+describe("identity alignment", () => {
+  it("does not call a skipped write-pass fingerprint a mismatch", () => {
+    const view = readIdentityAlignment({
+      destination_summary: {
+        multi_stream: true,
+        table: "orders",
+        streams: [{ name: "customers" }, { name: "orders" }],
+        identity_alignment: {
+          identity_hash_aligned: null,
+          write_pass_rows: 0,
+          reread_rows: 2,
+          reason: "write_pass_not_fingerprinted",
+        },
+      },
+    });
+    assert.ok(view);
+    assert.equal(view.aligned, null);
+    assert.equal(view.lastStreamOnly, true);
+    assert.equal(view.streamName, "orders");
+    const sentence = identityAlignmentSentence(view);
+    assert.match(sentence, /Last stream orders/);
+    assert.match(sentence, /not a hash mismatch/);
+    assert.match(sentence, /not a digest of the other tables/);
+    assert.doesNotMatch(sentence, /did not align/);
+  });
+
+  it("says when the hashes actually disagreed", () => {
+    const view = readIdentityAlignment({
+      destination_summary: {
+        identity_alignment: {
+          identity_hash_aligned: false,
+          write_pass_rows: 0,
+          reread_rows: 2,
+          reason: "write_pass_empty",
+        },
+      },
+    });
+    assert.equal(view?.aligned, false);
+    assert.equal(view?.lastStreamOnly, false);
+    assert.match(identityAlignmentSentence(view!), /did not align/);
+    assert.match(identityAlignmentSentence(view!), /write_pass_empty/);
   });
 });
 

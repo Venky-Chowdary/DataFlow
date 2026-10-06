@@ -95,6 +95,8 @@ export interface TransferCheckpoint {
   offset?: number;
   cursor_value?: unknown;
   cursor_column?: string;
+  /** Named stream this checkpoint belongs to. On a multi-table job this is one table, not the job. */
+  cdc_stream?: string;
   status?: string;
   /** ISO timestamp from checkpoint_service — used for resume-age display. */
   updated_at?: string;
@@ -174,6 +176,11 @@ export interface TransferJob {
   name?: string;
   source_type: string;
   source_name: string;
+  /**
+   * Multi-table jobs. List payloads carry names only; the detail document
+   * still has destination_summary.streams. Absent on a single-table job.
+   */
+  stream_names?: string[];
   source_connector_id?: string;
   dest_connector_id?: string;
   destination_type: string;

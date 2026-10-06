@@ -20,10 +20,20 @@ type SummaryCarrier = {
   warnings_suppressed?: unknown;
   foreign_keys?: unknown;
   schema_fidelity?: unknown;
+  identity_alignment?: unknown;
+  multi_stream?: unknown;
+  table?: unknown;
 };
 
 export type JobEvidenceCarrier = {
   streams?: unknown;
+  /** Names lifted onto list payloads. Detail jobs use destination_summary.streams. */
+  stream_names?: unknown;
+  source_name?: string | null;
+  source_type?: string | null;
+  destination_database?: string | null;
+  destination_collection?: string | null;
+  destination_type?: string | null;
   rejected_rows?: unknown;
   coerced_null_rows?: unknown;
   rejected_details?: unknown;
@@ -81,6 +91,83 @@ export function readJobStreams(job: JobEvidenceCarrier | null | undefined): CdcS
   const fromSummary = streamList(summaryOf(job)?.streams);
   if (fromSummary.length) return fromSummary;
   return streamList(job?.streams);
+}
+
+/**
+ * Table names for this run, in engine order.
+ *
+ * Detail jobs read the stream health list. List payloads only carry
+ * `stream_names` — the names, never the per-stream ledgers.
+ */
+export function readJobStreamNames(job: JobEvidenceCarrier | null | undefined): string[] {
+  const fromHealth = readJobStreams(job).map((stream) => stream.name);
+  if (fromHealth.length) return fromHealth;
+  if (!Array.isArray(job?.stream_names)) return [];
+  const names: string[] = [];
+  for (const item of job.stream_names) {
+    const name = String(item ?? "").trim();
+    if (!name || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
+}
+
+/** Visible list of stream names. Extra names stay in the count, not an unbounded string. */
+export function formatStreamNames(names: string[], max = 4): string {
+  const clean = names.map((name) => name.trim()).filter(Boolean);
+  if (clean.length <= max) return clean.join(", ");
+  return `${clean.slice(0, max).join(", ")} +${clean.length - max}`;
+}
+
+function destRouteLabel(job: JobEvidenceCarrier): string {
+  const database = String(job.destination_database || "").trim();
+  const collection = String(job.destination_collection || "").trim();
+  const paired = [database, collection].filter(Boolean).join(".");
+  return paired || String(job.destination_type || "").trim() || "destination";
+}
+
+/**
+ * Route an operator can trust.
+ *
+ * A multi-table job's stored source_name and destination_collection are the
+ * restored endpoint (the last table). Naming only that table hides the rest.
+ */
+export function formatJobRoute(job: JobEvidenceCarrier | null | undefined): string {
+  if (!job) return "source → destination";
+  const names = readJobStreamNames(job);
+  if (names.length >= 2) {
+    const dest = String(job.destination_database || "").trim()
+      || String(job.destination_type || "").trim()
+      || "destination";
+    return `${formatStreamNames(names)} → ${dest} (${names.length} tables)`;
+  }
+  const source = String(job.source_name || "").trim()
+    || String(job.source_type || "").trim()
+    || "source";
+  return `${source} → ${destRouteLabel(job)}`;
+}
+
+/**
+ * True when `name` is the auto title of the restored endpoint, not an
+ * operator rename. Those titles name the last table of a multi-table job.
+ */
+export function isRestoredEndpointTitle(
+  name: string,
+  job: JobEvidenceCarrier | null | undefined,
+): boolean {
+  const folded = name.trim().toLowerCase();
+  if (!folded || !job) return false;
+  const source = String(job.source_name || "").trim();
+  const collection = String(job.destination_collection || "").trim();
+  const database = String(job.destination_database || "").trim();
+  const candidates: string[] = [];
+  if (source) candidates.push(source);
+  for (const arrow of ["→", "->"]) {
+    if (source && collection) candidates.push(`${source} ${arrow} ${collection}`);
+    if (source && database && collection) candidates.push(`${source} ${arrow} ${database}.${collection}`);
+    if (source && database) candidates.push(`${source} ${arrow} ${database}`);
+  }
+  return candidates.some((candidate) => candidate.toLowerCase() === folded);
 }
 
 function countFrom(top: unknown, nested: unknown): number {
@@ -301,4 +388,91 @@ export function readSchemaFidelity(job: JobEvidenceCarrier | null | undefined): 
   const skipped = finiteNumber(raw.skipped_count) ?? 0;
   if (!items.length && unsupported === 0 && unknown === 0) return null;
   return { carried, unsupported, unknown, skipped, items };
+}
+
+export type IdentityAlignmentView = {
+  aligned: boolean | null;
+  reason: string;
+  writePassRows: number | null;
+  rereadRows: number | null;
+  /** True when this object is the last stream, not a job-wide digest. */
+  lastStreamOnly: boolean;
+  streamName: string;
+};
+
+/**
+ * Write-pass vs independent re-read.
+ *
+ * `identity_hash_aligned: null` with reason `write_pass_not_fingerprinted`
+ * is expected on a same-engine re-read. It is not a mismatch. On a
+ * multi-table job the object is the last stream's alignment.
+ */
+export function readIdentityAlignment(
+  job: JobEvidenceCarrier | null | undefined,
+): IdentityAlignmentView | null {
+  const summary = summaryOf(job);
+  const raw = summary && isRecord(summary.identity_alignment) ? summary.identity_alignment : null;
+  if (!raw) return null;
+  const aligned = raw.identity_hash_aligned === true
+    ? true
+    : raw.identity_hash_aligned === false
+      ? false
+      : null;
+  const reason = String(raw.reason || "").trim();
+  const writePassRows = finiteNumber(raw.write_pass_rows);
+  const rereadRows = finiteNumber(raw.reread_rows);
+  if (aligned == null && !reason && writePassRows == null && rereadRows == null) return null;
+  const names = readJobStreamNames(job);
+  const multi = names.length >= 2 || summary?.multi_stream === true;
+  const table = typeof summary?.table === "string" ? summary.table.trim() : "";
+  const streamName = (table && names.includes(table) ? table : "")
+    || names[names.length - 1]
+    || table;
+  return {
+    aligned,
+    reason,
+    writePassRows,
+    rereadRows,
+    lastStreamOnly: multi,
+    streamName: multi ? streamName : "",
+  };
+}
+
+function rowPhrase(count: number | null): string {
+  if (count == null) return "";
+  return `${count.toLocaleString()} row${count === 1 ? "" : "s"}`;
+}
+
+export function identityAlignmentTone(view: IdentityAlignmentView): "ok" | "warn" | "muted" {
+  if (view.aligned === false) return "warn";
+  if (view.aligned === true) return "ok";
+  return "muted";
+}
+
+/** One sentence. Does not invent a mismatch when the write pass was not fingerprinted. */
+export function identityAlignmentSentence(view: IdentityAlignmentView): string {
+  const where = view.lastStreamOnly
+    ? `Last stream ${view.streamName || "table"}: `
+    : "";
+  const reread = rowPhrase(view.rereadRows);
+  if (view.reason === "write_pass_not_fingerprinted") {
+    const count = reread ? ` (${reread})` : "";
+    const scope = view.lastStreamOnly
+      ? " This is not a hash mismatch, and it is not a digest of the other tables."
+      : " This is not a hash mismatch.";
+    return `${where}The write pass was not fingerprinted. The independent re-read${count} owns the digest.${scope}`;
+  }
+  if (view.aligned === true) {
+    const count = reread ? ` (${reread})` : "";
+    return `${where}Identity hashes match the independent re-read${count}.`;
+  }
+  if (view.aligned === false) {
+    const why = view.reason ? ` (${view.reason})` : "";
+    const counts = [
+      reread ? `re-read ${reread}` : "",
+      view.writePassRows != null ? `write pass ${rowPhrase(view.writePassRows)}` : "",
+    ].filter(Boolean).join("; ");
+    return `${where}Identity hashes did not align${why}.${counts ? ` ${counts}.` : ""}`;
+  }
+  return `${where}Identity alignment is ${view.reason || "unmeasured"}. Not a measured mismatch.`;
 }

@@ -34,8 +34,9 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, readJobMappings, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
+import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "../components/jobs/SchemaFidelityNotes";
 import {
@@ -192,14 +193,10 @@ function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
 function jobRouteLabel(
   job: Pick<
     TransferJob,
-    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type"
+    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type" | "stream_names"
   >,
 ) {
-  const dest =
-    [job.destination_database, job.destination_collection].filter(Boolean).join(".")
-    || job.destination_type
-    || "destination";
-  return `${jobSourceLabel(job)} → ${dest}`;
+  return formatJobRoute(job);
 }
 
 function jobDisplayName(
@@ -211,11 +208,20 @@ function jobDisplayName(
     | "destination_database"
     | "destination_collection"
     | "destination_type"
+    | "stream_names"
   >,
   override?: string | null,
 ) {
   const named = (override ?? job.name)?.trim();
-  return named || jobRouteLabel(job);
+  if (named && !isRestoredEndpointTitle(named, job)) return named;
+  return formatJobRoute(job);
+}
+
+function checkpointCommittedPhrase(checkpoint: TransferJob["checkpoint"] | null | undefined): string {
+  if (checkpoint?.rows_processed == null) return "";
+  const rows = `${checkpoint.rows_processed.toLocaleString()} rows committed`;
+  const stream = (checkpoint.cdc_stream || "").trim();
+  return stream ? `${rows} on ${stream}` : rows;
 }
 
 function normalizeJobName(value: string) {
@@ -510,7 +516,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             ? (gapRecovery
               ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
               : "Full refresh re-run from the beginning — it replaces the destination.")
-            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${(liveJob?.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${checkpointCommittedPhrase(liveJob?.checkpoint) || "no rows committed yet"}).`),
         tone: "success",
       });
       onRefresh?.();
@@ -610,6 +616,8 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
   const streamHealth = readJobStreams(liveJob);
+  const streamNames = readJobStreamNames(liveJob);
+  const multiStream = streamNames.length >= 2;
   const rejectedCount = readRejectedRows(liveJob);
   const coercedCount = readCoercedNullRows(liveJob);
   const rejectedDetails = readRejectedDetails(liveJob);
@@ -801,8 +809,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                   />
                 ) : (
                   filtered.map((job, index) => {
-                    const route = jobRouteLabel(job);
+                    const fullRoute = jobRouteLabel(job);
                     const displayName = jobDisplayName(job, nameOverrides[job._id]);
+                    const route = displayName === fullRoute
+                      ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
+                      : fullRoute;
                     const isLiveRow = job.status === "running" || job.status === "pending";
                     return (
                       <button
@@ -830,7 +841,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
-                            <span className="df2-job-row-route-meta" title={route}>{route}</span>
+                            <span className="df2-job-row-route-meta" title={fullRoute}>{route}</span>
                             {(() => {
                               const rows = formatJobRowMetric(job);
                               return (
@@ -920,13 +931,21 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           <ConnectorIcon id={selected.source_type} size={22} />
                           <div>
                             <span>Source</span>
-                            <strong>{liveJob.source_name || selected.source_name}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {multiStream
+                                ? formatStreamNames(streamNames)
+                                : (liveJob.source_name || selected.source_name)}
+                            </strong>
                           </div>
                           <DtIcon name="transfer" size={14} />
                           <ConnectorIcon id={selected.destination_type} size={22} />
                           <div>
                             <span>Destination</span>
-                            <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {multiStream
+                                ? `${[liveJob.destination_database, typeof liveJob.destination_summary?.schema === "string" ? liveJob.destination_summary.schema : ""].filter(Boolean).join(".")} · ${streamNames.length} tables`
+                                : `${liveJob.destination_database}.${liveJob.destination_collection}`}
+                            </strong>
                           </div>
                         </div>
                       </div>
@@ -989,8 +1008,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             />
                             <RunCarryNotes job={liveJob} />
                             <SchemaFidelityNotes job={liveJob} />
+                            <IdentityAlignmentNote job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
+                              onOpenGate8={recon ? () => setEvidenceDrawer("gate8") : undefined}
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
                               }
@@ -1653,7 +1674,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 <dd>
                   batch {liveJob.checkpoint.chunk_index ?? 0}
                   {liveJob.checkpoint.rows_processed != null
-                    ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
+                    ? ` · ${checkpointCommittedPhrase(liveJob.checkpoint)}`
                     : ""}
                   {liveJob.checkpoint.updated_at
                     ? ` · updated ${String(liveJob.checkpoint.updated_at)}`
@@ -1698,12 +1719,18 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             )}
             {(typeof destSummary.table === "string" || typeof destSummary.collection === "string") && (
               <div>
-                <dt>Table / collection</dt>
-                <dd>{String(destSummary.table || destSummary.collection)}</dd>
+                <dt>{multiStream ? "Last stream table" : "Table / collection"}</dt>
+                <dd>
+                  {String(destSummary.table || destSummary.collection)}
+                  {multiStream ? ` · job is ${formatStreamNames(streamNames)}` : ""}
+                </dd>
               </div>
             )}
             {typeof destSummary.checksum === "string" && destSummary.checksum && (
-              <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
+              <div>
+                <dt>{multiStream ? "Last stream writer checksum" : "Writer checksum"}</dt>
+                <dd className="df2-mono">{String(destSummary.checksum)}</dd>
+              </div>
             )}
           </dl>
           <PhaseProfileCard

@@ -93,3 +93,51 @@ def test_slim_job_recovers_connector_ids_from_legacy_transfer_request():
     assert slim["source_connector_id"] == "mysql-venky"
     assert slim["dest_connector_id"] == "sf-dest"
     assert "transfer_request" not in slim
+
+
+def test_slim_job_lifts_multi_table_names_and_drops_stream_ledgers():
+    job = {
+        "_id": "multi",
+        "status": "completed",
+        "source_name": "orders",
+        "destination_collection": "orders",
+        "streams": [{"name": "stale", "row_accounting": {"dest_count": 99}}],
+        "destination_summary": {
+            "table": "orders",
+            "multi_stream": True,
+            "checksum": "abc",
+            "streams": [
+                {"name": "customers", "row_accounting": {"dest_count": 2, "note": "x" * 500}},
+                {"name": "orders", "row_accounting": {"dest_count": 2}},
+                {"status": "completed"},
+                {"name": "customers"},
+            ],
+        },
+    }
+    slim = slim_job_for_list(job)
+    assert slim["stream_names"] == ["customers", "orders"]
+    assert "destination_summary" not in slim
+    assert "streams" not in slim
+    assert slim["source_name"] == "orders"
+
+
+def test_slim_job_omits_stream_names_for_a_single_table():
+    slim = slim_job_for_list(
+        {
+            "_id": "one",
+            "source_name": "orders",
+            "destination_summary": {"streams": [{"name": "orders", "row_accounting": {"dest_count": 2}}]},
+        }
+    )
+    assert "stream_names" not in slim
+
+
+def test_slim_job_uses_top_level_streams_when_the_summary_list_is_empty():
+    slim = slim_job_for_list(
+        {
+            "_id": "cdc",
+            "streams": [{"stream": "customers"}, {"name": "orders"}],
+            "destination_summary": {"streams": []},
+        }
+    )
+    assert slim["stream_names"] == ["customers", "orders"]

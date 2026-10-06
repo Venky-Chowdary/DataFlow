@@ -13,6 +13,7 @@ import {
   overviewRecentMigrationsState,
 } from "../lib/overviewAnalytics";
 import { destProvenCount, formatJobRowMetric } from "../lib/conservationLedger";
+import { formatJobRoute, formatStreamNames, readJobStreamNames } from "../lib/jobEvidence";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
@@ -443,10 +444,18 @@ export function DashboardPage({
                         {jobs.slice(0, JOB_LIMIT).map((job, index) => (
                           <tr key={job._id || `job-${index}`} className={job.status === "failed" ? "df2-row-error" : job.status === "completed_with_quarantine" ? "df2-row-warn" : ""}>
                             <td>
-                              <div className="df2-cell-title" title={job.source_name}>{job.source_name}</div>
-                              <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
-                                {job.source_type} → {job.destination_type}
-                              </div>
+                              {(() => {
+                                const names = readJobStreamNames(job);
+                                const title = names.length >= 2 ? formatStreamNames(names) : job.source_name;
+                                return (
+                                  <>
+                                    <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
+                                    <div className="df2-cell-meta" title={`${job.source_type} → ${job.destination_type}`}>
+                                      {job.source_type} → {job.destination_type}
+                                    </div>
+                                  </>
+                                );
+                              })()}
                             </td>
                             <td><CopyIdChip id={job._id} label="Job" compact /></td>
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>

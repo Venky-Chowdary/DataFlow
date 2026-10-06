@@ -12,12 +12,13 @@ import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard } from "./Gate8ProofCard";
-import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, presentMultiStreamGate8, type Gate8Reconciliation } from "./gate8Status";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8, type Gate8Reconciliation } from "./gate8Status";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
-import { readJobStreams } from "../../lib/jobEvidence";
+import { formatStreamNames, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
+import { IdentityAlignmentNote } from "../jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "../jobs/SchemaFidelityNotes";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
@@ -114,6 +115,8 @@ export function TransferResultDashboard({
   const resolvedProof = asMappingProof(mappingProofProp) || asMappingProof(result.mapping_proof);
   const ds = result.destination_summary;
   const streamHealth = readJobStreams(result);
+  const streamNames = readJobStreamNames(result);
+  const multiStream = streamNames.length >= 2;
   const rec = result.records_transferred ?? 0;
   const errDetails = (result.error_details || {}) as Record<string, unknown>;
   const rejected = Number(
@@ -152,6 +155,9 @@ export function TransferResultDashboard({
     gate8.tone === "ok" ? "ok" : gate8.tone === "danger" ? "danger" : gate8.tone === "warn" ? "warn" : undefined;
   const throughput = result.records_per_second ?? ds?.records_per_second;
   const checksum = fmt(ds?.checksum) || fmt(result.reconciliation?.target_checksum);
+  const activeRoute = multiStream
+    ? `${formatStreamNames(streamNames)} → ${ds?.database || ds?.schema || destLabel}`
+    : `${sourceLabel} → ${destLabel}`;
 
   const eventLog = useMemo(() => {
     if (result.event_log?.length) return result.event_log;
@@ -171,13 +177,14 @@ export function TransferResultDashboard({
       preflight_run_id: prev?.preflight_run_id,
       job_id: result.job_id,
       validation_status: result.success ? (hasIntegrityLoss ? "completed_with_quarantine" : "completed") : "failed",
-      route: `${sourceLabel} → ${destLabel}`,
+      route: activeRoute,
       blockers: result.error ? [result.error] : prev?.blockers,
     }));
-  }, [destLabel, hasIntegrityLoss, rec, result.error, result.job_id, result.success, setActiveData, sourceLabel]);
+  }, [activeRoute, hasIntegrityLoss, rec, result.error, result.job_id, result.success, setActiveData, sourceLabel]);
 
-  const destinationLine =
-    ds?.table ? `${ds.schema || ds.database || "default"}.${ds.table}` :
+  const destinationLine = multiStream
+    ? `${[ds?.schema || ds?.database || "destination", formatStreamNames(streamNames)].filter(Boolean).join(" · ")}`
+    : ds?.table ? `${ds.schema || ds.database || "default"}.${ds.table}` :
     ds?.collection ? [ds.database, ds.collection].filter(Boolean).join(".") :
     ds?.database ? ds.database :
     ds?.dataset ? ds.dataset :
@@ -235,7 +242,14 @@ export function TransferResultDashboard({
     metaChips.push({ label: "Batch", value: Number(ds.chunk_size).toLocaleString() });
   }
   if (sourceRows != null && sourceRows > 0 && sourceRows !== rec) {
-    metaChips.push({ label: "Source rows", value: sourceRows.toLocaleString() });
+    metaChips.push({
+      label: multiStream || isGate8LastStream(gate8Report) ? "Last stream source" : "Source rows",
+      value: sourceRows.toLocaleString(),
+      tone: multiStream || isGate8LastStream(gate8Report) ? "warn" : undefined,
+      title: multiStream || isGate8LastStream(gate8Report)
+        ? "Row count of the last table's checksum. The job total is each stream's destination COUNT(*)."
+        : undefined,
+    });
   }
   if (result.operation) {
     metaChips.push({ label: "Mode", value: result.operation });
@@ -293,6 +307,13 @@ export function TransferResultDashboard({
       tone: "warn",
       title: "Append dest COUNT(*) growth this run. Whole-table checksums are not comparable.",
     });
+  } else if (checksum && (multiStream || isGate8LastStream(gate8Report))) {
+    metaChips.push({
+      label: "Last stream checksum",
+      value: checksum.slice(0, 12),
+      tone: "warn",
+      title: checksum,
+    });
   } else if (checksum && !isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined)) {
     metaChips.push({ label: "Checksum", value: checksum.slice(0, 12), title: checksum });
   } else if (isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined) && checksum) {
@@ -348,7 +369,9 @@ export function TransferResultDashboard({
             <ConnectorIcon id={sourceType} size={16} />
             <div>
               <span>{sourceType ? sourceType.toUpperCase() : "Source"}</span>
-              <strong title={sourceLabel}>{sourceLabel}</strong>
+              <strong title={multiStream ? streamNames.join(", ") : sourceLabel}>
+                {multiStream ? formatStreamNames(streamNames) : sourceLabel}
+              </strong>
             </div>
           </div>
           <div className="df2-result-arrow" aria-hidden>
@@ -358,7 +381,7 @@ export function TransferResultDashboard({
             <ConnectorIcon id={destType} size={16} />
             <div>
               <span>{destinationPath}</span>
-              <strong title={destLabel}>{destinationLine}</strong>
+              <strong title={multiStream ? streamNames.join(", ") : destLabel}>{destinationLine}</strong>
             </div>
           </div>
         </div>
@@ -449,7 +472,7 @@ export function TransferResultDashboard({
           records_processed: rec,
           rejected_rows: rejected,
           coerced_null_rows: coercedNull,
-          reconciliation: result.reconciliation as Record<string, unknown> | undefined,
+          reconciliation: (gate8Report ?? result.reconciliation) as Record<string, unknown> | undefined,
           destination_summary: ds as Record<string, unknown> | undefined,
           cdc_cursor_gap: result.cdc_cursor_gap,
           error_code: result.error_code,
@@ -457,6 +480,9 @@ export function TransferResultDashboard({
         }}
         onOpenValidate={onOpenValidate}
         onResume={onResume}
+        onOpenGate8={() => {
+          document.querySelector(".df2-result-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
         onOpenQuarantine={
           showQuarantine
             ? () => document.getElementById("df2-result-quarantine")?.scrollIntoView({ behavior: "smooth" })
@@ -472,7 +498,7 @@ export function TransferResultDashboard({
         // Writer checksum alone is not Gate-8 — never invent matching source/target
         // fingerprints that would render as Verified.
         if (!serverReconcile && !writerChecksum) return null;
-        const report: Gate8Reconciliation = serverReconcile || {
+        const report: Gate8Reconciliation = (serverReconcile ? gate8Report : undefined) || {
           passed: false,
           preview: true,
           phase: "post_write_pending",
@@ -787,6 +813,7 @@ export function TransferResultDashboard({
 
         <RunCarryNotes job={{ destination_summary: ds }} />
         <SchemaFidelityNotes job={{ destination_summary: ds }} />
+        <IdentityAlignmentNote job={{ destination_summary: ds }} />
 
         {showMore && (
           <details className="df2-result-more">

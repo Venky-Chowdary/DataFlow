@@ -37,6 +37,7 @@ import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPa
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
@@ -950,6 +951,9 @@ export function JobTheaterView({
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
+            onOpenGate8={() => {
+              document.querySelector(".df2-theater-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
           />
           {lineage.length > 0 && (
             <details className="df2-theater-lineage">
@@ -1708,6 +1712,7 @@ export function JobTheaterView({
 
       {!earlyFail && <RunCarryNotes job={job} hideCycle />}
       {!earlyFail && <SchemaFidelityNotes job={job} />}
+      {!earlyFail && <IdentityAlignmentNote job={job} />}
 
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
