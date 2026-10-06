@@ -114,3 +114,20 @@ def test_cdc_watermark_survives_checkpoint_load():
     # An explicit cursor_value stays the record. The watermark key does not replace it.
     kept = Checkpoint.from_dict({"cursor_value": "10", "watermark": "4"})
     assert kept.cursor_value == "10"
+
+
+def test_cdc_checkpoint_keeps_the_stream_it_names():
+    """Resume must still know which table a watermark belongs to."""
+    loaded = Checkpoint.from_dict(
+        {
+            "watermark": "4",
+            "stream": "orders",
+            "cdc_shared_reader": True,
+        }
+    )
+    assert loaded.cursor_value == "4"
+    assert loaded.cdc_stream == "orders"
+    assert loaded.cdc_shared_reader is True
+    again = Checkpoint.from_dict(loaded.to_dict())
+    assert again.cdc_stream == "orders"
+    assert again.cdc_shared_reader is True

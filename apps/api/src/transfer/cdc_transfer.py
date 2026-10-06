@@ -1560,6 +1560,11 @@ def _run_cdc_shared_multi_table(
 
         persist_dest_keyset_on_signal(opened.resume)
 
+    # One route cursor. The shared store wins. An empty store may resume
+    # from the job checkpoint when that record is the shared log position.
+    # A scalar that names one table is not this route's cursor.
+    shared_wm = resume_watermark(shared_wm, checkpoint, shared=True)
+
     cdc: Any
     ddl_log: list[str] = [
         f"CDC(shared_reader) {src_type} tables={tables} → {dest_type} "
@@ -2237,6 +2242,7 @@ def _run_cdc_multi_stream_sequential(
                         workspace_id=workspace_id,
                         schedule_id=schedule_id,
                         mappings_inherited=not declared_maps,
+                        checkpoint_bound_to_stream=True,
                     )
                     ddl_log.extend(stream_ddl)
                     total_rows += rows
@@ -2317,6 +2323,7 @@ def _run_cdc_single_stream(
     workspace_id: str = "",
     schedule_id: str = "",
     mappings_inherited: bool = False,
+    checkpoint_bound_to_stream: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer for a single stream contract."""
     from .stream_dest_procedure import (
@@ -2433,8 +2440,15 @@ def _run_cdc_single_stream(
 
     # The reader and the snapshot plan must share this cursor. A checkpoint
     # fills a missing store only. It must not rewind a cursor the store
-    # already advanced.
-    watermark = resume_watermark(watermark, checkpoint)
+    # already advanced. A multi-table run adopts that checkpoint only when
+    # it names this stream. An unnamed job cursor is one table's position
+    # and must not seek the others.
+    watermark = resume_watermark(
+        watermark,
+        checkpoint,
+        stream=table_name,
+        allow_unnamed=not checkpoint_bound_to_stream,
+    )
 
     from services.multi_stream_plan import reader_columns_for_stream
 
@@ -2965,6 +2979,7 @@ def _run_cdc_single_stream(
                 {
                     "chunk_index": chunk_idx,
                     "watermark": checkpoint_watermark,
+                    "stream": table_name,
                     "rows_written": state.rows_written,
                     "cdc_lag_seconds": lag_fields.get("cdc_lag_seconds"),
                     "replication_lag_bytes": lag_fields.get("replication_lag_bytes"),

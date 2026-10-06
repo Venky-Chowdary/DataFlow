@@ -111,6 +111,13 @@ class Checkpoint:
     #: so resume must restore them or the population double-counts the pages a
     #: previous pass already bounded.
     rows_cursor_bounded: int = 0
+    #: CDC stream this cursor belongs to. Empty on a legacy single-stream
+    #: checkpoint. A sequential multi-table resume must not apply the cursor
+    #: to every selected table.
+    cdc_stream: str = ""
+    #: True when ``cursor_value`` is the shared log position for the route,
+    #: not one table's query cursor.
+    cdc_shared_reader: bool = False
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -176,6 +183,8 @@ class Checkpoint:
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
             "target_rows_before": self.target_rows_before,
+            "cdc_stream": self.cdc_stream,
+            "cdc_shared_reader": self.cdc_shared_reader,
         }
 
     @classmethod
@@ -187,6 +196,14 @@ class Checkpoint:
         # so a resume used to drop the log position and snapshot again.
         if fields.get("cursor_value") is None and data.get("watermark") is not None:
             fields["cursor_value"] = data.get("watermark")
+        # The job blob names the stream as ``stream``. This record keeps it
+        # so a later table does not seek with another table's cursor.
+        if not fields.get("cdc_stream"):
+            named = data.get("cdc_stream") or data.get("stream") or data.get("stream_name")
+            if isinstance(named, str) and named.strip():
+                fields["cdc_stream"] = named.strip()
+        if data.get("cdc_shared_reader") and not fields.get("cdc_shared_reader"):
+            fields["cdc_shared_reader"] = True
         return cls(**fields)
 
 

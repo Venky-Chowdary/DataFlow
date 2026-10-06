@@ -135,6 +135,31 @@ def test_resume_watermark_keeps_the_store_ahead_of_a_checkpoint():
     assert checkpoint_watermark({"cursor_value": "9"}) == "9"
 
 
+def test_resume_watermark_stays_on_the_stream_it_names():
+    """A job cursor is one position. It must not seek a different table."""
+    from services.sync_cursor import resume_watermark
+
+    orders = "slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1"
+    assert resume_watermark(None, {"watermark": orders}, stream="orders", allow_unnamed=False) == orders
+    assert resume_watermark(None, {"watermark": orders}, stream="users", allow_unnamed=False) is None
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, stream="orders", allow_unnamed=False) == "4"
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, stream="users", allow_unnamed=False) is None
+    # Unnamed scalar: one stream may adopt it. A second table must not.
+    assert resume_watermark(None, {"watermark": "4"}, stream="orders", allow_unnamed=True) == "4"
+    assert resume_watermark(None, {"watermark": "4"}, stream="users", allow_unnamed=False) is None
+    # The store still wins, including when the checkpoint names another table.
+    assert resume_watermark("9", {"watermark": orders}, stream="users", allow_unnamed=False) == "9"
+    route = "slot=s|phase=streaming|lsn=0/1A"
+    assert resume_watermark(None, {"watermark": route, "cdc_shared_reader": True}, shared=True) == route
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, shared=True) is None
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "stream": "users"},
+        stream="orders",
+        allow_unnamed=False,
+    ) is None
+
+
 def test_composite_tiebreak_compares_typed_not_lexically():
     from services.keyset_pagination import encode_keyset_bookmark
 

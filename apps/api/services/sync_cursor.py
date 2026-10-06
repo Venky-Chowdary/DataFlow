@@ -848,17 +848,155 @@ def checkpoint_watermark(checkpoint: Any) -> str | None:
     return str(wm)
 
 
-def resume_watermark(stored: str | None, checkpoint: Any) -> str | None:
+def _bare_table_name(name: str) -> str:
+    """Table identity without a schema prefix. ``public.orders`` and ``orders`` match."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    return text.rsplit(".", 1)[-1].strip()
+
+
+def _same_table(left: str, right: str) -> bool:
+    a = _bare_table_name(left)
+    b = _bare_table_name(right)
+    return bool(a) and a.lower() == b.lower()
+
+
+def cursor_owner_table(watermark: Any) -> str | None:
+    """Single table named inside a resume token.
+
+    Query-CDC scalars name no table. A comma-separated list is one shared
+    route cursor, not a table this token may seek on its own.
+    """
+    if watermark is None:
+        return None
+    from urllib.parse import unquote
+
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = watermark if isinstance(watermark, dict) else unwrap_resume_token(watermark)
+    if isinstance(token, dict):
+        raw = token.get("table")
+        if isinstance(raw, list):
+            names = [_bare_table_name(str(item)) for item in raw]
+            names = [item for item in names if item]
+            return names[0] if len(names) == 1 else None
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text or "," in text:
+            return None
+        return _bare_table_name(text) or None
+    text = str(token or "")
+    table = ""
+    for part in text.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip().lower() == "table" and value.strip():
+            table = unquote(value.strip())
+    if not table or "," in table:
+        return None
+    return _bare_table_name(table) or None
+
+
+def checkpoint_stream_name(checkpoint: Any) -> str | None:
+    """Stream a checkpoint record claims, when it claims one."""
+    if checkpoint is None:
+        return None
+    named = getattr(checkpoint, "cdc_stream", None)
+    if isinstance(named, str) and named.strip() and "," not in named:
+        return _bare_table_name(named) or None
+    data: Any = checkpoint
+    if not isinstance(data, dict) and hasattr(checkpoint, "to_dict"):
+        try:
+            data = checkpoint.to_dict()
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return None
+    for key in ("cdc_stream", "stream", "stream_name"):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw.strip() and "," not in raw:
+            return _bare_table_name(raw) or None
+    return None
+
+
+def _checkpoint_is_shared(checkpoint: Any) -> bool:
+    if checkpoint is None:
+        return False
+    if isinstance(checkpoint, dict):
+        return bool(checkpoint.get("cdc_shared_reader"))
+    if getattr(checkpoint, "cdc_shared_reader", False):
+        return True
+    if hasattr(checkpoint, "to_dict"):
+        try:
+            data = checkpoint.to_dict()
+        except Exception:
+            return False
+        return bool(isinstance(data, dict) and data.get("cdc_shared_reader"))
+    return False
+
+
+def _looks_like_log_resume(watermark: str) -> bool:
+    """True when the cursor is a log position, not a query-CDC scalar."""
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = unwrap_resume_token(watermark)
+    if isinstance(token, dict):
+        if str(token.get("phase") or "").strip().lower() in {"snapshot", "streaming"}:
+            return True
+        return any(token.get(key) for key in ("kind", "lsn", "scn", "file", "gtid", "gtid_set"))
+    text = str(token or "").strip().lower()
+    return "phase=" in text or "slot=" in text or "lsn=" in text or text.startswith("{")
+
+
+def resume_watermark(
+    stored: str | None,
+    checkpoint: Any,
+    *,
+    stream: str | None = None,
+    allow_unnamed: bool = True,
+    shared: bool = False,
+) -> str | None:
     """Resume cursor. The cursor store wins when it has a value.
 
     A job checkpoint is throttled and can be older than the store. Copying
     it over the store rewinds the next poll and drops a keyset tie-break.
     When the store is empty, the checkpoint is the only record that a
     previous run already applied rows.
+
+    That record is one cursor. A sequential multi-table run must not hand
+    it to every stream. Pass ``stream`` and ``allow_unnamed=False`` so an
+    unnamed scalar, or a token that names another table, is left behind
+    and that stream snapshots. A single stream may still adopt an unnamed
+    checkpoint (``allow_unnamed=True``). The shared log reader adopts a
+    route token onto its one key (``shared=True``) and leaves a per-table
+    query cursor alone.
     """
     if stored is not None:
         return str(stored)
-    return checkpoint_watermark(checkpoint)
+    wm = checkpoint_watermark(checkpoint)
+    if wm is None:
+        return None
+    if shared:
+        if _checkpoint_is_shared(checkpoint) or _looks_like_log_resume(wm):
+            return wm
+        return None
+    named = checkpoint_stream_name(checkpoint)
+    token_table = cursor_owner_table(wm)
+    if named and token_table and not _same_table(named, token_table):
+        return None
+    owner = named or token_table
+    if stream and str(stream).strip():
+        if owner and _same_table(owner, stream):
+            return wm
+        if owner:
+            return None
+        if allow_unnamed:
+            return wm
+        return None
+    return wm
 
 
 def advance_stored_cursor(

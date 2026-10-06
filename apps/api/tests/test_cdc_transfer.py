@@ -536,3 +536,119 @@ def test_empty_store_resumes_from_the_job_checkpoint(tmp_path, monkeypatch):
     assert get_watermark("generic_sql:test:src→generic_sql:test:dst:stream") == "4"
 
 
+def _cdc_reads(monkeypatch, tmp_path):
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "sync_cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    seen: list[dict] = []
+
+    def _read(*args, **kwargs):
+        table = args[2] if len(args) > 2 else kwargs.get("table")
+        seen.append({"table": table, "cursor_after": kwargs.get("cursor_after")})
+        return _batch(["id"], []), None
+
+    return seen, _read
+
+
+def _two_table_cdc(source_table: str = "orders"):
+    source = EndpointConfig(
+        kind="database", format="generic_sql", database="test", table=source_table
+    )
+    destination = EndpointConfig(
+        kind="database", format="generic_sql", database="test", table="orders"
+    )
+    contracts = [
+        {
+            "name": "orders",
+            "sync_mode": "cdc",
+            "primary_key": "id",
+            "cursor_field": "id",
+            "snapshot_mode": "initial",
+        },
+        {
+            "name": "users",
+            "sync_mode": "cdc",
+            "primary_key": "id",
+            "cursor_field": "id",
+            "snapshot_mode": "initial",
+        },
+    ]
+    return source, destination, contracts
+
+
+def test_sequential_checkpoint_does_not_seek_the_other_table(tmp_path, monkeypatch):
+    """Orders' stored position must not become users' keyset seek.
+
+    The job checkpoint is one cursor. Both per-table stores are empty.
+    Users snapshots from the start.
+    """
+    seen, _read = _cdc_reads(monkeypatch, tmp_path)
+    source, destination, contracts = _two_table_cdc()
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "integer"},
+            stream_contracts=contracts,
+            job_id="cdc-two",
+            checkpoint={"watermark": "4", "stream": "orders"},
+        )
+    by_table: dict[str, list] = {}
+    for row in seen:
+        by_table.setdefault(str(row["table"]), []).append(row["cursor_after"])
+    assert "4" in by_table["orders"]
+    assert all(cursor is None for cursor in by_table["users"])
+
+
+def test_sequential_snapshot_token_stays_on_its_table(tmp_path, monkeypatch):
+    """A phase=snapshot token names its table. The other table does not seek it."""
+    seen, _read = _cdc_reads(monkeypatch, tmp_path)
+    source, destination, contracts = _two_table_cdc()
+    token = "slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1"
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "integer"},
+            stream_contracts=contracts,
+            job_id="cdc-snap-owner",
+            checkpoint={"watermark": token},
+        )
+    users = [row["cursor_after"] for row in seen if row["table"] == "users"]
+    orders = [row["cursor_after"] for row in seen if row["table"] == "orders"]
+    assert users
+    assert all(cursor is None or "last_pk=1" not in str(cursor) for cursor in users)
+    assert token in orders
+
+
+def test_unnamed_checkpoint_is_not_applied_to_every_table(tmp_path, monkeypatch):
+    """A scalar with no stream name is not a cursor for both tables."""
+    seen, _read = _cdc_reads(monkeypatch, tmp_path)
+    source, destination, contracts = _two_table_cdc()
+    with (
+        patch("src.transfer.cdc_transfer._read_batch", side_effect=_read),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(0, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+    ):
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "integer"},
+            stream_contracts=contracts,
+            job_id="cdc-unnamed",
+            checkpoint={"watermark": "4"},
+        )
+    assert seen
+    assert all(row["cursor_after"] is None for row in seen)
+
+
