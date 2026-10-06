@@ -591,7 +591,14 @@ export function TransferResultDashboard({
         }
       />
 
-      <ReplaySafetyCard report={ds?.replay_safety} />
+      <ReplaySafetyCard
+        report={ds?.replay_safety}
+        scopeNote={
+          multiStream
+            ? `This verdict is the last stream (${ds?.table || streamNames[streamNames.length - 1]}). It is not a retry guarantee for every table.`
+            : null
+        }
+      />
 
       <ConnectionReuseCard
         report={ds?.connection_reuse}

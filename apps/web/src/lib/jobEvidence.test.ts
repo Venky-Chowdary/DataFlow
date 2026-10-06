@@ -414,6 +414,60 @@ describe("readSchemaFidelity", () => {
     assert.deepEqual(view?.items.map((item) => item.aspect), ["foreign_key", "enum_domain"]);
   });
 
+  it("drops a create-table foreign key once the later carry proved that constraint", () => {
+    const view = readSchemaFidelity({
+      destination_summary: {
+        schema_fidelity: {
+          carried_count: 8,
+          unsupported_count: 1,
+          unknown_count: 2,
+          skipped_count: 18,
+          items: [
+            {
+              aspect: "foreign_key",
+              name: "orders_customer_id_fkey",
+              status: "unsupported",
+              reason: "CREATE TABLE does not add this reference",
+            },
+            { aspect: "enum_domain", name: "*", status: "unknown", reason: "catalog was not read" },
+            { aspect: "nested_shape", name: "*", status: "unknown", reason: "catalog was not read" },
+          ],
+        },
+        foreign_keys: {
+          verdict: "carried",
+          decisions: [
+            {
+              name: "fk_orders_customer_id",
+              status: "carried",
+              source_detail: "orders_customer_id_fkey: (customer_id) -> public.customers(id)",
+            },
+          ],
+        },
+      },
+    });
+    assert.equal(view?.unsupported, 0);
+    assert.deepEqual(view?.items.map((item) => item.aspect), ["enum_domain", "nested_shape"]);
+  });
+
+  it("keeps an unsupported foreign key the carry did not prove", () => {
+    const view = readSchemaFidelity({
+      destination_summary: {
+        schema_fidelity: {
+          unsupported_count: 1,
+          unknown_count: 0,
+          items: [
+            { aspect: "foreign_key", name: "orders_customer_id_fkey", status: "unsupported", reason: "not added" },
+          ],
+        },
+        foreign_keys: {
+          decisions: [{ name: "fk_other", status: "unsupported", source_detail: "other_fkey: (x) -> t(id)" }],
+        },
+      },
+    });
+    assert.equal(view?.unsupported, 1);
+    assert.equal(view?.items[0].name, "orders_customer_id_fkey");
+  });
+
   it("returns null when every aspect was carried or measured absent", () => {
     assert.equal(
       readSchemaFidelity({

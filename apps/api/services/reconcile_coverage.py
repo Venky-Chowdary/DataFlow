@@ -94,6 +94,41 @@ def _population_sentence(dest_sum: int, measured: int, stream_count: int) -> str
     )
 
 
+_LAST_STREAM_LADDER_NOTE = (
+    "L1–L3 compared the last stream only, not the multi-table job."
+)
+
+
+def _qualify_last_stream_ladder(report: dict[str, Any]) -> dict[str, Any]:
+    """The nested ladder must not keep a whole-job checksum claim.
+
+    Gate-8 attaches L1–L3 before the multi-table qualifier runs, so the
+    ladder still says ``full_checksum`` and ``population_checksum_proof``
+    for the last table. A reader of that object would undo the parent
+    scope. The layer measurements stay; the claim does not.
+    """
+    ladder = report.get("verification_ladder")
+    if not isinstance(ladder, dict) or not ladder:
+        return report
+    if str(ladder.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM:
+        return report
+    qualified = dict(ladder)
+    assurance = str(qualified.get("assurance_level") or "")
+    if assurance in {"full_checksum", "five_layer"}:
+        qualified["assurance_level"] = PER_STREAM_CHECKSUM
+    qualified["checksum_scope"] = LAST_STREAM_CHECKSUM
+    if qualified.get("population_checksum_proof") is True:
+        qualified["population_checksum_proof"] = False
+    note = str(qualified.get("screening_note") or "").rstrip()
+    if _LAST_STREAM_LADDER_NOTE not in note:
+        qualified["screening_note"] = (
+            f"{note} {_LAST_STREAM_LADDER_NOTE}".strip() if note else _LAST_STREAM_LADDER_NOTE
+        )
+    out = dict(report)
+    out["verification_ladder"] = qualified
+    return out
+
+
 def qualify_multi_stream_reconciliation(
     report: dict[str, Any],
     dest_summary: dict[str, Any] | None,
@@ -114,7 +149,10 @@ def qualify_multi_stream_reconciliation(
     streams = dest_summary.get("streams")
     if not isinstance(streams, list) or len(streams) < 2:
         return report
-    if str(report.get("checksum_scope") or "") in _NARROW_CHECKSUM_SCOPES:
+    scope = str(report.get("checksum_scope") or "")
+    if scope in _NARROW_CHECKSUM_SCOPES:
+        if scope == LAST_STREAM_CHECKSUM:
+            return _qualify_last_stream_ladder(report)
         return report
     claimed_full = (
         str(report.get("assurance_level") or "") == "full_checksum"
@@ -140,6 +178,7 @@ def qualify_multi_stream_reconciliation(
     out["stream_count"] = len(streams)
     out["migration_proven"] = False
     out["population_proof"] = False
+    out = _qualify_last_stream_ladder(out)
     if measured:
         out["job_dest_count"] = dest_sum
         out["job_dest_count_measured_streams"] = measured

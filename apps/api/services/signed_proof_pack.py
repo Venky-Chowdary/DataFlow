@@ -1017,6 +1017,10 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
     reconciliation = (
         dict(job["reconciliation"]) if isinstance(job.get("reconciliation"), dict) else None
     )
+    if reconciliation is not None and dest:
+        from services.reconcile_coverage import qualify_multi_stream_reconciliation
+
+        reconciliation = qualify_multi_stream_reconciliation(reconciliation, dest)
     if reconciliation is not None:
         if (
             "identity_hash_aligned" not in reconciliation

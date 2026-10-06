@@ -1762,6 +1762,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             }
           />
           <ReplaySafetyCard
+            scopeNote={
+              multiStream
+                ? `This verdict is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). It is not a retry guarantee for every table.`
+                : null
+            }
             report={
               destSummary.replay_safety && typeof destSummary.replay_safety === "object"
                 ? (destSummary.replay_safety as ReplaySafetyReport)

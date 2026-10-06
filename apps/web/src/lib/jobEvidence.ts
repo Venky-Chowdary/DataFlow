@@ -364,26 +364,62 @@ export type SchemaFidelityView = {
   items: SchemaFidelityItem[];
 };
 
+/**
+ * Source constraint names the later ALTER carry proved.
+ *
+ * Create-new fidelity marks that foreign key unsupported because CREATE
+ * TABLE cannot add it before the parent is loaded. A carried decision names
+ * the source constraint in ``source_detail``. That later proof is the one
+ * the warning list should follow.
+ */
+function carriedForeignKeyNames(summary: SummaryCarrier | null): Set<string> {
+  const names = new Set<string>();
+  const raw = summary?.foreign_keys;
+  if (!isRecord(raw) || !Array.isArray(raw.decisions)) return names;
+  for (const decision of raw.decisions) {
+    if (!isRecord(decision) || decision.status !== "carried") continue;
+    const detail = String(decision.source_detail || "");
+    const head = detail.split(":")[0].trim().toLowerCase();
+    if (head && head !== "*") names.add(head);
+    const decisionName = String(decision.name || "").trim().toLowerCase();
+    if (decisionName && decisionName !== "*") names.add(decisionName);
+  }
+  return names;
+}
+
 /** Create-new DDL fidelity. Carried and measured-absent rows are quiet. */
 export function readSchemaFidelity(job: JobEvidenceCarrier | null | undefined): SchemaFidelityView | null {
-  const raw = summaryOf(job)?.schema_fidelity;
+  const summary = summaryOf(job);
+  const raw = summary?.schema_fidelity;
   if (!isRecord(raw)) return null;
+  const carriedKeys = carriedForeignKeyNames(summary);
   const items: SchemaFidelityItem[] = [];
+  let quietedForeignKeys = 0;
   if (Array.isArray(raw.items)) {
     for (const item of raw.items) {
       if (!isRecord(item)) continue;
       const status = String(item.status || "");
       if (!status || status === "carried" || status === "skipped") continue;
+      const aspect = String(item.aspect || "");
+      const name = String(item.name || "");
+      if (
+        status === "unsupported"
+        && aspect === "foreign_key"
+        && carriedKeys.has(name.trim().toLowerCase())
+      ) {
+        quietedForeignKeys += 1;
+        continue;
+      }
       items.push({
-        aspect: String(item.aspect || ""),
-        name: String(item.name || ""),
+        aspect,
+        name,
         status,
         reason: String(item.reason || ""),
       });
     }
   }
   const carried = finiteNumber(raw.carried_count) ?? 0;
-  const unsupported = finiteNumber(raw.unsupported_count) ?? 0;
+  const unsupported = Math.max(0, (finiteNumber(raw.unsupported_count) ?? 0) - quietedForeignKeys);
   const unknown = finiteNumber(raw.unknown_count) ?? 0;
   const skipped = finiteNumber(raw.skipped_count) ?? 0;
   if (!items.length && unsupported === 0 && unknown === 0) return null;

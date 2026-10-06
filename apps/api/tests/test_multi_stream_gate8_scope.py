@@ -48,6 +48,49 @@ def _last_table_full_checksum() -> dict:
     }
 
 
+def test_nested_ladder_does_not_keep_a_job_checksum_claim() -> None:
+    """L1–L3 are attached before the qualifier and still say full_checksum."""
+    report = _last_table_full_checksum()
+    report["verification_ladder"] = {
+        "layers": {"L1": {"passed": True}, "L3": {"passed": True}},
+        "passed": True,
+        "assurance_level": "full_checksum",
+        "population_proof": False,
+        "population_checksum_proof": True,
+        "screening_note": "Sample probes (limit 500) are screening only — never population proof.",
+    }
+    out = qualify_multi_stream_reconciliation(report, _two_stream_summary())
+    ladder = out["verification_ladder"]
+    assert ladder["assurance_level"] == "per_stream_checksum"
+    assert ladder["checksum_scope"] == LAST_STREAM_CHECKSUM
+    assert ladder["population_checksum_proof"] is False
+    assert ladder["layers"]["L1"]["passed"] is True
+    assert "last stream only" in ladder["screening_note"]
+    assert "Sample probes" in ladder["screening_note"]
+
+    again = qualify_multi_stream_reconciliation(out, _two_stream_summary())
+    assert again["verification_ladder"]["screening_note"] == ladder["screening_note"]
+    assert again["message"] == out["message"]
+    assert again["verification_ladder"] is out["verification_ladder"]
+
+
+def test_stored_last_stream_report_still_qualifies_its_ladder() -> None:
+    """A job written before the ladder stamp keeps the parent sentence."""
+    report = qualify_multi_stream_reconciliation(
+        _last_table_full_checksum(), _two_stream_summary()
+    )
+    report = dict(report)
+    report["verification_ladder"] = {
+        "assurance_level": "five_layer",
+        "population_checksum_proof": True,
+        "passed": True,
+    }
+    out = qualify_multi_stream_reconciliation(report, _two_stream_summary())
+    assert out["message"] == report["message"]
+    assert out["verification_ladder"]["assurance_level"] == "per_stream_checksum"
+    assert out["verification_ladder"]["population_checksum_proof"] is False
+
+
 def test_last_table_checksum_is_not_the_job_digest() -> None:
     out = qualify_multi_stream_reconciliation(
         _last_table_full_checksum(),
