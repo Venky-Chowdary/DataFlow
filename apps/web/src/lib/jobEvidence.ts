@@ -23,6 +23,7 @@ type SummaryCarrier = {
   identity_alignment?: unknown;
   multi_stream?: unknown;
   table?: unknown;
+  schema?: unknown;
 };
 
 export type JobEvidenceCarrier = {
@@ -93,23 +94,50 @@ export function readJobStreams(job: JobEvidenceCarrier | null | undefined): CdcS
   return streamList(job?.streams);
 }
 
-/**
- * Table names for this run, in engine order.
- *
- * Detail jobs read the stream health list. List payloads only carry
- * `stream_names` — the names, never the per-stream ledgers.
- */
-export function readJobStreamNames(job: JobEvidenceCarrier | null | undefined): string[] {
-  const fromHealth = readJobStreams(job).map((stream) => stream.name);
-  if (fromHealth.length) return fromHealth;
-  if (!Array.isArray(job?.stream_names)) return [];
+function uniqueNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
   const names: string[] = [];
-  for (const item of job.stream_names) {
+  for (const item of value) {
     const name = String(item ?? "").trim();
     if (!name || names.includes(name)) continue;
     names.push(name);
   }
   return names;
+}
+
+/** Selected tables on the request. `selected: false` is the only opt-out. */
+function selectedContractNames(job: JobEvidenceCarrier | null | undefined): string[] {
+  const request = isRecord(job?.transfer_request) ? job.transfer_request : null;
+  const contracts = request?.stream_contracts;
+  if (!Array.isArray(contracts)) return [];
+  const names: string[] = [];
+  for (const contract of contracts) {
+    if (!isRecord(contract) || contract.selected === false) continue;
+    const name = String(contract.name ?? contract.stream ?? "").trim();
+    if (!name || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Table names for this run, in engine order.
+ *
+ * Two measured stream-health rows win. Until that list exists, list payloads
+ * carry `stream_names`, and the request's selected contracts name the job
+ * from the first poll. One stamped table must not hide the rest of the
+ * selection. A single-table job stays one name.
+ */
+export function readJobStreamNames(job: JobEvidenceCarrier | null | undefined): string[] {
+  const fromHealth = readJobStreams(job).map((stream) => stream.name);
+  const listed = uniqueNames(job?.stream_names);
+  const selected = selectedContractNames(job);
+  if (fromHealth.length >= 2) return fromHealth;
+  if (listed.length >= 2) return listed;
+  if (selected.length >= 2) return selected;
+  if (fromHealth.length) return fromHealth;
+  if (listed.length) return listed;
+  return selected;
 }
 
 /** Visible list of stream names. Extra names stay in the count, not an unbounded string. */
@@ -145,6 +173,41 @@ export function formatJobRoute(job: JobEvidenceCarrier | null | undefined): stri
     || String(job.source_type || "").trim()
     || "source";
   return `${source} → ${destRouteLabel(job)}`;
+}
+
+export type JobEndpointLabels = {
+  source: string;
+  dest: string;
+  multi: boolean;
+};
+
+/**
+ * Source and destination titles for a job header.
+ *
+ * Multi-table jobs name every selected table and the destination database.
+ * The stored endpoint stays the fallback for a single table. Callers pass
+ * the label they already had so a document that has not arrived yet does
+ * not flash "Source".
+ */
+export function jobEndpointLabels(
+  job: JobEvidenceCarrier | null | undefined,
+  fallback?: { source?: string; dest?: string },
+): JobEndpointLabels {
+  const names = readJobStreamNames(job);
+  if (job && names.length >= 2) {
+    const summary = summaryOf(job);
+    const database = String(job.destination_database || "").trim();
+    const schema = summary && typeof summary.schema === "string" ? summary.schema.trim() : "";
+    const head = [database, schema].filter(Boolean).join(".") || "destination";
+    return {
+      source: formatStreamNames(names),
+      dest: `${head} · ${names.length} tables`,
+      multi: true,
+    };
+  }
+  const source = String(fallback?.source || job?.source_name || "").trim() || "Source";
+  const dest = String(fallback?.dest || "").trim() || (job ? destRouteLabel(job) : "Destination");
+  return { source, dest, multi: false };
 }
 
 /**

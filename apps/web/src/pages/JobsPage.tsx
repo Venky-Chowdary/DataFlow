@@ -34,7 +34,7 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -621,6 +621,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const streamHealth = readJobStreams(liveJob);
   const streamNames = readJobStreamNames(liveJob);
   const multiStream = streamNames.length >= 2;
+  const routeLabels = jobEndpointLabels(liveJob ?? selected, {
+    source: liveJob?.source_name || selected?.source_name || "",
+    dest: liveJob
+      ? `${liveJob.destination_database}.${liveJob.destination_collection}`
+      : selected
+        ? `${selected.destination_database}.${selected.destination_collection}`
+        : "",
+  });
   const explanationText = presentStoredExplanation(liveJob?.explanation, liveJob);
   const rejectedCount = readRejectedRows(liveJob);
   const coercedCount = readCoercedNullRows(liveJob);
@@ -904,8 +912,8 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     </div>
                     <JobTheater
                       jobId={selectedId!}
-                      sourceLabel={selected.source_name}
-                      destLabel={`${selected.destination_database}.${selected.destination_collection}`}
+                      sourceLabel={routeLabels.source}
+                      destLabel={routeLabels.dest}
                       sourceType={selected.source_type}
                       destType={selected.destination_type}
                       onComplete={handleComplete}
@@ -937,9 +945,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           <div>
                             <span>Source</span>
                             <strong title={multiStream ? streamNames.join(", ") : undefined}>
-                              {multiStream
-                                ? formatStreamNames(streamNames)
-                                : (liveJob.source_name || selected.source_name)}
+                              {routeLabels.source}
                             </strong>
                           </div>
                           <DtIcon name="transfer" size={14} />
@@ -947,9 +953,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           <div>
                             <span>Destination</span>
                             <strong title={multiStream ? streamNames.join(", ") : undefined}>
-                              {multiStream
-                                ? `${[liveJob.destination_database, typeof liveJob.destination_summary?.schema === "string" ? liveJob.destination_summary.schema : ""].filter(Boolean).join(".")} · ${streamNames.length} tables`
-                                : `${liveJob.destination_database}.${liveJob.destination_collection}`}
+                              {routeLabels.dest}
                             </strong>
                           </div>
                         </div>
@@ -1994,11 +1998,15 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             setMappingProofOpen(false);
           }}
           proof={mappingProof}
-          sourceLabel={liveJob.source_name}
+          sourceLabel={routeLabels.multi ? routeLabels.source : liveJob.source_name}
           destLabel={
-            liveJob.destination_collection
-            || liveJob.destination_database
-            || liveJob.destination_type
+            routeLabels.multi
+              ? routeLabels.dest
+              : (
+                liveJob.destination_collection
+                || liveJob.destination_database
+                || liveJob.destination_type
+              )
           }
         />
       )}

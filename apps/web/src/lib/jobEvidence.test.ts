@@ -7,6 +7,7 @@ import {
   foreignKeyProblems,
   formatJobRoute,
   identityAlignmentSentence,
+  jobEndpointLabels,
   presentChecksumNote,
   presentJobPhases,
   presentStoredEventLog,
@@ -127,6 +128,65 @@ describe("multi-table route", () => {
       destination_summary: { streams: [{ name: "orders" }] },
     };
     assert.equal(formatJobRoute(job), "orders → dataflow.orders");
+  });
+
+  it("names every selected contract before any stream health exists", () => {
+    const job = {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+      transfer_request: {
+        stream_contracts: [
+          { name: "customers", selected: true },
+          { name: "orders" },
+          { name: "archive", selected: false },
+          { stream: "orders" },
+        ],
+      },
+    };
+    assert.deepEqual(readJobStreamNames(job), ["customers", "orders"]);
+    assert.equal(formatJobRoute(job), "customers, orders → dataflow (2 tables)");
+    assert.deepEqual(jobEndpointLabels(job, { source: "orders", dest: "dataflow.orders" }), {
+      source: "customers, orders",
+      dest: "dataflow · 2 tables",
+      multi: true,
+    });
+  });
+
+  it("does not let the first written table hide the rest of the selection", () => {
+    const job = {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_summary: {
+        schema: "live",
+        streams: [{ name: "customers" }],
+      },
+      transfer_request: {
+        stream_contracts: [{ name: "customers" }, { name: "orders" }],
+      },
+    };
+    assert.deepEqual(readJobStreamNames(job), ["customers", "orders"]);
+    assert.equal(jobEndpointLabels(job).dest, "dataflow.live · 2 tables");
+  });
+
+  it("keeps measured stream health ahead of a different contract list", () => {
+    const job = {
+      destination_summary: {
+        streams: [{ name: "customers" }, { name: "orders" }],
+      },
+      transfer_request: {
+        stream_contracts: [{ name: "alpha" }, { name: "beta" }],
+      },
+    };
+    assert.deepEqual(readJobStreamNames(job), ["customers", "orders"]);
+  });
+
+  it("keeps a caller label until the job document names two tables", () => {
+    assert.deepEqual(jobEndpointLabels(null, { source: "UI Postgres", dest: "dataflow.orders" }), {
+      source: "UI Postgres",
+      dest: "dataflow.orders",
+      multi: false,
+    });
   });
 });
 

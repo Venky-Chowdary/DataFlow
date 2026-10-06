@@ -121,6 +121,55 @@ def test_slim_job_lifts_multi_table_names_and_drops_stream_ledgers():
     assert slim["source_name"] == "orders"
 
 
+def test_slim_job_names_selected_contracts_before_stream_health_exists():
+    slim = slim_job_for_list(
+        {
+            "_id": "starting",
+            "source_name": "orders",
+            "destination_collection": "orders",
+            "transfer_request": {
+                "stream_contracts": [
+                    {"name": "customers", "selected": True},
+                    {"name": "orders"},
+                    {"name": "archive", "selected": False},
+                    {"stream": "orders"},
+                ]
+            },
+        }
+    )
+    assert slim["stream_names"] == ["customers", "orders"]
+    assert "transfer_request" not in slim
+
+
+def test_slim_job_does_not_let_the_first_written_table_hide_the_selection():
+    slim = slim_job_for_list(
+        {
+            "_id": "partial",
+            "destination_summary": {"streams": [{"name": "customers", "row_accounting": {"dest_count": 2}}]},
+            "transfer_request": {
+                "stream_contracts": [{"name": "customers"}, {"name": "orders"}],
+            },
+        }
+    )
+    assert slim["stream_names"] == ["customers", "orders"]
+    assert "destination_summary" not in slim
+
+
+def test_slim_job_keeps_measured_streams_ahead_of_contracts():
+    slim = slim_job_for_list(
+        {
+            "_id": "measured",
+            "destination_summary": {
+                "streams": [{"name": "customers"}, {"name": "orders"}],
+            },
+            "transfer_request": {
+                "stream_contracts": [{"name": "alpha"}, {"name": "beta"}],
+            },
+        }
+    )
+    assert slim["stream_names"] == ["customers", "orders"]
+
+
 def test_slim_job_omits_stream_names_for_a_single_table():
     slim = slim_job_for_list(
         {

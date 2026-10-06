@@ -27,6 +27,7 @@ import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail"
 import { ContractBindField } from "../components/contracts/ContractBindField";
 import { contractBindFromPolicies } from "../lib/contractBind";
 import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
+import { jobEndpointLabels } from "../lib/jobEvidence";
 import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
@@ -5836,6 +5837,17 @@ export function TransferPage({
     cloudPath,
     sourceConnectorName: sourceConnector?.name,
   });
+  const theaterRoute = jobEndpointLabels(
+    isMultiStreamSource
+      ? {
+          destination_database: targetDb,
+          transfer_request: {
+            stream_contracts: multiStreamNames.map((name) => ({ name, selected: true })),
+          },
+        }
+      : null,
+    { source: sourceLabel, dest: `${targetDb}.${targetCollection}` },
+  );
   const destLabelShort = destSelected && (destKindMode === "file_export" || Boolean(destType))
     ? (selectedDestConnector
       ? `${selectedDestConnector.name}${targetCollection ? ` · ${targetCollection}` : ""}`
@@ -8051,8 +8063,8 @@ export function TransferPage({
           <div className="df2-card-body df2-run-theater-host">
             <JobTheater
               jobId={activeJobId}
-              sourceLabel={sourceLabel}
-              destLabel={`${targetDb}.${targetCollection}`}
+              sourceLabel={theaterRoute.source}
+              destLabel={theaterRoute.dest}
               sourceType={sourceKind === "file" ? "file" : sourceConnector?.type || sourceKind}
               destType={destKindMode === "file_export" ? exportFormat : destType}
               preflight={preflight || undefined}
