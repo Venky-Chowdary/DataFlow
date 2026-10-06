@@ -70,7 +70,7 @@ def build_migration_proof_pack(
     re-read (or engine/remapped population), and identity hashes align.
     """
     from services.connector_versions import versions_include_release
-    from services.reconcile_coverage import INDEPENDENT_SOURCE_DIGESTS
+    from services.reconcile_coverage import INDEPENDENT_SOURCE_DIGESTS, LAST_STREAM_CHECKSUM
 
     art = dict(decision_artifact or {})
     art_hash = str(art.get("content_hash") or "").strip().lower()
@@ -83,6 +83,7 @@ def build_migration_proof_pack(
     provenance = str(recon.get("source_checksum_provenance") or "")
     identity_ok = recon.get("identity_hash_aligned") is True
     independent_source = provenance in INDEPENDENT_SOURCE_DIGESTS
+    last_stream_only = str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM
 
     migration_proven = bool(
         job_success
@@ -93,6 +94,7 @@ def build_migration_proof_pack(
         and versions_ok
         and identity_ok
         and independent_source
+        and not last_stream_only
     )
 
     return {
@@ -121,6 +123,7 @@ def build_migration_proof_pack(
                 versions_ok=versions_ok,
                 identity_ok=identity_ok,
                 independent_source=independent_source,
+                last_stream_only=last_stream_only,
             ),
         },
     }
@@ -144,6 +147,7 @@ def _incomplete_reasons(
     versions_ok: bool = True,
     identity_ok: bool = True,
     independent_source: bool = True,
+    last_stream_only: bool = False,
 ) -> list[str]:
     reasons: list[str] = []
     if not job_success:
@@ -162,6 +166,8 @@ def _incomplete_reasons(
         reasons.append("source_not_independently_reread")
     if not identity_ok:
         reasons.append("identity_hash_not_aligned")
+    if last_stream_only:
+        reasons.append("checksum_scope_last_stream")
     return reasons
 
 

@@ -276,18 +276,26 @@ def summarize(
         counts[status] = counts.get(status, 0) + 1
     violations = [d for d in decisions if d.get("integrity_violation")]
     resolution = classify_cycle_resolution(cycle, decisions)
-    verdict = (
-        "referential_integrity_violated"
-        if violations
-        else (
-            "carried"
-            if counts.get("carried")
-            and not counts.get("unsupported")
-            and not counts.get("unknown")
-            and resolution["resolved"]
-            else "partial"
-        )
+    carried_n = counts.get("carried", 0)
+    open_findings = (
+        counts.get("unsupported", 0)
+        + counts.get("unknown", 0)
+        + counts.get("planned", 0)
     )
+    if violations:
+        verdict = "referential_integrity_violated"
+    elif carried_n and not open_findings and resolution["resolved"]:
+        verdict = "carried"
+    elif (
+        not carried_n
+        and not open_findings
+        and counts.get("skipped")
+        and resolution["resolved"]
+    ):
+        # Every table was measured and none declared a foreign key.
+        verdict = "none"
+    else:
+        verdict = "partial"
     out: dict[str, Any] = {
         "decisions": decisions,
         "counts": counts,

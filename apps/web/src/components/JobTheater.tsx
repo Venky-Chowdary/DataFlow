@@ -20,7 +20,7 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/gate8Status";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
@@ -36,6 +36,10 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
+import { RunCarryNotes } from "./jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -482,12 +486,21 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const gate8View = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
   const population = readGate8Population({
     row_accounting: job.row_accounting,
-    reconciliation: job.reconciliation,
+    reconciliation: gate8View ?? job.reconciliation,
     preflight,
   });
-  const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
+  const lastStreamPopulation = isGate8LastStream(gate8View);
+  const lineage = useMemo(
+    () => readJobLineage(job.lineage_events, { checksumScope: gate8View?.checksum_scope }),
+    [job.lineage_events, gate8View?.checksum_scope],
+  );
+  const presentedLog = useMemo(() => {
+    const texts = presentStoredEventLog(log.map((entry) => entry.text), job);
+    return texts.map((text, i) => ({ id: log[i]?.id ?? i + 1, text }));
+  }, [log, job]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -595,6 +608,7 @@ export function JobTheaterView({
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
+  const streamHealth = readJobStreams(job);
   const engineSeconds = publishedEngineElapsedSeconds(destinationSummary.elapsed_seconds);
   const showEngineElapsed = !isRunning && engineSeconds != null;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
@@ -608,25 +622,17 @@ export function JobTheaterView({
     && String(rollbackPlan?.strategy || "") === "DISCARD_STAGING"
     && rollbackPlan?.executable === true
     && Boolean(rollbackPlan?.staging_table);
-  const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
-  const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
+  const rejectedRows = readRejectedRows(job);
+  const coercedNullRows = readCoercedNullRows(job);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
-  const writerWarnings = Array.isArray(destinationSummary.warnings)
-    ? destinationSummary.warnings.map((item) => String(item)).filter(Boolean)
-    : [];
-  const warningCount = writerWarnings.length;
-  const warningsSuppressed = Number(destinationSummary.warnings_suppressed ?? 0) || 0;
+  const writerWarnings = readWriterWarnings(job);
+  const warningCount = writerWarnings.messages.length;
+  const warningsSuppressed = writerWarnings.suppressed;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
-  const fkSummary = (destinationSummary.foreign_keys ?? null) as {
-    cycle?: string[];
-    cycle_resolved?: boolean;
-    cycle_strategy?: string;
-    cycle_note?: string;
-    carried?: number;
-  } | null;
-  const fkCycle = Array.isArray(fkSummary?.cycle) ? fkSummary.cycle : [];
+  const fkCarry = readForeignKeyCarry(job);
+  const fkCycle = fkCarry?.cycle ?? [];
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
@@ -921,11 +927,11 @@ export function JobTheaterView({
           {(population.destCount != null || population.validateRunId || population.coverage) && (
               <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
                 <span>
-                  <strong>Dest COUNT</strong>
+                  <strong>{lastStreamPopulation ? "Job dest COUNT" : "Dest COUNT"}</strong>
                   {population.destCount != null ? population.destCount.toLocaleString() : "—"}
                 </span>
                 <span>
-                  <strong>Checksum</strong>
+                  <strong>{lastStreamPopulation ? "Last stream checksum" : "Checksum"}</strong>
                   {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
                 </span>
                 <span>
@@ -952,6 +958,9 @@ export function JobTheaterView({
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
+            onOpenGate8={() => {
+              document.querySelector(".df2-theater-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
           />
           {lineage.length > 0 && (
             <details className="df2-theater-lineage">
@@ -1527,9 +1536,9 @@ export function JobTheaterView({
         )}
       </div>
 
-      {Array.isArray(job.streams) && job.streams.length > 1 && (
+      {streamHealth.length > 0 && (
         <div className="df2-theater-v3-streams" aria-label="Per-stream health">
-          {job.streams.map((stream) => (
+          {streamHealth.map((stream) => (
             <div key={stream.name} className="df2-theater-v3-stream">
               <strong>{stream.name}</strong>
               <span>{stream.status || "—"}</span>
@@ -1646,20 +1655,20 @@ export function JobTheaterView({
         <article className={`df2-theater-v3-sla-card${warningCount > 0 ? " is-warn" : ""}`}>
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
-          <small title={writerWarnings.join("\n")}>
+          <small>
             {warningCount
-              ? `${writerWarnings[0]}${warningCount > 1 ? ` · +${warningCount - 1} more` : ""}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} not listed` : ""}`
+              ? `${warningCount} destination message${warningCount === 1 ? "" : "s"}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} more not listed` : ""}`
               : "No destination warnings"}
           </small>
         </article>
         {fkCycle.length > 0 && (
-        <article className={`df2-theater-v3-sla-card${fkSummary?.cycle_resolved ? "" : " is-warn"}`}>
+        <article className={`df2-theater-v3-sla-card${fkCarry?.cycleResolved ? "" : " is-warn"}`}>
           <span>FK cycle</span>
-          <strong>{fkSummary?.cycle_resolved ? "Recreated" : "Not enforced"}</strong>
+          <strong>{fkCarry?.cycleResolved ? "Recreated" : "Not enforced"}</strong>
           <small>
-            {fkSummary?.cycle_resolved
+            {fkCarry?.cycleResolved
               ? `Post-load ALTER on ${fkCycle.join(", ")} — destination validated the rows`
-              : fkSummary?.cycle_note
+              : fkCarry?.cycleNote
                 || `Cycle ${fkCycle.join(", ")} is not fully enforced on the destination`}
           </small>
         </article>
@@ -1668,7 +1677,7 @@ export function JobTheaterView({
           <span>Checksum evidence</span>
           <strong>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && (isGate8AppendDelta(recon) || isGate8KeyedBatch(recon))) {
                 const id = gate8AppendIdentity(recon);
                 if (id.destBefore != null && id.written != null) {
@@ -1683,9 +1692,12 @@ export function JobTheaterView({
           </strong>
           <small>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && isGate8KeyedBatch(recon) && recon.passed) {
                 return "This run’s keys verified — extra dest rows outside proof";
+              }
+              if (recon && isGate8LastStream(recon) && recon.passed) {
+                return "Last stream checksum — not the whole job";
               }
               if (recon && isGate8AppendDelta(recon)) {
                 const id = gate8AppendIdentity(recon);
@@ -1705,10 +1717,14 @@ export function JobTheaterView({
       </div>
       )}
 
+      {!earlyFail && <RunCarryNotes job={job} hideCycle />}
+      {!earlyFail && <SchemaFidelityNotes job={job} />}
+      {!earlyFail && <IdentityAlignmentNote job={job} />}
+
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
-          report={job.reconciliation}
-          explanation={job.explanation}
+          report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
+          explanation={presentStoredExplanation(job.explanation, job)}
           jobId={jobId}
           className="df2-theater-gate8"
           onOpenValidate={onBackToValidate}
@@ -1889,7 +1905,7 @@ export function JobTheaterView({
             jobId={jobId}
             rejectedRows={rejectedRows}
             coercedNullRows={coercedNullRows}
-            initialDetails={job.rejected_details}
+            initialDetails={readRejectedDetails(job)}
             autoLoad
             initiallyOpen
             repairMappings={(resolvedProof?.mappings || []).map((m): RepairMapping => ({
@@ -1914,7 +1930,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
         <LiveEventLog
-          lines={log}
+          lines={presentedLog}
           live={isRunning}
           variant="theater"
           title="Live event log"

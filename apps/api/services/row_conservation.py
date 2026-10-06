@@ -2524,10 +2524,12 @@ def attach_conservation_to_updates(
     *,
     previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Stamp ``row_accounting`` on terminal job updates (mutates ``updates``).
+    """Stamp ``row_accounting`` and per-stream health on terminal job updates.
 
     Same hook shape as ``attach_trust_to_updates`` so every completed job
     carries dest COUNT(*) conservation, not only the certificate export.
+    Stream health stays the list on ``destination_summary``; this copies that
+    list onto the job so a reader that only sees the top level is not empty.
     """
     from services.job_trust import is_terminal_status
 
@@ -2537,6 +2539,15 @@ def attach_conservation_to_updates(
     merged.update(updates)
     merged["status"] = status
     updates["row_accounting"] = account_job(merged).to_dict()
+    # Same list the ledger already read. Terminal jobs must carry it on the
+    # document, not only inside destination_summary — Jobs and Theater read it.
+    from src.transfer.job_failure import summary_streams
+
+    streams = summary_streams(updates.get("destination_summary"))
+    if streams is None and "destination_summary" not in updates and isinstance(previous, Mapping):
+        streams = summary_streams(previous.get("destination_summary"))
+    if streams is not None:
+        updates["streams"] = streams
     return updates
 
 

@@ -34,6 +34,28 @@ except ImportError:  # pragma: no cover - tests with api root on path
 logger = logging.getLogger(__name__)
 
 
+def _publish_stream_written(job_id: str | None, stream_name: str, rows: int) -> None:
+    """One durable line per table.
+
+    The batch callback names an insert. A COPY fast path does not call it, so
+    a parent table loaded by COPY never appeared in the event log. This note
+    does not move ``records_processed`` — that counter is the running total.
+    """
+    if not job_id or not stream_name:
+        return
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        get_mongodb_service().update_job_status(
+            job_id,
+            "running",
+            phase="writing",
+            message=f"Wrote {int(rows):,} rows on {stream_name}…",
+        )
+    except Exception:
+        logger.warning("stream write note failed for %s", stream_name, exc_info=True)
+
+
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
     """Drop the remapped destination object (overwrite sync, multi-stream).
 
@@ -319,6 +341,7 @@ def run_non_cdc_multi_stream_sequential(
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
+                _publish_stream_written(job_id, stream_name, rows)
                 shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
                 if limit > 0:
                     remaining_limit = max(0, remaining_limit - rows)
@@ -405,4 +428,7 @@ def run_non_cdc_multi_stream_sequential(
                 "dest_ddl"
             ):
                 ddl_log.append(f"{decision['status'].upper()} FK: {decision['dest_ddl']}")
+    from services.reconcile_coverage import annotate_last_stream_checksum_note
+
+    annotate_last_stream_checksum_note(last_summary)
     return total_rows, ddl_log, last_summary, headers

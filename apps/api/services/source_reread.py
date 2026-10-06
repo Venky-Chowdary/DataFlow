@@ -169,6 +169,32 @@ def should_reread_file_source(
     return True
 
 
+def alignment_when_write_pass_empty(
+    reread_rows: int, *, inline_fingerprints_used: bool
+) -> dict[str, Any]:
+    """A source re-read whose write pass recorded no fingerprint.
+
+    A route that re-reads on purpose does not fingerprint the write pass.
+    An empty write pass is then expected, and ``identity_hash_aligned`` stays
+    unset — stamping false would read as a mismatch that was never measured.
+    A route that was supposed to fingerprint and recorded nothing disagreed.
+    """
+    rows = int(reread_rows or 0)
+    if inline_fingerprints_used:
+        return {
+            "identity_hash_aligned": False,
+            "write_pass_rows": 0,
+            "reread_rows": rows,
+            "reason": "write_pass_empty",
+        }
+    return {
+        "identity_hash_aligned": None,
+        "write_pass_rows": 0,
+        "reread_rows": rows,
+        "reason": "write_pass_not_fingerprinted",
+    }
+
+
 def align_source_populations(write_pass: Any, reread: Any) -> dict[str, Any]:
     """Identity alignment of a write-pass fingerprint set and a second source read.
 

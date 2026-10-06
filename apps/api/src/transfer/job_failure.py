@@ -85,6 +85,20 @@ _CDC_JOB_FIELDS = (
 )
 
 
+def summary_streams(payload: Any) -> list[Any] | None:
+    """Non-empty per-stream health.
+
+    Writers stamp this list on ``destination_summary`` (and CDC checkpoints).
+    An empty list is not a stream set — callers must not wipe a real one.
+    """
+    if not isinstance(payload, dict):
+        return None
+    streams = payload.get("streams")
+    if isinstance(streams, list) and streams:
+        return list(streams)
+    return None
+
+
 def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) -> None:
     """Copy CDC lag/health fields onto the job document for SSE + UI tiles."""
     if not isinstance(checkpoint, dict):
@@ -97,16 +111,13 @@ def _promote_cdc_job_fields(checkpoint: dict[str, Any], update: dict[str, Any]) 
         for key in _CDC_JOB_FIELDS:
             if key in cdc_meta and key not in update:
                 update[key] = cdc_meta.get(key)
-    streams = checkpoint.get("streams")
-    if isinstance(streams, list) and streams:
+    # Checkpoint list is the live page. The summary list is the fallback when
+    # the page only nested health under destination_summary.
+    streams = summary_streams(checkpoint) or summary_streams(
+        checkpoint.get("destination_summary")
+    )
+    if streams is not None:
         update["streams"] = streams
-    summary_streams = (checkpoint.get("destination_summary") or {}).get("streams")
-    if (
-        isinstance(summary_streams, list)
-        and summary_streams
-        and "streams" not in update
-    ):
-        update["streams"] = summary_streams
 
 
 def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -322,8 +333,8 @@ def _cdc_fields_from_summary(dest_summary: dict[str, Any] | None) -> dict[str, A
         for key in _CDC_JOB_FIELDS:
             if key in cdc_meta and key not in out:
                 out[key] = cdc_meta.get(key)
-    streams = dest_summary.get("streams")
-    if isinstance(streams, list) and streams:
+    streams = summary_streams(dest_summary)
+    if streams is not None:
         out["streams"] = streams
     return out
 

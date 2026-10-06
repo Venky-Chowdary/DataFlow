@@ -200,6 +200,22 @@ describe("readJobLineage", () => {
     ]);
     assert.equal(rows.length, 2);
     assert.match(rows[0].summary, /src 10/);
+    assert.match(rows[0].summary, /checksum ok/);
+    assert.doesNotMatch(rows[0].summary, /last stream/);
     assert.match(rows[1].summary, /q 2/);
+  });
+
+  it("does not call a last-stream digest a job checksum", () => {
+    const rows = readJobLineage(
+      [{
+        event_type: "reconciliation",
+        payload: { source_count: 2, target_count: 2, checksum_ok: true },
+      }],
+      { checksumScope: "last_stream" },
+    );
+    assert.match(rows[0].summary, /last stream src 2/);
+    assert.match(rows[0].summary, /last stream dest 2/);
+    assert.match(rows[0].summary, /last stream checksum ok/);
+    assert.doesNotMatch(rows[0].summary, /(?:^|· )checksum ok/);
   });
 });

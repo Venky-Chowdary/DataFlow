@@ -4,6 +4,7 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
 import { formatJobRowMetric, destMetricCompact } from "../../lib/conservationLedger";
+import { formatJobRoute, readJobStreamNames } from "../../lib/jobEvidence";
 
 export interface SearchNavigateTarget {
   screen: Screen;
@@ -166,8 +167,12 @@ export function WorkspaceSearch({
 
     for (const j of jobs.slice(0, 40)) {
       const srcName = j.source_name ?? "";
+      const route = formatJobRoute(j);
+      const streamHit = readJobStreamNames(j).some((name) => matchesQuery(name, q));
       if (
         matchesQuery(srcName, q)
+        || matchesQuery(route, q)
+        || streamHit
         || matchesQuery(j.source_type, q)
         || matchesQuery(j.destination_type, q)
         || matchesQuery(j._id, q)
@@ -179,7 +184,7 @@ export function WorkspaceSearch({
         out.push({
           id: `job-${j._id}`,
           kind: "job",
-          label: `${srcName || j.source_type || "Source"} → ${j.destination_collection || j.destination_database || "dest"}`,
+          label: route,
           meta: `${j.status} · ${destMetricCompact(rows)}`,
           screen: "jobs",
           jobId: j._id,

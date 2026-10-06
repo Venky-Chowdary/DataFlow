@@ -10,7 +10,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from services.migration_certificate import physical_state_findings
+from services.migration_certificate import (
+    _schema_object_blockers,
+    physical_state_findings,
+)
 from services.physical_state_diff import (
     ADVISORY_ASPECTS,
     ASPECTS,
@@ -257,6 +260,90 @@ def test_certificate_marks_missing_comparison_unverified() -> None:
     assert "not compared" in findings["schema_objects"]["reason"]
 
 
+def test_certificate_requalifies_a_local_foreign_key_after_schema_move() -> None:
+    """A stored report that predates the child-schema comparison.
+
+    ``public.customers`` on a ``public`` table and ``live.customers`` on a
+    ``live`` table are the same local parent. The certificate must not say
+    that foreign key failed to survive. A parent outside the child schema
+    stays absent, and a caller that does not name both schemas keeps the
+    stored report.
+    """
+    recon = {
+        "physical_state": {
+            "schema_objects": {
+                "verified": False,
+                "absent": ["foreign_keys"],
+                "aspects": {
+                    "foreign_keys": {
+                        "status": "absent",
+                        "missing": ["customer_id->public.customers->id"],
+                        "extra": ["customer_id->live_ui.customers->id"],
+                    }
+                },
+            }
+        }
+    }
+    findings = physical_state_findings(
+        recon, source_schema="public", dest_schema="live_ui"
+    )
+    objects = findings["schema_objects"]
+    assert objects["aspects"]["foreign_keys"]["status"] == "carried"
+    assert objects["aspects"]["foreign_keys"]["missing"] == []
+    assert "foreign_keys" not in objects["absent"]
+    assert objects["verified"] is True
+    assert recon["physical_state"]["schema_objects"]["absent"] == ["foreign_keys"]
+
+    stored = physical_state_findings(recon)
+    assert stored["schema_objects"]["aspects"]["foreign_keys"]["status"] == "absent"
+
+    cross = {
+        "physical_state": {
+            "schema_objects": {
+                "verified": False,
+                "absent": ["foreign_keys"],
+                "aspects": {
+                    "foreign_keys": {
+                        "status": "absent",
+                        "missing": ["parent_id->archive.parent->id"],
+                        "extra": ["parent_id->live.parent->id"],
+                    }
+                },
+            }
+        }
+    }
+    stayed = physical_state_findings(cross, source_schema="public", dest_schema="live")
+    assert stayed["schema_objects"]["aspects"]["foreign_keys"]["status"] == "absent"
+    assert stayed["schema_objects"]["absent"] == ["foreign_keys"]
+    assert any("did not survive" in line for line in _schema_object_blockers(stayed))
+    assert not any("did not survive" in line for line in _schema_object_blockers(findings))
+
+    mixed = {
+        "physical_state": {
+            "schema_objects": {
+                "verified": False,
+                "absent": ["foreign_keys"],
+                "aspects": {
+                    "foreign_keys": {
+                        "status": "absent",
+                        "missing": [
+                            "customer_id->public.customers->id",
+                            "parent_id->archive.parent->id",
+                        ],
+                        "extra": [
+                            "customer_id->live_ui.customers->id",
+                            "parent_id->live.parent->id",
+                        ],
+                    }
+                },
+            }
+        }
+    }
+    held = physical_state_findings(mixed, source_schema="public", dest_schema="live_ui")
+    assert held["schema_objects"]["aspects"]["foreign_keys"]["status"] == "absent"
+    assert "foreign_keys" in held["schema_objects"]["absent"]
+
+
 CHECKED = (
     "CREATE TABLE {name} (id INTEGER PRIMARY KEY, qty INTEGER CHECK (qty > 0))"
 )
@@ -466,6 +553,7 @@ def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
 
 def _fk_state(
     *facts: tuple[tuple[str, ...], str, str, tuple[str, ...]],
+    schema: str = "",
     proof: tuple[str, ...] = (),
     dialect: str = "",
     match: tuple[str, ...] = (),
@@ -476,6 +564,7 @@ def _fk_state(
     return PhysicalState(
         found=True,
         readable=True,
+        schema=schema,
         foreign_key_facts=tuple(facts),
         foreign_key_proof=proof,
         foreign_key_match=match,
@@ -1046,6 +1135,23 @@ def test_catalog_diff_uses_the_orphan_scan_relationship_identity() -> None:
     assert drifted["aspects"]["foreign_keys"]["extra"] == [
         "parent_id->archive.parent->id"
     ]
+
+    moved = compare_physical_state(
+        _fk_state(sales, schema="sales"),
+        _fk_state(archive, schema="archive"),
+    )
+    assert moved["aspects"]["foreign_keys"]["status"] == "carried"
+    assert moved["aspects"]["foreign_keys"]["missing"] == []
+    assert moved["aspects"]["foreign_keys"]["extra"] == []
+    assert "foreign_keys" not in moved["absent"]
+    assert moved["verified"] is True
+
+    # A parent outside the child's schema is still a different table.
+    cross = compare_physical_state(
+        _fk_state((("parent_id",), "archive", "parent", ("id",)), schema="public"),
+        _fk_state((("parent_id",), "live", "parent", ("id",)), schema="live"),
+    )
+    assert cross["aspects"]["foreign_keys"]["status"] == "absent"
 
     public = (("parent_id",), "public", "parent", ("id",))
     unqualified = (("Parent_Id",), "", "Parent", ("ID",))

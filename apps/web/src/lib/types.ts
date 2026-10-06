@@ -95,6 +95,8 @@ export interface TransferCheckpoint {
   offset?: number;
   cursor_value?: unknown;
   cursor_column?: string;
+  /** Named stream this checkpoint belongs to. On a multi-table job this is one table, not the job. */
+  cdc_stream?: string;
   status?: string;
   /** ISO timestamp from checkpoint_service — used for resume-age display. */
   updated_at?: string;
@@ -174,6 +176,11 @@ export interface TransferJob {
   name?: string;
   source_type: string;
   source_name: string;
+  /**
+   * Multi-table jobs. List payloads carry names only; the detail document
+   * still has destination_summary.streams. Absent on a single-table job.
+   */
+  stream_names?: string[];
   source_connector_id?: string;
   dest_connector_id?: string;
   destination_type: string;
@@ -420,6 +427,12 @@ export interface Gate8ReconciliationPayload {
   };
   source_rows?: number;
   target_rows?: number;
+  /**
+   * Sum of per-stream dest COUNT(*) on a sequential multi-table run.
+   * ``source_rows`` / ``target_rows`` stay the last stream. This is not a
+   * second checksum.
+   */
+  job_dest_count?: number;
   /** Pre-write dest COUNT(*) — append identity is dest_after − dest_before. */
   target_rows_before?: number | null;
   rejected_rows?: number;
@@ -1316,6 +1329,10 @@ export interface TransferResult {
     rejected_details_truncated?: boolean;
     /** Findings the run recorded, whether or not the sample kept them all. */
     rejected_details_total?: number;
+    /** Per-stream health. account_job reads this list, not a second model. */
+    streams?: CdcStreamHealth[];
+    /** Sequential multi-table run. Job Gate-8 is the last stream's digest. */
+    multi_stream?: boolean;
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;

@@ -181,8 +181,11 @@ except (
 
 from services.batch_progress import (
     ThrottledCheckpoint,
+    batch_write_message,
     compute_transfer_progress_pct,
     effective_backfill_new_fields,
+    opening_analysis_message,
+    opening_batch_message,
     row_count_label,
 )
 from services.read_options import ReadOptions, ReadOptionsError
@@ -202,6 +205,7 @@ from src.transfer.resume_state import resolve_resume_checkpoint
 logger = logging.getLogger("dataflow.transfer")
 
 from src.transfer.reconcile_heartbeat import (  # noqa: E402
+    reconcile_heartbeat_scope as _reconcile_heartbeat_scope,
     reconcile_phase_heartbeat as _reconcile_phase_heartbeat,
 )
 
@@ -388,9 +392,9 @@ def _build_explanation(
 
 def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     """Durable per-mapping evidence for Theater/Jobs — rebuilt from the run request."""
-    from services.mapping_proof import build_mapping_proof
+    from services.mapping_proof import build_mapping_proof, mappings_from_request
 
-    mappings = list(request.mappings or [])
+    mappings = mappings_from_request(request)
     if not mappings:
         return {}
     dest_extra = getattr(request.destination, "extra", None) or {}
@@ -2822,7 +2826,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
+                    ),
                 )
                 if pct is not None:
                     update["progress_pct"] = pct
@@ -3306,9 +3316,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -3633,7 +3641,7 @@ class UniversalTransferEngine:
                 "running",
                 phase="reading",
                 progress_pct=5,
-                message="Analyzing source table…",
+                message=opening_analysis_message(request.stream_contracts),
             )
             # Several tables: the primary sample is that stream's CALL or
             # SELECT when it has one. Peeking the table would map columns the
@@ -4035,10 +4043,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=(
-                        f"CDC applied {rows:,} change(s)…"
-                        if is_cdc
-                        else f"Writing batch {chunk}/{chunks} ({rows:,} rows)…"
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        is_cdc=is_cdc,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
                     ),
                 )
                 if is_cdc:
@@ -4083,7 +4094,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
+                message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
             is_streaming = True
@@ -4256,9 +4267,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -4871,7 +4880,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
+                    ),
                 )
                 if pct is not None:
                     update["progress_pct"] = pct
@@ -4913,7 +4928,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
+                message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
             is_streaming = True
@@ -4980,9 +4995,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
