@@ -203,3 +203,136 @@ def test_shared_transfer_path_applies_per_table(tmp_path, monkeypatch) -> None:
     )
     assert route_key.startswith("cdc-shared:")
     assert "job" not in route_key  # slot derives from the route, not the run
+
+
+def test_interrupted_shared_snapshot_still_dumps_the_unread_table(tmp_path, monkeypatch) -> None:
+    """A crash after table A's page must not mark the route snapshot-complete.
+
+    The stored token stays phase=snapshot (table + last primary key). The next
+    run calls snapshot() again so the unread table is dumped. A streaming
+    token after the dump finishes does not start another snapshot.
+    """
+    import json
+
+    import pytest
+
+    from src.transfer.cdc_transfer import _run_cdc_shared_multi_table
+    from src.transfer.models import EndpointConfig
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+
+    calls = {"snapshot_calls": 0, "resumes": []}
+    applied: list[str] = []
+    checkpoints: list[Any] = []
+
+    class FakeCdc:
+        def __init__(self, *a, **k):
+            self.resume = k.get("resume_token")
+            calls["resumes"].append(self.resume)
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            calls["snapshot_calls"] += 1
+            if calls["snapshot_calls"] == 1:
+                yield ChangeBatch(
+                    inserts=[{"id": "1"}],
+                    resume_token="slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1",
+                    table="orders",
+                )
+                raise RuntimeError("snapshot died after the orders page")
+            assert "phase=snapshot" in str(self.resume)
+            yield ChangeBatch(
+                inserts=[{"id": "9"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1|table=users|last_pk=9",
+                table="users",
+            )
+            yield ChangeBatch(
+                resume_token="slot=s|phase=streaming|lsn=0/1",
+                ack_barrier=True,
+            )
+
+        def poll(self):
+            calls["polls"] = int(calls.get("polls") or 0) + 1
+            if False:
+                yield ChangeBatch()
+
+        def ack(self, token=None):
+            calls.setdefault("acks", []).append(token)
+
+        def close(self):
+            pass
+
+    source = EndpointConfig(
+        kind="database", format="postgresql", database="app", table="orders", schema="public"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "dst.db"), table="orders"
+    )
+    selected = [
+        SyncContract(name="orders", primary_key="id", sync_mode="cdc"),
+        SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+    ]
+
+    def fake_apply(*args, **kwargs):
+        change = args[4]
+        applied.append(change.table or "")
+        return (len(change.inserts) + len(change.updates), "ck", {}, len(change.deletes))
+
+    def run():
+        return _run_cdc_shared_multi_table(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "string"},
+            lambda _chunk, _total, _rows, payload: checkpoints.append(payload.get("watermark")),
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": "orders", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+                {"name": "users", "selected": True, "primary_key": "id", "snapshot_mode": "initial"},
+            ],
+            selected=selected,
+            job_id="job-shared-crash",
+            checkpoint=None,
+            checkpoint_service=None,
+            backfill_new_fields=False,
+            validation_mode="strict",
+            limit=0,
+        )
+
+    def stored() -> list[str]:
+        path = tmp_path / "cursors.json"
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [str(entry.get("watermark") or "") for entry in data.get("cursors") or []]
+
+    with patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc), \
+         patch("src.transfer.cdc_transfer._apply_change_batch", side_effect=fake_apply), \
+         patch("src.transfer.cdc_transfer.resolve_dest_table", side_effect=lambda *_a, **_k: "t"), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}):
+        with pytest.raises(RuntimeError, match="snapshot died after the orders page"):
+            run()
+        assert calls["snapshot_calls"] == 1
+        assert applied == ["orders"]
+        assert any("phase=snapshot" in token and "table=orders" in token for token in stored())
+        assert checkpoints
+        assert all(
+            token is None or "phase=snapshot" in str(token) for token in checkpoints
+        )
+        assert any("phase=snapshot" in str(token) for token in checkpoints)
+
+        checkpoints.clear()
+        _rows, _ddl, summary, _errs = run()
+        assert calls["snapshot_calls"] == 2
+        assert "users" in applied
+        assert any("phase=streaming" in token for token in stored())
+        assert summary.get("cdc", {}).get("watermark")
+        assert "phase=streaming" in str(summary["cdc"]["watermark"])
+
+        before = calls["snapshot_calls"]
+        run()
+        assert calls["snapshot_calls"] == before

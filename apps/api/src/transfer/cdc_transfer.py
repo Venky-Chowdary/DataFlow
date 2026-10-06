@@ -1479,6 +1479,7 @@ def _run_cdc_shared_multi_table(
         is_durable_log_resume_token,
         is_side_channel_resume_token,
     )
+    from services.cdc_snapshot_mode import snapshot_dump_open
 
     from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
 
@@ -1770,6 +1771,9 @@ def _run_cdc_shared_multi_table(
     # barrier makes the whole transaction advance together or not at all.
     pending_table_watermarks: dict[str, str] = {}
     pending_eos_bundle: list[Any] = []
+    # Cursor this run has made durable. A phase=snapshot token is an open
+    # dump (table + last primary key), not "snapshot finished".
+    published_shared = shared_wm
 
     def _flush_table_watermarks() -> None:
         """Publish staged per-table cursors now that the transaction is fully applied."""
@@ -1789,7 +1793,7 @@ def _run_cdc_shared_multi_table(
         pending_table_watermarks.clear()
 
     def _apply_tagged(change: ChangeBatch) -> bool:
-        nonlocal total_rows, chunk_idx, headers, last_summary
+        nonlocal total_rows, chunk_idx, headers, last_summary, published_shared
         stream = _resolve_stream(change)
         cfg = stream_cfg[stream]
         use_maps = cfg["mappings"]
@@ -1946,8 +1950,10 @@ def _run_cdc_shared_multi_table(
                             "sync_mode": sync_mode,
                             "tables": tables,
                             "shared_reader": True,
+                            "snapshot_dump_open": snapshot_dump_open(token_s),
                         },
                     )
+                    published_shared = token_s
                     if hasattr(cdc, "ack") and (
                         is_durable_log_resume_token(change.resume_token)
                         or isinstance(change.resume_token, str)
@@ -1966,7 +1972,7 @@ def _run_cdc_shared_multi_table(
                 total_rows,
                 {
                     "chunk_index": chunk_idx,
-                    "watermark": shared_wm,
+                    "watermark": published_shared,
                     "rows_written": total_rows,
                     "streams": list(stream_health.values()),
                     "cdc_delivery": "exactly_once" if eos_active else "at-least-once",
