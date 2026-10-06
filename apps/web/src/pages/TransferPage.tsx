@@ -89,10 +89,13 @@ import {
   destWriteReady,
   isCallableDestMode,
   isCallableSourceMode,
+  destStreamPlaceholder,
   procedureHint,
   procedureStreamName,
   queryHint,
   sourceExtractReady,
+  statementKind,
+  streamExtractPlaceholder,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
 import {
@@ -144,6 +147,7 @@ import { isJobSuccess } from "../lib/uiUtils";
 import {
   parseStreamNames,
   primaryStreamName,
+  summarizeStreamReadFailures,
   type StreamSchemaPreview,
 } from "../lib/sourceStreams";
 import {
@@ -232,6 +236,7 @@ import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
   firstStreamContractIssue,
+  resolveStreamFields,
   seedStreamFieldsFromCandidates,
   type StreamFieldContract,
 } from "../lib/streamContracts";
@@ -276,6 +281,15 @@ type SyncMode = SyncModeId;
 type SchemaPolicy = SchemaPolicyId;
 type ValidationMode = ValidationModeId;
 
+/** Gate key for one stream's extract. Half-typed text does not replace the table read. */
+function streamExtractToken(name: string, sql: string | undefined): string {
+  const text = String(sql || "").trim();
+  const kind = statementKind(text);
+  if (kind === "query" || kind === "procedure" || kind === "dest_dml") return `${name}=${text}`;
+  if (/^\s*create\b/i.test(text)) return `${name}=CREATE`;
+  return `${name}=`;
+}
+
 export function TransferPage({
   connectors,
   connectorsLoading = false,
@@ -286,7 +300,7 @@ export function TransferPage({
   seedSourceConnector = null,
   seedStudioIntent = null,
 }: TransferPageProps) {
-  const { toast } = useToast();
+  const { toast, dismissMatching } = useToast();
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
@@ -2733,6 +2747,21 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return true;
     }
+    if (
+      sourceKind === "database"
+      && isMultiStreamSource
+      && streamPreviews.length > 0
+      && !streamPreviews.some((s) => s.status === "ok" && (s.columns?.length ?? 0) > 0)
+    ) {
+      toast({
+        title: "No stream schema was read",
+        message: sourceIntrospectError
+          || "Fix the connector or the table names, then retry. Destination stays closed until one stream reads.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
     return false;
   };
 
@@ -2908,7 +2937,7 @@ export function TransferPage({
       });
   }, [sourceConnector, setActiveData]);
 
-  const introspectOneStream = useCallback(async (streamName: string) => {
+  const introspectOneStream = useCallback(async (streamName: string, statement = "") => {
     if (!sourceConnector) {
       return { ok: false as const, error: "No source connector selected" };
     }
@@ -2921,6 +2950,7 @@ export function TransferPage({
     };
     if (isMongo) sourceEndpoint.collection = streamName;
     else sourceEndpoint.table = streamName;
+    const perStream = statement.trim();
     if (isCallableSourceMode(sourceReadMode) && !isMongo) {
       sourceEndpoint.source_read_mode = sourceReadMode;
       if (sourceReadMode === "procedure") sourceEndpoint.procedure_call = procedureCall.trim();
@@ -2931,6 +2961,29 @@ export function TransferPage({
         procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
         source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
         procedure_params: procedureParams,
+      };
+    } else if (perStream && !isMongo && streamExtractToken(streamName, perStream) !== `${streamName}=`) {
+      const kind = statementKind(perStream);
+      if (kind === "dest_dml") {
+        return {
+          ok: false as const,
+          error: `${streamName}: this statement writes rows. A source extract is a CALL or a read-only SELECT.`,
+        };
+      }
+      if (kind !== "query" && kind !== "procedure") {
+        return {
+          ok: false as const,
+          error: `${streamName}: paste a CALL or a read-only SELECT. A CREATE statement is the object's definition, not the extract.`,
+        };
+      }
+      const mode = kind === "query" ? "query" : "procedure";
+      sourceEndpoint.source_read_mode = mode;
+      sourceEndpoint.procedure_call = mode === "procedure" ? perStream : "";
+      sourceEndpoint.source_query = mode === "query" ? perStream : "";
+      sourceEndpoint.extra = {
+        source_read_mode: mode,
+        procedure_call: mode === "procedure" ? perStream : "",
+        source_query: mode === "query" ? perStream : "",
       };
     }
 
@@ -3025,7 +3078,10 @@ export function TransferPage({
     const settled = await Promise.all(
       names.map(async (name) => {
         try {
-          const result = await introspectOneStream(name);
+          const result = await introspectOneStream(
+            name,
+            streamFields[name]?.sourceProcedure || "",
+          );
           if (!result.ok) {
             return {
               name,
@@ -3064,12 +3120,26 @@ export function TransferPage({
     const failed = settled.filter((s) => s.status === "error");
 
     if (!primaryOk) {
-      const detail = failed.map((f) => `${f.name}: ${f.error}`).join(" · ");
       const message = names.length > 1
-        ? `None of the ${names.length} streams could be read. ${detail}`
+        ? summarizeStreamReadFailures(failed.map((f) => ({ name: f.name, error: f.error })))
         : (failed[0]?.error || "Could not read source schema.");
       setSourceIntrospectError(message);
-      toast({ title: "Could not read source schema", message, tone: "error" });
+      // A failed read must not keep the previous table's columns, or Continue
+      // opens Destination against a schema this selection never produced.
+      setParsed(null);
+      setAnalysis(null);
+      setConnectorSampleRows([]);
+      setSourceRowEstimate(null);
+      setActiveData(null);
+      setTransferPlan((prev) => (
+        prev
+          ? { ...prev, source_columns: [], source_schema: {}, message }
+          : null
+      ));
+      // Several streams already show the failure on the schema card. A toast
+      // on top of that card hides the extract boxes.
+      if (names.length > 1) dismissMatching("Could not read source schema");
+      else toast({ title: "Could not read source schema", message, tone: "error" });
       return null;
     }
 
@@ -3084,10 +3154,10 @@ export function TransferPage({
         : undefined,
     });
 
+    dismissMatching("Could not read source schema");
     if (failed.length) {
       const warn = `${failed.length} of ${names.length} streams failed (${failed.map((f) => f.name).join(", ")}). Preview tabs show details; remove or fix those names before run.`;
       setSourceIntrospectError(warn);
-      toast({ title: "Partial stream schema", message: warn, tone: "warning" });
     } else {
       setSourceIntrospectError(null);
     }
@@ -3112,6 +3182,9 @@ export function TransferPage({
     introspectOneStream,
     applyPrimaryStreamSchema,
     toast,
+    dismissMatching,
+    streamFields,
+    setActiveData,
   ]);
 
   const introspectConnectorSourceRef = useRef(introspectConnectorSource);
@@ -3141,7 +3214,10 @@ export function TransferPage({
     }
 
     // Gate on the full stream list so adding/removing a name re-reads schemas.
-    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
+    const extractKey = !callable
+      ? names.map((name) => streamExtractToken(name, streamFields[name]?.sourceProcedure)).join("||")
+      : "";
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}|${extractKey}`;
     const gate = sourceIntrospectGateRef.current;
     if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
       return;
@@ -3197,6 +3273,7 @@ export function TransferPage({
     cloudPath,
     sourceReadMode,
     procedureCall,
+    streamFields,
   ]);
 
   const retrySourceIntrospect = useCallback(() => {
@@ -3219,7 +3296,10 @@ export function TransferPage({
         ? (rawPath ? [procedureStreamName(rawPath)] : [])
         : parseStreamNames(rawPath);
     if (!sourceConnectorId || !names.length) return;
-    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
+    const extractKey = !callable
+      ? names.map((name) => streamExtractToken(name, streamFields[name]?.sourceProcedure)).join("||")
+      : "";
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}|${extractKey}`;
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     setSourceIntrospecting(true);
@@ -3257,6 +3337,7 @@ export function TransferPage({
     sourceReadMode,
     procedureCall,
     introspectConnectorSource,
+    streamFields,
   ]);
 
   // List existing source objects so a missing name (sample) is a picker, not invented Map.
@@ -4568,6 +4649,29 @@ export function TransferPage({
           }),
           dest_extra: {
             allow_append_only: allowAppendOnly,
+            ...(destWriteMode === "procedure"
+              ? {
+                  dest_write_mode: "procedure",
+                  dest_procedure_call: destProcedureCall.trim(),
+                  ...(Object.keys(destProcedureParamMap).length
+                    ? { dest_procedure_param_map: destProcedureParamMap }
+                    : {}),
+                  ...(Object.keys(destProcedureParams).length
+                    ? { dest_procedure_params: destProcedureParams }
+                    : {}),
+                }
+              : destWriteMode === "query"
+                ? {
+                    dest_write_mode: "query",
+                    dest_query_sql: destQuerySql.trim(),
+                    ...(Object.keys(destProcedureParamMap).length
+                      ? { dest_procedure_param_map: destProcedureParamMap }
+                      : {}),
+                    ...(Object.keys(destProcedureParams).length
+                      ? { dest_procedure_params: destProcedureParams }
+                      : {}),
+                  }
+                : {}),
             ...(destDriverType === "iceberg"
               ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
               : {}),
@@ -5549,12 +5653,17 @@ export function TransferPage({
     procedureCall,
   });
 
+  const anyStreamReady = streamPreviews.some(
+    (s) => s.status === "ok" && (s.columns?.length ?? 0) > 0,
+  );
+  const multiStreamUnread = isMultiStreamSource && streamPreviews.length > 0 && !anyStreamReady;
   const canConfigureDest =
     sourceKind === "file"
       ? Boolean(parsed)
       : Boolean(
           sourceInputsReady
-          && (analysis?.columns.length || currentSourceColumns.length),
+          && (analysis?.columns.length || currentSourceColumns.length)
+          && !multiStreamUnread,
         );
 
   const destSqlReady = destWriteReady({
@@ -6079,7 +6188,7 @@ export function TransferPage({
           canGoTo={(n) =>
             n < step ||
             n === STEP_SOURCE ||
-            (n === STEP_DESTINATION && (sourceKind === "file" ? !!parsed : Boolean(currentSourceColumns.length || analysis?.columns.length))) ||
+            (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
             (n === STEP_SHAPE && canRunPreflight) ||
             (n === STEP_MAP && canRunPreflight) ||
             (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
@@ -6598,7 +6707,7 @@ export function TransferPage({
               </div>
 
               {!isCallableSourceMode(sourceReadMode) && (
-              <div className="df2-source-multistream" role="note">
+              <div className="df2-source-multistream">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />
                   <strong>
@@ -6609,8 +6718,8 @@ export function TransferPage({
                 </div>
                 <p>
                   {isMultiStreamSource
-                    ? "Each name is a separate table/collection with its own watermark. Configure identity in Destination → Advanced."
-                    : "Use commas for multi-table sync (example: sessions, users)."}
+                    ? "Each name is its own table, with its own watermark, mapping, and transform."
+                    : "Use commas for multi-table sync (example: sessions, users). Each table is its own stream."}
                 </p>
                 {isMultiStreamSource && (
                   <ul className="df2-source-stream-chips" aria-label="Streams to sync">
@@ -6633,6 +6742,62 @@ export function TransferPage({
                       );
                     })}
                   </ul>
+                )}
+                {isMultiStreamSource && (dialectOffersProcedures(sourceConnector?.type) || dialectOffersQuery(sourceConnector?.type)) && (
+                  <div className="df2-stream-procedures">
+                    <p className="df2-label-hint">
+                      Optional extract for each table. Leave it blank to copy the table.
+                      One statement is not reused on the others.
+                    </p>
+                    <details className="df2-stream-extract-note">
+                      <summary>What you can write</summary>
+                      <p>
+                        A CALL, a function (<code>SELECT * FROM schema.fn()</code>), or one
+                        read-only SELECT. Use quoted literals. A procedure that joins
+                        these tables is one extract: switch Source extract to Stored
+                        procedure and paste that CALL. A destination CALL or
+                        INSERT/MERGE is in Destination → Advanced.
+                      </p>
+                    </details>
+                    {multiStreamNames.map((streamName) => {
+                      const fields = resolveStreamFields(
+                        streamName,
+                        streamFields,
+                        cursorField,
+                        primaryKeyField,
+                        cursorSemantics,
+                      );
+                      return (
+                        <label className="df2-label" htmlFor={`src-extract-${streamName.replace(/[^A-Za-z0-9_-]/g, "-")}`} key={`src-extract-${streamName}`}>
+                          {streamName}
+                          <textarea
+                            id={`src-extract-${streamName.replace(/[^A-Za-z0-9_-]/g, "-")}`}
+                            className="df2-input"
+                            rows={2}
+                            spellCheck={false}
+                            value={fields.sourceProcedure || ""}
+                            placeholder={streamExtractPlaceholder(
+                              streamName,
+                              dialectOffersProcedures(sourceConnector?.type),
+                            )}
+                            onChange={(e) => {
+                              const value = e.target.value;
+                              setStreamFields((prev) => ({
+                                ...prev,
+                                [streamName]: {
+                                  ...prev[streamName],
+                                  cursorField: prev[streamName]?.cursorField ?? cursorField,
+                                  primaryKeyField: prev[streamName]?.primaryKeyField ?? primaryKeyField,
+                                  cursorSemantics: prev[streamName]?.cursorSemantics ?? cursorSemantics,
+                                  sourceProcedure: value,
+                                },
+                              }));
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
               )}
@@ -6698,7 +6863,11 @@ export function TransferPage({
                       ? "Enter a read-only SELECT. Preview the result set, then continue."
                       : "Enter a CALL/EXEC. Preview the result set, then continue.")
                 : isMultiStreamSource
-                  ? `${multiStreamNames.length} streams selected — continue to pick a destination`
+                  ? (multiStreamUnread
+                    ? "No stream schema was read. Fix the connector, then retry."
+                    : streamPreviews.some((s) => s.status === "error")
+                      ? `${streamPreviews.filter((s) => s.status === "ok").length} of ${multiStreamNames.length} streams ready — continue to pick a destination`
+                      : `${multiStreamNames.length} streams selected — continue to pick a destination`)
                   : "Select connector and table/collection to continue";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
           return (
@@ -7411,7 +7580,16 @@ export function TransferPage({
           destRouteLabel={mapDestRouteLabel}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           steps={shapeSteps}
-          onChangeSteps={setShapeSteps}
+          onChangeSteps={(next) => {
+            if (!isMultiStreamSource) {
+              setShapeSteps(next);
+              return;
+            }
+            const active = (mapActiveStream || primarySourceStream || "").trim();
+            setShapeSteps(next.map((step) => (
+              step.source_table || !active ? step : { ...step, source_table: active }
+            )));
+          }}
           onIdentity={setShapeIdentity}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
@@ -7422,6 +7600,22 @@ export function TransferPage({
           destTable={targetCollection}
           sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
           sourceCatalog={Object.keys(sourceColumnsByStream).length ? sourceColumnsByStream : undefined}
+          streamSamples={
+            multiStreamNames.length > 1
+              ? Object.fromEntries(
+                  streamPreviews
+                    .filter((preview) => preview.status === "ok" && preview.columns.length)
+                    .map((preview) => [preview.name, {
+                      columns: preview.columns,
+                      schema: preview.schema,
+                      rows: preview.rows,
+                    }]),
+                )
+              : undefined
+          }
+          onProgramHash={(hash) => {
+            setShapeIdentity((prev) => (prev ? { ...prev, hash } : prev));
+          }}
           destTables={targetCollection ? [targetCollection] : undefined}
           destCatalog={
             targetCollection && destSchemaMap && Object.keys(destSchemaMap).length
@@ -7432,8 +7626,10 @@ export function TransferPage({
             setBusinessRuleReport(report);
             const primary = primarySourceStream || sourceTable || undefined;
             if (report.shape_steps.length) {
+              // Several tables: keep every stamped step. Filtering to the
+              // primary table dropped orders' transforms before Execute.
               setShapeSteps((prev) => mergeCompiledShapeSteps(prev, report.shape_steps, {
-                sourceTable: primary,
+                sourceTable: multiStreamNames.length > 1 ? undefined : primary,
               }));
             }
             setColumnMappings((prev) => mergeBusinessRules(prev, report, { sourceTable: primary }));
@@ -8164,6 +8360,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: value,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
               // A new column is a new question: the previous column's declared
@@ -8180,6 +8377,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
               cursorSemantics: value,
@@ -8193,6 +8391,7 @@ export function TransferPage({
           setStreamFields((prev) => ({
             ...prev,
             [stream]: {
+              ...prev[stream],
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: value,
               cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
@@ -8202,6 +8401,22 @@ export function TransferPage({
             setPrimaryKeyField(value);
           }
         }}
+        onStreamDestProcedureChange={
+          isMultiStreamSource && (dialectOffersProcedures(destDriverType || destType) || dialectOffersQuery(destDriverType || destType))
+            ? (stream, value) => {
+                setStreamFields((prev) => ({
+                  ...prev,
+                  [stream]: {
+                    ...prev[stream],
+                    cursorField: prev[stream]?.cursorField ?? cursorField,
+                    primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+                    cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
+                    destProcedure: value,
+                  },
+                }));
+              }
+            : undefined
+        }
       />
       </PageFrame>
     </PageShell>

@@ -306,7 +306,7 @@ export function SourceStepAside({
         {sourceIntrospectError && (
           <div className="df2-source-aside-stream-warn" role="status">
             <DtIcon name="alert" size={14} />
-            <p>{sourceIntrospectError}</p>
+            <p>The schema card has the read error. Fix the name, then retry.</p>
             {onRetrySourceIntrospect && (
               <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={onRetrySourceIntrospect}>
                 Retry

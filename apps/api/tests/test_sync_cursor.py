@@ -84,6 +84,128 @@ def test_compare_cursor_values_uses_typed_order():
     assert compare_cursor_values("500", None) == 1
 
 
+def test_stored_cursor_advances_onto_a_tie_break():
+    """A restart must seek past the last peer, not past the whole timestamp."""
+    from services.keyset_pagination import encode_keyset_bookmark
+    from services.sync_cursor import advance_stored_cursor, query_cdc_resume_watermark
+
+    tied = encode_keyset_bookmark(["2024-01-01", "5"])
+    later_pk = encode_keyset_bookmark(["2024-01-01", "9"])
+    next_day = encode_keyset_bookmark(["2024-01-02", "1"])
+    ten = encode_keyset_bookmark(["10", "1"])
+
+    assert advance_stored_cursor(None, ten) == (ten, True)
+    # "10" must not lose to "9" because the bookmark contains a separator.
+    assert advance_stored_cursor("9", ten) == (ten, True)
+    assert advance_stored_cursor("2024-01-01", tied) == (tied, True)
+    assert advance_stored_cursor(tied, later_pk) == (later_pk, True)
+    assert advance_stored_cursor(later_pk, tied) == (later_pk, False)
+    assert advance_stored_cursor(tied, next_day) == (next_day, True)
+
+    stored = query_cdc_resume_watermark(
+        [
+            {"id": "1", "updated_at": "2024-01-01"},
+            {"id": "2", "updated_at": "2024-01-01"},
+        ],
+        "updated_at",
+        "id",
+        None,
+    )
+    assert stored == encode_keyset_bookmark(["2024-01-01", "2"])
+    # The peer that was not in the page is still after the stored pair.
+    assert compare_cursor_values(
+        encode_keyset_bookmark(["2024-01-01", "3"]), stored
+    ) > 0
+
+
+def test_resume_watermark_keeps_the_store_ahead_of_a_checkpoint():
+    from services.checkpoint_service import Checkpoint
+    from services.keyset_pagination import encode_keyset_bookmark
+    from services.sync_cursor import checkpoint_watermark, resume_watermark
+
+    stored = encode_keyset_bookmark(["2024-01-01", "2"])
+    assert resume_watermark(stored, {"watermark": "2024-01-01"}) == stored
+    assert resume_watermark(None, {"watermark": "4"}) == "4"
+    assert resume_watermark(None, {"cdc": {"watermark": "0/1A"}}) == "0/1A"
+    assert resume_watermark(None, Checkpoint(cursor_value="slot=s|phase=streaming|lsn=0/2")) == (
+        "slot=s|phase=streaming|lsn=0/2"
+    )
+    assert resume_watermark(None, None) is None
+    assert resume_watermark("", {"watermark": "4"}) == ""
+    assert checkpoint_watermark({"cursor_value": "9"}) == "9"
+
+
+def test_resume_watermark_stays_on_the_stream_it_names():
+    """A job cursor is one position. It must not seek a different table."""
+    from services.sync_cursor import resume_watermark
+
+    orders = "slot=s|phase=snapshot|lsn=0/1|table=orders|last_pk=1"
+    assert resume_watermark(None, {"watermark": orders}, stream="orders", allow_unnamed=False) == orders
+    assert resume_watermark(None, {"watermark": orders}, stream="users", allow_unnamed=False) is None
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, stream="orders", allow_unnamed=False) == "4"
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, stream="users", allow_unnamed=False) is None
+    # Unnamed scalar: one stream may adopt it. A second table must not.
+    assert resume_watermark(None, {"watermark": "4"}, stream="orders", allow_unnamed=True) == "4"
+    assert resume_watermark(None, {"watermark": "4"}, stream="users", allow_unnamed=False) is None
+    # The store still wins, including when the checkpoint names another table.
+    assert resume_watermark("9", {"watermark": orders}, stream="users", allow_unnamed=False) == "9"
+    route = "slot=s|phase=streaming|lsn=0/1A"
+    assert resume_watermark(None, {"watermark": route, "cdc_shared_reader": True}, shared=True) == route
+    assert resume_watermark(None, {"watermark": "4", "stream": "orders"}, shared=True) is None
+    # Orders' open dump is not the shared route cursor.
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "stream": "orders"},
+        shared=True,
+    ) is None
+    # The same open dump still resumes when the shared reader published it.
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        shared=True,
+    ) == orders
+    # A route streaming token must not become one table's keyset.
+    assert resume_watermark(
+        None,
+        {"watermark": route, "cdc_shared_reader": True},
+        stream="orders",
+        allow_unnamed=True,
+    ) is None
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        stream="orders",
+        allow_unnamed=True,
+    ) == orders
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "cdc_shared_reader": True},
+        stream="users",
+        allow_unnamed=True,
+    ) is None
+    assert resume_watermark(
+        None,
+        {"watermark": orders, "stream": "users"},
+        stream="orders",
+        allow_unnamed=False,
+    ) is None
+
+
+def test_isolate_stream_checkpoint_copies_only_the_named_table():
+    from services.checkpoint_service import Checkpoint
+    from services.sync_cursor import isolate_stream_checkpoint
+
+    job = Checkpoint(job_id="j", offset=50, cursor_value="50", cdc_stream="orders")
+    orders = isolate_stream_checkpoint(job, "orders")
+    assert orders is not job
+    assert orders.offset == 50
+    assert orders.cursor_value == "50"
+    assert isolate_stream_checkpoint(job, "users") is None
+    unnamed = Checkpoint(job_id="j", offset=50, cursor_value="50")
+    assert isolate_stream_checkpoint(unnamed, "orders") is None
+    assert isolate_stream_checkpoint(None, "orders") is None
+
+
 def test_composite_tiebreak_compares_typed_not_lexically():
     from services.keyset_pagination import encode_keyset_bookmark
 

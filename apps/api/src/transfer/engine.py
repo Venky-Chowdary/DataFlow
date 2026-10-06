@@ -1089,6 +1089,8 @@ def _execute_policy_gates_for_request(
         priority_column=str(getattr(request, "priority_column", "") or ""),
         priority_direction=str(getattr(request, "priority_direction", "") or "desc"),
         row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
+        source_endpoint=src,
+        destination_endpoint=dest,
     )
 
 
@@ -3633,10 +3635,14 @@ class UniversalTransferEngine:
                 progress_pct=5,
                 message="Analyzing source table…",
             )
-            columns, schema, total_rows, sample_rows = peek_stream_source(
-                request.source
+            # Several tables: the primary sample is that stream's CALL or
+            # SELECT when it has one. Peeking the table would map columns the
+            # writer never reads.
+            from services.execute_shape_route import peek_declared_source
+
+            columns, schema, total_rows, sample_rows = peek_declared_source(
+                request.source, request.stream_contracts
             )
-            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:
@@ -3660,49 +3666,19 @@ class UniversalTransferEngine:
             # will receive. A separate throwaway runner shapes the design-time
             # sample: those effects are not the population's.
             _settle_locales(request, sample_rows, columns)
-            shape_runner = _open_shape_runner(request, columns)
-            declared_contract = resolve_sync_contract(request.stream_contracts)
-            shape_refusal = _shape_stream_refusal(
-                shape_runner,
-                effective_sync=resolve_effective_sync_mode(
-                    request.sync_mode,
-                    declared_contract.sync_mode if declared_contract else None,
-                ),
-                multi_stream=len(
-                    resolve_selected_sync_contracts(request.stream_contracts)
-                ) > 1,
-                cursor_field=(
-                    declared_contract.cursor_field if declared_contract else ""
-                ),
-                key_columns=(
-                    declared_contract.primary_key_columns()
-                    if declared_contract and declared_contract.primary_key
-                    else []
-                ),
-            )
-            if shape_refusal:
-                mongo.update_job_status(
-                    job_id,
-                    "failed",
-                    error=shape_refusal,
-                    phase="failed",
-                    progress_pct=0,
-                )
-                return TransferResult(
-                    success=False,
-                    error=shape_refusal,
-                    error_details={
-                        "reason": "shape_route_unsupported",
-                        "remediation": (
-                            "Remove the Shape recipe for this sync mode, or shape "
-                            "on a full-refresh / incremental-append route."
-                        ),
-                    },
-                    operation=request.operation,
-                    job_id=job_id,
-                )
+            # design_runner shapes the primary sample. The sequential writer
+            # builds one runner per stream from shape_by_stream.
+            from services.execute_shape_route import open_execute_shape
+
+            shape_plan = open_execute_shape(request, columns, job_id=job_id)
+            if shape_plan.failure is not None:
+                return shape_plan.failure
+            design_runner = shape_plan.design_runner
+            shape_runner = shape_plan.shape_runner
+            shape_by_stream = shape_plan.shape_by_stream
+            approved_shape_hash = shape_plan.approved_shape_hash
             sample_probe = (
-                ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+                ShapeRunner(design_runner.recipe) if design_runner is not None else None
             )
             if sample_probe is not None:
                 sample_rows = sample_probe.records(sample_rows)
@@ -3714,8 +3690,8 @@ class UniversalTransferEngine:
                 # The rewrites emptied the first page, not the table. Read on
                 # rather than let the gates judge a run on no rows at all.
                 widened_probe = (
-                    ShapeRunner(shape_runner.recipe)
-                    if shape_runner is not None
+                    ShapeRunner(design_runner.recipe)
+                    if design_runner is not None
                     else None
                 )
                 sample_rows = _widen_design_sample(
@@ -3803,7 +3779,7 @@ class UniversalTransferEngine:
                             column_types=schema,
                             dest_types=dest_schema_types,
                             dest_db=dst_fmt.lower(),
-                            shape_runner=shape_runner,
+                            shape_runner=design_runner,
                         )
                     ),
                     rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
@@ -4114,6 +4090,13 @@ class UniversalTransferEngine:
             stream_contract = resolve_sync_contract(request.stream_contracts)
             selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
             multi_non_cdc = len(selected_streams) > 1
+            from services.execute_shape_route import procedure_replay_failure
+
+            procedure_blocked = procedure_replay_failure(
+                request, selected_streams, job_id=job_id
+            )
+            if procedure_blocked is not None:
+                return procedure_blocked
             # Overwrite DROP once on primary is wrong for multi-stream — sequential
             # path drops each remapped destination instead.
             if not multi_non_cdc and should_drop_destination_for_sync(
@@ -4244,6 +4227,8 @@ class UniversalTransferEngine:
                         source_filter=request.source_filter,
                         limit=request.limit,
                         skip_preflight=request.skip_preflight,
+                        shape_by_stream=shape_by_stream or None,
+                        approved_shape_hash=approved_shape_hash,
                     )
                 )
             else:

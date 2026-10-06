@@ -96,6 +96,40 @@ _SELECT_FUNC_RE = re.compile(
     rf"^\s*SELECT\s+\*\s+FROM\s+({_QUALIFIED})\s*\((.*)\)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SOURCE_QUERY_RE = re.compile(
+    r"^\s*(SELECT|WITH|VALUES)\b",
+    re.IGNORECASE,
+)
+_DEST_DML_RE = re.compile(
+    r"^\s*(INSERT|MERGE|UPDATE|UPSERT|REPLACE)\b",
+    re.IGNORECASE,
+)
+
+
+def leading_statement_kind(text: str) -> str:
+    """``procedure`` | ``query`` | ``dest_dml`` | ``""``.
+
+    The first statement after comments, using the same shapes the parsers
+    already accept. A PostgreSQL ``SELECT * FROM schema.fn(...)`` is a
+    procedure. A general SELECT/WITH is a source extract. INSERT/MERGE is a
+    destination write. Unrecognized text returns ``""`` so the declared mode
+    stays in charge and the parser can refuse it in its own words.
+    """
+    stripped = _strip_comments(text)
+    if not stripped:
+        return ""
+    if _DDL_DEFINITION.match(stripped):
+        return ""
+    if _SELECT_FUNC_RE.match(stripped) or _CALL_RE.match(stripped) or _EXEC_RE.match(stripped):
+        return "procedure"
+    if _SOURCE_QUERY_RE.match(stripped):
+        return "query"
+    if _DEST_DML_RE.match(stripped):
+        return "dest_dml"
+    if _BARE_IDENT_RE.match(stripped):
+        return "procedure"
+    return ""
+
 
 _DENIED_NAME_PREFIXES = (
     "xp_",

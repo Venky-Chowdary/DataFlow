@@ -608,6 +608,10 @@ export async function previewShapeRecipe(payload: {
   column_types?: Record<string, string>;
   target_schema?: Record<string, string>;
   include_profile?: boolean;
+  /** Sample's table when several streams share one recipe. */
+  focus_table?: string;
+  source_tables?: string[];
+  source_catalog?: Record<string, string[]>;
 }): Promise<ShapePreviewResponse> {
   const res = await apiFetch(`${API_BASE}/shape/preview`, {
     method: "POST",

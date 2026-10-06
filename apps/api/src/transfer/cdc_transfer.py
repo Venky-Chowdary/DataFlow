@@ -56,7 +56,6 @@ from services.tombstone import (
 from services.cdc_engine import (
     ChangeBatch,
     WatermarkType,
-    advance_watermark,
     infer_watermark_type,
     max_watermark,
 )
@@ -77,6 +76,7 @@ from services.sync_cursor import (
     map_source_to_target,
     resolve_selected_sync_contracts,
     resolve_sync_contract,
+    resume_watermark,
     set_watermark,
 )
 from services.value_serializer import cell_to_string
@@ -749,6 +749,13 @@ class CdcEngine:
         for h, rows in reader:
             if not headers:
                 headers = h
+                # An inherited multi-table stream reads the table (no column
+                # list). Soft-delete detection needs those real names; the
+                # primary table's schema must not decide them.
+                if not self.tombstone_column and not self.columns:
+                    self.tombstone_column = _detect_tombstone_column(
+                        self.schema, headers
+                    )
             for row in rows:
                 buffer.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
                 if len(buffer) >= self.batch_size:
@@ -908,6 +915,85 @@ def _stamp_unparsed_sql_redo_summary(
     return out
 
 
+def _change_column_names(change: ChangeBatch) -> list[str]:
+    """Column names present on this batch's inserts and updates, in first-seen order.
+
+    ``_df_lsn`` is stamped later and is not part of the table's own set.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for record in list(change.inserts or []) + list(change.updates or []):
+        if not isinstance(record, dict):
+            continue
+        for key in record:
+            name = str(key).strip()
+            folded = name.casefold()
+            if not name or folded in seen or folded == "_df_lsn":
+                continue
+            seen.add(folded)
+            ordered.append(name)
+    return ordered
+
+
+def _note_inherited_map(summary: dict[str, Any] | None, note: str) -> dict[str, Any]:
+    """Surface why another table's column map was not applied. Once per note."""
+    out = dict(summary or {})
+    text = (note or "").strip()
+    if not text:
+        return out
+    warnings = [str(item) for item in (out.get("warnings") or [])]
+    if text not in warnings:
+        warnings.append(text)
+    out["warnings"] = warnings
+    return out
+
+
+def _align_inherited_batch(
+    mappings: list[dict[str, Any]],
+    headers: list[str],
+    change: ChangeBatch,
+    pk_target_col: str | list[str],
+    pk_source_cols: list[str],
+    lock: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str], str | list[str], str]:
+    """Keep this batch's columns when the map was borrowed from another table.
+
+    A later delete-only batch has no row image. ``lock`` remembers the first
+    image so that batch does not fall back to the primary table's schema and
+    rename the delete key.
+    """
+    from services.multi_stream_plan import adopt_inherited_mappings
+    from services.sync_cursor import map_source_to_target
+
+    imaged = _change_column_names(change)
+    note = ""
+    if imaged:
+        mappings, note = adopt_inherited_mappings(mappings, imaged)
+        headers = imaged
+        if lock is not None:
+            if lock.get("noted"):
+                note = ""
+            elif note:
+                lock["noted"] = True
+            lock["mappings"] = list(mappings)
+            lock["headers"] = list(headers)
+    elif lock and lock.get("mappings"):
+        mappings = list(lock["mappings"])
+        headers = list(lock.get("headers") or headers)
+    elif pk_source_cols:
+        # No row image yet, and none remembered. Another table's schema must
+        # not become this batch's column list or its delete key.
+        mappings = [
+            {"source": col, "target": col, "confidence": 0.95}
+            for col in pk_source_cols
+        ]
+        headers = list(pk_source_cols)
+    if pk_source_cols:
+        resolved = [map_source_to_target(col, mappings) or col for col in pk_source_cols]
+        pk_target_col = resolved[0] if len(resolved) == 1 else ",".join(resolved)
+    return list(mappings), list(headers), pk_target_col, note
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -928,6 +1014,9 @@ def _apply_change_batch(
     cursor_key: str = "",
     stream_name: str = "",
     writer_fence: int = 0,
+    mappings_inherited: bool = False,
+    pk_source_cols: list[str] | None = None,
+    align_lock: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import normalize_delivery_guarantee
@@ -952,6 +1041,20 @@ def _apply_change_batch(
             rejected=rejected_details,
         )
 
+    inherit_note = ""
+    if mappings_inherited:
+        mappings, headers, pk_target_col, inherit_note = _align_inherited_batch(
+            mappings,
+            headers,
+            change,
+            pk_target_col,
+            list(pk_source_cols or []),
+            align_lock,
+        )
+        column_types = dict(column_types or {})
+        for name in headers:
+            column_types.setdefault(name, "string")
+
     if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
         from connectors.cdc_eos_sql import apply_change_batch_exactly_once
 
@@ -968,8 +1071,9 @@ def _apply_change_batch(
             stream_name=stream_name,
             writer_fence=writer_fence,
         )
-        return rows, checksum, _stamp_unparsed_sql_redo_summary(
-            dest_summary, rejected_details
+        return rows, checksum, _note_inherited_map(
+            _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
+            inherit_note,
         ), deleted
 
     # Normalize once so every writer and the delete path see a real column list.
@@ -1151,7 +1255,10 @@ def _apply_change_batch(
         from services.row_conservation import CENSUS_KEY
 
         dest_summary[CENSUS_KEY] = census_payload
-    dest_summary = _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details)
+    dest_summary = _note_inherited_map(
+        _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
+        inherit_note,
+    )
 
     return rows_written, last_checksum, dest_summary, deleted
 
@@ -1270,6 +1377,13 @@ def _run_cdc_multi_stream(
     dest transaction for the demuxed barrier (N tables + one LSN). Unwired
     dests stay sequential and fail-closed at apply.
     """
+    from .stream_dest_procedure import (
+        CdcDestinationSessionError,
+        refuse_cdc_destination_row_apply,
+    )
+
+    # Before either reader. A CALL must not fall through to sequential upsert.
+    refuse_cdc_destination_row_apply(destination, sync_mode, stream_contracts)
     from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS, normalize_delivery_guarantee
     from services.cdc_multi_table import can_share_log_reader
 
@@ -1299,7 +1413,7 @@ def _run_cdc_multi_stream(
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
 
-            if isinstance(exc, CdcLeaseConflict):
+            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError)):
                 raise
             logger.warning(
                 "Shared multi-table CDC reader unavailable (%s); "
@@ -1352,6 +1466,12 @@ def _run_cdc_shared_multi_table(
     demuxed table batches until ``ack_barrier``, then applies them in one dest
     transaction and acks the source LSN once.
     """
+    from .stream_dest_procedure import (
+        cdc_destination_hooks,
+        refuse_cdc_destination_row_apply,
+    )
+
+    refuse_cdc_destination_row_apply(destination, sync_mode, stream_contracts)
     from services.cdc_multi_table import (
         shared_route_cursor_key,
         should_ack_shared_batch,
@@ -1360,6 +1480,7 @@ def _run_cdc_shared_multi_table(
         is_durable_log_resume_token,
         is_side_channel_resume_token,
     )
+    from services.cdc_snapshot_mode import snapshot_dump_open
 
     from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
 
@@ -1396,13 +1517,15 @@ def _run_cdc_shared_multi_table(
             continue
         raw = next((c for c in stream_contracts if c.get("name") == name), {}) or {}
         stream_maps = raw.get("mappings")
-        use_maps = stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
+        declared = isinstance(stream_maps, list) and bool(stream_maps)
+        use_maps = stream_maps if declared else mappings
         stream_cfg[name] = {
             "primary_key": _cdc_pk_str(
                 contract.primary_key or primary_keys.get(name), name
             ),
             "cursor_field": str(contract.cursor_field or ""),
             "mappings": use_maps,
+            "mappings_inherited": not declared,
             "cursor_key": build_cursor_key(
                 source_type=src_type,
                 source_database=str(src_cfg.get("database") or ""),
@@ -1436,6 +1559,11 @@ def _run_cdc_shared_multi_table(
         from services.cdc_exactly_once import persist_dest_keyset_on_signal
 
         persist_dest_keyset_on_signal(opened.resume)
+
+    # One route cursor. The shared store wins. An empty store may resume
+    # from the job checkpoint when that record is the shared log position.
+    # A token that names one table is that table's keyset, not this route.
+    shared_wm = resume_watermark(shared_wm, checkpoint, shared=True)
 
     cdc: Any
     ddl_log: list[str] = [
@@ -1649,6 +1777,13 @@ def _run_cdc_shared_multi_table(
     # barrier makes the whole transaction advance together or not at all.
     pending_table_watermarks: dict[str, str] = {}
     pending_eos_bundle: list[Any] = []
+    # Tables whose latest stored token is still an open dump. The streaming
+    # handoff moves them to that log position. Leaving phase=snapshot would
+    # make a later per-table run reopen the dump.
+    open_snapshot_tables: set[str] = set()
+    # Cursor this run has made durable. A phase=snapshot token is an open
+    # dump (table + last primary key), not "snapshot finished".
+    published_shared = shared_wm
 
     def _flush_table_watermarks() -> None:
         """Publish staged per-table cursors now that the transaction is fully applied."""
@@ -1668,14 +1803,26 @@ def _run_cdc_shared_multi_table(
         pending_table_watermarks.clear()
 
     def _apply_tagged(change: ChangeBatch) -> bool:
-        nonlocal total_rows, chunk_idx, headers, last_summary
+        nonlocal total_rows, chunk_idx, headers, last_summary, published_shared
         stream = _resolve_stream(change)
         cfg = stream_cfg[stream]
         use_maps = cfg["mappings"]
+        inherit_note = ""
         from services.cdc_snapshot_window import _pk_columns
 
         pk_source = _pk_columns(cfg["primary_key"])
-        pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
+        if cfg.get("mappings_inherited"):
+            use_maps, headers, pk_joined, inherit_note = _align_inherited_batch(
+                use_maps,
+                headers,
+                change,
+                cfg["primary_key"],
+                pk_source,
+                cfg.setdefault("align_lock", {}),
+            )
+            pk_target = _pk_columns(pk_joined)
+        else:
+            pk_target = [map_source_to_target(c, use_maps) or c for c in pk_source]
         if original_dest_table is not None or original_dest_collection is not None:
             if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
                 destination.collection = stream
@@ -1688,9 +1835,11 @@ def _run_cdc_shared_multi_table(
             aliases=(stream,),
         )
         col_types = dict(schema)
-        if change.inserts or change.updates:
+        if change.inserts or change.updates and not cfg.get("mappings_inherited"):
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
+        for name in headers:
+            col_types.setdefault(name, "string")
         _assert_cdc_lease_before_apply(cdc)
         rows_written = 0
         deleted = 0
@@ -1769,6 +1918,7 @@ def _run_cdc_shared_multi_table(
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
+        dest_summary = _note_inherited_map(dest_summary, inherit_note)
         if dest_summary:
             last_summary = _merge_cdc_dest_summary(
                 shared_accum,
@@ -1796,11 +1946,20 @@ def _run_cdc_shared_multi_table(
                 # commit keeps its previous position.
                 if change.total_changes:
                     pending_table_watermarks[stream] = token_s
+                    if snapshot_dump_open(token_s):
+                        open_snapshot_tables.add(stream)
                 if should_ack_shared_batch(change) and not skip_ack:
                     # Barrier reached: the whole transaction is applied, so the
                     # per-table cursors and the shared log position may both move.
                     # A position-only barrier (heartbeat, or a commit that touched
                     # no captured table) advances the log but no table cursor.
+                    # A streaming handoff closes every table still marked as an
+                    # open dump. Their snapshot token is not a finished cursor.
+                    if not snapshot_dump_open(token_s):
+                        for name in open_snapshot_tables:
+                            if name in stream_cfg:
+                                pending_table_watermarks[name] = token_s
+                        open_snapshot_tables.clear()
                     _flush_table_watermarks()
                     set_watermark(
                         shared_key,
@@ -1810,8 +1969,10 @@ def _run_cdc_shared_multi_table(
                             "sync_mode": sync_mode,
                             "tables": tables,
                             "shared_reader": True,
+                            "snapshot_dump_open": snapshot_dump_open(token_s),
                         },
                     )
+                    published_shared = token_s
                     if hasattr(cdc, "ack") and (
                         is_durable_log_resume_token(change.resume_token)
                         or isinstance(change.resume_token, str)
@@ -1823,6 +1984,40 @@ def _run_cdc_shared_multi_table(
                                 "Shared CDC ack failed (at-least-once redelivery): %s",
                                 ack_exc,
                             )
+                elif (
+                    snapshot_dump_open(token_s)
+                    and not skip_ack
+                    and not eos_active
+                ):
+                    # SQL Server and Oracle snapshot pages are not a log
+                    # barrier. The page is still the keyset resume (table +
+                    # last primary key). Store it without acking: a crash
+                    # continues the dump, and the streaming handoff remains
+                    # the only ack. Exactly-once waits for that barrier so
+                    # the cursor cannot move before the destination commit.
+                    if change.total_changes and stream in stream_cfg:
+                        set_watermark(
+                            stream_cfg[stream]["cursor_key"],
+                            token_s,
+                            metadata={
+                                "job_id": job_id,
+                                "sync_mode": sync_mode,
+                                "shared_reader": True,
+                                "snapshot_dump_open": True,
+                            },
+                        )
+                    set_watermark(
+                        shared_key,
+                        token_s,
+                        metadata={
+                            "job_id": job_id,
+                            "sync_mode": sync_mode,
+                            "tables": tables,
+                            "shared_reader": True,
+                            "snapshot_dump_open": True,
+                        },
+                    )
+                    published_shared = token_s
         if on_checkpoint:
             on_checkpoint(
                 chunk_idx,
@@ -1830,7 +2025,7 @@ def _run_cdc_shared_multi_table(
                 total_rows,
                 {
                     "chunk_index": chunk_idx,
-                    "watermark": shared_wm,
+                    "watermark": published_shared,
                     "rows_written": total_rows,
                     "streams": list(stream_health.values()),
                     "cdc_delivery": "exactly_once" if eos_active else "at-least-once",
@@ -1845,32 +2040,33 @@ def _run_cdc_shared_multi_table(
         return bool(change.total_changes)
 
     try:
-        if run_snapshot:
-            with _cdc_span("cdc.snapshot", job_id=str(job_id or ""), shared_reader=True):
-                for change in cdc.snapshot():
-                    _apply_tagged(change)
-                    if limit and total_rows >= limit:
-                        break
-        if run_stream and not (limit and total_rows >= limit):
-            max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
-            max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
-            idle = 0
-            with _cdc_span("cdc.poll", job_id=str(job_id or ""), shared_reader=True):
-                for _ in range(max_rounds):
-                    had = False
-                    for change in cdc.poll():
-                        if _apply_tagged(change):
-                            had = True
+        with cdc_destination_hooks(destination, ddl_log):
+            if run_snapshot:
+                with _cdc_span("cdc.snapshot", job_id=str(job_id or ""), shared_reader=True):
+                    for change in cdc.snapshot():
+                        _apply_tagged(change)
                         if limit and total_rows >= limit:
                             break
-                    if limit and total_rows >= limit:
-                        break
-                    if had:
-                        idle = 0
-                    else:
-                        idle += 1
-                        if idle >= max_idle:
+            if run_stream and not (limit and total_rows >= limit):
+                max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
+                max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
+                idle = 0
+                with _cdc_span("cdc.poll", job_id=str(job_id or ""), shared_reader=True):
+                    for _ in range(max_rounds):
+                        had = False
+                        for change in cdc.poll():
+                            if _apply_tagged(change):
+                                had = True
+                            if limit and total_rows >= limit:
+                                break
+                        if limit and total_rows >= limit:
                             break
+                        if had:
+                            idle = 0
+                        else:
+                            idle += 1
+                            if idle >= max_idle:
+                                break
     finally:
         if original_dest_table is not None:
             destination.table = original_dest_table
@@ -1965,6 +2161,14 @@ def _run_cdc_multi_stream_sequential(
     schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Legacy path: N independent CDC readers (N slots / N server_ids)."""
+    from .stream_dest_procedure import (
+        cdc_destination_hooks,
+        hide_session_hooks,
+        refuse_cdc_destination_row_apply,
+    )
+
+    # Direct callers fail here, before any per-table reader opens.
+    refuse_cdc_destination_row_apply(destination, sync_mode, stream_contracts)
     total_rows = 0
     ddl_log: list[str] = []
     headers: list[str] = list(schema.keys())
@@ -1978,71 +2182,92 @@ def _run_cdc_multi_stream_sequential(
     original_dest_collection = getattr(destination, "collection", None)
 
     try:
-        for contract in selected:
-            stream_name = (contract.name or "").strip() or "stream"
-            # Bind source/dest object to this stream (table/collection name).
-            if getattr(source, "format", "") == "mongodb" or original_collection:
-                source.collection = stream_name
-            else:
-                source.table = stream_name
-            if original_dest_table is not None or original_dest_collection is not None:
-                if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
-                    destination.collection = stream_name
+        # One Advanced before/after pair is one session. Clearing the live
+        # extra stops each table from replaying a shared TRUNCATE.
+        with cdc_destination_hooks(destination, ddl_log), hide_session_hooks(destination):
+            for contract in selected:
+                stream_name = (contract.name or "").strip() or "stream"
+                # Bind source/dest object to this stream (table/collection name).
+                if getattr(source, "format", "") == "mongodb" or original_collection:
+                    source.collection = stream_name
                 else:
-                    destination.table = stream_name
+                    source.table = stream_name
+                if original_dest_table is not None or original_dest_collection is not None:
+                    if getattr(destination, "format", "") == "mongodb" or original_dest_collection:
+                        destination.collection = stream_name
+                    else:
+                        destination.table = stream_name
 
-            single_contracts = [
-                {
-                    **(
-                        next(
-                            (c for c in stream_contracts if c.get("name") == stream_name),
-                            {},
-                        )
-                    ),
-                    "name": stream_name,
-                    "selected": True,
-                    "sync_mode": contract.sync_mode or sync_mode,
-                    "cursor_field": contract.cursor_field,
-                    "primary_key": contract.primary_key,
-                    "schema_policy": contract.schema_policy,
-                    "validation_mode": contract.validation_mode or validation_mode,
-                }
-            ]
-            # Prefer per-stream mappings when the operator mapped each stream on Map.
-            stream_maps = single_contracts[0].get("mappings")
-            use_mappings = stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
-            status = "completed"
-            error: str | None = None
-            rows = 0
-            summary: dict[str, Any] = {}
-            try:
-                rows, stream_ddl, summary, headers = _run_cdc_single_stream(
-                    source,
-                    destination,
-                    use_mappings,
-                    schema,
-                    on_checkpoint,
-                    sync_mode=sync_mode,
-                    stream_contracts=single_contracts,
-                    job_id=job_id,
-                    checkpoint=checkpoint,
-                    checkpoint_service=checkpoint_service,
-                    backfill_new_fields=backfill_new_fields,
-                    validation_mode=validation_mode,
-                    limit=limit,
-                    delivery_guarantee=delivery_guarantee,
-                    workspace_id=workspace_id,
-                    schedule_id=schedule_id,
-                )
-                ddl_log.extend(stream_ddl)
-                total_rows += rows
-                last_summary = summary
-                lag = summary.get("cdc_lag_seconds")
-                if isinstance(lag, (int, float)):
-                    worst_lag = lag if worst_lag is None else max(worst_lag, float(lag))
-            except Exception as exc:
-                status = "failed"
-                error = str(exc)
+                single_contracts = [
+                    {
+                        **(
+                            next(
+                                (c for c in stream_contracts if c.get("name") == stream_name),
+                                {},
+                            )
+                        ),
+                        "name": stream_name,
+                        "selected": True,
+                        "sync_mode": contract.sync_mode or sync_mode,
+                        "cursor_field": contract.cursor_field,
+                        "primary_key": contract.primary_key,
+                        "schema_policy": contract.schema_policy,
+                        "validation_mode": contract.validation_mode or validation_mode,
+                    }
+                ]
+                # Prefer per-stream mappings when the operator mapped each stream on Map.
+                stream_maps = single_contracts[0].get("mappings")
+                declared_maps = isinstance(stream_maps, list) and bool(stream_maps)
+                use_mappings = stream_maps if declared_maps else mappings
+                status = "completed"
+                error: str | None = None
+                rows = 0
+                summary: dict[str, Any] = {}
+                try:
+                    rows, stream_ddl, summary, headers = _run_cdc_single_stream(
+                        source,
+                        destination,
+                        use_mappings,
+                        schema,
+                        on_checkpoint,
+                        sync_mode=sync_mode,
+                        stream_contracts=single_contracts,
+                        job_id=job_id,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        backfill_new_fields=backfill_new_fields,
+                        validation_mode=validation_mode,
+                        limit=limit,
+                        delivery_guarantee=delivery_guarantee,
+                        workspace_id=workspace_id,
+                        schedule_id=schedule_id,
+                        mappings_inherited=not declared_maps,
+                        checkpoint_bound_to_stream=True,
+                    )
+                    ddl_log.extend(stream_ddl)
+                    total_rows += rows
+                    last_summary = summary
+                    lag = summary.get("cdc_lag_seconds")
+                    if isinstance(lag, (int, float)):
+                        worst_lag = lag if worst_lag is None else max(worst_lag, float(lag))
+                except Exception as exc:
+                    status = "failed"
+                    error = str(exc)
+                    from services.row_conservation import record_stream_health
+
+                    record_stream_health(
+                        stream_health,
+                        name=stream_name,
+                        status=status,
+                        records_processed=rows,
+                        summary=summary,
+                        extra={"error": error},
+                        sync_mode=sync_mode,
+                        destination=destination,
+                        count_source=False,
+                    )
+                    raise
+                cdc_meta = summary.get("cdc") if isinstance(summary.get("cdc"), dict) else {}
                 from services.row_conservation import record_stream_health
 
                 record_stream_health(
@@ -2051,32 +2276,17 @@ def _run_cdc_multi_stream_sequential(
                     status=status,
                     records_processed=rows,
                     summary=summary,
-                    extra={"error": error},
+                    extra={
+                        "cdc_lag_seconds": summary.get("cdc_lag_seconds"),
+                        "replication_lag_bytes": cdc_meta.get("replication_lag_bytes"),
+                        "watermark": cdc_meta.get("watermark"),
+                        "error": error,
+                    },
                     sync_mode=sync_mode,
                     destination=destination,
+                    dest_table=stream_name,
                     count_source=False,
                 )
-                raise
-            cdc_meta = summary.get("cdc") if isinstance(summary.get("cdc"), dict) else {}
-            from services.row_conservation import record_stream_health
-
-            record_stream_health(
-                stream_health,
-                name=stream_name,
-                status=status,
-                records_processed=rows,
-                summary=summary,
-                extra={
-                    "cdc_lag_seconds": summary.get("cdc_lag_seconds"),
-                    "replication_lag_bytes": cdc_meta.get("replication_lag_bytes"),
-                    "watermark": cdc_meta.get("watermark"),
-                    "error": error,
-                },
-                sync_mode=sync_mode,
-                destination=destination,
-                dest_table=stream_name,
-                count_source=False,
-            )
     finally:
         if original_table is not None:
             source.table = original_table
@@ -2112,8 +2322,17 @@ def _run_cdc_single_stream(
     delivery_guarantee: str = "at_least_once",
     workspace_id: str = "",
     schedule_id: str = "",
+    mappings_inherited: bool = False,
+    checkpoint_bound_to_stream: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer for a single stream contract."""
+    from .stream_dest_procedure import (
+        cdc_destination_hooks,
+        refuse_cdc_destination_row_apply,
+    )
+
+    # A destination CALL must not become a table upsert, and must not open a slot.
+    refuse_cdc_destination_row_apply(destination, sync_mode, stream_contracts)
     # Driver type is used for generic read/write; CDC source kind uses the
     # catalog format so sqlserver/oracle are not collapsed to generic_sql.
     src_driver = resolve_driver_type(source.format)
@@ -2219,8 +2438,25 @@ def _run_cdc_single_stream(
 
         persist_dest_keyset_on_signal(opened.resume)
 
-    headers = list(schema.keys())
+    # The reader and the snapshot plan must share this cursor. A checkpoint
+    # fills a missing store only. It must not rewind a cursor the store
+    # already advanced. A multi-table run adopts that checkpoint only when
+    # it names this stream. An unnamed job cursor is one table's position
+    # and must not seek the others.
+    watermark = resume_watermark(
+        watermark,
+        checkpoint,
+        stream=table_name,
+        allow_unnamed=not checkpoint_bound_to_stream,
+    )
+
+    from services.multi_stream_plan import reader_columns_for_stream
+
+    headers = reader_columns_for_stream(
+        list(schema.keys()), inherited=mappings_inherited
+    )
     column_types = {c: schema.get(c, "string") for c in headers}
+    align_lock: dict[str, Any] = {}
     # Non-empty only when log capture was refused and cursor polling took over.
     capture_downgrade: dict[str, str | bool] = {}
 
@@ -2544,21 +2780,14 @@ def _run_cdc_single_stream(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
-    # Resume from durable job checkpoint watermark when present.
+    # Chunk progress only. The cursor itself was resolved before the reader
+    # was opened, and a checkpoint must not replace it here.
     cp_dict: dict[str, Any] = {}
     if checkpoint is not None:
         if isinstance(checkpoint, dict):
             cp_dict = checkpoint
         elif hasattr(checkpoint, "to_dict"):
             cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
-    if cp_dict:
-        cp_wm = cp_dict.get("watermark")
-        if cp_wm is None and isinstance(cp_dict.get("cdc"), dict):
-            cp_wm = cp_dict["cdc"].get("watermark")
-        if cp_wm is not None:
-            state.running_cursor = str(cp_wm)
-            state.watermark = str(cp_wm)
-            watermark = str(cp_wm)
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
 
@@ -2569,8 +2798,19 @@ def _run_cdc_single_stream(
     max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
     txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
-    def _apply_and_checkpoint(change: ChangeBatch) -> bool:
-        """Apply one batch, persist watermark, ack source. Returns True if data moved."""
+    def _apply_and_checkpoint(change: ChangeBatch, *, publish_resume: bool = True) -> bool:
+        """Apply one batch. A finished page may become the resume cursor.
+
+        An offset snapshot page is not a resume position: rows still unread
+        can sort before the page's cursor. ``publish_resume`` stays false
+        until that dump has read the table. A crash then runs the snapshot
+        again and upserts what already landed.
+
+        A log snapshot token (``phase=snapshot``, table + last primary key)
+        is a resume position. It is stored immediately and not acked. The
+        next run continues ``snapshot()`` from that key. The slot or LSN is
+        acked when the dump finishes.
+        """
         nonlocal chunk_idx, total_chunks
         from services.cdc_resume_tokens import (
             is_durable_log_resume_token,
@@ -2622,6 +2862,9 @@ def _run_cdc_single_stream(
                 delivery_guarantee=eos_guarantee,
                 cursor_key=cursor_key,
                 stream_name=str(table_name or dest_table or ""),
+                mappings_inherited=mappings_inherited,
+                pk_source_cols=pk_source_cols,
+                align_lock=align_lock,
                 writer_fence=int(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),
@@ -2663,20 +2906,20 @@ def _run_cdc_single_stream(
                 except TypeError:
                     state.running_cursor = str(change.resume_token)
         elif change.inserts or change.updates:
-            values = [
-                r.get(cursor_field)
-                for r in (change.inserts + change.updates)
-                if r.get(cursor_field) is not None
-            ]
-            if values:
-                wm_type = infer_watermark_type([str(v) for v in values])
-                batch_max = max_watermark([str(v) for v in values], wm_type)
-                if batch_max:
-                    new_watermark, advanced = advance_watermark(
-                        state.running_cursor, [batch_max], wm_type
-                    )
-                    if advanced and new_watermark is not None:
-                        state.running_cursor = new_watermark
+            # Query CDC has no log token. Store (cursor, pk) when the cursor
+            # is not unique so a restart seeks past the last applied peer
+            # instead of dropping every row that shares that cursor value.
+            from services.sync_cursor import query_cdc_resume_watermark
+
+            tiebreak = cdc._keyset_tiebreak() if isinstance(cdc, CdcEngine) else ""
+            resumed = query_cdc_resume_watermark(
+                [r for r in (change.inserts + change.updates) if isinstance(r, dict)],
+                cursor_field,
+                tiebreak,
+                state.running_cursor,
+            )
+            if resumed and resumed != state.running_cursor:
+                state.running_cursor = resumed
 
         chunk_idx += 1
         total_chunks = max(total_chunks, chunk_idx)
@@ -2693,7 +2936,12 @@ def _run_cdc_single_stream(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        if state.running_cursor:
+        from services.cdc_snapshot_mode import snapshot_dump_open
+
+        open_dump = bool(
+            state.running_cursor and snapshot_dump_open(state.running_cursor)
+        )
+        if state.running_cursor and (publish_resume or open_dump):
             set_watermark(
                 cursor_key,
                 state.running_cursor,
@@ -2701,11 +2949,14 @@ def _run_cdc_single_stream(
                     "job_id": job_id,
                     "sync_mode": sync_mode,
                     "chunk": chunk_idx,
+                    "snapshot_dump_open": bool(open_dump and not publish_resume),
                     **lag_fields,
                 },
             )
-        # Ack source only AFTER durable watermark (peek→apply→ack).
-        if hasattr(cdc, "ack") and not skip_ack:
+        # Ack source only AFTER a durable resume cursor (peek→apply→ack).
+        # An open snapshot token is stored above so the next run can continue
+        # the dump. The slot stays until that dump finishes.
+        if publish_resume and hasattr(cdc, "ack") and not skip_ack:
             try:
                 cdc.ack(change.resume_token)
             except Exception as ack_exc:
@@ -2714,13 +2965,21 @@ def _run_cdc_single_stream(
                     ack_exc,
                 )
         if on_checkpoint:
+            # An offset page max is not a resume token, so the checkpoint keeps
+            # the cursor this run started with. A phase=snapshot log token is
+            # the resume position and is recorded with the cursor store.
+            if publish_resume or open_dump:
+                checkpoint_watermark = state.running_cursor
+            else:
+                checkpoint_watermark = watermark
             on_checkpoint(
                 chunk_idx,
                 total_chunks,
                 state.rows_written,
                 {
                     "chunk_index": chunk_idx,
-                    "watermark": state.running_cursor,
+                    "watermark": checkpoint_watermark,
+                    "stream": table_name,
                     "rows_written": state.rows_written,
                     "cdc_lag_seconds": lag_fields.get("cdc_lag_seconds"),
                     "replication_lag_bytes": lag_fields.get("replication_lag_bytes"),
@@ -2798,32 +3057,60 @@ def _run_cdc_single_stream(
             f"(DDD-3 stream-wins; not blocking dump)"
         )
 
-    if run_snapshot:
-        with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
-            for change in cdc.snapshot():
-                _apply_and_checkpoint(change)
+    with cdc_destination_hooks(destination, ddl_log):
+        snapshot_resume = None
+        if run_snapshot:
+            with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
+                for change in cdc.snapshot():
+                    if change.resume_token is not None:
+                        snapshot_resume = change.resume_token
+                    _apply_and_checkpoint(change, publish_resume=False)
+            # The dump finished. This cursor is the handoff: every snapshot
+            # row was applied, so a later poll may seek past it.
+            if state.running_cursor:
+                from services.cdc_snapshot_mode import snapshot_dump_open
 
-    # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
-    # continuously poll until idle so a single job drains the slot/binlog/CT stream.
-    if run_stream:
-        with _cdc_span("cdc.poll", job_id=str(job_id or "")):
-            if isinstance(cdc, CdcEngine):
-                if watermark is not None or not run_snapshot:
-                    for change in cdc.poll():
-                        _apply_and_checkpoint(change)
-            else:
-                idle_polls = 0
-                for _round in range(max_poll_rounds):
-                    had_data = False
-                    for change in cdc.poll():
-                        if _apply_and_checkpoint(change):
-                            had_data = True
-                    if had_data:
-                        idle_polls = 0
-                    else:
-                        idle_polls += 1
-                        if idle_polls >= max_idle_polls:
-                            break
+                still_open = snapshot_dump_open(state.running_cursor)
+                set_watermark(
+                    cursor_key,
+                    state.running_cursor,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": sync_mode,
+                        "snapshot_complete": not still_open,
+                        "snapshot_dump_open": still_open,
+                    },
+                )
+            if snapshot_resume is not None and hasattr(cdc, "ack"):
+                try:
+                    cdc.ack(snapshot_resume)
+                except Exception as ack_exc:
+                    logger.warning(
+                        "CDC snapshot ack failed (at-least-once redelivery): %s",
+                        ack_exc,
+                    )
+
+        # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
+        # continuously poll until idle so a single job drains the slot/binlog/CT stream.
+        if run_stream:
+            with _cdc_span("cdc.poll", job_id=str(job_id or "")):
+                if isinstance(cdc, CdcEngine):
+                    if watermark is not None or not run_snapshot:
+                        for change in cdc.poll():
+                            _apply_and_checkpoint(change)
+                else:
+                    idle_polls = 0
+                    for _round in range(max_poll_rounds):
+                        had_data = False
+                        for change in cdc.poll():
+                            if _apply_and_checkpoint(change):
+                                had_data = True
+                        if had_data:
+                            idle_polls = 0
+                        else:
+                            idle_polls += 1
+                            if idle_polls >= max_idle_polls:
+                                break
 
     final_watermark = state.running_cursor if state.running_cursor is not None else watermark
     lag_fields = _cdc_lag_fields(cdc)

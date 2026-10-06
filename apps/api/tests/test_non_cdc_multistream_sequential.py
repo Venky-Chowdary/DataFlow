@@ -109,6 +109,69 @@ def test_non_cdc_sequential_uses_per_stream_mappings_and_remaps_tables() -> None
     assert any("MULTI-STREAM sequential" in line for line in ddl)
 
 
+def test_session_hooks_run_once_and_are_not_on_each_stream() -> None:
+    class End:
+        def __init__(self) -> None:
+            self.kind = "database"
+            self.format = "postgresql"
+            self.table = "out"
+            self.collection = ""
+            self.extra = {
+                "dest_procedure_before": "CALL public.prep()",
+                "dest_procedure_after": "CALL public.finish()",
+            }
+
+    source = End()
+    source.table = "customers"
+    destination = End()
+    contracts = [
+        {"name": "customers", "selected": True, "sync_mode": "full_refresh_append"},
+        {"name": "orders", "selected": True, "sync_mode": "full_refresh_append"},
+    ]
+    selected = [
+        SyncContract(name="customers", sync_mode="full_refresh_append"),
+        SyncContract(name="orders", sync_mode="full_refresh_append"),
+    ]
+    seen_hooks: list[tuple[str, str]] = []
+    inherited: list[bool] = []
+
+    def _fake_stream(src, dest, mappings, schema, *args, **kwargs):
+        extra = dest.extra
+        seen_hooks.append((
+            str(extra.get("dest_procedure_before") or ""),
+            str(extra.get("dest_procedure_after") or ""),
+        ))
+        inherited.append(bool(kwargs.get("mappings_inherited")))
+        return 1, [], {"watermark": "1"}, ["id"]
+
+    hook_ids: list[str] = []
+
+    def _fake_hook(dest, spec):
+        hook_ids.append(spec.identifier)
+
+    with patch("src.transfer.stream.stream_database_transfer", side_effect=_fake_stream), \
+         patch("src.transfer.stream._drop_destination_endpoint", return_value=False), \
+         patch("src.transfer.adapters._run_dest_procedure_hook", side_effect=_fake_hook):
+        _rows, ddl, _summary, _headers = run_non_cdc_multi_stream_sequential(
+            source,
+            destination,
+            [{"source": "id", "target": "customer_id"}],
+            {},
+            None,
+            sync_mode="full_refresh_append",
+            stream_contracts=contracts,
+            selected=selected,
+            job_id="j-hooks",
+        )
+
+    assert seen_hooks == [("", ""), ("", "")]
+    assert inherited == [True, True]
+    assert hook_ids == ["public.prep", "public.finish"]
+    assert any("SESSION before_write once" in line for line in ddl)
+    assert any("SESSION after_write once" in line for line in ddl)
+    assert destination.extra["dest_procedure_before"] == "CALL public.prep()"
+
+
 def test_non_cdc_sequential_fail_fast_records_failed_stream() -> None:
     source = MagicMock()
     source.format = "postgresql"
@@ -161,3 +224,258 @@ def test_non_cdc_sequential_fail_fast_records_failed_stream() -> None:
 
     assert raised
     assert source.table == "a,b"
+
+
+def test_sequential_applies_each_streams_call_and_shape_then_restores() -> None:
+    source = MagicMock()
+    source.format = "postgresql"
+    source.kind = "database"
+    source.table = "customers,orders"
+    source.collection = ""
+    source.extra = {}
+    destination = MagicMock()
+    destination.format = "postgresql"
+    destination.kind = "database"
+    destination.table = "out"
+    destination.collection = ""
+    destination.extra = {}
+
+    contracts = [
+        {
+            "name": "customers",
+            "selected": True,
+            "sync_mode": "full_refresh_append",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+            "dest_write_mode": "procedure",
+            "dest_procedure_call": "CALL public.land_customer(:id)",
+        },
+        {"name": "orders", "selected": True, "sync_mode": "full_refresh_append"},
+    ]
+    selected = [
+        SyncContract(name="customers", sync_mode="full_refresh_append"),
+        SyncContract(name="orders", sync_mode="full_refresh_append"),
+    ]
+    seen: list[dict] = []
+
+    def _fake_stream(src, dest, mappings, schema, *args, **kwargs):
+        seen.append({
+            "table": src.table,
+            "call": src.extra.get("procedure_call"),
+            "mode": src.extra.get("source_read_mode"),
+            "steps": kwargs.get("shape_steps"),
+            "dest_call": dest.extra.get("dest_procedure_call"),
+        })
+        removed = 2 if src.table == "customers" else 0
+        return 1, [f"STREAM {src.table}"], {"rows_shaped_out": removed}, ["id"]
+
+    with patch(
+        "src.transfer.stream.stream_database_transfer",
+        side_effect=_fake_stream,
+    ), patch(
+        "src.transfer.stream._drop_destination_endpoint",
+        return_value=False,
+    ):
+        _rows, _ddl, summary, _ = run_non_cdc_multi_stream_sequential(
+            source,
+            destination,
+            [],
+            {},
+            None,
+            sync_mode="full_refresh_append",
+            stream_contracts=contracts,
+            selected=selected,
+            job_id="j-proc",
+            shape_by_stream={"customers": [{"op": "trim", "column": "email"}]},
+            approved_shape_hash="abc123",
+        )
+
+    assert source.extra == {}
+    assert destination.extra == {}
+    assert source.table == "customers,orders"
+    assert [row["table"] for row in seen] == ["customers", "orders"]
+    assert seen[0]["call"] == "CALL public.get_customers()"
+    assert seen[0]["mode"] == "procedure"
+    assert seen[0]["dest_call"] == "CALL public.land_customer(:id)"
+    assert seen[0]["steps"] == [{"op": "trim", "column": "email"}]
+    assert seen[1]["call"] in (None, "")
+    assert seen[1]["steps"] is None
+    assert seen[1]["dest_call"] in (None, "")
+    assert summary["rows_shaped_out"] == 2
+    assert summary["shape_recipe_hash"] == "abc123"
+
+
+def test_sequential_refuses_to_replay_one_source_procedure() -> None:
+    source = MagicMock()
+    source.format = "postgresql"
+    source.kind = "database"
+    source.table = "customers,orders"
+    source.collection = ""
+    source.extra = {
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL public.get_orders()",
+    }
+    destination = MagicMock()
+    destination.format = "postgresql"
+    destination.kind = "database"
+    destination.table = "out"
+    destination.collection = ""
+    destination.extra = {}
+    selected = [
+        SyncContract(name="customers", sync_mode="full_refresh_append"),
+        SyncContract(name="orders", sync_mode="full_refresh_append"),
+    ]
+    contracts = [
+        {"name": "customers", "selected": True},
+        {"name": "orders", "selected": True},
+    ]
+    with patch(
+        "src.transfer.stream.stream_database_transfer",
+    ) as stream:
+        try:
+            run_non_cdc_multi_stream_sequential(
+                source,
+                destination,
+                [],
+                {},
+                None,
+                sync_mode="full_refresh_append",
+                stream_contracts=contracts,
+                selected=selected,
+                job_id="j-replay",
+            )
+            raised = False
+        except ValueError as exc:
+            raised = True
+            assert "get_orders" in str(exc)
+    assert raised
+    assert stream.call_count == 0
+    assert source.extra["procedure_call"] == "CALL public.get_orders()"
+
+
+def test_sequential_checkpoint_does_not_seek_the_other_table() -> None:
+    """Orders' offset must not become users' resume point.
+
+    The same checkpoint object used to be passed into every table. After
+    orders stored its last key, users sought that key and skipped its own
+    rows. Users reads from the start. Orders keeps its own position, on a
+    copy, so a write during orders cannot move users.
+    """
+    from services.checkpoint_service import Checkpoint
+
+    source = MagicMock()
+    source.format = "postgresql"
+    source.kind = "database"
+    source.table = "orders,users"
+    source.collection = ""
+    destination = MagicMock()
+    destination.format = "postgresql"
+    destination.kind = "database"
+    destination.table = "out"
+    destination.collection = ""
+    destination.extra = {}
+    selected = [
+        SyncContract(name="orders", sync_mode="full_refresh_append", primary_key="id"),
+        SyncContract(name="users", sync_mode="full_refresh_append", primary_key="id"),
+    ]
+    contracts = [
+        {"name": "orders", "selected": True, "sync_mode": "full_refresh_append", "primary_key": "id"},
+        {"name": "users", "selected": True, "sync_mode": "full_refresh_append", "primary_key": "id"},
+    ]
+    job = Checkpoint(
+        job_id="j-seek",
+        offset=50,
+        chunk_index=2,
+        rows_processed=50,
+        cursor_value="50",
+        cdc_stream="orders",
+    )
+    seen: list[tuple[str, object]] = []
+
+    def _fake_stream(src, dest, mappings, schema, *args, **kwargs):
+        ck = kwargs.get("checkpoint")
+        if ck is None:
+            seen.append((str(src.table), None))
+        else:
+            seen.append((str(src.table), (ck is job, ck.offset, ck.cursor_value)))
+            ck.offset = 999
+            ck.cursor_value = "999"
+        return 1, [], {"watermark": "1"}, ["id"]
+
+    with patch(
+        "src.transfer.stream.stream_database_transfer",
+        side_effect=_fake_stream,
+    ), patch(
+        "src.transfer.stream._drop_destination_endpoint",
+        return_value=False,
+    ):
+        run_non_cdc_multi_stream_sequential(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "INTEGER"},
+            None,
+            sync_mode="full_refresh_append",
+            stream_contracts=contracts,
+            selected=selected,
+            job_id="j-seek",
+            checkpoint=job,
+        )
+
+    assert seen == [("orders", (False, 50, "50")), ("users", None)]
+    # The shared ledger is cleared so a later table cannot inherit it.
+    # Orders already received its own copy.
+    assert job.offset == 0
+    assert job.cursor_value is None
+    assert job.cdc_stream == "orders"
+
+
+def test_unnamed_multi_stream_checkpoint_restarts_each_table() -> None:
+    """A checkpoint that names no table is not a seek key for every table."""
+    from services.checkpoint_service import Checkpoint
+
+    source = MagicMock()
+    source.format = "postgresql"
+    source.kind = "database"
+    source.table = "orders"
+    source.collection = ""
+    destination = MagicMock()
+    destination.format = "postgresql"
+    destination.kind = "database"
+    destination.table = "out"
+    destination.collection = ""
+    destination.extra = {}
+    selected = [
+        SyncContract(name="orders", sync_mode="full_refresh_append", primary_key="id"),
+        SyncContract(name="users", sync_mode="full_refresh_append", primary_key="id"),
+    ]
+    job = Checkpoint(job_id="j-unnamed", offset=50, chunk_index=2, cursor_value="50")
+    seen: list[object] = []
+
+    def _fake_stream(src, dest, mappings, schema, *args, **kwargs):
+        seen.append(kwargs.get("checkpoint"))
+        return 1, [], {}, ["id"]
+
+    with patch(
+        "src.transfer.stream.stream_database_transfer",
+        side_effect=_fake_stream,
+    ), patch(
+        "src.transfer.stream._drop_destination_endpoint",
+        return_value=False,
+    ):
+        run_non_cdc_multi_stream_sequential(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "INTEGER"},
+            None,
+            sync_mode="full_refresh_append",
+            stream_contracts=[
+                {"name": "orders", "selected": True, "primary_key": "id"},
+                {"name": "users", "selected": True, "primary_key": "id"},
+            ],
+            selected=selected,
+            job_id="j-unnamed",
+            checkpoint=job,
+        )
+    assert seen == [None, None]

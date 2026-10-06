@@ -946,6 +946,8 @@ def _run_preflight(
             # G12 must match Studio / Execute — Pilot cannot soft-skip staging policy.
             write_via_staging=bool(write_via_staging),
             source_read_mode=source_read_mode,
+            source_endpoint=source_config,
+            destination_endpoint=dst_conn,
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
         # config and table are what enable the live coercion probe; without

@@ -10,6 +10,7 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import { destStreamPlaceholder } from "../../lib/sourceReadMode";
 import {
   CURSOR_SEMANTICS,
   CURSOR_SEMANTICS_LABELS,
@@ -115,6 +116,8 @@ interface DestinationAdvancedDrawerProps {
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamCursorSemanticsChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
+  /** Per-stream destination CALL or INSERT/MERGE. Source extracts live on the Source step. */
+  onStreamDestProcedureChange?: (stream: string, value: string) => void;
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
   suggestedPrimaryKey?: string;
@@ -246,6 +249,7 @@ export function DestinationAdvancedDrawer({
   onStreamCursorChange,
   onStreamCursorSemanticsChange,
   onStreamPrimaryKeyChange,
+  onStreamDestProcedureChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
   uniqueKeySuggestions = [],
@@ -877,7 +881,10 @@ export function DestinationAdvancedDrawer({
           </p>
           {names.length > 1 && (
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
-              Each stream keeps its own cursor and primary key. Sync mode and schema policy apply to all streams.
+              Each stream keeps its own cursor and primary key. The source extract for
+              each table is on the Source step. A destination CALL or INSERT/MERGE
+              for this stream is below — it is not replayed onto the others.
+              Sync mode and schema policy apply to all streams.
             </p>
           )}
           <div className="df2-stream-table-wrap">
@@ -921,7 +928,7 @@ export function DestinationAdvancedDrawer({
                       || semantics.status === "block");
                   return (
                     <tr key={streamName}>
-                      <td>
+                      <td data-label="Stream">
                         <label className="df2-stream-name">
                           <input type="checkbox" checked readOnly aria-label={`${streamName} selected`} />
                           <span>
@@ -932,8 +939,8 @@ export function DestinationAdvancedDrawer({
                           </span>
                         </label>
                       </td>
-                      <td>{syncModeLabel}</td>
-                      <td>
+                      <td data-label="Mode">{syncModeLabel}</td>
+                      <td data-label="Cursor">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={requiresCursor && fields.cursorField && streamCols.includes(fields.cursorField)
@@ -951,7 +958,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Cursor means">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.cursorSemantics || ""}
@@ -970,7 +977,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Primary key">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
@@ -990,8 +997,8 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>{schemaPolicyLabel}</td>
-                      <td>
+                      <td data-label="Policy">{schemaPolicyLabel}</td>
+                      <td data-label="Status">
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
                           {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
@@ -1008,6 +1015,40 @@ export function DestinationAdvancedDrawer({
               </tbody>
             </table>
           </div>
+          {names.length > 1 && onStreamDestProcedureChange && (
+            <div className="df2-stream-procedures">
+              <p className="df2-label-hint">
+                Optional. Leave blank to write the table. One CALL, or one
+                INSERT/MERGE/UPDATE, runs once per row of this stream. :name
+                binds to the column of the same name, and a missing column
+                quarantines that row. CDC, SCD2, and mirror refuse it — it is
+                not a table identity.
+              </p>
+              {names.map((streamName) => {
+                const fields = resolveStreamFields(
+                  streamName,
+                  streamFields,
+                  defaultCursor,
+                  defaultPrimaryKey,
+                  defaultCursorSemantics,
+                );
+                return (
+                  <label className="df2-label" htmlFor={`dst-proc-${streamName}`} key={`proc-${streamName}`}>
+                    {streamName} destination
+                    <textarea
+                      id={`dst-proc-${streamName}`}
+                      className="df2-input"
+                      rows={2}
+                      spellCheck={false}
+                      value={fields.destProcedure || ""}
+                      placeholder={destStreamPlaceholder(streamName)}
+                      onChange={(e) => onStreamDestProcedureChange(streamName, e.target.value)}
+                    />
+                  </label>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {(syncMode === "scd2" || syncMode === "mirror") && (

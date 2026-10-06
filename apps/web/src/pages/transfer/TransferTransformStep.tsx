@@ -22,6 +22,7 @@ import {
   kitchenSampleValues,
   previewSampleNote,
   recipePayload,
+  stampStepSourceTable,
   summarizeEffect,
   toggleStep,
   type ShapeCatalog,
@@ -69,12 +70,21 @@ interface TransferTransformStepProps {
   destTable?: string;
   sourceTables?: string[];
   sourceCatalog?: Record<string, string[]>;
+  /** Per-table sample. Preview of orders must not run on the customers rows. */
+  streamSamples?: Record<string, {
+    columns: string[];
+    schema: Record<string, string>;
+    rows: Record<string, unknown>[];
+  }>;
   destTables?: string[];
   destCatalog?: Record<string, string[]>;
+  /** Full-program hash when the sample on screen is not the primary table. */
+  onProgramHash?: (hash: string) => void;
 }
 
 const PREVIEW_ROWS = 12;
 const PREVIEW_DEBOUNCE_MS = 250;
+const NO_ROWS: Record<string, unknown>[] = [];
 
 function isTransportTimeout(message: string): boolean {
   return /timed out|abort|504|network/i.test(message);
@@ -123,8 +133,10 @@ export function TransferTransformStep({
   destTable = "",
   sourceTables = [],
   sourceCatalog = {},
+  streamSamples,
   destTables = [],
   destCatalog = {},
+  onProgramHash,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -147,11 +159,30 @@ export function TransferTransformStep({
   const [previewedStepsKey, setPreviewedStepsKey] = useState("");
   const stepsListRef = useRef<HTMLOListElement | null>(null);
 
-  const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
+  const tables = useMemo(
+    () => sourceTables.map((name) => name.trim()).filter(Boolean),
+    [sourceTables],
+  );
+  const [focusTable, setFocusTable] = useState("");
+  const activeTable = tables.includes(focusTable)
+    ? focusTable
+    : (sourceTable && tables.includes(sourceTable) ? sourceTable : tables[0] || "");
+  const primaryTable = tables[0] || "";
+  const viewingPrimary = !primaryTable || activeTable === primaryTable;
+  const focusedSample = activeTable ? streamSamples?.[activeTable] : undefined;
+  const usingStreamSample = tables.length > 1 && Boolean(streamSamples);
+  const previewColumns = usingStreamSample && focusedSample?.columns?.length
+    ? focusedSample.columns
+    : sourceColumns;
+  const previewSchema = usingStreamSample && focusedSample && Object.keys(focusedSample.schema || {}).length
+    ? focusedSample.schema
+    : sourceSchema;
+  const previewRows = usingStreamSample ? (focusedSample?.rows ?? NO_ROWS) : sampleRows;
+  const rowsKey = useMemo(() => JSON.stringify(previewRows.slice(0, 200)), [previewRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
   const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
   const sourceSchemaKey = useMemo(() => JSON.stringify(sourceSchema), [sourceSchema]);
-  const shapedColumns = preview?.recipe.output_columns ?? sourceColumns;
+  const shapedColumns = preview?.recipe.output_columns ?? previewColumns;
   const retyped = useMemo(
     () => Object.entries(preview?.retyped_columns ?? {}).sort(([a], [b]) => a.localeCompare(b)),
     [preview],
@@ -201,45 +232,52 @@ export function TransferTransformStep({
   // viewer sees the same findings an operator would act on. Previewing composes a
   // recipe identity, which is plan work, so that call stays behind the gate.
   useEffect(() => {
-    if (!sampleRows.length) return;
+    if (!previewRows.length) return;
     let cancelled = false;
     profileShapeSource({
-      sample_rows: sampleRows.slice(0, 200),
-      source_columns: sourceColumns,
+      sample_rows: previewRows.slice(0, 200),
+      source_columns: previewColumns,
       target_schema: targetSchema,
     })
       .then((next) => { if (!cancelled) { setProfile(next); setProfileError(""); } })
       .catch((err) => { if (!cancelled) setProfileError(err instanceof Error ? err.message : String(err)); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rowsKey, schemaKey, sourceColumns.join("|")]);
+  }, [rowsKey, schemaKey, previewColumns.join("|")]);
 
   const timer = useRef<number | null>(null);
   useEffect(() => {
-    if (!plan.allowed || !sampleRows.length) return;
+    if (!plan.allowed || !previewRows.length) return;
     if (timer.current !== null) window.clearTimeout(timer.current);
     let cancelled = false;
     timer.current = window.setTimeout(() => {
       setBusy(true);
       previewShapeRecipe({
         recipe: { steps },
-        sample_rows: sampleRows.slice(0, 200),
-        source_columns: sourceColumns,
-        column_types: sourceSchema,
+        sample_rows: previewRows.slice(0, 200),
+        source_columns: previewColumns,
+        column_types: previewSchema,
         target_schema: targetSchema,
+        focus_table: tables.length > 1 ? activeTable : undefined,
+        source_tables: tables.length > 1 ? tables : undefined,
+        source_catalog: tables.length > 1 ? sourceCatalog : undefined,
       })
         .then((next) => {
           if (cancelled) return;
           setPreview(next);
           setPreviewError("");
           setPreviewedStepsKey(stepsKey);
-          onIdentity({
+          const image = {
             hash: next.recipe.recipe_hash,
             columns: next.recipe.output_columns,
             columnTypes: next.column_types ?? {},
             retypedColumns: next.retyped_columns ?? {},
             sampleRows: next.after,
-          });
+          };
+          // The hash names the whole program. Columns of another table must
+          // not replace the primary image Map is held to.
+          if (viewingPrimary) onIdentity(image);
+          else onProgramHash?.(image.hash);
         })
         .catch((err) => {
           if (cancelled) return;
@@ -247,7 +285,7 @@ export function TransferTransformStep({
           setPreviewedStepsKey("");
           setPreviewError(err instanceof Error ? err.message : String(err));
           // A recipe the engine refuses has no identity to approve.
-          onIdentity(null);
+          if (viewingPrimary) onIdentity(null);
         })
         .finally(() => { if (!cancelled) setBusy(false); });
     }, PREVIEW_DEBOUNCE_MS);
@@ -256,7 +294,22 @@ export function TransferTransformStep({
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|"), previewRetry]);
+  }, [
+    plan.allowed,
+    rowsKey,
+    stepsKey,
+    schemaKey,
+    sourceSchemaKey,
+    sourceColumns.join("|"),
+    previewRetry,
+    sourceTable,
+    activeTable,
+    viewingPrimary,
+    tables.join("|"),
+    tables.map((name) => `${name}:${(sourceCatalog[name] || []).join(",")}`).join("|"),
+    previewColumns.join("|"),
+    previewSchema,
+  ]);
 
   useEffect(() => {
     const step = preview?.refusal?.step;
@@ -271,15 +324,19 @@ export function TransferTransformStep({
     return index;
   }, [catalog]);
 
+  const ownStep = useCallback((step: ShapeStepWire) => (
+    stampStepSourceTable(step, activeTable, tables.length)
+  ), [activeTable, tables.length]);
+
   const addStep = useCallback((step: ShapeStepWire) => {
     if (preloadTransformRefused(syncMode)) return;
-    onChangeSteps([...steps, step]);
-  }, [onChangeSteps, steps, syncMode]);
+    onChangeSteps([...steps, ownStep(step)]);
+  }, [onChangeSteps, ownStep, steps, syncMode]);
 
   const applySuggestion = useCallback((suggestion: ShapeSuggestion) => {
     if (preloadTransformRefused(syncMode)) return;
-    onChangeSteps([...steps, suggestion.step]);
-  }, [onChangeSteps, steps, syncMode]);
+    onChangeSteps([...steps, ownStep(suggestion.step)]);
+  }, [onChangeSteps, ownStep, steps, syncMode]);
 
   const suggestions = useMemo(
     () => sortSuggestions(preview?.suggestions?.length ? preview.suggestions : (profile?.suggestions ?? [])),
@@ -626,6 +683,31 @@ export function TransferTransformStep({
             </button>
           </header>
 
+          {tables.length > 1 && (
+            <div className="df2-xform-stream-tabs" role="tablist" aria-label="Table this step applies to">
+              {tables.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  role="tab"
+                  aria-selected={name === activeTable}
+                  onClick={() => setFocusTable(name)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+          {tables.length > 1 && (
+            <p className="df2-label-hint">
+              {previewRows.length
+                ? `New steps apply to ${activeTable}. The other tables keep their own steps.`
+                : `${activeTable} has no sample yet. Reload it on the Source step before previewing its steps.`}
+            </p>
+          )}
+          {preview?.preview_note && (
+            <p className="df2-label-hint">{preview.preview_note}</p>
+          )}
           {steps.length === 0 ? (
             <p className="df2-xform-empty">
               <DtIcon name="check" size={16} />
@@ -641,12 +723,15 @@ export function TransferTransformStep({
                   <li
                     key={`${step.op}:${index}`}
                     id={`xform-step-${index + 1}`}
-                    className={`${disabled ? "is-disabled" : ""}${refused ? " is-refused" : ""}`.trim()}
+                    className={`${disabled ? "is-disabled" : ""}${refused ? " is-refused" : ""}${step.source_table && activeTable && step.source_table !== activeTable ? " is-other-stream" : ""}`.trim()}
                   >
                     <div className="df2-xform-step-head">
                       <span className="df2-xform-step-index">{index + 1}</span>
                       <strong>{describeStep(step, operationsByName.get(step.op))}</strong>
                       <code className="df2-xform-step-op">{step.op}</code>
+                      {tables.length > 1 && step.source_table && (
+                        <span className="df2-badge">{step.source_table}</span>
+                      )}
                       {step.on_error && step.on_error !== "refuse" && (
                         <span className="df2-badge">on error: {step.on_error}</span>
                       )}

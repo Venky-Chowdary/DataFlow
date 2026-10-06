@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { filterObjectNames } from "./objectNameFilter.js";
+import { filterObjectNames, multiObjectNamesSettled, objectNameAfterPick, objectNameDraft } from "./objectNameFilter.js";
 
 describe("filterObjectNames", () => {
   const tables = ["case_a_dst", "case_a_src", "orders", "public.case_a_dst"];
@@ -17,6 +17,16 @@ describe("filterObjectNames", () => {
       filterObjectNames(tables, "case_a"),
       ["case_a_dst", "case_a_src", "public.case_a_dst"],
     );
+  });
+
+  it("filters a multi-table box by the name still being typed", () => {
+    assert.deepEqual(objectNameDraft("case_a_src, ord"), { query: "ord", chosen: ["case_a_src"] });
+    assert.deepEqual(filterObjectNames(tables, objectNameDraft("case_a_src, orders").query), ["orders"]);
+    assert.equal(objectNameAfterPick("case_a_src, ord", "orders"), "case_a_src, orders");
+    assert.equal(objectNameAfterPick("orders", "orders"), "orders");
+    assert.equal(multiObjectNamesSettled("orders, case_a_src", tables), true);
+    assert.equal(multiObjectNamesSettled("orders, nope_b", tables), false);
+    assert.equal(multiObjectNamesSettled("orders", tables), false);
   });
 
   it("returns the catalog unfiltered when the box is empty", () => {

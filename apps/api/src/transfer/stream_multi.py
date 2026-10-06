@@ -90,15 +90,19 @@ def run_non_cdc_multi_stream_sequential(
     source_filter: dict[str, Any] | None = None,
     limit: int = 0,
     skip_preflight: bool = False,
+    shape_by_stream: dict[str, list[dict]] | None = None,
+    approved_shape_hash: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run full/incremental for N streams sequentially (one object at a time).
 
     Mirrors CDC ``_run_cdc_multi_stream_sequential``: remap source/dest per stream,
     prefer per-stream mappings, aggregate ``streams[]`` health. Overwrite DROP is
-    per remapped destination (not once on the primary). Delivery remains
-    **at-least-once** on resume (shared job checkpoint).
+    per remapped destination (not once on the primary). A job checkpoint is
+    applied only to the stream it names. Any other table reads from the start
+    (at-least-once upsert of rows already written).
     """
     from services.sync_cursor import (
+        isolate_stream_checkpoint,
         resolve_effective_sync_mode,
         resolve_selected_sync_contracts,
         should_drop_destination_for_sync,
@@ -142,7 +146,41 @@ def run_non_cdc_multi_stream_sequential(
             c for c in selected_list if (c.name or "") not in set(fk_context.order)
         ]
 
+    from services.multi_stream_plan import (
+        contract_for_stream,
+        endpoint_session_hooks,
+        patched_endpoint_extra,
+        patches_for_stream,
+        review_stream_procedures,
+        strip_session_hooks,
+    )
+    from services.procedure_destination import ProcedureDestinationError, plan_dest_procedure
+    from services.rule_compiler.normalize import fold
+
+    stream_names = [(c.name or "").strip() for c in selected_list]
+    procedure_refusal = review_stream_procedures(
+        source,
+        destination,
+        stream_contracts,
+        stream_names,
+        sync_mode=sync_mode,
+    )
+    if procedure_refusal:
+        raise ValueError(procedure_refusal)
+
+    def _steps_for(name: str) -> list[dict] | None:
+        if not shape_by_stream:
+            return None
+        if name in shape_by_stream:
+            return list(shape_by_stream[name])
+        want = fold(name)
+        for key, steps in shape_by_stream.items():
+            if fold(key) == want:
+                return list(steps)
+        return None
+
     total_rows = 0
+    shaped_out = 0
     ddl_log: list[str] = [
         f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
         "each stream has its own watermark; at-least-once)"
@@ -167,12 +205,36 @@ def run_non_cdc_multi_stream_sequential(
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
+    session_before, session_after = endpoint_session_hooks(destination)
+    session_plan = None
+    if session_before or session_after:
+        try:
+            session_plan = plan_dest_procedure(destination)
+        except ProcedureDestinationError as exc:
+            raise ValueError(str(exc)) from exc
+
     defer_fk = push_deferred_single_table_foreign_keys()
+    run_session_after = False
+    streams_ok = False
     try:
+        if session_plan is not None and session_plan.before_spec is not None:
+            from .adapters import _run_dest_procedure_hook
+
+            _run_dest_procedure_hook(destination, session_plan.before_spec)
+            ddl_log.append(
+                f"SESSION before_write once ({session_plan.before_spec.identifier}) "
+                f"— not replayed on each of {len(selected_list)} streams"
+            )
+        if session_plan is not None and session_plan.after_spec is not None:
+            run_session_after = True
         for contract in selected_list:
             if remaining_limit == 0 and limit > 0:
                 break
             stream_name = (contract.name or "").strip() or "stream"
+            # Copy this table's resume position before the shared ledger is
+            # cleared. The clear stops the next table inheriting an offset.
+            # The copy is what lets the table that owns the checkpoint seek.
+            stream_checkpoint = isolate_stream_checkpoint(checkpoint, stream_name)
             begin_table_population(checkpoint)
             if getattr(source, "format", "") == "mongodb" or original_collection:
                 source.collection = stream_name
@@ -184,10 +246,7 @@ def run_non_cdc_multi_stream_sequential(
                 else:
                     destination.table = stream_name
 
-            raw = next(
-                (c for c in (stream_contracts or []) if c.get("name") == stream_name),
-                {},
-            ) or {}
+            raw = contract_for_stream(stream_contracts, stream_name)
             single_contracts = [
                 {
                     **raw,
@@ -226,29 +285,41 @@ def run_non_cdc_multi_stream_sequential(
             rows = 0
             summary: dict[str, Any] = {}
             stream_limit = remaining_limit if limit > 0 else 0
+            source_patch, dest_patch = patches_for_stream(raw)
+            if session_plan is not None:
+                dest_patch = strip_session_hooks(dest_patch)
+            declared_maps = isinstance(stream_maps, list) and bool(stream_maps)
             try:
                 # Empty schema → re-introspect each remapped source table.
-                rows, stream_ddl, summary, headers = stream_database_transfer(
-                    source,
-                    destination,
-                    use_mappings,
-                    {},
-                    on_checkpoint,
-                    sync_mode=sync_mode,
-                    stream_contracts=single_contracts,
-                    job_id=job_id,
-                    checkpoint=checkpoint,
-                    checkpoint_service=checkpoint_service,
-                    retry_budget=retry_budget,
-                    backfill_new_fields=backfill_new_fields,
-                    validation_mode=validation_mode,
-                    source_filter=source_filter,
-                    limit=stream_limit,
-                    skip_preflight=skip_preflight,
-                )
+                # The CALL, when this stream names one, is on the extra only
+                # for this iteration — the next stream does not inherit it.
+                with patched_endpoint_extra(source, source_patch), patched_endpoint_extra(
+                    destination, dest_patch
+                ):
+                    rows, stream_ddl, summary, headers = stream_database_transfer(
+                        source,
+                        destination,
+                        use_mappings,
+                        {},
+                        on_checkpoint,
+                        sync_mode=sync_mode,
+                        stream_contracts=single_contracts,
+                        job_id=job_id,
+                        checkpoint=stream_checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        retry_budget=retry_budget,
+                        backfill_new_fields=backfill_new_fields,
+                        validation_mode=validation_mode,
+                        source_filter=source_filter,
+                        limit=stream_limit,
+                        skip_preflight=skip_preflight,
+                        shape_steps=_steps_for(stream_name),
+                        mappings_inherited=not declared_maps,
+                    )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
+                shaped_out += int((summary or {}).get("rows_shaped_out") or 0)
                 if limit > 0:
                     remaining_limit = max(0, remaining_limit - rows)
             except Exception as exc:
@@ -284,7 +355,27 @@ def run_non_cdc_multi_stream_sequential(
                 source=source,
                 destination=destination,
             )
+        streams_ok = True
     finally:
+        if (
+            run_session_after
+            and session_plan is not None
+            and session_plan.after_spec is not None
+        ):
+            try:
+                from .adapters import _run_dest_procedure_hook
+
+                _run_dest_procedure_hook(destination, session_plan.after_spec)
+                ddl_log.append(
+                    f"SESSION after_write once ({session_plan.after_spec.identifier}) "
+                    f"— not replayed on each of {len(selected_list)} streams"
+                )
+            except Exception:
+                if streams_ok:
+                    raise
+                logger.exception(
+                    "session after_write failed after a stream write failed"
+                )
         pop_deferred_single_table_foreign_keys(defer_fk)
         if original_table is not None:
             source.table = original_table
@@ -299,6 +390,13 @@ def run_non_cdc_multi_stream_sequential(
     last_summary["streams"] = stream_health
     last_summary["multi_stream"] = True
     last_summary["multi_stream_mode"] = "sequential"
+    if shaped_out:
+        # Summed across streams. The last stream's own tally is not the run.
+        last_summary["rows_shaped_out"] = shaped_out
+    if approved_shape_hash:
+        last_summary["shape_recipe_hash"] = approved_shape_hash
+    elif shape_by_stream:
+        last_summary["shape_by_stream"] = sorted(shape_by_stream)
     fk_summary = _carry_foreign_keys_after_load(destination, fk_context)
     if fk_summary is not None:
         last_summary["foreign_keys"] = fk_summary

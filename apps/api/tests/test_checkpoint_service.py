@@ -102,3 +102,32 @@ def test_has_failed_saves_and_require_save_fail_closed():
         service.require_save(cp)
     assert service.failed_saves == 2
     assert CHECKPOINT_PERSISTENCE_FAILED.startswith("Checkpoint persistence failed")
+
+
+def test_cdc_watermark_survives_checkpoint_load():
+    """A CDC job stores ``watermark``. Resume must not drop that cursor."""
+    loaded = Checkpoint.from_dict(
+        {"job_id": "job-cdc", "watermark": "slot=s|phase=streaming|lsn=0/1A", "chunk_index": 3}
+    )
+    assert loaded.cursor_value == "slot=s|phase=streaming|lsn=0/1A"
+    assert loaded.chunk_index == 3
+    # An explicit cursor_value stays the record. The watermark key does not replace it.
+    kept = Checkpoint.from_dict({"cursor_value": "10", "watermark": "4"})
+    assert kept.cursor_value == "10"
+
+
+def test_cdc_checkpoint_keeps_the_stream_it_names():
+    """Resume must still know which table a watermark belongs to."""
+    loaded = Checkpoint.from_dict(
+        {
+            "watermark": "4",
+            "stream": "orders",
+            "cdc_shared_reader": True,
+        }
+    )
+    assert loaded.cursor_value == "4"
+    assert loaded.cdc_stream == "orders"
+    assert loaded.cdc_shared_reader is True
+    again = Checkpoint.from_dict(loaded.to_dict())
+    assert again.cdc_stream == "orders"
+    assert again.cdc_shared_reader is True

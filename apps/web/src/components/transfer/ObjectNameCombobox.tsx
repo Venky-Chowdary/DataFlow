@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
-import { filterObjectNames } from "./objectNameFilter";
+import { filterObjectNames, multiObjectNamesSettled, objectNameAfterPick, objectNameDraft } from "./objectNameFilter";
 
 interface ObjectNameComboboxProps {
   id: string;
@@ -48,13 +48,15 @@ export function ObjectNameCombobox({
     maxHeight: number;
   } | null>(null);
 
-  const filtered = useMemo(() => filterObjectNames(options, value), [options, value]);
+  const draft = useMemo(() => objectNameDraft(value), [value]);
+  const filtered = useMemo(() => filterObjectNames(options, draft.query), [options, draft.query]);
+  const namesSettled = useMemo(() => multiObjectNamesSettled(value, options), [value, options]);
 
   const exactMatch = useMemo(() => {
-    const q = value.trim().toLowerCase();
+    const q = draft.query.toLowerCase();
     if (!q) return false;
     return options.some((n) => n.toLowerCase() === q);
-  }, [options, value]);
+  }, [options, draft.query]);
 
   const computeMenuBox = () => {
     const control = controlRef.current;
@@ -122,10 +124,16 @@ export function ObjectNameCombobox({
   }, [filtered, open]);
 
   const pick = (name: string) => {
-    onChange(name);
+    onChange(objectNameAfterPick(value, name));
     closeMenu();
     inputRef.current?.focus();
   };
+
+  useEffect(() => {
+    if (!namesSettled) return;
+    setOpen(false);
+    setMenuBox(null);
+  }, [namesSettled]);
 
   const showCreateRow =
     allowCreate && value.trim().length > 0 && !exactMatch;
@@ -136,7 +144,7 @@ export function ObjectNameCombobox({
   const optionCount = filtered.length + (showCreateRow ? 1 : 0);
 
   const menu =
-    open && canOpen && menuBox
+    open && canOpen && menuBox && !namesSettled
       ? createPortal(
           <ul
             ref={menuRef}
@@ -159,7 +167,7 @@ export function ObjectNameCombobox({
               <li className="df2-object-combobox-empty" role="presentation">
                 {options.length === 0
                   ? emptyHint || `No ${objectNoun}s discovered yet — type a name to create.`
-                  : `No ${objectNoun}s match “${value.trim()}”.`}
+                  : `No ${objectNoun}s match “${draft.query || value.trim()}”.`}
               </li>
             ) : (
               <>
@@ -173,7 +181,7 @@ export function ObjectNameCombobox({
                     >
                       <span className="df2-object-combobox-option-name">{name}</span>
                       <span className="df2-object-combobox-option-meta">
-                        {name.trim().toLowerCase() === value.trim().toLowerCase() ? "selected" : "existing"}
+                        {name.trim().toLowerCase() === draft.query.toLowerCase() ? "selected" : "existing"}
                       </span>
                     </button>
                   </li>

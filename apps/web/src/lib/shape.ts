@@ -197,6 +197,22 @@ export interface ShapePreviewResponse {
   refusal: ShapeRefusal | null;
   shaped_profile: ShapeColumnProfile[];
   suggestions: ShapeSuggestion[];
+  /** Set when the sample is one stream of a multi-table recipe. */
+  preview_note?: string;
+}
+
+/**
+ * A new step among several tables belongs to the table the operator is
+ * looking at. An existing stamp is kept. One table needs no stamp.
+ */
+export function stampStepSourceTable(
+  step: ShapeStepWire,
+  table: string,
+  tableCount: number,
+): ShapeStepWire {
+  const name = table.trim();
+  if (tableCount < 2 || !name || step.source_table) return step;
+  return { ...step, source_table: name };
 }
 
 /** Move one applied step, returning a new list (out-of-range moves are no-ops). */
