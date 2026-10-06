@@ -34,7 +34,7 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
@@ -618,6 +618,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const streamHealth = readJobStreams(liveJob);
   const streamNames = readJobStreamNames(liveJob);
   const multiStream = streamNames.length >= 2;
+  const explanationText = presentStoredExplanation(liveJob?.explanation, liveJob);
   const rejectedCount = readRejectedRows(liveJob);
   const coercedCount = readCoercedNullRows(liveJob);
   const rejectedDetails = readRejectedDetails(liveJob);
@@ -1560,7 +1561,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         >
           <Gate8ProofCard
             report={recon}
-            explanation={liveJob.explanation}
+            explanation={explanationText}
             jobId={selectedId || liveJob._id}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
@@ -1734,6 +1735,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             )}
           </dl>
           <PhaseProfileCard
+            scopeNote={
+              multiStream
+                ? `Timing is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). A re-read is counted again. These phase rows are not the job total.`
+                : null
+            }
             profile={
               destSummary.phase_profile && typeof destSummary.phase_profile === "object"
                 ? (destSummary.phase_profile as PhaseProfileReport)
@@ -2017,7 +2023,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
           icon={<DtIcon name="book" size={18} />}
           size="lg"
         >
-          <JobExplanationView text={liveJob.explanation} />
+          <JobExplanationView text={explanationText} />
         </Drawer>
       )}
 

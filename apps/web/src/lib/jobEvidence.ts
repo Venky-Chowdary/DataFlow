@@ -476,3 +476,38 @@ export function identityAlignmentSentence(view: IdentityAlignmentView): string {
   }
   return `${where}Identity alignment is ${view.reason || "unmeasured"}. Not a measured mismatch.`;
 }
+
+const SINGLE_TABLE_REPLACE = "Destination will be cleared and fully replaced with source data.";
+const EACH_TABLE_REPLACE = "Each selected table is cleared and fully replaced with that table's source rows.";
+
+/**
+ * Stored explanations were written from the restored endpoint, so a
+ * multi-table job reads as one table. New runs already name every stream.
+ * This only rewrites that stored opening. It does not invent columns.
+ */
+export function presentStoredExplanation(
+  text: string | null | undefined,
+  job: JobEvidenceCarrier | null | undefined,
+): string {
+  const raw = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) return "";
+  const names = readJobStreamNames(job);
+  if (names.length < 2) return raw;
+  const first = raw.split("\n")[0] || "";
+  const alreadyNamed = names.every((name) => first.includes(name));
+  let next = raw;
+  if (!alreadyNamed) {
+    next = next.replace(/^Transfer:.*$/m, `Transfer: ${formatJobRoute(job)}`);
+  }
+  if (next.includes(SINGLE_TABLE_REPLACE)) {
+    next = next.replace(SINGLE_TABLE_REPLACE, EACH_TABLE_REPLACE);
+  }
+  if (/^Source inferred/m.test(next) && !/last stream \(/i.test(next)) {
+    const summary = summaryOf(job);
+    const table = typeof summary?.table === "string" ? summary.table.trim() : "";
+    const last = (table && names.includes(table) ? table : "") || names[names.length - 1];
+    const note = `Column sample and schema mapping below are the last stream (${last}), not every table.`;
+    next = next.replace(/^Source inferred/m, `${note}\nSource inferred`);
+  }
+  return next;
+}

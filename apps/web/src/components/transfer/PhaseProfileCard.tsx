@@ -14,10 +14,16 @@ import type { PhaseProfileReport } from "../../lib/types";
 export function PhaseProfileCard({
   profile,
   engineSeconds,
+  scopeNote,
 }: {
   profile?: PhaseProfileReport | null;
   /** Monotonic execute clock from the engine. Distinct from the phase span. */
   engineSeconds?: number | null;
+  /**
+   * Set when this profile is the last stream of a multi-table run.
+   * Its row totals include a re-read and are not the job population.
+   */
+  scopeNote?: string | null;
 }) {
   const view = buildPhaseProfileView(profile);
   // Omitting the section entirely beats rendering an empty card: a ragged grid
@@ -31,6 +37,7 @@ export function PhaseProfileCard({
         <strong>Where the time went</strong>
         <span>{view.headline}</span>
       </header>
+      {scopeNote ? <p className="df2-result-phase-note">{scopeNote}</p> : null}
 
       <ul className="df2-result-phase-list">
         {view.rows.map((row) => (
@@ -54,7 +61,7 @@ export function PhaseProfileCard({
               {row.rows > 0 && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span>{row.rows.toLocaleString()} rows</span>
+                  <span>{row.rows.toLocaleString()} {scopeNote ? "phase rows" : "rows"}</span>
                   <span aria-hidden="true">·</span>
                   <span>{row.throughputLabel}</span>
                 </>

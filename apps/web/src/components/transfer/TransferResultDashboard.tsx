@@ -16,7 +16,7 @@ import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8Ke
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
-import { formatStreamNames, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
+import { formatStreamNames, presentStoredExplanation, readJobStreamNames, readJobStreams } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
 import { IdentityAlignmentNote } from "../jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "../jobs/RunCarryNotes";
@@ -517,7 +517,7 @@ export function TransferResultDashboard({
         return (
           <Gate8ProofCard
             report={report}
-            explanation={result.explanation}
+            explanation={presentStoredExplanation(result.explanation, result)}
             jobId={result.job_id}
             className="df2-result-gate8"
             onOpenValidate={onOpenValidate}
@@ -575,6 +575,11 @@ export function TransferResultDashboard({
       <TransformationsCard report={ds?.transformations} />
 
       <PhaseProfileCard
+        scopeNote={
+          multiStream
+            ? `Timing is the last stream (${ds?.table || streamNames[streamNames.length - 1]}). A re-read is counted again. These phase rows are not the job total.`
+            : null
+        }
         profile={ds?.phase_profile}
         engineSeconds={
           ds?.elapsed_seconds != null && Number.isFinite(Number(ds.elapsed_seconds))

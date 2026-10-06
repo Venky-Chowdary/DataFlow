@@ -36,7 +36,7 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
-import { readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
@@ -493,7 +493,10 @@ export function JobTheaterView({
     preflight,
   });
   const lastStreamPopulation = isGate8LastStream(gate8View);
-  const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
+  const lineage = useMemo(
+    () => readJobLineage(job.lineage_events, { checksumScope: gate8View?.checksum_scope }),
+    [job.lineage_events, gate8View?.checksum_scope],
+  );
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -1717,7 +1720,7 @@ export function JobTheaterView({
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
           report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
-          explanation={job.explanation}
+          explanation={presentStoredExplanation(job.explanation, job)}
           jobId={jobId}
           className="df2-theater-gate8"
           onOpenValidate={onBackToValidate}

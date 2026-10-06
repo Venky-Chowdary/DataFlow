@@ -7,6 +7,7 @@ import {
   foreignKeyProblems,
   formatJobRoute,
   identityAlignmentSentence,
+  presentStoredExplanation,
   isRestoredEndpointTitle,
   readCoercedNullRows,
   readForeignKeyCarry,
@@ -167,6 +168,42 @@ describe("identity alignment", () => {
     assert.equal(view?.lastStreamOnly, false);
     assert.match(identityAlignmentSentence(view!), /did not align/);
     assert.match(identityAlignmentSentence(view!), /write_pass_empty/);
+  });
+});
+
+describe("presentStoredExplanation", () => {
+  const stored = [
+    "Transfer: database/postgresql (orders) → database/postgresql (orders)",
+    "Sync behavior: Destination will be cleared and fully replaced with source data.",
+    "Source inferred 4 columns: id, customer_id, amount, updated_at",
+    "Rows written: 4",
+  ].join("\n");
+
+  it("rewrites a stored single-table opening when the run has two streams", () => {
+    const text = presentStoredExplanation(stored, {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+      destination_summary: {
+        multi_stream: true,
+        table: "orders",
+        streams: [{ name: "customers" }, { name: "orders" }],
+      },
+    });
+    assert.match(text, /^Transfer: customers, orders → dataflow \(2 tables\)/);
+    assert.match(text, /Each selected table is cleared/);
+    assert.match(text, /last stream \(orders\)/);
+    assert.match(text, /Source inferred 4 columns/);
+    assert.doesNotMatch(text, /postgresql \(orders\) →/);
+  });
+
+  it("leaves a single-table explanation unchanged", () => {
+    const text = presentStoredExplanation(stored, {
+      source_name: "orders",
+      destination_database: "dataflow",
+      destination_collection: "orders",
+    });
+    assert.equal(text, stored);
   });
 });
 
