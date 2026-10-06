@@ -14,6 +14,7 @@ import {
   isGate8AppendDelta,
   isGate8IdentityUnproven,
   isGate8KeyedBatch,
+  isGate8LastStream,
   isGate8PreWriteSimulation,
   isGate8SampleVerified,
   isGate8WriterAckOnly,
@@ -215,7 +216,8 @@ export function Gate8ProofCard({
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
   const keyedBatch = !preWrite && !sampleVerified && isGate8KeyedBatch(report);
-  const appendDelta = !preWrite && !sampleVerified && !keyedBatch && isGate8AppendDelta(report);
+  const lastStream = !preWrite && !sampleVerified && !keyedBatch && isGate8LastStream(report);
+  const appendDelta = !preWrite && !sampleVerified && !keyedBatch && !lastStream && isGate8AppendDelta(report);
   const writerAck = !preWrite && !sampleVerified && !appendDelta && !keyedBatch && isGate8WriterAckOnly(report);
   const passed = Boolean(report.passed) && !preWrite && !writerAck;
   const simulationOk = Boolean(report.passed) && preWrite;
@@ -255,12 +257,12 @@ export function Gate8ProofCard({
     || Boolean(sampleError)
     || sampleSkipped;
 
-  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch;
+  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta && !keyedBatch && !lastStream;
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
-      : sampleVerified || identityUnproven || appendDelta || keyedBatch
+      : sampleVerified || identityUnproven || appendDelta || keyedBatch || lastStream
         ? "is-pending"
         : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
@@ -279,6 +281,8 @@ export function Gate8ProofCard({
             ? "This run’s rows verified — extra destination rows are outside this proof"
             : appendDelta && passed
               ? "Append delta verified — whole-table checksums not comparable"
+              : lastStream && passed
+                ? "Last stream checksum matches — not the whole job"
               : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
@@ -292,12 +296,14 @@ export function Gate8ProofCard({
             ? "Batch"
             : appendDelta && passed
               ? "Row count"
+              : lastStream && passed
+                ? "Last stream"
               : (fullChecksumPass ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : identityUnproven || sampleVerified || ((appendDelta || keyedBatch) && passed)
+      : identityUnproven || sampleVerified || ((appendDelta || keyedBatch || lastStream) && passed)
         ? "is-pending"
         : (fullChecksumPass ? "is-ok" : "is-bad");
 
@@ -323,6 +329,13 @@ export function Gate8ProofCard({
             {" "}Post-write <strong>row-count</strong> and <strong>checksum</strong> proof
             is produced only after Execute finishes — never claim “source and destination match”
             before the write.
+          </>
+        ) : lastStream && passed ? (
+          <>
+            This digest is the <strong>last stream</strong> in a multi-table run.
+            Each stream has its own destination COUNT(*). Those counts are the
+            job population. This checksum is <strong>not</strong> the whole job
+            and is not migration_proven.
           </>
         ) : appendDelta || keyedBatch ? (
           <>

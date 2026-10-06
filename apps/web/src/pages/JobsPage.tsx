@@ -26,7 +26,7 @@ import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
-import { classifyGate8Status } from "../components/transfer/gate8Status";
+import { classifyGate8Status, presentMultiStreamGate8 } from "../components/transfer/gate8Status";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -613,7 +613,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const rejectedCount = readRejectedRows(liveJob);
   const coercedCount = readCoercedNullRows(liveJob);
   const rejectedDetails = readRejectedDetails(liveJob);
-  const recon = liveJob?.reconciliation;
+  const recon = presentMultiStreamGate8(
+    liveJob?.reconciliation,
+    liveJob?.destination_summary,
+  );
   const gate8 = classifyGate8Status(recon);
   const destMetric = destHeadline(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);

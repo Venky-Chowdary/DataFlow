@@ -1318,6 +1318,8 @@ export interface TransferResult {
     rejected_details_total?: number;
     /** Per-stream health. account_job reads this list, not a second model. */
     streams?: CdcStreamHealth[];
+    /** Sequential multi-table run. Job Gate-8 is the last stream's digest. */
+    multi_stream?: boolean;
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;

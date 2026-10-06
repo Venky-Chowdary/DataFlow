@@ -12,7 +12,7 @@ import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard } from "./Gate8ProofCard";
-import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, type Gate8Reconciliation } from "./gate8Status";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, presentMultiStreamGate8, type Gate8Reconciliation } from "./gate8Status";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
@@ -142,7 +142,11 @@ export function TransferResultDashboard({
   });
   const ackDisagrees = writerAckDisagrees(result);
   // Never infer Gate-8 Passed from job success alone — and never call writer-ack “Passed”.
-  const gate8 = classifyGate8Status(result.reconciliation as Gate8Reconciliation | undefined);
+  const gate8Report = presentMultiStreamGate8(
+    result.reconciliation as Gate8Reconciliation | undefined,
+    result.destination_summary,
+  );
+  const gate8 = classifyGate8Status(gate8Report);
   const reconcileLabel = gate8.label;
   const reconcileTone =
     gate8.tone === "ok" ? "ok" : gate8.tone === "danger" ? "danger" : gate8.tone === "warn" ? "warn" : undefined;

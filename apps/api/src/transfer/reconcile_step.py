@@ -33,6 +33,7 @@ from services.reconcile_coverage import (
     WRITTEN_BATCH_KEYS,
     is_cdc_source_image_count_report,
     is_no_op_report,
+    qualify_multi_stream_reconciliation,
 )
 from services.destination_key_collision_probe import (
     destination_enforces_key,
@@ -1520,6 +1521,7 @@ def run_reconciliation(
             )
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
+        stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
         stamped = _attach_match_summary(stamped, dest_summary)
         return stamped
 

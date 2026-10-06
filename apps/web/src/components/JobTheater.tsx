@@ -20,7 +20,7 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/gate8Status";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
@@ -1664,7 +1664,7 @@ export function JobTheaterView({
           <span>Checksum evidence</span>
           <strong>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && (isGate8AppendDelta(recon) || isGate8KeyedBatch(recon))) {
                 const id = gate8AppendIdentity(recon);
                 if (id.destBefore != null && id.written != null) {
@@ -1679,9 +1679,12 @@ export function JobTheaterView({
           </strong>
           <small>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && isGate8KeyedBatch(recon) && recon.passed) {
                 return "This run’s keys verified — extra dest rows outside proof";
+              }
+              if (recon && isGate8LastStream(recon) && recon.passed) {
+                return "Last stream checksum — not the whole job";
               }
               if (recon && isGate8AppendDelta(recon)) {
                 const id = gate8AppendIdentity(recon);
@@ -1706,7 +1709,7 @@ export function JobTheaterView({
 
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
-          report={job.reconciliation}
+          report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
           explanation={job.explanation}
           jobId={jobId}
           className="df2-theater-gate8"

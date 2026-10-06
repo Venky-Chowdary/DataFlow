@@ -421,7 +421,7 @@ def classify_post_write_assurance(
             ),
         }
 
-    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT, LAST_STREAM_CHECKSUM
 
     if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT and passed:
         return {
@@ -435,6 +435,20 @@ def classify_post_write_assurance(
                 "CDC dest COUNT vs live source-table COUNT. Leftover MERGE is a "
                 "no-op. At-least-once upsert — not platform exactly-once. "
                 "Not full_checksum / migration proven."
+            ),
+        }
+
+    if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM and passed:
+        return {
+            "claim_level": "per_stream_checksum",
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": checksum_match,
+            "note": (
+                "Checksum covers the last stream only, not the multi-table job. "
+                "Not migration_proven."
             ),
         }
 
@@ -682,6 +696,13 @@ def proof_pack_evidence_completeness_errors(
             )
     if claim_migration_proven:
         recon = reconciliation if isinstance(reconciliation, dict) else {}
+        from services.reconcile_coverage import LAST_STREAM_CHECKSUM
+
+        if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM:
+            errors.append(
+                "migration_proven refused: checksum covers the last stream only, "
+                "not the multi-table job"
+            )
         provenance = str(recon.get("source_checksum_provenance") or "")
         independent_reread = (
             provenance == "independent_source_reread"
