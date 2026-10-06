@@ -8,13 +8,16 @@ the others.
 from __future__ import annotations
 
 from services.multi_stream_plan import (
+    adopt_inherited_mappings,
     approved_recipe_refusal,
     contract_for_stream,
     design_source_patch,
+    endpoint_session_hooks,
     full_recipe_hash,
     partition_shape_steps,
     patches_for_stream,
     review_stream_procedures,
+    strip_session_hooks,
 )
 from services.shape_models import ShapeRecipe
 
@@ -310,6 +313,40 @@ def test_design_peek_uses_the_primary_streams_statement_only() -> None:
         [{"name": "customers"}, {"name": "orders"}],
         ["customers", "orders"],
     ) is None
+
+
+def test_inherited_map_is_kept_only_when_the_column_set_matches() -> None:
+    customers = [
+        {"source": "id", "target": "id"},
+        {"source": "email", "target": "customer_email"},
+    ]
+    same, note = adopt_inherited_mappings(customers, ["email", "id"])
+    assert note == ""
+    assert same[1]["target"] == "customer_email"
+    identity, note = adopt_inherited_mappings(customers, ["id", "customer_id", "amount"])
+    assert "amount" in note
+    assert "omits" in note
+    assert {row["source"] for row in identity} == {"id", "customer_id", "amount"}
+    assert all(row["source"] == row["target"] for row in identity)
+
+
+def test_session_hooks_are_stripped_from_the_per_stream_patch() -> None:
+    before, after = endpoint_session_hooks({
+        "extra": {
+            "dest_procedure_before": "CALL public.prep()",
+            "dest_procedure_after": " CALL public.finish() ",
+            "dest_procedure_call": "CALL public.land(:id)",
+        }
+    })
+    assert before == "CALL public.prep()"
+    assert after == "CALL public.finish()"
+    stripped = strip_session_hooks({
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL public.land(:id)",
+    })
+    assert stripped["dest_procedure_call"] == "CALL public.land(:id)"
+    assert stripped["dest_procedure_before"] == ""
+    assert stripped["dest_procedure_after"] == ""
 
 
 def test_contract_lookup_folds_the_stream_name() -> None:

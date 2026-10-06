@@ -492,6 +492,70 @@ def patches_for_stream(
     return source_patch, dest_patch
 
 
+def adopt_inherited_mappings(
+    mappings: list[Mapping[str, Any]] | None,
+    columns: list[str],
+) -> tuple[list[dict[str, Any]], str]:
+    """Use another table's map only when it names exactly these columns.
+
+    Customers mapped as ``id, email`` applied to orders would omit ``amount``.
+    That is silent column loss. A mismatch returns an identity map of this
+    stream's own columns (each name written to itself). An empty inherited
+    list is the same identity map, with no note.
+    """
+    cols = [str(c).strip() for c in columns or [] if str(c).strip()]
+    comparable = [c for c in cols if fold(c) != fold("_df_lsn")]
+    mapped: set[str] = set()
+    for item in mappings or []:
+        if not isinstance(item, Mapping):
+            continue
+        src = str(item.get("source") or "").strip()
+        if src and fold(src) != fold("_df_lsn"):
+            mapped.add(fold(src))
+    have = {fold(c) for c in comparable}
+    identity = [
+        {"source": c, "target": c, "confidence": 0.95}
+        for c in comparable
+    ]
+    if mapped and mapped == have:
+        return [dict(item) for item in (mappings or []) if isinstance(item, Mapping)], ""
+    if not mapped:
+        return identity, ""
+    missing = sorted(have - mapped)
+    extra = sorted(mapped - have)
+    parts: list[str] = []
+    if missing:
+        parts.append("omits " + ", ".join(missing))
+    if extra:
+        parts.append("names " + ", ".join(extra) + ", which this stream does not have")
+    note = (
+        "Inherited column map was not applied to this stream ("
+        + "; ".join(parts)
+        + "). Each column is written under its own name."
+    )
+    return identity, note
+
+
+def endpoint_session_hooks(endpoint: Any) -> tuple[str, str]:
+    """The destination's before/after statements. Empty when this dest has none.
+
+    One Advanced field is one session, not one execution per selected table.
+    """
+    extra = _extra_dict(endpoint)
+    return (
+        str(extra.get("dest_procedure_before") or "").strip(),
+        str(extra.get("dest_procedure_after") or "").strip(),
+    )
+
+
+def strip_session_hooks(patch: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Clear session hooks on a per-stream extra patch so the chunk writer cannot replay them."""
+    out = dict(patch or {})
+    out["dest_procedure_before"] = ""
+    out["dest_procedure_after"] = ""
+    return out
+
+
 def design_source_patch(
     contracts: list[Mapping[str, Any]] | None,
     stream_names: list[str],

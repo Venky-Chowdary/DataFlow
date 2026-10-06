@@ -109,6 +109,69 @@ def test_non_cdc_sequential_uses_per_stream_mappings_and_remaps_tables() -> None
     assert any("MULTI-STREAM sequential" in line for line in ddl)
 
 
+def test_session_hooks_run_once_and_are_not_on_each_stream() -> None:
+    class End:
+        def __init__(self) -> None:
+            self.kind = "database"
+            self.format = "postgresql"
+            self.table = "out"
+            self.collection = ""
+            self.extra = {
+                "dest_procedure_before": "CALL public.prep()",
+                "dest_procedure_after": "CALL public.finish()",
+            }
+
+    source = End()
+    source.table = "customers"
+    destination = End()
+    contracts = [
+        {"name": "customers", "selected": True, "sync_mode": "full_refresh_append"},
+        {"name": "orders", "selected": True, "sync_mode": "full_refresh_append"},
+    ]
+    selected = [
+        SyncContract(name="customers", sync_mode="full_refresh_append"),
+        SyncContract(name="orders", sync_mode="full_refresh_append"),
+    ]
+    seen_hooks: list[tuple[str, str]] = []
+    inherited: list[bool] = []
+
+    def _fake_stream(src, dest, mappings, schema, *args, **kwargs):
+        extra = dest.extra
+        seen_hooks.append((
+            str(extra.get("dest_procedure_before") or ""),
+            str(extra.get("dest_procedure_after") or ""),
+        ))
+        inherited.append(bool(kwargs.get("mappings_inherited")))
+        return 1, [], {"watermark": "1"}, ["id"]
+
+    hook_ids: list[str] = []
+
+    def _fake_hook(dest, spec):
+        hook_ids.append(spec.identifier)
+
+    with patch("src.transfer.stream.stream_database_transfer", side_effect=_fake_stream), \
+         patch("src.transfer.stream._drop_destination_endpoint", return_value=False), \
+         patch("src.transfer.adapters._run_dest_procedure_hook", side_effect=_fake_hook):
+        _rows, ddl, _summary, _headers = run_non_cdc_multi_stream_sequential(
+            source,
+            destination,
+            [{"source": "id", "target": "customer_id"}],
+            {},
+            None,
+            sync_mode="full_refresh_append",
+            stream_contracts=contracts,
+            selected=selected,
+            job_id="j-hooks",
+        )
+
+    assert seen_hooks == [("", ""), ("", "")]
+    assert inherited == [True, True]
+    assert hook_ids == ["public.prep", "public.finish"]
+    assert any("SESSION before_write once" in line for line in ddl)
+    assert any("SESSION after_write once" in line for line in ddl)
+    assert destination.extra["dest_procedure_before"] == "CALL public.prep()"
+
+
 def test_non_cdc_sequential_fail_fast_records_failed_stream() -> None:
     source = MagicMock()
     source.format = "postgresql"

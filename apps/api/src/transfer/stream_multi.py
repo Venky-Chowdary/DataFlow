@@ -146,10 +146,13 @@ def run_non_cdc_multi_stream_sequential(
 
     from services.multi_stream_plan import (
         contract_for_stream,
+        endpoint_session_hooks,
         patched_endpoint_extra,
         patches_for_stream,
         review_stream_procedures,
+        strip_session_hooks,
     )
+    from services.procedure_destination import ProcedureDestinationError, plan_dest_procedure
     from services.rule_compiler.normalize import fold
 
     stream_names = [(c.name or "").strip() for c in selected_list]
@@ -200,8 +203,28 @@ def run_non_cdc_multi_stream_sequential(
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
+    session_before, session_after = endpoint_session_hooks(destination)
+    session_plan = None
+    if session_before or session_after:
+        try:
+            session_plan = plan_dest_procedure(destination)
+        except ProcedureDestinationError as exc:
+            raise ValueError(str(exc)) from exc
+
     defer_fk = push_deferred_single_table_foreign_keys()
+    run_session_after = False
+    streams_ok = False
     try:
+        if session_plan is not None and session_plan.before_spec is not None:
+            from .adapters import _run_dest_procedure_hook
+
+            _run_dest_procedure_hook(destination, session_plan.before_spec)
+            ddl_log.append(
+                f"SESSION before_write once ({session_plan.before_spec.identifier}) "
+                f"— not replayed on each of {len(selected_list)} streams"
+            )
+        if session_plan is not None and session_plan.after_spec is not None:
+            run_session_after = True
         for contract in selected_list:
             if remaining_limit == 0 and limit > 0:
                 break
@@ -257,6 +280,9 @@ def run_non_cdc_multi_stream_sequential(
             summary: dict[str, Any] = {}
             stream_limit = remaining_limit if limit > 0 else 0
             source_patch, dest_patch = patches_for_stream(raw)
+            if session_plan is not None:
+                dest_patch = strip_session_hooks(dest_patch)
+            declared_maps = isinstance(stream_maps, list) and bool(stream_maps)
             try:
                 # Empty schema → re-introspect each remapped source table.
                 # The CALL, when this stream names one, is on the extra only
@@ -282,6 +308,7 @@ def run_non_cdc_multi_stream_sequential(
                         limit=stream_limit,
                         skip_preflight=skip_preflight,
                         shape_steps=_steps_for(stream_name),
+                        mappings_inherited=not declared_maps,
                     )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
@@ -322,7 +349,27 @@ def run_non_cdc_multi_stream_sequential(
                 source=source,
                 destination=destination,
             )
+        streams_ok = True
     finally:
+        if (
+            run_session_after
+            and session_plan is not None
+            and session_plan.after_spec is not None
+        ):
+            try:
+                from .adapters import _run_dest_procedure_hook
+
+                _run_dest_procedure_hook(destination, session_plan.after_spec)
+                ddl_log.append(
+                    f"SESSION after_write once ({session_plan.after_spec.identifier}) "
+                    f"— not replayed on each of {len(selected_list)} streams"
+                )
+            except Exception:
+                if streams_ok:
+                    raise
+                logger.exception(
+                    "session after_write failed after a stream write failed"
+                )
         pop_deferred_single_table_foreign_keys(defer_fk)
         if original_table is not None:
             source.table = original_table

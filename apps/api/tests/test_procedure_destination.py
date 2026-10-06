@@ -20,7 +20,9 @@ from services.procedure_destination import (
     binds_for_row,
     dest_write_mode_of,
     plan_dest_procedure,
+    row_apply_plan_without_hooks,
 )
+from services.procedure_source import PROCEDURE_DIALECTS, QUERY_ONLY_DIALECTS
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "procedure_destination_matrix.json"
 
@@ -206,6 +208,53 @@ def test_sqlite_dest_query_writes_and_quarantines() -> None:
     with pytest.raises(ProcedureDestinationError) as exc:
         assert_dest_procedure_sync_allowed("cdc", dest)
     assert exc.value.reason == REASON_DEST_CDC
+
+
+def test_chunk_plan_does_not_carry_session_hooks() -> None:
+    dest = {
+        "type": "postgresql",
+        "extra": {
+            "dest_write_mode": "procedure",
+            "dest_procedure_call": "CALL public.land(:id)",
+            "dest_procedure_before": "CALL public.prep()",
+            "dest_procedure_after": "CALL public.finish()",
+        },
+    }
+    plan = plan_dest_procedure(dest)
+    chunk = row_apply_plan_without_hooks(plan)
+    assert chunk is not None
+    assert chunk.row_spec is not None
+    assert chunk.before_spec is None
+    assert chunk.after_spec is None
+    assert plan is not None and plan.before_spec is not None
+
+
+def test_procedure_dialects_parse_and_non_sql_sinks_refuse() -> None:
+    """Every CALL dialect parses. File, document, and query-only engines refuse a CALL.
+
+    This is a parse matrix, not a live transfer of each connector.
+    """
+    call = {"dest_write_mode": "procedure", "dest_procedure_call": "CALL public.land(:id)"}
+    parsed = 0
+    for dialect in sorted(PROCEDURE_DIALECTS):
+        plan = plan_dest_procedure({"type": dialect, "extra": call})
+        assert plan is not None and plan.mode == MODE_ROW_APPLY, dialect
+        parsed += 1
+    refused = 0
+    for dialect in sorted(QUERY_ONLY_DIALECTS):
+        with pytest.raises(ProcedureDestinationError):
+            plan_dest_procedure({"type": dialect, "extra": call})
+        refused += 1
+    for dialect in (
+        "csv", "json", "jsonl", "parquet", "iceberg", "kafka",
+        "s3", "gcs", "mongodb", "dynamodb",
+    ):
+        with pytest.raises(ProcedureDestinationError):
+            plan_dest_procedure({"type": dialect, "extra": call})
+        refused += 1
+    assert parsed == len(PROCEDURE_DIALECTS)
+    assert parsed >= 18
+    assert refused == len(QUERY_ONLY_DIALECTS) + 10
 
 
 def test_named_matrix_floor() -> None:

@@ -806,6 +806,36 @@ def _declared_destination_key_columns(
     return src_cols, pk_targets
 
 
+def _write_procedure_chunk(
+    destination: EndpointConfig,
+    records: list[dict[str, Any]],
+    plan: Any,
+) -> tuple[int, str, dict]:
+    """One chunk through the destination CALL or INSERT. Hooks are not on ``plan``."""
+    from services.procedure_destination import apply_rows_via_procedure
+
+    from .adapters import _dest_procedure_execute
+
+    engine, text, close = _dest_procedure_execute(destination)
+    try:
+        with engine.begin() as conn:
+            written, ddl, summary = apply_rows_via_procedure(
+                destination,
+                records,
+                execute_call=lambda sql, binds: conn.execute(text(sql), binds or {}),
+                plan=plan,
+            )
+    finally:
+        close()
+    summary = dict(summary or {})
+    quarantine = [row for row in (summary.get("quarantine") or []) if isinstance(row, dict)]
+    summary["rejected_rows"] = int(summary.get("quarantine_count") or len(quarantine))
+    summary["rejected_details"] = quarantine
+    summary["load_method"] = "dest_procedure"
+    summary["warnings"] = list(ddl or [])[:10]
+    return written, "", summary
+
+
 def stream_database_transfer(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -826,10 +856,15 @@ def stream_database_transfer(
     skip_preflight: bool = False,
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
+    mappings_inherited: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
+
+    ``mappings_inherited`` is true when this stream did not declare its own
+    map and the list belongs to another table. A mismatch becomes an identity
+    map of this stream's columns so those columns are not dropped.
 
     ``shape_runner`` is the recipe Validate approved, applied to every page as it
     is read — so the writer, the DDL, the digest and the destination all describe
@@ -862,6 +897,7 @@ def stream_database_transfer(
             skip_preflight=skip_preflight,
             shape_runner=shape_runner,
             shape_steps=shape_steps,
+            mappings_inherited=mappings_inherited,
         )
         ok = True
         return result
@@ -947,6 +983,7 @@ def _stream_database_transfer_impl(
     skip_preflight: bool = False,
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
+    mappings_inherited: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -1026,6 +1063,21 @@ def _stream_database_transfer_impl(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
+
+    # A destination CALL, INSERT/MERGE, or before/after hook is not a table
+    # copy. Planning it here refuses a dialect that cannot run it before any
+    # row is written, and keeps COPY from skipping the statement.
+    from services.procedure_destination import (
+        ProcedureDestinationError,
+        plan_dest_procedure,
+        row_apply_plan_without_hooks,
+    )
+
+    try:
+        dest_proc_plan = plan_dest_procedure(destination)
+    except ProcedureDestinationError as exc:
+        raise ValueError(str(exc)) from exc
+    row_apply_plan = row_apply_plan_without_hooks(dest_proc_plan)
 
     # A server-side COPY never materializes a row in this process, so a recipe
     # could not be applied to one. A shaped run takes the paged route instead of
@@ -1118,7 +1170,15 @@ def _stream_database_transfer_impl(
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
-        fast = None if (pending_shape or writer_owns_evolution) else _try_copy_fast_path(
+        if dest_proc_plan is not None:
+            from services.copy_fast_path import note_copy_decline
+
+            note_copy_decline(
+                "destination procedure, query, or hook is not a table copy"
+            )
+        fast = None if (
+            pending_shape or writer_owns_evolution or dest_proc_plan is not None
+        ) else _try_copy_fast_path(
             source=source,
             destination=destination,
             mappings=mappings,
@@ -1791,6 +1851,11 @@ def _stream_database_transfer_impl(
     # carriers, the mappings and the DDL are decided from the recipe's output.
     write_columns = list(shape_runner.output_columns or columns) if shape_runner else columns
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in write_columns}
+    inherit_note = ""
+    if mappings_inherited:
+        from services.multi_stream_plan import adopt_inherited_mappings
+
+        mappings, inherit_note = adopt_inherited_mappings(mappings, write_columns)
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in write_columns]
     from services.shape_contract import write_ready_mappings
@@ -1883,6 +1948,8 @@ def _stream_database_transfer_impl(
             f"SHAPE recipe {shape_runner.recipe_hash} applied on the read: "
             f"{shape_runner.recipe.describe()}"
         )
+    if inherit_note:
+        ddl_log.append(inherit_note)
 
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
@@ -2977,7 +3044,16 @@ def _stream_database_transfer_impl(
             write_kwargs["close_connection"] = False
             write_kwargs["connection_holder"] = pg_conn_state
 
-        write_op = partial(
+        if row_apply_plan is not None:
+            records = [dict(zip(batch.headers, row)) for row in batch.rows]
+            write_op = partial(
+                _write_procedure_chunk,
+                destination,
+                records,
+                row_apply_plan,
+            )
+        else:
+            write_op = partial(
             _write_batch,
             dest_type,
             destination,
@@ -3152,6 +3228,9 @@ def _stream_database_transfer_impl(
             method = incoming.get("load_method")
             if method:
                 load_methods_seen.append(str(method))
+            if method == "dest_procedure":
+                for line in incoming.get("warnings") or []:
+                    ddl_log.append(str(line))
             # Merge quarantine findings across batches — never replace with last batch only.
             prev = dest_summary if isinstance(dest_summary, dict) else {}
             prev_details = list(prev.get("rejected_details") or [])
@@ -3287,7 +3366,18 @@ def _stream_database_transfer_impl(
         dispatcher.submit(idx, batch, _process_db_chunk)
         fetch_offset += _raw_page_rows(batch)
 
+    run_session_after = False
+    row_path_ok = False
     try:
+        if dest_proc_plan is not None and dest_proc_plan.before_spec is not None:
+            from .adapters import _run_dest_procedure_hook
+
+            _run_dest_procedure_hook(destination, dest_proc_plan.before_spec)
+            ddl_log.append(
+                f"before_write once {dest_proc_plan.before_spec.identifier}"
+            )
+        if dest_proc_plan is not None and dest_proc_plan.after_spec is not None:
+            run_session_after = True
         # Process the first batch synchronously so DDL (table/index creation) is
         # committed before any parallel workers try to insert into the new table.
         while batch:
@@ -3334,7 +3424,22 @@ def _stream_database_transfer_impl(
                 # that region as duplicates.
                 dispatcher.abort()
                 raise
+        row_path_ok = True
     finally:
+        if run_session_after and dest_proc_plan is not None and dest_proc_plan.after_spec is not None:
+            try:
+                from .adapters import _run_dest_procedure_hook
+
+                _run_dest_procedure_hook(destination, dest_proc_plan.after_spec)
+                ddl_log.append(
+                    f"after_write once {dest_proc_plan.after_spec.identifier}"
+                )
+            except Exception:
+                if row_path_ok:
+                    raise
+                logger.exception(
+                    "destination after_write failed after the stream write failed"
+                )
         if src_scan:
             try:
                 from connectors.sql_snapshot_scan import close_table_scan
