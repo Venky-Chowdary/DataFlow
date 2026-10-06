@@ -928,7 +928,7 @@ export function DestinationAdvancedDrawer({
                       || semantics.status === "block");
                   return (
                     <tr key={streamName}>
-                      <td>
+                      <td data-label="Stream">
                         <label className="df2-stream-name">
                           <input type="checkbox" checked readOnly aria-label={`${streamName} selected`} />
                           <span>
@@ -939,8 +939,8 @@ export function DestinationAdvancedDrawer({
                           </span>
                         </label>
                       </td>
-                      <td>{syncModeLabel}</td>
-                      <td>
+                      <td data-label="Mode">{syncModeLabel}</td>
+                      <td data-label="Cursor">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={requiresCursor && fields.cursorField && streamCols.includes(fields.cursorField)
@@ -958,7 +958,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Cursor means">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.cursorSemantics || ""}
@@ -977,7 +977,7 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td data-label="Primary key">
                         <select
                           className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
@@ -997,8 +997,8 @@ export function DestinationAdvancedDrawer({
                           ))}
                         </select>
                       </td>
-                      <td>{schemaPolicyLabel}</td>
-                      <td>
+                      <td data-label="Policy">{schemaPolicyLabel}</td>
+                      <td data-label="Status">
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
                           {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
