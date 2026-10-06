@@ -388,9 +388,9 @@ def _build_explanation(
 
 def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     """Durable per-mapping evidence for Theater/Jobs — rebuilt from the run request."""
-    from services.mapping_proof import build_mapping_proof
+    from services.mapping_proof import build_mapping_proof, mappings_from_request
 
-    mappings = list(request.mappings or [])
+    mappings = mappings_from_request(request)
     if not mappings:
         return {}
     dest_extra = getattr(request.destination, "extra", None) or {}

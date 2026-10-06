@@ -38,6 +38,7 @@ import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -1701,6 +1702,7 @@ export function JobTheaterView({
       )}
 
       {!earlyFail && <RunCarryNotes job={job} hideCycle />}
+      {!earlyFail && <SchemaFidelityNotes job={job} />}
 
       {isComplete && job.reconciliation && (
         <Gate8ProofCard

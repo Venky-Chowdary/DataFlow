@@ -19,6 +19,7 @@ import { conservationCompleteCopy, destHeadline, readConservationLedger, writerA
 import { readJobStreams } from "../../lib/jobEvidence";
 import { StreamHealthTable } from "../jobs/StreamHealthTable";
 import { RunCarryNotes } from "../jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "../jobs/SchemaFidelityNotes";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
@@ -781,6 +782,7 @@ export function TransferResultDashboard({
         )}
 
         <RunCarryNotes job={{ destination_summary: ds }} />
+        <SchemaFidelityNotes job={{ destination_summary: ds }} />
 
         {showMore && (
           <details className="df2-result-more">

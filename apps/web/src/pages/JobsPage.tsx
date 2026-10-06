@@ -34,9 +34,10 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
-import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { readCoercedNullRows, readJobMappings, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
 import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "../components/jobs/SchemaFidelityNotes";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -268,15 +269,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   }, [onStartTransfer]);
 
   const jobRepairMappings = useMemo((): RepairMapping[] => {
-    const maps = liveJob?.transfer_request?.mappings;
-    if (!Array.isArray(maps)) return [];
-    return maps.map((m) => ({
-      source: m.source || m.source_column || "",
-      destination: m.target || m.target_column || "",
-      destination_type: m.target_type || m.source_type,
-      target_type: m.target_type || m.source_type,
+    return readJobMappings(liveJob).map((m) => ({
+      source: m.source,
+      destination: m.target,
+      destination_type: m.targetType || m.sourceType,
+      target_type: m.targetType || m.sourceType,
+      stream: m.stream || undefined,
     })).filter((m) => m.source);
-  }, [liveJob?.transfer_request?.mappings]);
+  }, [liveJob]);
 
   // Counted over the whole history, not the page of rows below: counting the rows
   // showed "All (50)" for a 90-job history and disagreed with Pilot.
@@ -602,7 +602,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     setRenameError(null);
   }, [selectedId]);
 
-  const jobMappings = liveJob?.transfer_request?.mappings ?? [];
+  const jobMappings = readJobMappings(liveJob);
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
   const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
@@ -985,6 +985,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               onOpenValidate={() => openValidateInStudio()}
                             />
                             <RunCarryNotes job={liveJob} />
+                            <SchemaFidelityNotes job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
                               onOpenQuarantine={
@@ -1884,6 +1885,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               <table className="df2-table">
                 <thead>
                   <tr>
+                    {jobMappings.some((m) => m.stream) ? <th>Stream</th> : null}
                     <th>Source</th>
                     <th>Target</th>
                     <th>Type</th>
@@ -1893,21 +1895,22 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 <tbody>
                   {jobMappings.length > 0
                     ? jobMappings.map((m, i) => {
-                        const src = String(m.source ?? m.source_column ?? "").trim() || "—";
-                        const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                        const src = m.source || "—";
+                        const tgt = m.target || "—";
                         const typ =
                           columnTypes[src]
-                          ?? m.source_type
-                          ?? m.target_type
-                          ?? columnTypes[tgt]
-                          ?? columnTypes[src.toLowerCase()]
-                          ?? columnTypes[tgt.toLowerCase()]
-                          ?? "—";
-                        const conf = typeof m.confidence === "number"
+                          || m.sourceType
+                          || m.targetType
+                          || columnTypes[tgt]
+                          || columnTypes[src.toLowerCase()]
+                          || columnTypes[tgt.toLowerCase()]
+                          || "—";
+                        const conf = m.confidence != null
                           ? `${Math.round(m.confidence * 100)}%`
                           : "—";
                         return (
-                          <tr key={`${src}-${tgt}-${i}`}>
+                          <tr key={`${m.stream}-${src}-${tgt}-${i}`}>
+                            {jobMappings.some((row) => row.stream) ? <td>{m.stream || "—"}</td> : null}
                             <td title={src}>{src}</td>
                             <td title={tgt}>{tgt}</td>
                             <td className="df2-cell-mono" title={typ}>{typ}</td>

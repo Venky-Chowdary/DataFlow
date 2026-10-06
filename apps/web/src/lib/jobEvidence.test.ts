@@ -7,9 +7,11 @@ import {
   foreignKeyProblems,
   readCoercedNullRows,
   readForeignKeyCarry,
+  readJobMappings,
   readJobStreams,
   readRejectedDetails,
   readRejectedRows,
+  readSchemaFidelity,
   readWriterWarnings,
 } from "./jobEvidence.js";
 
@@ -151,5 +153,81 @@ describe("quarantine evidence", () => {
     });
     assert.equal(details?.length, 1);
     assert.equal(details?.[0].column, "qty");
+  });
+});
+
+describe("readJobMappings", () => {
+  it("reads multi-table maps from stream contracts when the top-level list is empty", () => {
+    const rows = readJobMappings({
+      mapping_proof: {},
+      transfer_request: {
+        mappings: [],
+        stream_contracts: [
+          {
+            name: "orders",
+            selected: true,
+            mappings: [{ source: "id", target: "id", source_type: "INTEGER", confidence: 0.99 }],
+          },
+          {
+            name: "customers",
+            selected: true,
+            mappings: [{ source: "email", target: "email", source_type: "TEXT", confidence: 0.99 }],
+          },
+          { name: "skipped", selected: false, mappings: [{ source: "x", target: "x" }] },
+        ],
+      },
+    });
+    assert.deepEqual(rows.map((row) => [row.stream, row.source]), [
+      ["orders", "id"],
+      ["customers", "email"],
+    ]);
+  });
+
+  it("prefers a non-empty proof over the request", () => {
+    const rows = readJobMappings({
+      mapping_proof: { mappings: [{ source: "sku", target: "sku", stream: "items" }] },
+      transfer_request: { mappings: [{ source: "other", target: "other" }] },
+    });
+    assert.deepEqual(rows.map((row) => row.source), ["sku"]);
+    assert.equal(rows[0].stream, "items");
+  });
+});
+
+describe("readSchemaFidelity", () => {
+  it("lists unsupported and unmeasured aspects and drops carried and skipped rows", () => {
+    const view = readSchemaFidelity({
+      destination_summary: {
+        schema_fidelity: {
+          carried_count: 8,
+          unsupported_count: 1,
+          unknown_count: 1,
+          skipped_count: 18,
+          items: [
+            { aspect: "primary_key", name: "id", status: "carried" },
+            { aspect: "trigger", name: "*", status: "skipped", reason: "none" },
+            { aspect: "foreign_key", name: "orders_customer_id_fkey", status: "unsupported", reason: "parent first" },
+            { aspect: "enum_domain", name: "*", status: "unknown", reason: "catalog was not read" },
+          ],
+        },
+      },
+    });
+    assert.equal(view?.unsupported, 1);
+    assert.deepEqual(view?.items.map((item) => item.aspect), ["foreign_key", "enum_domain"]);
+  });
+
+  it("returns null when every aspect was carried or measured absent", () => {
+    assert.equal(
+      readSchemaFidelity({
+        destination_summary: {
+          schema_fidelity: {
+            carried_count: 2,
+            unsupported_count: 0,
+            unknown_count: 0,
+            items: [{ aspect: "primary_key", status: "carried" }],
+          },
+        },
+      }),
+      null,
+    );
   });
 });

@@ -40,6 +40,7 @@ from services.dialect_profiles import schema_from_cfg
 from services.source_reread import (
     REREAD_SCAN_SOURCES,
     align_source_populations,
+    alignment_when_write_pass_empty,
     reread_pagination_plan,
     should_reread_source,
 )
@@ -3557,16 +3558,15 @@ def _stream_database_transfer_impl(
                 alignment = align_source_populations(write_pass_fp, fp_accumulator)
                 dest_summary["write_pass_checksum"] = write_pass_fp.digest()
             else:
-                alignment = {
-                    "identity_hash_aligned": False,
-                    "write_pass_rows": 0,
-                    "reread_rows": int(fp_accumulator.total),
-                    "reason": "write_pass_empty",
-                }
+                alignment = alignment_when_write_pass_empty(
+                    int(fp_accumulator.total),
+                    inline_fingerprints_used=inline_fingerprints_used,
+                )
             dest_summary["identity_alignment"] = alignment
-            dest_summary["identity_hash_aligned"] = bool(
-                alignment.get("identity_hash_aligned")
-            )
+            if alignment.get("identity_hash_aligned") is not None:
+                dest_summary["identity_hash_aligned"] = bool(
+                    alignment.get("identity_hash_aligned")
+                )
             final_checksum = fp_accumulator.digest()
             dest_summary["checksum_mode"] = "source_reread"
             dest_summary["source_independently_reread"] = True

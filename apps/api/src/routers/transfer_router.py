@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.mapping_proof import mappings_from_request
 from services.shape_preflight import ShapePreflightRefused
 from pathlib import Path
 from typing import Any, Optional
@@ -981,7 +982,7 @@ async def execute_transfer_json(
         job_id,
         plan_id=str(body.plan_id).strip() if body.plan_id else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dst.format or "",
         source_kind=src.kind or "",
         dest_kind=dst.kind or "",
@@ -1429,7 +1430,7 @@ async def run_universal_transfer(
         job_id,
         plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dest_format or "",
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",

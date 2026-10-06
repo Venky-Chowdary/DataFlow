@@ -85,4 +85,24 @@ describe("RunCarryNotes", () => {
     assert.doesNotMatch(html, /skipped/);
     assert.doesNotMatch(html, /no foreign keys/);
   });
+
+  it("states a measured absence instead of a partial carry", () => {
+    const html = renderToStaticMarkup(
+      <RunCarryNotes
+        job={{
+          destination_summary: {
+            foreign_keys: {
+              verdict: "none",
+              decisions: [
+                { status: "skipped", dest_table: "customers", reason: "Source table declares no foreign keys (measured)." },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+    assert.match(html, /No foreign keys on the source \(measured\)/);
+    assert.doesNotMatch(html, /partially carried/);
+    assert.doesNotMatch(html, /customers/);
+  });
 });

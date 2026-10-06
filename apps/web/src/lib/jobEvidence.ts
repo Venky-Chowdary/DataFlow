@@ -19,6 +19,7 @@ type SummaryCarrier = {
   warnings?: unknown;
   warnings_suppressed?: unknown;
   foreign_keys?: unknown;
+  schema_fidelity?: unknown;
 };
 
 export type JobEvidenceCarrier = {
@@ -28,6 +29,8 @@ export type JobEvidenceCarrier = {
   rejected_details?: unknown;
   rejected_details_total?: unknown;
   destination_summary?: SummaryCarrier | null;
+  mapping_proof?: unknown;
+  transfer_request?: unknown;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -205,4 +208,97 @@ export function foreignKeyProblems(carry: ForeignKeyCarryView): ForeignKeyDecisi
   return carry.decisions.filter(
     (d) => d.integrityViolation || (d.status !== "carried" && d.status !== "skipped"),
   );
+}
+
+export type JobMappingRow = {
+  stream: string;
+  source: string;
+  target: string;
+  sourceType: string;
+  targetType: string;
+  confidence: number | null;
+};
+
+function mappingRows(value: unknown, stream = ""): JobMappingRow[] {
+  if (!Array.isArray(value)) return [];
+  const out: JobMappingRow[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const source = String(item.source ?? item.source_column ?? "").trim();
+    const target = String(item.target ?? item.target_column ?? "").trim();
+    if (!source && !target) continue;
+    const named = String(item.stream ?? stream).trim();
+    out.push({
+      stream: named,
+      source,
+      target,
+      sourceType: String(item.source_type ?? ""),
+      targetType: String(item.target_type ?? item.dest_type ?? ""),
+      confidence: finiteNumber(item.confidence),
+    });
+  }
+  return out;
+}
+
+/**
+ * Column map for this run. Proof rows win, then the top-level request map,
+ * then each selected stream contract. Multi-table jobs leave the top-level
+ * list empty and keep the map on the contract.
+ */
+export function readJobMappings(job: JobEvidenceCarrier | null | undefined): JobMappingRow[] {
+  const proof = isRecord(job?.mapping_proof) ? mappingRows(job.mapping_proof.mappings) : [];
+  if (proof.length) return proof;
+  const request = isRecord(job?.transfer_request) ? job.transfer_request : null;
+  const top = mappingRows(request?.mappings);
+  if (top.length) return top;
+  const contracts = request?.stream_contracts;
+  if (!Array.isArray(contracts)) return [];
+  const out: JobMappingRow[] = [];
+  for (const contract of contracts) {
+    if (!isRecord(contract) || contract.selected === false) continue;
+    const name = String(contract.name ?? contract.stream ?? "").trim();
+    out.push(...mappingRows(contract.mappings, name));
+  }
+  return out;
+}
+
+export type SchemaFidelityItem = {
+  aspect: string;
+  name: string;
+  status: string;
+  reason: string;
+};
+
+export type SchemaFidelityView = {
+  carried: number;
+  unsupported: number;
+  unknown: number;
+  skipped: number;
+  items: SchemaFidelityItem[];
+};
+
+/** Create-new DDL fidelity. Carried and measured-absent rows are quiet. */
+export function readSchemaFidelity(job: JobEvidenceCarrier | null | undefined): SchemaFidelityView | null {
+  const raw = summaryOf(job)?.schema_fidelity;
+  if (!isRecord(raw)) return null;
+  const items: SchemaFidelityItem[] = [];
+  if (Array.isArray(raw.items)) {
+    for (const item of raw.items) {
+      if (!isRecord(item)) continue;
+      const status = String(item.status || "");
+      if (!status || status === "carried" || status === "skipped") continue;
+      items.push({
+        aspect: String(item.aspect || ""),
+        name: String(item.name || ""),
+        status,
+        reason: String(item.reason || ""),
+      });
+    }
+  }
+  const carried = finiteNumber(raw.carried_count) ?? 0;
+  const unsupported = finiteNumber(raw.unsupported_count) ?? 0;
+  const unknown = finiteNumber(raw.unknown_count) ?? 0;
+  const skipped = finiteNumber(raw.skipped_count) ?? 0;
+  if (!items.length && unsupported === 0 && unknown === 0) return null;
+  return { carried, unsupported, unknown, skipped, items };
 }

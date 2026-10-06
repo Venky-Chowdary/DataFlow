@@ -24,6 +24,7 @@ function foreignKeyHeadline(carry: ForeignKeyCarryView): string {
     const n = carry.carried;
     return `${n} foreign key${n === 1 ? "" : "s"} recreated on the destination`;
   }
+  if (carry.verdict === "none") return "No foreign keys on the source (measured)";
   if (carry.verdict === "partial") return "Foreign keys partially carried";
   if (carry.verdict === "unknown") return "Foreign key carry did not finish";
   return carry.verdict || "Foreign keys";
@@ -44,7 +45,8 @@ export function RunCarryNotes({
   const warnings = readWriterWarnings(job);
   const carry = readForeignKeyCarry(job);
   const problems = carry ? foreignKeyProblems(carry) : [];
-  const showCarry = Boolean(carry) && (!hideCycle || problems.length > 0 || Boolean(carry?.error));
+  const quietCarry = carry?.verdict === "carried" || carry?.verdict === "none";
+  const showCarry = Boolean(carry) && (!hideCycle || problems.length > 0 || Boolean(carry?.error) || carry?.verdict === "none");
   if (warnings.messages.length === 0 && warnings.suppressed === 0 && !showCarry) return null;
 
   return (
@@ -67,14 +69,14 @@ export function RunCarryNotes({
       {showCarry && carry && (
         <section
           className={
-            problems.length > 0 || carry.integrityViolations > 0 || carry.verdict !== "carried" || carry.error
+            problems.length > 0 || carry.integrityViolations > 0 || !quietCarry || carry.error
               ? "df2-result-warnings-block"
               : "df2-jobs-overview-note"
           }
           role="status"
           aria-label="Foreign key carry"
         >
-          <p className={problems.length > 0 || carry.verdict !== "carried" ? "df2-result-warnings-note" : undefined}>
+          <p className={problems.length > 0 || !quietCarry ? "df2-result-warnings-note" : undefined}>
             {foreignKeyHeadline(carry)}
           </p>
           {!hideCycle && carry.cycle.length > 0 && (

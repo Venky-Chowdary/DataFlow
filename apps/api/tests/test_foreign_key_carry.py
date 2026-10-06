@@ -20,7 +20,7 @@ from services.foreign_key_carry import (
     plan_foreign_keys,
     verify_foreign_keys,
 )
-from services.foreign_key_orchestration import dependency_order
+from services.foreign_key_orchestration import dependency_order, summarize
 from services.foreign_key_metadata import ForeignKey, ForeignKeys
 
 MEASURED = {
@@ -84,6 +84,20 @@ def test_measured_table_without_references_is_skipped():
     decision = _only(plan)
     assert decision.status == "skipped"
     assert "no foreign keys" in decision.reason
+
+
+def test_measured_absence_is_not_a_partial_carry():
+    summary = summarize(
+        [
+            {
+                "status": "skipped",
+                "dest_table": "customers",
+                "reason": "Source table declares no foreign keys (measured).",
+            }
+        ]
+    )
+    assert summary["verdict"] == "none"
+    assert summary["carried"] == 0
 
 
 def test_unmapped_key_column_refuses_instead_of_referencing_the_wrong_column():

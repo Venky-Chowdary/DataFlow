@@ -11,12 +11,23 @@ from unittest.mock import MagicMock, patch
 
 from services.reconcile_coverage import SOURCE_DIGEST_SOURCE_REREAD
 from services.source_reread import (
+    alignment_when_write_pass_empty,
     engine_family,
     reread_pagination_plan,
     should_reread_source,
 )
 from src.transfer.models import EndpointConfig
 from src.transfer.reconcile_step import run_reconciliation
+
+
+def test_reread_without_a_write_pass_digest_is_not_a_mismatch():
+    skipped = alignment_when_write_pass_empty(2, inline_fingerprints_used=False)
+    assert skipped["identity_hash_aligned"] is None
+    assert skipped["reason"] == "write_pass_not_fingerprinted"
+    assert skipped["reread_rows"] == 2
+    missed = alignment_when_write_pass_empty(2, inline_fingerprints_used=True)
+    assert missed["identity_hash_aligned"] is False
+    assert missed["reason"] == "write_pass_empty"
 
 
 def test_engine_family_collapses_postgres_aliases():
