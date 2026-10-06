@@ -485,11 +485,13 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const gate8View = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
   const population = readGate8Population({
     row_accounting: job.row_accounting,
-    reconciliation: job.reconciliation,
+    reconciliation: gate8View ?? job.reconciliation,
     preflight,
   });
+  const lastStreamPopulation = isGate8LastStream(gate8View);
   const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
@@ -917,11 +919,11 @@ export function JobTheaterView({
           {(population.destCount != null || population.validateRunId || population.coverage) && (
               <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
                 <span>
-                  <strong>Dest COUNT</strong>
+                  <strong>{lastStreamPopulation ? "Job dest COUNT" : "Dest COUNT"}</strong>
                   {population.destCount != null ? population.destCount.toLocaleString() : "—"}
                 </span>
                 <span>
-                  <strong>Checksum</strong>
+                  <strong>{lastStreamPopulation ? "Last stream checksum" : "Checksum"}</strong>
                   {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
                 </span>
                 <span>

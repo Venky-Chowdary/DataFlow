@@ -322,12 +322,16 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
       migration_proven: true,
       message: "Row fidelity verified — source and target checksums match (2 rows)",
     };
-    const view = classifyGate8Status(
-      presentMultiStreamGate8(stored, {
-        multi_stream: true,
-        streams: [{ name: "customers" }, { name: "orders" }],
-      }),
-    );
+    const presented = presentMultiStreamGate8(stored, {
+      multi_stream: true,
+      streams: [
+        { name: "customers", row_accounting: { dest_count: 2, balanced: true } },
+        { name: "orders", row_accounting: { dest_count: 2, balanced: true } },
+      ],
+    });
+    assert.equal(presented?.job_dest_count, 4);
+    assert.equal(presented?.checksum_scope, "last_stream");
+    const view = classifyGate8Status(presented);
     assert.equal(view.fullPass, false);
     assert.equal(view.tone, "warn");
     assert.equal(view.label, "Last stream checksum");

@@ -129,6 +129,22 @@ const NARROW_GATE8_SCOPES = new Set([
   "last_stream",
 ]);
 
+/** Sum stored per-stream dest COUNT(*) values. ``true`` is not a count. */
+export function jobDestCountFromStreams(streams: unknown): number | undefined {
+  if (!Array.isArray(streams) || streams.length === 0) return undefined;
+  let sum = 0;
+  let measured = 0;
+  for (const row of streams) {
+    if (!row || typeof row !== "object") return undefined;
+    const ledger = (row as { row_accounting?: { dest_count?: unknown } }).row_accounting;
+    const count = ledger?.dest_count;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return undefined;
+    sum += count;
+    measured += 1;
+  }
+  return measured === streams.length ? sum : undefined;
+}
+
 /**
  * Present a stored multi-table Gate-8 report.
  *
@@ -156,6 +172,9 @@ export function presentMultiStreamGate8<T extends Gate8Reconciliation>(
     : /^row fidelity verified/i.test(message)
       ? `Checksum matches the last stream (${rowLabel}). This digest is not the ${streams.length}-stream job.`
       : `${message} This digest is not the whole job.`.trim();
+  const jobDest = typeof report.job_dest_count === "number" && Number.isInteger(report.job_dest_count)
+    ? report.job_dest_count
+    : jobDestCountFromStreams(streams);
   return {
     ...report,
     checksum_scope: "last_stream",
@@ -163,6 +182,7 @@ export function presentMultiStreamGate8<T extends Gate8Reconciliation>(
     assurance_level: assurance === "full_checksum" ? "per_stream_checksum" : report.assurance_level,
     coverage: coverage === "full_checksum" ? "per_stream_checksum" : report.coverage,
     message: honest,
+    ...(jobDest != null ? { job_dest_count: jobDest } : {}),
   };
 }
 

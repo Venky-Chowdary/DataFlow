@@ -420,6 +420,12 @@ export interface Gate8ReconciliationPayload {
   };
   source_rows?: number;
   target_rows?: number;
+  /**
+   * Sum of per-stream dest COUNT(*) on a sequential multi-table run.
+   * ``source_rows`` / ``target_rows`` stay the last stream. This is not a
+   * second checksum.
+   */
+  job_dest_count?: number;
   /** Pre-write dest COUNT(*) — append identity is dest_after − dest_before. */
   target_rows_before?: number | null;
   rejected_rows?: number;

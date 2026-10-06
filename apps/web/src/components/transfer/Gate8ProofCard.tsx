@@ -232,6 +232,15 @@ export function Gate8ProofCard({
   const heldOut = Math.max(rejectedRows - coercedNullRows, 0);
   const expectedRows = Math.max(sourceRows - heldOut - rowsSkipped, 0);
   const delta = targetRows - expectedRows;
+  const jobDestRaw = report.job_dest_count;
+  const jobDestCount = typeof jobDestRaw === "number" && Number.isInteger(jobDestRaw) && jobDestRaw >= 0
+    ? jobDestRaw
+    : null;
+  const checksumsMatch = Boolean(
+    report.source_checksum
+    && report.target_checksum
+    && report.source_checksum === report.target_checksum,
+  );
   const appendId = gate8AppendIdentity(report);
   const showAppendIdentity = Boolean((appendDelta || keyedBatch) && appendId.destBefore != null);
   const mismatches = report.sample_compare?.mismatches ?? [];
@@ -437,6 +446,29 @@ export function Gate8ProofCard({
               </dd>
             </div>
           </>
+        ) : lastStream ? (
+          <>
+            <div>
+              <dt>Last stream source</dt>
+              <dd>{sourceRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Last stream dest</dt>
+              <dd>{targetRows.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Job dest COUNT(*)</dt>
+              <dd className="is-warn" title="Sum of each stream’s destination COUNT(*), not this digest">
+                {jobDestCount == null ? "—" : jobDestCount.toLocaleString()}
+              </dd>
+            </div>
+            <div>
+              <dt>Last stream delta</dt>
+              <dd className={delta === 0 ? "is-ok" : "is-warn"}>
+                {delta === 0 ? "0" : `${delta > 0 ? "+" : ""}${delta.toLocaleString()}`}
+              </dd>
+            </div>
+          </>
         ) : (
           <>
             <div>
@@ -501,28 +533,29 @@ export function Gate8ProofCard({
         <div>
           <dt>Checksums</dt>
           <dd className={
-            appendDelta
+            appendDelta || lastStream || !checksumsMatch
               ? "is-warn"
-              : report.source_checksum
-                && report.target_checksum
-                && report.source_checksum === report.target_checksum
-                ? "is-ok"
-                : "is-warn"
+              : "is-ok"
           }>
             {appendDelta
               ? "Not comparable"
-              : keyedBatch && report.source_checksum && report.target_checksum
-                && report.source_checksum === report.target_checksum
+              : keyedBatch && checksumsMatch
                 ? "Match (written keys)"
-                : report.source_checksum && report.target_checksum
-                  ? (report.source_checksum === report.target_checksum ? "Match" : "Mismatch")
-                  : "—"}
+                : lastStream && checksumsMatch
+                  ? "Match (last stream)"
+                  : report.source_checksum && report.target_checksum
+                    ? (checksumsMatch ? "Match" : "Mismatch")
+                    : "—"}
           </dd>
         </div>
         <div>
           <dt>Proof scope</dt>
-          <dd title="Coverage and source-digest provenance — never claimed as population_proof">
-            {[report.coverage || report.dest_readback?.coverage || "unmeasured", report.source_checksum_provenance || "—"].join(" · ")}
+          <dd
+            className="df2-gate8-proof-scope"
+            title="Coverage and source-digest provenance — never claimed as population_proof"
+          >
+            <span>{report.coverage || report.dest_readback?.coverage || "unmeasured"}</span>
+            <span>{report.source_checksum_provenance || "—"}</span>
           </dd>
         </div>
         {report.sample_compare?.sample_seed?.method === "stratified" && (
@@ -629,9 +662,14 @@ export function Gate8ProofCard({
             <div>
               <dt>Populations</dt>
               <dd>
+                {lastStream ? "last stream " : ""}
                 source {(report.match_summary.source_rows ?? 0).toLocaleString()} ·
                 {" "}destination {(report.match_summary.dest_rows ?? 0).toLocaleString()}
+                {lastStream && jobDestCount != null
+                  ? ` · job dest ${jobDestCount.toLocaleString()}`
+                  : ""}
                 {report.match_summary.dest_rows_before != null
+                  && !(lastStream && Number(report.match_summary.dest_rows_before) === 0)
                   ? ` (held ${report.match_summary.dest_rows_before.toLocaleString()} before this run)`
                   : ""}
               </dd>
@@ -639,8 +677,9 @@ export function Gate8ProofCard({
             <div>
               <dt>Cells agreeing</dt>
               {/* Null percent is "not measured", never 0% — an unmeasured
-                  comparison must not read as total disagreement. */}
-              <dd className={report.match_summary.sample_match_percent == null
+                  comparison must not read as total disagreement. A last-stream
+                  sample at 100% is still not the multi-table job. */}
+              <dd className={report.match_summary.sample_match_percent == null || lastStream
                 ? "is-warn"
                 : report.match_summary.sample_match_percent === 100 ? "is-ok" : "is-warn"}>
                 {report.match_summary.sample_match_percent == null
@@ -708,7 +747,7 @@ export function Gate8ProofCard({
 
       <div className="df2-gate8-proof-next" role="region" aria-label="Proof export and next steps">
         <div className="df2-gate8-proof-next-copy">
-          <strong>{hasFindings || preWrite ? "Next step" : "Audit export"}</strong>
+          <strong>{hasFindings || preWrite || (lastStream && passed) ? "Next step" : "Audit export"}</strong>
           <p>
             {preWrite
               ? "Run Execute to produce post-write row-count and checksum proof in Job Theater."
@@ -718,7 +757,9 @@ export function Gate8ProofCard({
                   ? "Sample matched — export the signed pack; migration_proven stays false until full_checksum."
                   : appendDelta || keyedBatch
                     ? "Rows landed. For full_checksum cell proof, re-run with overwrite/truncate or upsert on a primary key."
-                    : "Export the signed proof pack for diligence (accepted risks, policies, hashes)."}
+                    : lastStream
+                      ? "This checksum is the last table. The job total is each stream’s destination COUNT(*) added together. Export the pack; migration_proven stays false."
+                      : "Export the signed proof pack for diligence (accepted risks, policies, hashes)."}
           </p>
         </div>
         <div className="df2-gate8-proof-next-actions">

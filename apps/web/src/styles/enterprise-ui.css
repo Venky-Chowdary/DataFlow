@@ -1464,6 +1464,17 @@
   word-break: break-all;
 }
 
+/* Scope tokens are words, not hex. break-all was splitting "independent". */
+.df2-gate8-proof-grid dd.df2-gate8-proof-scope {
+  word-break: normal;
+  overflow-wrap: break-word;
+  font-weight: 600;
+}
+
+.df2-gate8-proof-grid dd.df2-gate8-proof-scope span {
+  display: block;
+}
+
 .df2-gate8-proof-grid dd.is-ok { color: var(--df-success); }
 .df2-gate8-proof-grid dd.is-warn { color: var(--df-warning); }
 
