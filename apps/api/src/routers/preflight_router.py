@@ -550,6 +550,11 @@ async def run_preflight(body: PreflightRequest):
             ),
             delivery_guarantee=body.delivery_guarantee or "auto",
             allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
+            source_endpoint=body.source_config,
+            destination_endpoint={
+                "format": body.dest_type or "",
+                **dict(body.dest_extra or {}),
+            },
         ),
         validation_mode=body.validation_mode,
     )

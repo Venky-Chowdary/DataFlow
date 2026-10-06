@@ -560,3 +560,71 @@ def test_incremental_deduped_blocks_an_undeclared_cursor():
     verdicts = g9["details"]["cursor_semantics"]
     assert verdicts and verdicts[0]["primary_action"]
 
+
+def test_validate_blocks_one_call_replayed_onto_every_stream():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {"name": "customers", "selected": True},
+            {"name": "orders", "selected": True},
+        ],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert "get_customers" in gate["message"]
+    assert "orders" in gate["message"]
+
+
+def test_validate_passes_when_each_stream_has_its_own_call():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {
+                "name": "customers",
+                "selected": True,
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL public.get_customers()",
+            },
+            {
+                "name": "orders",
+                "selected": True,
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL public.get_orders()",
+            },
+        ],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "pass"
+
+
+def test_one_stream_does_not_emit_the_replay_gate():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "customers", "selected": True}],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    assert all(g["id"] != "g23_stream_procedures" for g in gates)
+

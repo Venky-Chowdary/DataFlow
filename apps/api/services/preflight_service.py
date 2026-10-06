@@ -517,6 +517,8 @@ def run_transfer_policy_gates(
     priority_column: str = "",
     priority_direction: str = "desc",
     row_limit: int = 0,
+    source_endpoint: Any = None,
+    destination_endpoint: Any = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     from services.schema_drift import schema_policy_honesty_line
@@ -728,23 +730,20 @@ def run_transfer_policy_gates(
             }
         )
 
-    # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
-    if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
-        "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
-    }:
-        gates.append({
-            "id": "redis_ttl_semantics",
-            "name": "Redis TTL / EXPIRE",
-            "status": GateStatus.PASS.value,
-            "severity": "warn",
-            "message": (
-                "Redis TTL/EXPIRE is not preserved as a migration guarantee — "
-                "values transfer; set EXPIRE in a post-load job if needed. "
-                "See docs/REDIS_TTL_SEMANTICS.md."
-            ),
-            "blocks_transfer": False,
-            "details": {"honesty": "ttl_not_productized"},
-        })
+    from services.multi_stream_plan import stream_procedure_policy_gate
+    from services.policy_gate_notes import redis_ttl_policy_gate
+
+    redis_gate = redis_ttl_policy_gate(dest, src)
+    if redis_gate:
+        gates.append(redis_gate)
+    procedure_gate = stream_procedure_policy_gate(
+        contracts,
+        sync_mode=sync,
+        source_endpoint=source_endpoint,
+        destination_endpoint=destination_endpoint,
+    )
+    if procedure_gate:
+        gates.append(procedure_gate)
 
     return gates
 

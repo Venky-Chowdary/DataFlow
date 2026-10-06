@@ -371,6 +371,58 @@ def _sync_callable_refusal(sync_mode: str, *, kind: str) -> str:
     )
 
 
+def stream_procedure_policy_gate(
+    contracts: list[Mapping[str, Any]] | None,
+    *,
+    sync_mode: str = "",
+    source_endpoint: Any = None,
+    destination_endpoint: Any = None,
+) -> dict[str, Any] | None:
+    """Validate gate for a CALL that would be replayed onto every selected table.
+
+    One stream returns ``None`` — the existing procedure path is unchanged.
+    Two or more streams always return a pass or a block, so Validate and
+    Execute name the same refusal before any row is written.
+    """
+    names = [
+        str(row.get("name") or "").strip()
+        for row in (contracts or [])
+        if isinstance(row, Mapping) and str(row.get("name") or "").strip()
+    ]
+    if len(names) < 2:
+        return None
+    refusal = review_stream_procedures(
+        source_endpoint,
+        destination_endpoint,
+        contracts,
+        names,
+        sync_mode=sync_mode,
+    )
+    if refusal:
+        return {
+            "id": "g23_stream_procedures",
+            "status": "block",
+            "message": refusal,
+            "duration_ms": 0,
+            "details": {
+                "reason": "multi_stream_procedure_refused",
+                "streams": names,
+                "remediation": (
+                    "Put a statement on each selected stream, or run one stream."
+                ),
+            },
+        }
+    return {
+        "id": "g23_stream_procedures",
+        "status": "pass",
+        "message": (
+            f"{len(names)} streams each carry their own read and write."
+        ),
+        "duration_ms": 0,
+        "details": {"streams": names},
+    }
+
+
 def review_stream_procedures(
     source: Any,
     destination: Any,

@@ -4649,6 +4649,29 @@ export function TransferPage({
           }),
           dest_extra: {
             allow_append_only: allowAppendOnly,
+            ...(destWriteMode === "procedure"
+              ? {
+                  dest_write_mode: "procedure",
+                  dest_procedure_call: destProcedureCall.trim(),
+                  ...(Object.keys(destProcedureParamMap).length
+                    ? { dest_procedure_param_map: destProcedureParamMap }
+                    : {}),
+                  ...(Object.keys(destProcedureParams).length
+                    ? { dest_procedure_params: destProcedureParams }
+                    : {}),
+                }
+              : destWriteMode === "query"
+                ? {
+                    dest_write_mode: "query",
+                    dest_query_sql: destQuerySql.trim(),
+                    ...(Object.keys(destProcedureParamMap).length
+                      ? { dest_procedure_param_map: destProcedureParamMap }
+                      : {}),
+                    ...(Object.keys(destProcedureParams).length
+                      ? { dest_procedure_params: destProcedureParams }
+                      : {}),
+                  }
+                : {}),
             ...(destDriverType === "iceberg"
               ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
               : {}),

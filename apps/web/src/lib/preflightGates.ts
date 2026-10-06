@@ -121,6 +121,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Declared monetary columns get an independent source SUM compared to the destination SUM after write. A row count is not a ledger balance. Browser sample SUM is not that proof.",
   },
   {
+    id: "g23_stream_procedures",
+    label: "Stream procedures",
+    icon: "gate",
+    rule: "Each selected table has its own read and write. One CALL is not replayed onto every table.",
+  },
+  {
     id: "g22_dest_referential_integrity",
     label: "Destination referential integrity",
     icon: "shield",
