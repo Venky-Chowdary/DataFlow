@@ -34,6 +34,8 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -606,7 +608,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const eventLog = (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [];
   const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
-  const rejectedCount = liveJob?.rejected_rows ?? 0;
+  const streamHealth = readJobStreams(liveJob);
+  const rejectedCount = readRejectedRows(liveJob);
+  const coercedCount = readCoercedNullRows(liveJob);
+  const rejectedDetails = readRejectedDetails(liveJob);
   const recon = liveJob?.reconciliation;
   const gate8 = classifyGate8Status(recon);
   const destMetric = destHeadline(liveJob);
@@ -714,7 +719,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             phases: liveJob.phases,
             notifications: liveJob.notifications,
             rejectedRows: liveJob.rejected_rows,
-            coercedNullRows: liveJob.coerced_null_rows,
+            coercedNullRows: coercedCount,
           })
         : [],
     [liveJob, selected],
@@ -1217,7 +1222,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
                             )}
 
-                            {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
+                            {isJobSuccess(selected.status) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
                               <div className="df2-data-integrity" role="note">
                                 <header className="df2-data-integrity-head">
                                   <DtIcon name="alert" size={16} />
@@ -1228,12 +1233,12 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 </header>
                                 <div className="df2-data-integrity-metrics">
                                   <article className="df2-data-integrity-metric is-dropped">
-                                    <strong>{Math.max(rejectedCount - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
+                                    <strong>{Math.max(rejectedCount - coercedCount, 0).toLocaleString()}</strong>
                                     <span>Rows held out (quarantine)</span>
                                     <small>Not written to the primary table — not silently dropped or NULL-invented.</small>
                                   </article>
                                   <article className="df2-data-integrity-metric is-coerced">
-                                    <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                    <strong>{coercedCount.toLocaleString()}</strong>
                                     <span>Values coerced to NULL</span>
                                     <small>coerce_null policy only — row kept with a NULL cell; original value not in primary.</small>
                                   </article>
@@ -1337,7 +1342,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 </article>
                                 <article className="df2-jobs-quarantine-metric">
                                   <span>Coerced to NULL</span>
-                                  <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                  <strong>{coercedCount.toLocaleString()}</strong>
                                 </article>
                               </div>
                             </section>
@@ -1384,15 +1389,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                   title: "Streams",
                                   description: "Per-stream dest COUNT(*) and watermarks",
                                   icon: "zap",
-                                  meta: Array.isArray(liveJob.streams) && liveJob.streams.length
-                                    ? `${liveJob.streams.length}`
-                                    : undefined,
-                                  disabled: !(Array.isArray(liveJob.streams) && liveJob.streams.length > 0),
+                                  meta: streamHealth.length ? `${streamHealth.length}` : undefined,
+                                  disabled: streamHealth.length === 0,
                                   onOpen: () => setEvidenceDrawer("streams"),
                                 },
                               ]}
                             />
-                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && (
+                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && streamHealth.length === 0 && (
                               <EmptyState
                                 compact
                                 icon="jobs"
@@ -1983,55 +1986,16 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         </Drawer>
       )}
 
-      {liveJob && evidenceDrawer === "streams" && Array.isArray(liveJob.streams) && (
+      {liveJob && evidenceDrawer === "streams" && streamHealth.length > 0 && (
         <Drawer
           open
           onClose={() => setEvidenceDrawer(null)}
           title="Stream conservation"
-          subtitle={`${liveJob.streams.length} stream(s)`}
+          subtitle={`${streamHealth.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
         >
-          <table className="df2-table df2-jobs-cdc-table">
-            <thead>
-              <tr>
-                <th>Stream</th>
-                <th>Status</th>
-                <th>Conserved</th>
-                <th>Events written</th>
-                <th>Lag</th>
-                <th>Watermark</th>
-              </tr>
-            </thead>
-            <tbody>
-              {liveJob.streams.map((s) => (
-                <tr key={s.name}>
-                  <td>{s.name}</td>
-                  <td>{s.status || "—"}</td>
-                  <td>
-                    {destMetricCompact(
-                      destHeadline({
-                        status: s.status,
-                        records_processed: s.records_processed,
-                        row_accounting: s.row_accounting,
-                      }),
-                    )}
-                  </td>
-                  <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
-                  <td>
-                    {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
-                      ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
-                      : "—"}
-                  </td>
-                  <td className="df2-cell-mono" title={s.watermark || ""}>
-                    {s.watermark
-                      ? `${String(s.watermark).slice(0, 40)}${String(s.watermark).length > 40 ? "…" : ""}`
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <StreamHealthTable streams={streamHealth} />
         </Drawer>
       )}
 
@@ -2050,18 +2014,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         >
           <QuarantinePanel
             jobId={selectedId}
-            rejectedRows={liveJob.rejected_rows}
-            coercedNullRows={liveJob.coerced_null_rows}
-            initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
-            truncatedDetails={Math.max(
-              0,
-              Number(
-                liveJob.rejected_details_total
-                  ?? (liveJob.destination_summary as { rejected_details_total?: number } | undefined)
-                    ?.rejected_details_total
-                  ?? 0,
-              ) - (Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details.length : 0),
-            )}
+            rejectedRows={rejectedCount}
+            coercedNullRows={coercedCount}
+            initialDetails={rejectedDetails}
+            truncatedDetails={Math.max(0, readRejectedDetailsTotal(liveJob) - (rejectedDetails?.length ?? 0))}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

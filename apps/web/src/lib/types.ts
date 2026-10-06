@@ -1316,6 +1316,8 @@ export interface TransferResult {
     rejected_details_truncated?: boolean;
     /** Findings the run recorded, whether or not the sample kept them all. */
     rejected_details_total?: number;
+    /** Per-stream health. account_job reads this list, not a second model. */
+    streams?: CdcStreamHealth[];
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;

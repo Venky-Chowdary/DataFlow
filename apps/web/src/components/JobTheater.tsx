@@ -36,6 +36,7 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "../lib/jobEvidence";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -595,6 +596,7 @@ export function JobTheaterView({
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
+  const streamHealth = readJobStreams(job);
   const engineSeconds = publishedEngineElapsedSeconds(destinationSummary.elapsed_seconds);
   const showEngineElapsed = !isRunning && engineSeconds != null;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
@@ -608,8 +610,8 @@ export function JobTheaterView({
     && String(rollbackPlan?.strategy || "") === "DISCARD_STAGING"
     && rollbackPlan?.executable === true
     && Boolean(rollbackPlan?.staging_table);
-  const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
-  const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
+  const rejectedRows = readRejectedRows(job);
+  const coercedNullRows = readCoercedNullRows(job);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
@@ -1527,9 +1529,9 @@ export function JobTheaterView({
         )}
       </div>
 
-      {Array.isArray(job.streams) && job.streams.length > 1 && (
+      {streamHealth.length > 0 && (
         <div className="df2-theater-v3-streams" aria-label="Per-stream health">
-          {job.streams.map((stream) => (
+          {streamHealth.map((stream) => (
             <div key={stream.name} className="df2-theater-v3-stream">
               <strong>{stream.name}</strong>
               <span>{stream.status || "—"}</span>
@@ -1889,7 +1891,7 @@ export function JobTheaterView({
             jobId={jobId}
             rejectedRows={rejectedRows}
             coercedNullRows={coercedNullRows}
-            initialDetails={job.rejected_details}
+            initialDetails={readRejectedDetails(job)}
             autoLoad
             initiallyOpen
             repairMappings={(resolvedProof?.mappings || []).map((m): RepairMapping => ({

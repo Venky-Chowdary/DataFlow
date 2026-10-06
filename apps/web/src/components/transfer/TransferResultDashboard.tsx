@@ -16,6 +16,8 @@ import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8Ke
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
+import { readJobStreams } from "../../lib/jobEvidence";
+import { StreamHealthTable } from "../jobs/StreamHealthTable";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
@@ -109,6 +111,7 @@ export function TransferResultDashboard({
   const [proofOpen, setProofOpen] = useState(false);
   const resolvedProof = asMappingProof(mappingProofProp) || asMappingProof(result.mapping_proof);
   const ds = result.destination_summary;
+  const streamHealth = readJobStreams(result);
   const rec = result.records_transferred ?? 0;
   const errDetails = (result.error_details || {}) as Record<string, unknown>;
   const rejected = Number(
@@ -424,6 +427,13 @@ export function TransferResultDashboard({
         }}
         onOpenValidate={onOpenValidate}
       />
+
+      {streamHealth.length > 0 && (
+        <section className="df2-result-streams" aria-label="Per-stream health">
+          <h3 className="df2-result-title">Streams</h3>
+          <StreamHealthTable streams={streamHealth} />
+        </section>
+      )}
 
       <JobTrustScoreCard
         job={{

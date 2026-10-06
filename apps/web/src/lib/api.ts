@@ -1,4 +1,5 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
@@ -1458,6 +1459,14 @@ export function streamJobProgress(
     const ds = raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined;
+    const evidence = {
+      streams: raw.streams,
+      rejected_rows: raw.rejected_rows,
+      coerced_null_rows: raw.coerced_null_rows,
+      rejected_details: raw.rejected_details,
+      destination_summary: ds,
+    };
+    const streamHealth = readJobStreams(evidence);
     const rpsFromRoot = raw.records_per_second != null ? Number(raw.records_per_second) : undefined;
     const rpsFromDs = ds?.records_per_second != null ? Number(ds.records_per_second) : undefined;
     return {
@@ -1491,9 +1500,9 @@ export function streamJobProgress(
         : ds?.chunk_size != null
           ? Number(ds.chunk_size)
           : undefined,
-      rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
-      coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
-      rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+      rejected_rows: readRejectedRows(evidence),
+      coerced_null_rows: readCoercedNullRows(evidence),
+      rejected_details: readRejectedDetails(evidence),
       destination_summary: ds,
       load_history_report: raw.load_history_report && typeof raw.load_history_report === "object"
         ? raw.load_history_report as JobProgress["load_history_report"]
@@ -1623,7 +1632,7 @@ export function streamJobProgress(
       row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
-      streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
+      streams: streamHealth.length ? streamHealth : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
