@@ -1197,6 +1197,7 @@ class DataPilotTools:
             "retry_job": self._retry_job,
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
+            "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
             "set_schedule_enabled": self._set_schedule_enabled,
@@ -2556,6 +2557,17 @@ class DataPilotTools:
         from .lifecycle_tools import _job_tool
 
         return _job_tool("replay_quarantine", job_id, selector)
+
+    def _prepare_cdc_source(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        restart: bool = True,
+        enable_gtid: bool = True,
+    ) -> ToolResult:
+        from .lifecycle_tools import prepare_cdc_source
+
+        return prepare_cdc_source(connector_id, name, restart, enable_gtid)
 
     def _test_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
         from .lifecycle_tools import test_connector

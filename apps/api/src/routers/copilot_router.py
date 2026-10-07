@@ -262,6 +262,22 @@ async def _run_lifecycle_confirm(
         sid = str(payload.get("schedule_id") or "").strip()
         out = await schedules_router.remove_pipeline_schedule(sid, http_request, workspace_id)
         return {**dict(out), "schedule_id": sid, "name": payload.get("name") or ""}
+    if kind == "prepare_cdc_source":
+        from services.cdc_host_prereq import apply_saved_cdc_prereq
+
+        cid = str(payload.get("connector_id") or "").strip()
+        if not cid:
+            raise HTTPException(status_code=400, detail="Approval is missing connector_id")
+        outcome = apply_saved_cdc_prereq(
+            cid,
+            restart=bool(payload.get("restart", True)),
+            enable_gtid=bool(payload.get("enable_gtid", True)),
+        )
+        return {
+            "connector_id": cid,
+            "name": payload.get("name") or "",
+            **outcome,
+        }
     if kind == "update_schedule":
         # Cadence and name only. Connectors, tables, mappings, and sync mode
         # stay on the stored schedule — this patch must not re-plan the route.

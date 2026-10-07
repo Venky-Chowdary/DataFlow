@@ -177,6 +177,35 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "prepare_cdc_source",
+        "description": (
+            "Stage the server settings continuous CDC needs on one saved database. "
+            "PostgreSQL: set wal_level=logical (slots and WAL senders at 10) and "
+            "restart so the postmaster reads it. MySQL: GRANT REPLICATION SLAVE, "
+            "REPLICATION CLIENT to the saved user, then persist gtid_mode=ON when "
+            "that user is allowed to. Nothing changes until Confirm. A role that "
+            "cannot run the statement is reported; a GTID is not invented."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string", "description": "Saved connector name"},
+                "restart": {
+                    "type": "boolean",
+                    "description": "Restart PostgreSQL after ALTER SYSTEM. Default true.",
+                    "default": True,
+                },
+                "enable_gtid": {
+                    "type": "boolean",
+                    "description": "Persist MySQL GTID after the replication grant. Default true.",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 LIFECYCLE_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in LIFECYCLE_TOOL_DEFINITIONS)
@@ -192,6 +221,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
     "update_schedule": "update_schedule",
+    "prepare_cdc_source": "prepare_cdc_source",
 }
 
 
@@ -325,6 +355,44 @@ def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] 
             error=f"No connector matched “{name or connector_id}”. Name a saved connector from Connectors.",
         )
     return conn, None
+
+
+def prepare_cdc_source(
+    connector_id: str = "",
+    name: str = "",
+    restart: bool = True,
+    enable_gtid: bool = True,
+) -> ToolResult:
+    """Stage logical decoding or the MySQL replication grant. Confirm applies it."""
+    conn, err = _connector("prepare_cdc_source", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    engine = str(brief.get("type") or conn.get("type") or "")
+    preview = {
+        **brief,
+        "restart": bool(restart),
+        "enable_gtid": bool(enable_gtid),
+        "change": (
+            "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
+            "max_wal_senders=10, then restart PostgreSQL"
+            if engine.lower() in {"postgresql", "postgres"}
+            else "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist gtid_mode when allowed"
+        ),
+    }
+    return _stage(
+        "prepare_cdc_source",
+        payload={
+            "connector_id": brief["connector_id"],
+            "name": brief["name"],
+            "restart": bool(restart),
+            "enable_gtid": bool(enable_gtid),
+        },
+        preview=preview,
+        label=f"Prepare CDC on {brief['name']}",
+        destructive=True,
+    )
 
 
 def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
