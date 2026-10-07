@@ -777,6 +777,75 @@ _BSON_NATIVE_SCALARS: tuple[type, ...] = (
 )
 
 
+def decimal_to_bson(value: Decimal) -> Any:
+    """Exact BSON carrier for one ``Decimal``.
+
+    ``Decimal128`` holds 34 significant digits and does not round through
+    float. A value wider than that, or one ``Decimal128`` refuses, keeps its
+    digits as text. ``None`` is the carrier for NaN and infinity, which BSON
+    cannot store and which must not be invented as ``0``.
+    """
+    text = safe_decimal_text(value)
+    if text is None:
+        return None
+    try:
+        from bson.decimal128 import Decimal128
+    except ImportError:
+        return text
+    try:
+        return Decimal128(text)
+    except (DecimalException, ValueError, TypeError):
+        return text
+
+
+_DECIMAL_CODEC: Any = None
+
+
+def _decimal_codec() -> Any:
+    """One codec instance. ``get_database`` runs on every job write."""
+    global _DECIMAL_CODEC
+    if _DECIMAL_CODEC is not None:
+        return _DECIMAL_CODEC
+    from bson.codec_options import TypeCodec
+    from bson.decimal128 import Decimal128
+
+    class DecimalCodec(TypeCodec):
+        python_type = Decimal
+        bson_type = Decimal128
+
+        def transform_python(self, value: Decimal) -> Any:
+            return decimal_to_bson(value)
+
+        def transform_bson(self, value: Any) -> Decimal:
+            return value.to_decimal()
+
+    _DECIMAL_CODEC = DecimalCodec()
+    return _DECIMAL_CODEC
+
+
+def control_plane_codec_options(base: Any | None = None) -> Any:
+    """Codec options that make every control-plane write accept ``Decimal``.
+
+    Profiling, numeric keys, and boolean-to-decimal coercion all produce
+    ``Decimal``. A job or approval document that still holds one raises
+    ``InvalidDocument: cannot encode object: Decimal('1')`` and the transfer
+    never starts. ``Decimal128`` is the carrier on the way out and ``Decimal``
+    on the way back — the same rule as :func:`decimal_to_bson`.
+
+    ``base`` is the client's existing options. Only the decimal codec is added,
+    so timezone and UUID representation stay whatever the client already used.
+    """
+    from bson.codec_options import CodecOptions, TypeRegistry
+
+    codec = _decimal_codec()
+    if base is None:
+        return CodecOptions(type_registry=TypeRegistry([codec]))
+    prior = list(getattr(base.type_registry, "codecs", []) or [])
+    fallback = getattr(base.type_registry, "fallback_encoder", None)
+    merged = TypeRegistry([*prior, codec], fallback)
+    return base.with_options(type_registry=merged)
+
+
 def bson_safe_document(value: Any) -> Any:
     """Rewrite a metadata document into types BSON can encode.
 
@@ -792,17 +861,7 @@ def bson_safe_document(value: Any) -> Any:
     owner the JSON surfaces use, instead of raising ``InvalidDocument``.
     """
     if isinstance(value, Decimal):
-        text = safe_decimal_text(value)
-        if text is None:
-            return None
-        try:
-            from bson.decimal128 import Decimal128
-        except ImportError:
-            return text
-        try:
-            return Decimal128(text)
-        except (DecimalException, ValueError, TypeError):
-            return text
+        return decimal_to_bson(value)
     if isinstance(value, dict):
         return {str(k): bson_safe_document(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

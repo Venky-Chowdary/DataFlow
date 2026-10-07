@@ -238,7 +238,18 @@ class MongoDBService:
             raise ConnectionError(
                 f"MongoDB unavailable at {self.connection_string}"
             )
-        return self.client[db_name or self.db_name]
+        name = db_name or self.db_name
+        # Decimal has no BSON wire. Profiling stats and numeric coercion put
+        # Decimal('1') on the job document, and insert_one then raises
+        # InvalidDocument before the transfer can start. The codec is the
+        # one carrier for every collection opened through this database.
+        from services.value_serializer import control_plane_codec_options
+
+        base = self.client[name]
+        return self.client.get_database(
+            name,
+            codec_options=control_plane_codec_options(base.codec_options),
+        )
 
     def test_connection(self) -> dict:
         """Test connection and return server info"""
