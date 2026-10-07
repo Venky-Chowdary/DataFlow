@@ -650,19 +650,18 @@ def write_mapped_rows(
             for m in mappings
             if _declares_calendar_day(m)
         }
-        source_type_by_col = {
+        # Polarity is a property of the column, not the cell. Resolving it
+        # once keeps a million-row write off the DDL regex.
+        instant_cols = {
             sanitize_identifier(
                 m.get("target") or m.get("source"), preserve_case=True
-            ): _mapping_source_type(m, column_types)
+            )
             for m in mappings
+            if declared_source_is_instant(_mapping_source_type(m, column_types))
         }
 
         def _to_bson(
-            value: Any,
-            stype: str,
-            transform: str = "",
-            column: str = "",
-            source_type: str = "",
+            value: Any, stype: str, transform: str = "", column: str = ""
         ) -> Any:
             from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
@@ -793,7 +792,7 @@ def write_mapped_rows(
                     if coerced.tzinfo is None:
                         from datetime import timezone as _tzu
 
-                        if declared_source_is_instant(source_type):
+                        if column in instant_cols:
                             coerced = coerced.replace(tzinfo=_tzu.utc)
                         elif column not in utc_normalize_ack:
                             raise ValueError(
@@ -877,13 +876,7 @@ def write_mapped_rows(
                 col = target_cols[i] if i < len(target_cols) else f"col_{i}"
                 try:
                     cells.append(
-                        _to_bson(
-                            v,
-                            t,
-                            transform_by_col.get(col, ""),
-                            column=col,
-                            source_type=source_type_by_col.get(col, ""),
-                        )
+                        _to_bson(v, t, transform_by_col.get(col, ""), column=col)
                     )
                 except (ValueError, TypeError, InvalidOperation) as exc:
                     append_write_quarantine_detail(

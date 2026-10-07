@@ -875,6 +875,32 @@ def test_fleet_queued_claims_release_in_one_load(temp_store, monkeypatch):
     assert store.get_schedule(other.id).running is False
 
 
+def test_a_future_slot_does_not_read_the_job(temp_store, monkeypatch):
+    """The beat must not round-trip the job store while the next slot is still ahead."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    future = datetime(2099, 1, 1, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": future,
+            "running": True,
+            "running_job_id": "job-future",
+            "running_started_at": future,
+        })
+    ])
+    calls = {"n": 0}
+
+    def _state(_job_id: str) -> str:
+        calls["n"] += 1
+        return "queued"
+
+    monkeypatch.setattr(store, "_job_dispatch_state", _state)
+    assert store.release_all_superseded_queued_claims() == 0
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-future"
+
+
 def test_scheduler_beat_releases_the_fleet_once(monkeypatch):
     called = {"n": 0}
     monkeypatch.setattr(

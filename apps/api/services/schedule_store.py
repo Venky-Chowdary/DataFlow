@@ -1150,9 +1150,12 @@ def _superseded_queued_replacement(
     job_id = str(sched.running_job_id or "").strip()
     if not sched.running or not job_id:
         return None
-    if _job_dispatch_state(job_id) != "queued":
-        return None
+    # The cadence check is local. A job read is only worth it once a newer
+    # slot is already due — otherwise every beat would round-trip Mongo for
+    # every in-flight schedule.
     if not following_slot_is_due(sched, current):
+        return None
+    if _job_dispatch_state(job_id) != "queued":
         return None
     if not _cancel_queued_job(job_id):
         return None
