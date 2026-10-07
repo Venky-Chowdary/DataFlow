@@ -341,6 +341,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "incremental_upsert, or cdc_incremental"
                     ),
                 },
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
                 "source_timezone": {
                     "type": "string",
                     "description": (
@@ -380,6 +393,19 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
                 "source_timezone": {
                     "type": "string",
@@ -532,6 +558,18 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "Cadence wording, with time/timezone when stated",
                 },
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key.",
+                },
                 "cursor_column": {
                     "type": "string",
                     "description": "Watermark column — required for incremental modes",
@@ -2670,6 +2708,7 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
@@ -2697,7 +2736,8 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
@@ -2726,6 +2766,7 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
@@ -2753,7 +2794,8 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
@@ -2814,6 +2856,7 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
@@ -2842,7 +2885,8 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
             rule_questions=rule_questions,
             applied_rules=applied_rules,

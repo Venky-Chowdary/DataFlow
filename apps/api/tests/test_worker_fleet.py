@@ -58,6 +58,21 @@ def test_scheduler_mode_auto_follows_distributed_backend(monkeypatch):
     assert scheduler_mode() == "claim"
 
 
+def test_api_claim_inflight_follows_transfer_workers(monkeypatch):
+    from services.worker_fleet import api_claim_inflight
+
+    monkeypatch.setenv("DATAFLOW_TRANSFER_WORKERS", "4")
+    monkeypatch.delenv("DATAWRAP_TRANSFER_WORKERS", raising=False)
+    assert api_claim_inflight() == 4
+
+    monkeypatch.setenv("DATAWRAP_TRANSFER_WORKERS", "6")
+    assert api_claim_inflight() == 6
+
+    monkeypatch.setenv("DATAFLOW_TRANSFER_WORKERS", "nope")
+    monkeypatch.delenv("DATAWRAP_TRANSFER_WORKERS", raising=False)
+    assert api_claim_inflight() == 8
+
+
 def test_api_claim_loop_respects_disable(monkeypatch):
     _force_claim(monkeypatch)
     monkeypatch.setenv("DATAFLOW_API_CLAIM_LOOP", "0")

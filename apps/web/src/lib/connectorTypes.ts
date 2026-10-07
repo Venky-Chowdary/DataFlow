@@ -217,6 +217,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   rest_api: { host: "", port: 443 },
   influxdb: { host: "localhost", port: 8086 },
   neo4j: { host: "localhost", port: 7474 },
+  kafka: { host: "localhost", port: 9092 },
   couchbase: { host: "localhost", port: 8093 },
 };
 

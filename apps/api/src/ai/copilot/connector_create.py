@@ -9,18 +9,29 @@ from urllib.parse import unquote, urlparse
 from connectors.sql_dsn import parse_sql_url
 
 
-_DEFAULT_PORTS = {
-    "postgresql": 5432,
-    "postgres": 5432,
-    "mysql": 3306,
-    "mariadb": 3306,
-    "mongodb": 27017,
-    "snowflake": 443,
-    "redis": 6379,
-    "sqlserver": 1433,
-    "oracle": 1521,
-    "redshift": 5439,
-}
+# Longer tokens first. ``postgres`` must not swallow ``postgresql``, and
+# ``mongo`` must not swallow ``mongodb``.
+_DRIVER_TOKENS: tuple[tuple[str, str], ...] = (
+    ("elasticsearch", "elasticsearch"),
+    ("opensearch", "elasticsearch"),
+    ("postgresql", "postgresql"),
+    ("pgvector", "pgvector"),
+    ("weaviate", "weaviate"),
+    ("qdrant", "qdrant"),
+    ("snowflake", "snowflake"),
+    ("sqlserver", "sqlserver"),
+    ("redshift", "redshift"),
+    ("influxdb", "influxdb"),
+    ("mariadb", "mysql"),
+    ("mongodb", "mongodb"),
+    ("postgres", "postgresql"),
+    ("neo4j", "neo4j"),
+    ("oracle", "oracle"),
+    ("kafka", "kafka"),
+    ("mysql", "mysql"),
+    ("redis", "redis"),
+    ("mongo", "mongodb"),
+)
 
 _TYPE_ALIASES = {
     "postgres": "postgresql",
@@ -84,7 +95,37 @@ def extract_url_credentials(message: str) -> dict[str, Any] | None:
         parsed = parse_mongodb_url(m.group(0).rstrip(".,;"))
         if parsed.get("host") or parsed.get("connection_string"):
             return parsed
+    m = re.search(r"(rediss?://)[^\s\"']+", text, re.I)
+    if m:
+        raw = m.group(0).rstrip(".,;")
+        parsed = urlparse(raw)
+        database = unquote((parsed.path or "").lstrip("/").split("/")[0] or "")
+        return {
+            "type": "redis",
+            "connection_string": raw,
+            "host": parsed.hostname or "",
+            "port": int(parsed.port) if parsed.port else 6379,
+            "username": unquote(parsed.username or ""),
+            "password": unquote(parsed.password or ""),
+            "database": database,
+        }
     return None
+
+
+def infer_driver_from_text(*parts: str) -> str:
+    """Driver named in a connector label or chat line, or "" when none is.
+
+    Word boundaries keep ``QA Redis Box`` on Redis and leave ``Demo PG`` alone
+    until the message actually says postgres. An empty result is not a type:
+    the caller still defaults a truly unnamed engine to PostgreSQL.
+    """
+    blob = " ".join(part for part in parts if part).lower()
+    if not blob.strip():
+        return ""
+    for token, driver in _DRIVER_TOKENS:
+        if re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", blob):
+            return driver
+    return ""
 
 
 #: An endpoint stated in prose rather than labelled: "at localhost:5433",
@@ -105,7 +146,8 @@ def extract_field_credentials(message: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
 
     type_m = re.search(
-        r"\b(postgresql|postgres|mysql|mariadb|mongodb|mongo|snowflake|redis|sqlserver|oracle|redshift)\b",
+        r"\b(elasticsearch|opensearch|pgvector|weaviate|qdrant|postgresql|postgres|"
+        r"neo4j|kafka|mysql|mariadb|mongodb|mongo|snowflake|redis|sqlserver|oracle|redshift)\b",
         lower,
     )
     if type_m:
@@ -319,10 +361,21 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
             ctype = "postgresql"
         elif cs.startswith("mongodb"):
             ctype = "mongodb"
+        elif cs.startswith("redis"):
+            ctype = "redis"
+    if not ctype:
+        ctype = infer_driver_from_text(
+            str(merged.get("name") or ""),
+            str(merged.get("host") or ""),
+            message or "",
+        )
     merged["type"] = ctype or "postgresql"
 
-    port = int(merged.get("port") or 0) or _DEFAULT_PORTS.get(merged["type"], 5432)
-    merged["port"] = port
+    from src.transfer.connector_capabilities import effective_port
+
+    # 0 and empty are "no port chosen". Redis is 6379, Elasticsearch 9200,
+    # Neo4j's HTTP Cypher port is 7474. An explicit port is kept.
+    merged["port"] = effective_port(merged["type"], merged.get("port"))
 
     if not merged.get("name"):
         host = str(merged.get("host") or "db")

@@ -139,6 +139,29 @@ def test_cdc_incremental_alias_blocks_without_a_primary_key():
     assert "Missing primary key" in str(g9["details"])
 
 
+def test_cdc_log_position_does_not_also_require_a_table_cursor():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "primary_key": ["id"],
+            "cursor_semantics": "cdc_position",
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        source_columns=["id", "status"],
+        mappings=[{"source": "id", "target": "id"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+    assert "Missing cursor" not in str(g9.get("details") or "")
+
+
 def test_cdc_catalog_primary_key_satisfies_a_blank_contract():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",

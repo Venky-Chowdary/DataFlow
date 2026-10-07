@@ -448,6 +448,7 @@ def plan_transfer(
     require_signed_contract: Any = None,
     source_filter: dict[str, Any] | None = None,
     upsert_key: str = "",
+    primary_key: str = "",
     dedupe_key: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
@@ -463,6 +464,7 @@ def plan_transfer(
     says which zone the source meant.
     """
     tool = "plan_transfer"
+    upsert_key = (upsert_key or primary_key or "").strip()
     src_table = (source_table or "").strip()
     unapplied = [str(q) for q in (rule_questions or []) if str(q or "").strip()]
     if unapplied:
@@ -637,6 +639,20 @@ def plan_transfer(
     if zone_columns:
         mappings = _stamp_zone_transform(mappings, source_timezone, zone_columns)
 
+    contracts, identity_error = _identity_stream_contract(
+        mode=mode,
+        source_table=src_table,
+        source_columns=src_names,
+        mappings=mappings,
+        operator_key=str(row_rules.get("upsert_key") or ""),
+        catalog_key=_source_primary_key(src_info),
+    )
+    if identity_error:
+        return _tool_result(tool, success=False, error=identity_error)
+    row_rules["stream_contracts"] = contracts
+    if contracts and not row_rules.get("upsert_key"):
+        row_rules["upsert_key"] = ",".join(contracts[0]["primary_key"])
+
     preflight = _run_preflight(
         src_conn=src_conn,
         dst_conn=dst_conn,
@@ -655,7 +671,9 @@ def plan_transfer(
         ),
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
-        source_primary_key=_source_primary_key(src_info),
+        source_primary_key=(
+            ",".join(contracts[0]["primary_key"]) if contracts else _source_primary_key(src_info)
+        ),
         write_via_staging=bool(write_via_staging),
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
         source_filter=row_rules["source_filter"] or None,
@@ -815,16 +833,87 @@ def _ground_data_rules(
 
     key = (upsert_key or dedupe_key or "").strip()
     if key:
-        actual, err = resolve(key, "upsert key")
-        if err:
-            return out, err
-        out["upsert_key"] = actual
-        out["sync_mode"] = normalize_sync_mode("upsert")
-        # The engine takes its merge keys from the stream contract, so an upsert
-        # on a named column has to be declared there or the write falls back to
-        # insert and duplicates the key.
-        out["stream_contracts"] = [{"name": "stream", "primary_key": actual, "selected": True}]
+        parts = [part.strip() for part in key.replace(";", ",").split(",") if part.strip()]
+        bound: list[str] = []
+        for part in parts:
+            actual, err = resolve(part, "upsert key")
+            if err:
+                return out, err
+            bound.append(actual)
+        out["upsert_key"] = ",".join(bound)
+        # An explicit key on append/overwrite means upsert. CDC, SCD2, and
+        # mirror already require a key — do not downgrade them to upsert.
+        from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
+
+        if mode not in MODES_REQUIRING_PRIMARY_KEY:
+            out["sync_mode"] = normalize_sync_mode("upsert")
     return out, ""
+
+
+def _identity_stream_contract(
+    *,
+    mode: str,
+    source_table: str,
+    source_columns: list[str],
+    mappings: list[dict[str, Any]],
+    operator_key: str,
+    catalog_key: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """The stream contract Execute and preflight both read.
+
+    The operator's key wins. Otherwise a mode that requires identity uses the
+    source catalog key when every column is mapped. No column named ``id`` is
+    invented. CDC's cursor is the log position (``cdc_position``), not a
+    guessed ``updated_at``.
+    """
+    from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
+    from services.primary_key import mapped_catalog_upsert_key
+
+    mapping_rows: list[dict[str, Any]] = []
+    for item in mappings or []:
+        row = item
+        if not isinstance(row, dict):
+            dump = getattr(row, "model_dump", None)
+            row = dump() if callable(dump) else {}
+        if not isinstance(row, dict):
+            continue
+        src = str(row.get("source") or row.get("source_column") or "").strip()
+        tgt = str(row.get("target") or row.get("target_column") or src).strip()
+        if src and tgt:
+            mapping_rows.append({"source": src, "target": tgt})
+
+    def _fully_mapped(cols: list[str]) -> bool:
+        if not cols:
+            return False
+        sources, _targets = mapped_catalog_upsert_key(cols, mapping_rows)
+        return [s.lower() for s in sources] == [c.lower() for c in cols]
+
+    chosen: list[str] = []
+    if operator_key:
+        chosen = [part for part in operator_key.split(",") if part]
+        if not _fully_mapped(chosen):
+            return [], (
+                f"Upsert key `{operator_key}` is not in the column mapping, "
+                "so the write cannot merge on it. Map that column, or name a "
+                "key that is mapped."
+            )
+    elif mode in MODES_REQUIRING_PRIMARY_KEY and catalog_key:
+        known = {col.lower(): col for col in source_columns}
+        parts = [part.strip() for part in catalog_key.split(",") if part.strip()]
+        if parts and all(part.lower() in known for part in parts):
+            bound = [known[part.lower()] for part in parts]
+            if _fully_mapped(bound):
+                chosen = bound
+    if not chosen:
+        return [], ""
+    contract: dict[str, Any] = {
+        "name": source_table or "stream",
+        "selected": True,
+        "primary_key": chosen,
+    }
+    if mode == "cdc":
+        contract["cursor_semantics"] = "cdc_position"
+    return [contract], ""
 
 
 def _rebind_filter_columns(
@@ -965,6 +1054,13 @@ def _run_preflight(
             stream_contracts=list(stream_contracts or []),
             backfill_new_fields=False,
             source_columns=columns,
+            catalog_primary_key_columns=[
+                part.strip()
+                for part in str(source_primary_key or "").split(",")
+                if part.strip()
+            ] or None,
+            mappings=mappings,
+            source_table=src_table,
             dest_type=dest_db_type,
             source_type=src_db_type,
             source_kind=source_kind or "database",
@@ -1303,6 +1399,7 @@ def start_transfer(
     require_signed_contract: Any = None,
     source_filter: dict[str, Any] | None = None,
     upsert_key: str = "",
+    primary_key: str = "",
     dedupe_key: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
@@ -1327,7 +1424,8 @@ def start_transfer(
         source_query=source_query,
         procedure_params=procedure_params,
         source_filter=source_filter,
-        upsert_key=upsert_key,
+        upsert_key=upsert_key or primary_key,
+        primary_key=primary_key,
         dedupe_key=dedupe_key,
         rule_questions=rule_questions,
         applied_rules=applied_rules,

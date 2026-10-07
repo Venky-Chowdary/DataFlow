@@ -1290,10 +1290,12 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
 
 
 def _release_superseded_queued_claims() -> None:
-    """Replace a queued run when a newer slot is already due.
+    """Keep a queued schedule job. Do not cancel it for a later slot.
 
-    A running transfer is left alone. Cancelling it would start a second
-    writer against the same destination. One store load covers the fleet.
+    The job has not read the source yet. Cancelling it while a large transfer
+    still holds the workers drops the fire, and the next slot cancels the
+    replacement too. Missed slots are counted when the job finishes. A running
+    writer stays one writer.
     """
     from services.schedule_store import release_all_superseded_queued_claims
 

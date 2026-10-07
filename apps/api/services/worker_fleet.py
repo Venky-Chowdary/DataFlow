@@ -315,6 +315,20 @@ def run_fleet_loop(
     _reap()
 
 
+def api_claim_inflight() -> int:
+    """How many transfers one API process may run at once.
+
+    The claim loop used to pin this at 1, so every job waited behind the
+    previous one and a schedule fire stuck in that queue was cancelled when
+    the next slot arrived. ``TRANSFER_WORKERS`` is the same cap the local
+    scheduler already uses.
+    """
+    try:
+        return max(1, int(getenv_brand("TRANSFER_WORKERS", "8") or "8"))
+    except ValueError:
+        return 8
+
+
 def start_api_claim_loop(*, poll_seconds: float | None = None) -> bool:
     """Start a daemon claim loop inside the API process (Phase F5).
 
@@ -343,7 +357,12 @@ def start_api_claim_loop(*, poll_seconds: float | None = None) -> bool:
             "API claim loop starting (worker_id=%s, mode=claim)",
             worker_id(),
         )
-        run_fleet_loop(run_fleet_job, poll_seconds=secs, stop_event=stop, max_inflight=1)
+        run_fleet_loop(
+            run_fleet_job,
+            poll_seconds=secs,
+            stop_event=stop,
+            max_inflight=api_claim_inflight(),
+        )
 
     _api_claim_thread = threading.Thread(
         target=_run, name="df-api-claim", daemon=True

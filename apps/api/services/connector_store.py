@@ -92,6 +92,38 @@ def _store_path() -> Path:
 
 _backend_choice: str | None = None
 
+_HISTORICAL_PORT_FALLBACK = 5432
+
+
+def listen_port_for_connector(conn_type: str, raw: Any) -> int:
+    """Listen port stored on a connector.
+
+    Missing, ``0``, and the old store-wide default of 5432 become the
+    driver's own port when that driver does not listen on 5432. Redis saved
+    as 5432 was dialing Postgres and the health check reported the host
+    unreachable. An explicit other port is kept. Postgres and pgvector stay
+    on 5432.
+    """
+    try:
+        from src.transfer.connector_capabilities import default_port, effective_port
+    except ImportError:
+        from transfer.connector_capabilities import default_port, effective_port
+
+    try:
+        parsed = int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed < 0:
+        parsed = 0
+    # The catalog used to advertise Neo4j Bolt (7687). This reader speaks the
+    # HTTP Cypher endpoint, so a saved 7687 never answers a health check.
+    if str(conn_type or "").lower() == "neo4j" and parsed == 7687:
+        return 7474
+    driver_default = default_port(str(conn_type or ""))
+    if parsed in (0, _HISTORICAL_PORT_FALLBACK) and driver_default != parsed:
+        return driver_default
+    return effective_port(conn_type, parsed)
+
 
 @dataclass
 class SavedConnector:
@@ -146,7 +178,7 @@ class SavedConnector:
             type=conn_type,
             role=normalize_connector_role(conn_type, data.get("role")),
             host=data.get("host", ""),
-            port=int(data.get("port", 5432)),
+            port=listen_port_for_connector(conn_type, data.get("port")),
             database=data.get("database", ""),
             username=data.get("username", ""),
             password=password,
@@ -436,7 +468,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         type=conn_type,
         role=normalize_connector_role(conn_type, data.get("role")),
         host=data.get("host", ""),
-        port=int(data.get("port", 5432)),
+        port=listen_port_for_connector(conn_type, data.get("port")),
         database=data.get("database", ""),
         username=data.get("username", ""),
         password=data.get("password", ""),

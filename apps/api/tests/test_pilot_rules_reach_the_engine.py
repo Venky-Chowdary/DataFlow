@@ -16,7 +16,11 @@ import asyncio
 
 import pytest
 
-from src.ai.copilot.transfer_tools import _ground_data_rules, _unapplied_rules_error
+from src.ai.copilot.transfer_tools import (
+    _ground_data_rules,
+    _identity_stream_contract,
+    _unapplied_rules_error,
+)
 
 COLUMNS = ["id", "Email", "status", "signup_date"]
 
@@ -69,18 +73,149 @@ def test_unknown_upsert_key_fails_closed():
 def test_upsert_key_becomes_a_stream_contract_and_switches_the_mode():
     out, err = _ground(upsert_key="id")
     assert err == ""
-    # The engine reads merge keys off the contract; without this the write
-    # inserts and duplicates the key instead of upserting.
-    assert out["stream_contracts"] == [
-        {"name": "stream", "primary_key": "id", "selected": True}
-    ]
+    # Grounding binds the column and switches append to upsert. The stream
+    # contract is built after the mapping exists, so a key that is not mapped
+    # cannot become a merge key.
+    assert out["stream_contracts"] == []
+    assert out["upsert_key"] == "id"
     assert "upsert" in out["sync_mode"]
+    contracts, identity_error = _identity_stream_contract(
+        mode=out["sync_mode"],
+        source_table="users",
+        source_columns=COLUMNS,
+        mappings=[{"source": "id", "target": "id"}],
+        operator_key=out["upsert_key"],
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts == [
+        {"name": "users", "selected": True, "primary_key": ["id"]}
+    ]
 
 
 def test_dedupe_key_is_honoured_as_the_upsert_identity():
     out, err = _ground(dedupe_key="Email")
     assert err == ""
-    assert out["stream_contracts"][0]["primary_key"] == "Email"
+    assert out["upsert_key"] == "Email"
+    contracts, identity_error = _identity_stream_contract(
+        mode=out["sync_mode"],
+        source_table="users",
+        source_columns=COLUMNS,
+        mappings=[{"source": "Email", "target": "email"}],
+        operator_key=out["upsert_key"],
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts[0]["primary_key"] == ["Email"]
+
+
+def test_cdc_keeps_its_mode_and_uses_the_log_as_the_cursor():
+    out, err = _ground(
+        upsert_key="order_id",
+        mode="cdc",
+        source_columns=["order_id", "status"],
+    )
+    assert err == ""
+    assert out["sync_mode"] == "cdc"
+    contracts, identity_error = _identity_stream_contract(
+        mode="cdc",
+        source_table="orders",
+        source_columns=["order_id", "status"],
+        mappings=[{"source": "order_id", "target": "order_id"}],
+        operator_key=out["upsert_key"],
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts == [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": ["order_id"],
+        "cursor_semantics": "cdc_position",
+    }]
+
+
+def test_catalog_primary_key_is_used_when_every_column_is_mapped():
+    contracts, identity_error = _identity_stream_contract(
+        mode="cdc",
+        source_table="orders",
+        source_columns=["id", "status"],
+        mappings=[{"source": "id", "target": "id"}, {"source": "status", "target": "status"}],
+        operator_key="",
+        catalog_key="id",
+    )
+    assert identity_error == ""
+    assert contracts[0]["primary_key"] == ["id"]
+    assert contracts[0]["cursor_semantics"] == "cdc_position"
+
+
+def test_unmapped_catalog_key_does_not_invent_id():
+    contracts, identity_error = _identity_stream_contract(
+        mode="upsert",
+        source_table="orders",
+        source_columns=["id", "sku"],
+        mappings=[{"source": "sku", "target": "sku"}],
+        operator_key="",
+        catalog_key="id",
+    )
+    assert identity_error == ""
+    assert contracts == []
+
+
+def test_unmapped_operator_key_is_refused():
+    contracts, identity_error = _identity_stream_contract(
+        mode="cdc",
+        source_table="orders",
+        source_columns=["order_id", "sku"],
+        mappings=[{"source": "sku", "target": "sku"}],
+        operator_key="order_id",
+        catalog_key="order_id",
+    )
+    assert contracts == []
+    assert "not in the column mapping" in identity_error
+
+
+def test_composite_operator_key_stays_a_list():
+    contracts, identity_error = _identity_stream_contract(
+        mode="upsert",
+        source_table="orders",
+        source_columns=["id", "tenant_id"],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "tenant_id", "target": "tenant_id"},
+        ],
+        operator_key="id,tenant_id",
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts[0]["primary_key"] == ["id", "tenant_id"]
+
+
+def test_mcp_start_transfer_accepts_primary_key():
+    import inspect
+
+    from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools, get_pilot_tools
+
+    schema = next(t for t in TOOL_DEFINITIONS if t["name"] == "start_transfer")
+    props = schema["input_schema"]["properties"]
+    assert "upsert_key" in props
+    assert "primary_key" in props
+    for method in (
+        DataPilotTools._plan_transfer,
+        DataPilotTools._start_transfer,
+        DataPilotTools._create_schedule,
+    ):
+        assert "primary_key" in inspect.signature(method).parameters
+    result = get_pilot_tools().execute(
+        "start_transfer",
+        {
+            "source_connector_name": "missing-src-for-pk",
+            "dest_connector_name": "missing-dst-for-pk",
+            "source_table": "orders",
+            "sync_mode": "cdc",
+            "primary_key": "order_id",
+        },
+    )
+    assert "unexpected keyword" not in (result.error or "").lower()
 
 
 def test_no_rules_leaves_the_requested_mode_untouched():

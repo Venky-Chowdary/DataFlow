@@ -112,6 +112,49 @@ def test_sqlite_probe_uses_the_same_path_allowlist(tmp_path, monkeypatch):
     assert (root / "probe.db").is_file()
 
 
+def test_named_redis_box_uses_the_redis_port_not_postgres():
+    draft = build_connector_draft(
+        "",
+        {"name": "QA Redis Box", "host": "redis.internal"},
+    )
+    assert draft["type"] == "redis"
+    assert draft["port"] == 6379
+    assert draft["host"] == "redis.internal"
+
+
+def test_specialty_drivers_get_their_listen_ports():
+    cases = {
+        "elasticsearch": 9200,
+        "neo4j": 7474,
+        "kafka": 9092,
+        "qdrant": 6333,
+        "weaviate": 8080,
+        "pgvector": 5432,
+    }
+    for driver, port in cases.items():
+        draft = build_connector_draft(
+            f"create a {driver} connector host graph.internal",
+        )
+        assert draft["type"] == driver, driver
+        assert draft["port"] == port, driver
+
+
+def test_explicit_port_is_kept():
+    draft = build_connector_draft(
+        "create a redis connector host cache.internal port 6380",
+    )
+    assert draft["type"] == "redis"
+    assert draft["port"] == 6380
+
+
+def test_redis_url_sets_type_and_port():
+    parsed = extract_url_credentials("save redis://localhost:6379/0")
+    assert parsed is not None
+    assert parsed["type"] == "redis"
+    assert parsed["port"] == 6379
+    assert parsed["host"] == "localhost"
+
+
 def test_build_draft_from_inline_prose():
     msg = (
         "create a postgres connector named Demo PG host localhost "

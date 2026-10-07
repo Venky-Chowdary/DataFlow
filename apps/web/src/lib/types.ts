@@ -1692,7 +1692,7 @@ export const CONNECTOR_CATALOG = [
   { id: "cassandra", label: "Apache Cassandra", port: 9042 },
   { id: "couchbase", label: "Couchbase", port: 8091 },
   { id: "redis", label: "Redis", port: 6379 },
-  { id: "neo4j", label: "Neo4j", port: 7687 },
+  { id: "neo4j", label: "Neo4j", port: 7474 },
   { id: "elasticsearch", label: "Elasticsearch", port: 9200 },
   { id: "firebase", label: "Firebase", port: 443 },
   // Cloud warehouses

@@ -297,7 +297,12 @@ def build_sync_contract_gate(
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"
         for c in contracts
-        if requires_cursor and not (c.get("cursor_field") or c.get("cursor"))
+        if requires_cursor
+        and not (c.get("cursor_field") or c.get("cursor"))
+        # CDC's cursor is the log position, not a table column. A declared
+        # cdc_position is that cursor. Inventing updated_at would skip rows
+        # the log had already captured.
+        and str(c.get("cursor_semantics") or "").strip().lower() != "cdc_position"
     ]
     missing_primary_key: list[str] = []
     catalog_identity: list[tuple[str, list[str]]] = []

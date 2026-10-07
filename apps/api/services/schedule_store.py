@@ -1043,9 +1043,8 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
 def _job_dispatch_state(job_id: str) -> str:
     """``queued``, ``running``, ``terminal``, or ``unknown``.
 
-    A job that is still waiting for a worker is not a writer. Airbyte replaces
-    that queued sync when the next slot arrives, and keeps the claim only once
-    the sync is actually running.
+    A job that is still waiting for a worker is not a writer. It is kept:
+    cancelling it for a later slot drops a fire that has not read yet.
     """
     if not (job_id or "").strip():
         return "unknown"
@@ -1068,149 +1067,25 @@ def _job_dispatch_state(job_id: str) -> str:
     return "unknown"
 
 
-def following_slot_is_due(sched: PipelineSchedule, now: datetime | None = None) -> bool:
-    """True when a cadence instant after the slot in flight is already due."""
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    slot = _parse_ts(sched.next_run_at)
-    if slot is None:
-        return False
-    if slot.tzinfo is None:
-        slot = slot.replace(tzinfo=timezone.utc)
-    try:
-        following = _parse_ts(
-            compute_next_run(sched.interval, slot, cron=sched.cron, tz=sched.timezone)
-        )
-    except CronError:
-        return False
-    if following is None:
-        return False
-    if following.tzinfo is None:
-        following = following.replace(tzinfo=timezone.utc)
-    return following <= current
-
-
-def _latest_due_slot(sched: PipelineSchedule, now: datetime) -> datetime:
-    """The newest cadence instant at or before ``now``.
-
-    Replacing a queued run must serve this instant. Leaving ``next_run_at`` on
-    the slot that already passed made the next beat cancel the replacement too.
-    """
-    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-    slot = _parse_ts(sched.next_run_at) or current
-    if slot.tzinfo is None:
-        slot = slot.replace(tzinfo=timezone.utc)
-    latest = slot
-    for _ in range(MISSED_WINDOW_SCAN_LIMIT):
-        try:
-            nxt = _parse_ts(
-                compute_next_run(sched.interval, latest, cron=sched.cron, tz=sched.timezone)
-            )
-        except CronError:
-            break
-        if nxt is None:
-            break
-        if nxt.tzinfo is None:
-            nxt = nxt.replace(tzinfo=timezone.utc)
-        if nxt > current:
-            break
-        latest = nxt
-    return latest
-
-
-def _cancel_queued_job(job_id: str) -> bool:
-    """Cancel a job that has not started writing. A running job is left alone."""
-    try:
-        svc = get_mongodb_service()
-        return bool(
-            svc.update_job_status(
-                job_id,
-                "cancelled",
-                only_from_status=("pending", "queued"),
-                phase="cancelled",
-                message=(
-                    "Replaced by the next schedule slot. "
-                    "This run was still queued and had not started writing."
-                ),
-            )
-        )
-    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
-        return False
-
-
-def _superseded_queued_replacement(
-    sched: PipelineSchedule, current: datetime
-) -> PipelineSchedule | None:
-    """The schedule with its queued claim dropped, or None when it stays.
-
-    Cancels the job only while its status is still pending or queued. A
-    running transfer keeps the claim until it finishes.
-    """
-    job_id = str(sched.running_job_id or "").strip()
-    if not sched.running or not job_id:
-        return None
-    # The cadence check is local. A job read is only worth it once a newer
-    # slot is already due — otherwise every beat would round-trip Mongo for
-    # every in-flight schedule.
-    if not following_slot_is_due(sched, current):
-        return None
-    if _job_dispatch_state(job_id) != "queued":
-        return None
-    if not _cancel_queued_job(job_id):
-        return None
-    latest = _latest_due_slot(sched, current)
-    return PipelineSchedule.from_dict({
-        **sched.to_dict(),
-        "running": False,
-        "running_instance": "",
-        "running_started_at": None,
-        "running_job_id": "",
-        "next_run_at": latest.astimezone(timezone.utc).isoformat(),
-    })
-
-
 def release_superseded_queued_claim(
     schedule_id: str, now: datetime | None = None
 ) -> PipelineSchedule | None:
-    """Drop a queued claim once a newer slot is due, and aim at that slot.
+    """Keep a queued schedule job. Do not cancel it for a later slot.
 
-    The queued job is cancelled only while its status is still pending or
-    queued. A running transfer keeps the claim until it finishes; the overrun
-    is then one catch-up, not a second writer.
+    The job has not read the source yet, so it is not a stale snapshot.
+    Cancelling it while a large transfer still holds the workers drops the
+    fire: the replacement waits in the same queue and the next slot cancels
+    that one too. Missed slots are counted when this job finishes, and a
+    running writer is still one writer — the overrun is one catch-up.
     """
-    current = now or datetime.now(timezone.utc)
-    schedules = _load_all()
-    for i, sched in enumerate(schedules):
-        if sched.id != schedule_id:
-            continue
-        updated = _superseded_queued_replacement(sched, current)
-        if updated is None:
-            return None
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
+    del schedule_id, now
     return None
 
 
 def release_all_superseded_queued_claims(now: datetime | None = None) -> int:
-    """Drop every queued claim a newer slot has passed.
-
-    One load and one save for the whole fleet. Releasing each id on its own
-    re-read the store once per schedule on every beat.
-    """
-    current = now or datetime.now(timezone.utc)
-    schedules = _load_all()
-    released = 0
-    for i, sched in enumerate(schedules):
-        updated = _superseded_queued_replacement(sched, current)
-        if updated is None:
-            continue
-        schedules[i] = updated
-        released += 1
-    if released:
-        _save_all(schedules)
-    return released
+    """Fleet form of :func:`release_superseded_queued_claim`. Never cancels."""
+    del now
+    return 0
 
 
 def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
