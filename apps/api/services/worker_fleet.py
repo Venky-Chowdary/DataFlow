@@ -111,6 +111,53 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
         return False
 
 
+def cancel_queued_job(job_id: str) -> dict[str, Any]:
+    """Take a not-yet-claimed job out of the queue.
+
+    Cancel on the transfer document alone left the queue row ``queued``,
+    so the worker claimed it and started the write. Only a row that is
+    still ``queued`` is flipped. A claimed or running row stays for the
+    worker, which observes ``cancel_requested``.
+    """
+    coll = _queue_coll()
+    if coll is None or not job_id:
+        return {"queue": "unavailable"}
+    try:
+        result = coll.update_one(
+            {"_id": job_id, "status": "queued"},
+            {
+                "$set": {
+                    "status": "cancelled",
+                    "finished_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+    except Exception:
+        _logger.exception("Failed to cancel queued job %s", job_id)
+        return {"queue": "unavailable"}
+    if getattr(result, "modified_count", 0):
+        return {"queue": "cancelled"}
+    return {"queue": "not_waiting"}
+
+
+def _transfer_job_cancelled(job_id: str) -> bool:
+    """True when the operator already cancelled this transfer."""
+    if not job_id:
+        return False
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        if mongo.is_cancel_requested(job_id):
+            return True
+        job = mongo.get_job(job_id) or {}
+        return str(job.get("status") or "") == "cancelled"
+    except Exception:
+        _logger.debug("cancel check failed for %s", job_id, exc_info=True)
+        return False
+
+
 def _queued_claim_filter() -> dict[str, Any]:
     """Oldest-queued filter limited to this process's workloads.
 
@@ -152,22 +199,41 @@ def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int
             return_doc = ReturnDocument.AFTER
         except Exception:
             return_doc = True  # type: ignore[assignment]
-        doc = coll.find_one_and_update(
-            _queued_claim_filter(),
-            {
-                "$set": {
-                    "status": "claimed",
-                    "claimed_at": datetime.now(timezone.utc),
-                    "worker": store.worker_id,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
-            sort=[("created_at", 1)],
-            return_document=return_doc,
-        )
-        if not doc:
+        skipped = 0
+        while skipped < 20:
+            doc = coll.find_one_and_update(
+                _queued_claim_filter(),
+                {
+                    "$set": {
+                        "status": "claimed",
+                        "claimed_at": datetime.now(timezone.utc),
+                        "worker": store.worker_id,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+                sort=[("created_at", 1)],
+                return_document=return_doc,
+            )
+            if not doc:
+                return None
+            job_id = str(doc.get("job_id") or doc.get("_id"))
+            if _transfer_job_cancelled(job_id):
+                coll.update_one(
+                    {"_id": doc["_id"], "status": "claimed", "worker": store.worker_id},
+                    {
+                        "$set": {
+                            "status": "cancelled",
+                            "worker": "",
+                            "finished_at": datetime.now(timezone.utc),
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+                skipped += 1
+                continue
+            break
+        else:
             return None
-        job_id = str(doc.get("job_id") or doc.get("_id"))
         if not store.acquire(job_id, ttl_seconds=ttl_seconds):
             coll.update_one(
                 {"_id": doc["_id"], "status": "claimed", "worker": store.worker_id},
@@ -299,7 +365,10 @@ def run_fleet_loop(
             fut = inflight.pop(jid)
             try:
                 fut.result()
-                _finish_queue_row(jid, status="done")
+                _finish_queue_row(
+                    jid,
+                    status="cancelled" if _transfer_job_cancelled(jid) else "done",
+                )
             except Exception:
                 _logger.exception("Fleet handler failed for %s", jid)
                 _finish_queue_row(jid, status="failed")
@@ -319,7 +388,10 @@ def run_fleet_loop(
         if inflight_cap == 1:
             try:
                 handler(job_id)
-                _finish_queue_row(job_id, status="done")
+                _finish_queue_row(
+                    job_id,
+                    status="cancelled" if _transfer_job_cancelled(job_id) else "done",
+                )
             except Exception:
                 _logger.exception("Fleet handler failed for %s", job_id)
                 _finish_queue_row(job_id, status="failed")

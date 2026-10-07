@@ -21,6 +21,10 @@ def _normalize_dest_db(db_type: str | None) -> str:
         "postgres",
         "pg",
         "postgresql",
+        # pgvector is PostgreSQL plus the vector type. Leaving it off this
+        # set sent every DECIMAL/INTEGER/BOOLEAN through the unknown-dialect
+        # TEXT default, so typed values survived only as text inside content.
+        "pgvector",
         "cockroachdb",
         "cockroach",
         "timescaledb",

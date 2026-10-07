@@ -1768,8 +1768,10 @@ def pause_cdc_card() -> CapabilityCard | None:
             "connection, unless a CDC schedule still owns the route. A cancel "
             "request leaves the slot while the worker still holds the CDC "
             "lease. Deleting the CDC schedule also runs "
-            "pg_drop_replication_slot. A failed CDC job keeps the slot so "
-            "resume can read the change still in the log."
+            "pg_drop_replication_slot. A failed one-shot CDC job drops the "
+            "slot when the failure is not retriable and the worker has "
+            "closed the replication connection. A retriable failure keeps "
+            "the slot so resume can read the change still in the log."
         ),
         source_module=(
             "services/schedule_runner.py · _dispatch_transfer · "

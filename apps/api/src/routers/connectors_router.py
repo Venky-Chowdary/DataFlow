@@ -809,6 +809,14 @@ async def cancel_transfer_job(job_id: str, request: Request):
         # path ever overwrites it — so a cancel cannot be lost to a race with
         # the worker's next chunk update.
         mongo.request_job_cancel(job_id)
+        queue_release: dict[str, Any] = {"queue": "not_attempted"}
+        try:
+            from services.worker_fleet import cancel_queued_job
+
+            queue_release = cancel_queued_job(job_id)
+        except Exception as exc:
+            logger.warning("Queue cancel failed for %s: %s", job_id, exc)
+            queue_release = {"queue": "unavailable"}
         mongo.update_job_status(
             job_id, "cancelled",
             phase="cancelled",
@@ -836,6 +844,7 @@ async def cancel_transfer_job(job_id: str, request: Request):
             "status": "cancelled",
             "message": "Cancellation requested",
             "cdc_slot_release": slot_release,
+            "queue_release": queue_release,
         }
     except HTTPException:
         raise

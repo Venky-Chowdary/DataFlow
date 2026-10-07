@@ -215,22 +215,43 @@ def release_finished_cdc_slot(
     source_cfg: dict[str, Any] | None = None,
     job_id: str = "",
     worker_closed: bool = False,
+    retriable: bool = False,
 ) -> dict[str, Any]:
-    """Drop the Postgres slot behind a completed or cancelled one-shot CDC job.
+    """Drop the Postgres slot behind a finished one-shot CDC job.
+
+    Completed and cancelled one-shots drop the slot. A failed one-shot
+    drops it only when the failure is not retriable and the worker has
+    closed the replication connection — a 1292 or a fence refusal will
+    not resume on the same slot, and leaving it holds WAL. A retriable
+    failure (the slot still has the change, or the lease store blipped)
+    keeps the slot. A CDC schedule, including a paused one, keeps it.
 
     Never raises. A failed release is logged so the operator can drop the
-    slot by hand. Does not drop when a CDC schedule still owns the route,
-    and does not clear the watermark unless the slot was actually dropped.
+    slot by hand. Does not clear the watermark unless the slot was
+    actually dropped.
 
     ``worker_closed`` is set by the worker after ``close()`` has released
     the replication connection. A cancel request that arrives while the
     worker still holds the lease leaves the slot; peek mode makes that
     slot look idle between polls.
     """
-    if reason not in {"completed", "cancelled"}:
+    if reason not in {"completed", "cancelled", "failed"}:
         return {"released": False, "reason": "not_terminal"}
     job = dict(job or {})
     jid = job_id or str(job.get("id") or job.get("_id") or "")
+    if reason == "failed":
+        if retriable:
+            return {
+                "released": False,
+                "reason": "retriable_failure",
+                "job_id": jid,
+            }
+        if not worker_closed:
+            return {
+                "released": False,
+                "reason": "worker_not_closed",
+                "job_id": jid,
+            }
     try:
         if _schedule_owns_slot(job, schedule_id=schedule_id, job_id=jid):
             return {"released": False, "reason": "schedule_owns_slot", "job_id": jid}

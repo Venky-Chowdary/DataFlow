@@ -523,7 +523,12 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
 
     if _parse_datetime(s, date_locale=active_locale) is not None:
         # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
-        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
+        # pgoutput and some CSV exports use a hours-only offset (``+00``, ``+05``).
+        # Requiring four digits classified those instants as text, and the plan
+        # then blocked the real timestamptz column as a conversion to TEXT.
+        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I) or re.search(
+            r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", s
+        ):
             return "TIMESTAMPTZ"
         return "TIMESTAMP"
 

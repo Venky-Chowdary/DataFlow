@@ -91,6 +91,38 @@ class WriteResult(_WriteResult):
     load_method: str = "weaviate_upsert"
 
 
+def list_classes(
+    *,
+    host: str = "",
+    port: int = 8080,
+    api_key: str = "",
+    ssl: bool = False,
+    connection_string: str = "",
+    **_kwargs: Any,
+) -> list[str]:
+    """Class names from ``GET /v1/schema``. An empty list is an empty cluster.
+
+    A non-200 response raises. Listing classes does not make Weaviate a
+    supported source.
+    """
+    session = _requests_session()
+    resp = session.get(
+        f"{_base_url(host, port, ssl, connection_string)}/v1/schema",
+        headers=_headers(api_key),
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Weaviate schema list returned {resp.status_code}")
+    body = resp.json() if resp.content else {}
+    classes = body.get("classes") if isinstance(body, dict) else None
+    names = [
+        str(row.get("class")).strip()
+        for row in (classes or [])
+        if isinstance(row, dict) and str(row.get("class") or "").strip()
+    ]
+    return sorted(set(names))
+
+
 def test_weaviate(
     *,
     host: str = "",

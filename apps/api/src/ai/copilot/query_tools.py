@@ -127,6 +127,7 @@ _BATCH_SAMPLE_DRIVERS = frozenset({
     "opensearch",
     "qdrant",
     "kafka",
+    "neo4j",
     "redis",
     "s3",
     "gcs",

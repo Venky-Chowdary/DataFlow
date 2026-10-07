@@ -23,6 +23,7 @@ from services.dest_precount import (
 )
 from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
+    CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -2691,7 +2692,33 @@ def run_reconciliation(
     ):
         # Same-engine catch-up used engine digest above. Cross-engine (or
         # digest unavailable) must not compare last-batch ack to full dest.
+        # A finished value scan checks that each source row's fingerprint
+        # is on the dest. If the scan cannot finish, stay on COUNT and say
+        # value fidelity was not compared.
         keyed_scope = CDC_SOURCE_IMAGE_COUNT
+        if source_endpoint is not None and source_endpoint.kind == "database":
+            from services.cdc_value_digest import prove_cdc_values
+
+            src_cfg_v = resolve_connector_config(source_endpoint)
+            src_type_v = resolve_driver_type(
+                str(src_cfg_v.get("type") or source_endpoint.format or "")
+            )
+            proof = prove_cdc_values(
+                source_type=src_type_v,
+                source_cfg=src_cfg_v,
+                source_table=str(
+                    source_endpoint.table or source_endpoint.collection or ""
+                ),
+                dest_type=str(db_type or ""),
+                dest_cfg=dict(cfg),
+                dest_table=str(table_name or ""),
+                mappings=list(mapping_dicts or []),
+                dest_types=dest_types,
+            )
+            if proof is not None:
+                keyed_scope = CDC_SOURCE_IMAGE_VALUES
+                source_checksum = proof.source_digest
+                target_checksum = proof.dest_digest
 
     # A keyed merge into an occupied destination grows it by ``inserts -
     # deletes``, not by the batch. When the batch digest could not be re-scoped

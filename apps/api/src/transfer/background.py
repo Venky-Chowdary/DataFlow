@@ -86,6 +86,9 @@ def _run_transfer(
 def run_fleet_job(job_id: str) -> None:
     """Worker-fleet handler: reconstruct TransferRequest from the Mongo job and execute."""
     mongo = get_mongodb_service()
+    if mongo.is_cancel_requested(job_id):
+        logger.info("Skipping job %s — cancelled before the worker started it", job_id)
+        return
     job = mongo.get_job(job_id)
     if not job:
         raise ValueError(f"Unknown job {job_id}")

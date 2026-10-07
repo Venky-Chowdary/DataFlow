@@ -6,6 +6,26 @@ from connectors.base import ConnectResult
 from connectors.gcs_common import gcs_client
 
 
+def gcs_blob_exists(cfg: dict, bucket: str, key: str) -> bool | None:
+    """True when the object is in the bucket, False when it is absent.
+
+    ``None`` means the check did not run. A failed list must not be treated
+    as create-new; a proven-absent key is create-new.
+    """
+    blob_name = (key or "").strip()
+    bucket_name = (bucket or "").strip()
+    if not blob_name or not bucket_name:
+        return None
+    try:
+        from connectors.gcs_common import gcs_client, gcs_emulator_kwargs
+
+        client = gcs_client(cfg)
+        probe_kw = gcs_emulator_kwargs(cfg)
+        return bool(client.bucket(bucket_name).blob(blob_name).exists(**probe_kw))
+    except Exception:
+        return None
+
+
 def test_gcs(
     *,
     host: str,
@@ -64,11 +84,22 @@ def test_gcs(
                 ),
                 driver="google-cloud-storage",
             )
-        keys = [b.name for b in client.list_blobs(bucket, max_results=100)]
+        try:
+            keys = [b.name for b in client.list_blobs(bucket, max_results=100)]
+        except Exception as exc:
+            return ConnectResult(
+                ok=True,
+                tables=[],
+                message=(
+                    f"GCS bucket `{bucket}` reachable, but listing objects failed: "
+                    f"{exc}"
+                ),
+                driver="google-cloud-storage",
+            )
         return ConnectResult(
             ok=True,
-            tables=keys or [bucket],
-            message=f"GCS bucket `{bucket}` reachable — {len(keys) or 1} object(s) listed.",
+            tables=keys,
+            message=f"GCS bucket `{bucket}` reachable — {len(keys)} object(s) listed.",
             driver="google-cloud-storage",
         )
     except Exception as exc:

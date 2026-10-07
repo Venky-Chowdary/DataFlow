@@ -2573,7 +2573,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for row in mapped_rows:
             if not unique_key_row_in_scope(row, pk_target, unique_keys=unique_keys):
                 continue
-            raw = str(row.get(pk_target, "") or "")
+            raw = str(_row_cell(row, pk_target, "") or "")
             val = unique_equality_key(
                 raw if raw else None,
                 dest_ddl,

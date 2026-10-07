@@ -32,6 +32,7 @@ from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
+    CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
@@ -276,6 +277,20 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["migration_proven"] = False
         out["population_proof"] = False
         out["checksum_match"] = False
+        return out
+
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES:
+        # Source-row fingerprints found on the dest. Dest extras are allowed.
+        # This is not full_checksum and not platform exactly-once.
+        matched = bool(out.get("passed")) and bool(out.get("checksum_match"))
+        out["phase"] = "post_write_verified" if matched else "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["assurance_level"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["migration_proven"] = False
+        out["population_proof"] = matched
+        out["checksum_match"] = matched
         return out
 
     if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
@@ -876,6 +891,7 @@ def reconcile(
                 f"CDC catch-up dest COUNT={target_rows:,} vs source image "
                 f"COUNT={expected_rows:,}{extra}{short_note}. Last-batch writer "
                 "checksum is diagnostic — not a source-image population digest. "
+                "Value fidelity was not compared. "
                 "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
                 "Not platform exactly-once."
             ),
@@ -887,6 +903,40 @@ def reconcile(
             population_proof=False,
             assurance_level=CDC_SOURCE_IMAGE_COUNT,
             checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+            target_rows_before=target_rows_before,
+        )
+    if checksum_scope == CDC_SOURCE_IMAGE_VALUES:
+        dest_short = target_rows < expected_rows
+        checksum_match = bool(source_checksum) and source_checksum == target_checksum
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        short_note = (
+            " Destination is short of the live source image." if dest_short else ""
+        )
+        value_note = (
+            " Mapped source-row fingerprints are present on the destination."
+            if checksum_match
+            else " One or more source-row fingerprints are missing on the destination."
+        )
+        return ReconciliationReport(
+            passed=(not dest_short) and checksum_match,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
+                "Dest extras are not a failure. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short,
+            assurance_level=CDC_SOURCE_IMAGE_VALUES,
+            checksum_scope=CDC_SOURCE_IMAGE_VALUES,
             target_rows_before=target_rows_before,
         )
     keyed_identity = (

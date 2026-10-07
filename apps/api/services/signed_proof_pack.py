@@ -114,7 +114,11 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
     Operational ``passed`` (rows landed) is a different question — a coerced
     write can complete and still be forbidden from claiming ``migration_proven``.
     """
-    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT, WRITTEN_BATCH_KEYS
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        WRITTEN_BATCH_KEYS,
+    )
 
     ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
     if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
@@ -136,7 +140,10 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
             # CDC COUNT-only: leftover dest keys sit outside the source-image
             # COUNT proof. Changelog is not S; leftover MERGE is a hard no-op.
             # checksum_match is False by design — do not claim full_checksum.
-            elif str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+            elif str(recon.get("checksum_scope") or "") in {
+                CDC_SOURCE_IMAGE_COUNT,
+                CDC_SOURCE_IMAGE_VALUES,
+            }:
                 skip_veto = True
         if not skip_veto:
             return _ladder_fail_veto(ladder)
@@ -421,7 +428,26 @@ def classify_post_write_assurance(
             ),
         }
 
-    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT, LAST_STREAM_CHECKSUM
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        LAST_STREAM_CHECKSUM,
+    )
+
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES and passed:
+        return {
+            "claim_level": CDC_SOURCE_IMAGE_VALUES,
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": bool(checksum_match),
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": bool(checksum_match),
+            "note": (
+                "CDC source-image value fingerprints are present on the destination. "
+                "Dest extras are not a failure. Not full_checksum. "
+                "At-least-once upsert. Not platform exactly-once."
+            ),
+        }
 
     if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT and passed:
         return {

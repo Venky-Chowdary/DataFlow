@@ -1011,15 +1011,23 @@ def scan_rows(
             example_rows[idx].append(row_no)
             example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
 
+    from services.column_case import lookup_row_value
+
+    _absent = object()
+
     def _scan_one_row(row: Any, row_no: int, *, widenable_only: bool) -> None:
         if not isinstance(row, Mapping):
             return
         for idx, source, fit_reason in probes:
             if widenable_only and bounded[idx].carrier not in _WIDENABLE_CARRIERS:
                 continue
-            if source not in row:
+            # Oracle/Snowflake catalogs and Map disagree on case. An exact
+            # ``source not in row`` skipped the cell, and a later exact
+            # ``row.get`` read it as empty — a NOT NULL check on the folded
+            # name then saw every row as null.
+            value = lookup_row_value(row, source, _absent)
+            if value is _absent:
                 continue
-            value = row.get(source)
             if value is None or is_missing_sentinel(value):
                 continue
             # Blank strings are a nullability question for width/typed

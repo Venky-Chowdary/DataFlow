@@ -1,0 +1,221 @@
+"""CDC catch-up value proof: source-row fingerprints must be on the dest.
+
+COUNT matching does not see an in-place update. This module fingerprints
+each source row through the destination bind and checks that fingerprint
+is present on the destination. Extra dest rows do not fail (a changelog
+is not the source table; leftover MERGE is a no-op).
+
+A scan that cannot finish returns ``None``. The caller then stays on
+``cdc_source_image_count`` and says value fidelity was not compared.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from typing import Any
+
+
+_IDENTITY_TRANSFORMS = frozenset(
+    {"", "none", "identity", "passthrough"}
+)
+_PAGE = 500
+_MAX_PAGES = 400
+
+
+@dataclass(frozen=True)
+class CdcValueProof:
+    source_digest: str
+    dest_digest: str
+    missing: int
+    source_rows: int
+    dest_rows: int
+
+    @property
+    def matched(self) -> bool:
+        return self.missing == 0 and bool(self.source_digest) and (
+            self.source_digest == self.dest_digest
+        )
+
+
+def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]] | None:
+    """``(source, dest)`` when every mapped column is a pure carry.
+
+    A transform is supposed to change the value. Comparing those cells
+    would fail a correct route, so the scan is declined.
+    """
+    if not mappings:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for raw in mappings:
+        if not isinstance(raw, dict):
+            return None
+        if raw.get("intentional_omit"):
+            continue
+        source = str(raw.get("source") or "").strip()
+        target = str(raw.get("target") or raw.get("source") or "").strip()
+        transform = str(raw.get("transform") or "").strip().lower()
+        if not source or not target:
+            return None
+        if transform not in _IDENTITY_TRANSFORMS:
+            return None
+        pairs.append((source, target))
+    return pairs or None
+
+
+def _fingerprint_row(
+    row: dict[str, Any],
+    columns: list[str],
+    *,
+    engine: str,
+    dest_types: dict[str, str] | None,
+) -> str:
+    from services.reconciliation import canonical_checksum
+
+    return canonical_checksum(
+        [row],
+        columns,
+        dest_db_type=engine,
+        dest_types=dest_types,
+    )
+
+
+def compare_row_sets(
+    source_rows: list[dict[str, Any]],
+    dest_rows: list[dict[str, Any]],
+    columns: list[str],
+    *,
+    engine: str,
+    dest_types: dict[str, str] | None = None,
+) -> CdcValueProof:
+    """Source fingerprints must be a subset of dest fingerprints."""
+    src = {
+        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types)
+        for row in source_rows
+    }
+    dst = {
+        _fingerprint_row(row, columns, engine=engine, dest_types=dest_types)
+        for row in dest_rows
+    }
+    missing = src - dst
+    source_digest = hashlib.sha256(
+        "\n".join(sorted(src)).encode()
+    ).hexdigest()
+    if missing:
+        dest_digest = hashlib.sha256(
+            "\n".join(sorted(dst)).encode()
+        ).hexdigest()
+        if dest_digest == source_digest:
+            dest_digest = "0" * 64
+    else:
+        dest_digest = source_digest
+    return CdcValueProof(
+        source_digest=source_digest,
+        dest_digest=dest_digest,
+        missing=len(missing),
+        source_rows=len(source_rows),
+        dest_rows=len(dest_rows),
+    )
+
+
+def _as_dicts(headers: list[str], rows: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            out.append(row)
+            continue
+        cells = list(row)
+        out.append(
+            {
+                headers[i]: cells[i] if i < len(cells) else None
+                for i in range(len(headers))
+            }
+        )
+    return out
+
+
+def _rename(rows: list[dict[str, Any]], pairs: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    renamed: list[dict[str, Any]] = []
+    for row in rows:
+        folded = {str(k).lower(): v for k, v in row.items()}
+        renamed.append(
+            {
+                dest: folded.get(src.lower())
+                for src, dest in pairs
+            }
+        )
+    return renamed
+
+
+def _scan_table(
+    db_type: str,
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str],
+) -> list[dict[str, Any]] | None:
+    from src.transfer.batch_readers import CONTINUATION_KWARG, _read_batch_impl
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    token_kwarg = CONTINUATION_KWARG.get(resolve_driver_type(db_type), "")
+    token: Any = None
+    offset = 0
+    collected: list[dict[str, Any]] = []
+    for _page in range(_MAX_PAGES):
+        result = _read_batch_impl(
+            db_type,
+            cfg,
+            table,
+            columns,
+            offset,
+            _PAGE,
+            **({token_kwarg: token} if token_kwarg and token is not None else {}),
+        )
+        batch = result[0] if isinstance(result, tuple) else result
+        if token_kwarg:
+            token = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+        headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
+        rows = list(getattr(batch, "rows", None) or [])
+        if not rows:
+            return collected
+        if not headers:
+            return None
+        collected.extend(_as_dicts(headers, rows))
+        offset += len(rows)
+        if len(rows) < _PAGE:
+            return collected
+        if token_kwarg and token is None:
+            return None
+    return None
+
+
+def prove_cdc_values(
+    *,
+    source_type: str,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    mappings: list[dict[str, Any]] | None,
+    dest_types: dict[str, str] | None = None,
+) -> CdcValueProof | None:
+    """Scan both tables, or ``None`` when the scan cannot be a proof."""
+    pairs = _identity_pairs(mappings)
+    if pairs is None or not source_table or not dest_table:
+        return None
+    columns = [dest for _src, dest in pairs]
+    source_columns = [src for src, _dest in pairs]
+    try:
+        source_rows = _scan_table(source_type, source_cfg, source_table, source_columns)
+        dest_rows = _scan_table(dest_type, dest_cfg, dest_table, columns)
+    except Exception:
+        return None
+    if source_rows is None or dest_rows is None:
+        return None
+    return compare_row_sets(
+        _rename(source_rows, pairs),
+        _rename(dest_rows, [(column, column) for column in columns]),
+        columns,
+        engine=dest_type,
+        dest_types=dest_types,
+    )

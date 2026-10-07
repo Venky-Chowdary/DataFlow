@@ -147,6 +147,20 @@ def _attach_create_on_write_dest(
         return out
     name = endpoint.table or endpoint.collection or ""
     exists = False
+    listed = _specialty_object_list(fmt, cfg)
+    if listed is not None:
+        connected, names, kind, list_message = listed
+        out["objects"] = [{"name": item, "type": kind} for item in names]
+        if not connected:
+            # A failed list is not an empty cluster and not create-new.
+            out["connected"] = False
+            out["message"] = list_message
+            out["table_exists"] = None
+            return out
+        if name:
+            folded = {item.lower() for item in names}
+            exists = name in names or name.lower() in folded
+        out["message"] = list_message
     if fmt in {"iceberg", "apache_iceberg"} and name:
         try:
             from connectors.iceberg_writer import _resolve_iceberg_table_dir
@@ -182,6 +196,71 @@ def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
         if not out.get("message"):
             out["message"] = "Destination schema probe failed"
     return out
+
+
+def _specialty_object_list(
+    fmt: str, cfg: dict
+) -> tuple[bool, list[str], str, str] | None:
+    """Object names for engines that are not SQL catalogs.
+
+    ``None`` means this helper does not own ``fmt``. A successful call with
+    an empty name list is an empty cluster. Connection and import errors
+    are a failed list, not a silent empty one.
+    """
+    kind = (fmt or "").strip().lower()
+    try:
+        if kind == "kafka":
+            from connectors.kafka_reader import list_topics
+
+            names = list_topics(cfg)
+            return True, names, "topic", f"Kafka connected — {len(names)} topic(s)"
+        if kind == "neo4j":
+            from connectors.neo4j import list_labels
+
+            names = list_labels(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 7474),
+                database=str(cfg.get("database") or "neo4j"),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+            )
+            return True, names, "label", f"Neo4j connected — {len(names)} label(s)"
+        if kind == "qdrant":
+            from connectors.qdrant_writer import list_collections
+
+            names = list_collections(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 6333),
+                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+            )
+            return (
+                True,
+                names,
+                "collection",
+                f"Qdrant connected — {len(names)} collection(s)",
+            )
+        if kind == "weaviate":
+            from connectors.weaviate_writer import list_classes
+
+            names = list_classes(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 8080),
+                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+                connection_string=str(cfg.get("connection_string") or ""),
+            )
+            return True, names, "class", f"Weaviate connected — {len(names)} class(es)"
+    except Exception as exc:
+        label = {
+            "kafka": "Kafka topic",
+            "neo4j": "Neo4j label",
+            "qdrant": "Qdrant collection",
+            "weaviate": "Weaviate class",
+        }.get(kind, kind)
+        return False, [], "object", f"{label} list failed: {exc}"
+    return None
 
 
 def introspect_endpoint(
@@ -472,6 +551,11 @@ def introspect_endpoint(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         key = endpoint.table or endpoint.collection
         if key and probe.ok:
+            from connectors.s3 import s3_object_exists
+
+            exists = s3_object_exists(cfg, str(cfg.get("database") or ""), str(key))
+            if exists is not None:
+                out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
         return out
 
@@ -490,6 +574,13 @@ def introspect_endpoint(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         key = endpoint.table or endpoint.collection
         if key and probe.ok:
+            from connectors.gcs import gcs_blob_exists
+
+            exists = gcs_blob_exists(
+                cfg, str(cfg.get("database") or ""), str(key)
+            )
+            if exists is not None:
+                out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
         return out
 
@@ -659,6 +750,14 @@ def introspect_endpoint(
 
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
+
+    specialty = _specialty_object_list(fmt, cfg)
+    if specialty is not None:
+        connected, names, kind, message = specialty
+        out["connected"] = connected
+        out["objects"] = [{"name": name, "type": kind} for name in names]
+        out["message"] = message
+        return out
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out

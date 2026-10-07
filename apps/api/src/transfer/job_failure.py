@@ -232,6 +232,53 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
     return details, extras
 
 
+def _release_failed_cdc_slot(
+    mongo: Any,
+    job_id: str,
+    request: Any,
+    *,
+    job: dict[str, Any] | None = None,
+) -> None:
+    """Drop a one-shot Postgres slot after a non-retriable CDC failure.
+
+    The reader closes in its own finally before this runs, so the slot is
+    inactive unless a schedule still owns the route. A retriable failure
+    never reaches this helper. Historical slots are not enumerated here.
+    """
+    try:
+        loaded = job if isinstance(job, dict) and job else (mongo.get_job(job_id) or {})
+    except Exception as exc:
+        logger.warning("CDC slot release skipped; job %s unread: %s", job_id, exc)
+        return
+    schedule_id = ""
+    source_cfg = None
+    if request is not None:
+        schedule_id = str(getattr(request, "schedule_id", "") or "")
+        source = getattr(request, "source", None)
+        if source is not None:
+            try:
+                from src.transfer.adapters import resolve_connector_config
+
+                source_cfg = resolve_connector_config(source)
+            except Exception as exc:
+                logger.debug("CDC failure source config unread: %s", exc)
+                source_cfg = None
+    try:
+        from services.cdc_catchup import release_finished_cdc_slot
+
+        release_finished_cdc_slot(
+            loaded,
+            reason="failed",
+            schedule_id=schedule_id,
+            source_cfg=source_cfg,
+            job_id=job_id,
+            worker_closed=True,
+            retriable=False,
+        )
+    except Exception as exc:
+        logger.warning("CDC slot release after failure failed for %s: %s", job_id, exc)
+
+
 def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
     """Drop a one-shot Postgres slot once the cancelled worker has closed it.
 
@@ -358,6 +405,8 @@ def _fail_runtime_job(
         status,
         **status_kwargs,
     )
+    if not cancelled and not bool(error_details.get("retriable")):
+        _release_failed_cdc_slot(mongo, job_id, request, job=prev)
     if lineage is not None and not cancelled:
         lineage.emit_run_failed(
             run_id=job_id,

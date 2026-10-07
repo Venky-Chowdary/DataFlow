@@ -180,7 +180,7 @@ def test_sftp_handshake_retries_without_strict_kex(monkeypatch):
     calls: list[bool] = []
 
     class _Transport:
-        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True, **_kwargs):
             self.strict_kex = strict_kex
             self.server_sig_algs = server_sig_algs
             calls.append(strict_kex)
@@ -227,7 +227,7 @@ def test_sftp_handshake_retries_after_eof_before_auth(monkeypatch):
     calls: list[tuple[bool, bool]] = []
 
     class _Transport:
-        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True, **_kwargs):
             self.strict_kex = strict_kex
             self.server_sig_algs = server_sig_algs
             calls.append((strict_kex, server_sig_algs))
@@ -263,7 +263,7 @@ def test_sftp_host_key_refusal_is_not_retried(monkeypatch):
     calls: list[bool] = []
 
     class _Transport:
-        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True, **_kwargs):
             self.strict_kex = strict_kex
             self.server_sig_algs = server_sig_algs
             calls.append(strict_kex)

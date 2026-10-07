@@ -237,9 +237,20 @@ def test_schedule_and_failure_keep_the_slot(monkeypatch) -> None:
         reason="failed",
         source_cfg={"type": "postgresql", "database": "qa"},
         job_id="job-x",
+        retriable=True,
     )
     assert failed["released"] is False
-    assert failed["reason"] == "not_terminal"
+    assert failed["reason"] == "retriable_failure"
+
+    still_open = release_finished_cdc_slot(
+        {"cdc_slot_name": "df_orders_slot"},
+        reason="failed",
+        source_cfg={"type": "postgresql", "database": "qa"},
+        job_id="job-x",
+        worker_closed=False,
+    )
+    assert still_open["released"] is False
+    assert still_open["reason"] == "worker_not_closed"
 
 
 def test_active_slot_is_not_cleared(monkeypatch) -> None:

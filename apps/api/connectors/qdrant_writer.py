@@ -152,6 +152,38 @@ class WriteResult(_WriteResult):
     load_method: str = "qdrant_upsert"
 
 
+def list_collections(
+    *,
+    host: str = "",
+    port: int = 6333,
+    api_key: str = "",
+    ssl: bool = False,
+    **_kwargs: Any,
+) -> list[str]:
+    """Collection names. An empty list is an empty cluster.
+
+    A non-200 response raises so the caller can say the list failed
+    instead of reporting a silent empty inventory.
+    """
+    session = _requests_session()
+    resp = session.get(
+        f"{_base_url(host, port, ssl)}/collections",
+        headers=_headers(api_key),
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Qdrant collection list returned {resp.status_code}")
+    body = resp.json() if resp.content else {}
+    result = body.get("result") if isinstance(body, dict) else None
+    rows = (result or {}).get("collections") if isinstance(result, dict) else None
+    names = [
+        str(row.get("name")).strip()
+        for row in (rows or [])
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
+    return sorted(set(names))
+
+
 def test_qdrant(
     *,
     host: str = "",

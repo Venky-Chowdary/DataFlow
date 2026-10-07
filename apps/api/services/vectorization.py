@@ -8,6 +8,8 @@ are cached by content hash to avoid re-embedding unchanged rows.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 import hashlib
 import json
 import logging
@@ -168,6 +170,7 @@ def _sentence_transformer_or_fallback(model_name: str) -> Embedder:
             "TF-IDF fallback (%s). Install requirements-rag.txt for MiniLM.",
             model_name,
         )
+        note_embedding_fallback("tfidf_fallback", model_name)
         return _CatalogFallbackEmbedder()
     return _SentenceTransformerEmbedder(model_name=short)
 
@@ -263,6 +266,35 @@ def chunk_text(
 # In-process L1 cache for repeated identical content within a process.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
 
+# Set when this task embedded with a fallback instead of the configured model.
+# ``_writer_diagnostics`` copies it onto the job warning list and clears it,
+# so the operator sees the substitution on the run rather than only inside
+# row metadata.
+_embedding_fallback_notice: ContextVar[str | None] = ContextVar(
+    "df_embedding_fallback_notice", default=None
+)
+
+
+def note_embedding_fallback(backend: str, model: str | None = None) -> None:
+    """Record that this write did not use the configured semantic model."""
+    name = str(backend or "").strip()
+    if not name or name == "sentence_transformers":
+        return
+    configured = str(model or "sentence-transformers/all-MiniLM-L6-v2")
+    _embedding_fallback_notice.set(
+        f"Vector embeddings used the {name} fallback instead of {configured}. "
+        "Install requirements-rag.txt for MiniLM. Each row is stamped "
+        "_df_embedding_backend so this is not a silent model substitution."
+    )
+
+
+def take_embedding_fallback_notice() -> str | None:
+    """Return the fallback warning once, for the job that just embedded."""
+    notice = _embedding_fallback_notice.get()
+    if notice:
+        _embedding_fallback_notice.set(None)
+    return notice
+
 
 def _cache_key(text: str, model: str | None, backend: str = "") -> str:
     return hashlib.sha256(
@@ -275,6 +307,7 @@ def _annotate_embed_backend(meta: dict[str, Any], model: str | None) -> None:
     backend = str(getattr(_get_embedder(model), "backend", "") or "")
     if backend and backend != "sentence_transformers":
         meta["_df_embedding_backend"] = backend
+        note_embedding_fallback(backend, model)
 
 
 def clear_memory_cache() -> int:

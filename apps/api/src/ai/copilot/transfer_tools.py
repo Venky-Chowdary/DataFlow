@@ -428,6 +428,91 @@ def _stamp_zone_transform(
     return out
 
 
+def _sign_required_risk_contracts(
+    mappings: list[dict[str, Any]],
+    acceptance: dict[str, Any],
+    *,
+    table: str,
+) -> list[dict[str, Any]]:
+    """Sign a continue-policy contract only on mappings a gate already requires.
+
+    Omitted acceptance signs nothing. A partial acceptance is refused: the
+    operator named the action and left out who approved it or why. Safe
+    mappings are never given a contract they do not need.
+    """
+    if not isinstance(acceptance, dict) or not acceptance:
+        return list(mappings or [])
+    from preflight.risk_contract import (
+        mapping_is_structural_review,
+        mapping_requires_risk_contract,
+    )
+    from services.decision_kernel import is_lossy_coercion
+    from services.migration_risk_contract import (
+        CONTINUE_POLICIES,
+        create_migration_risk_contract,
+    )
+
+    approved_by = str(acceptance.get("approved_by") or "").strip()
+    reason = str(acceptance.get("reason") or "").strip()
+    policy = str(acceptance.get("execution_policy") or "").strip().upper()
+    if policy == "CAST_FAIL_QUARANTINE":
+        policy = "CAST_AND_CONTINUE"
+    if not approved_by or not reason or not policy:
+        raise ValueError(
+            "risk_acceptance needs approved_by, reason, and execution_policy. "
+            "Nothing was signed."
+        )
+    if policy not in CONTINUE_POLICIES:
+        raise ValueError(
+            f"execution_policy {policy} does not clear a gate. "
+            "Use QUARANTINE_ROW, CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, "
+            "SKIP_ROW, or STOP_COLUMN."
+        )
+    named = {
+        str(c).strip()
+        for c in (acceptance.get("columns") or [])
+        if str(c or "").strip()
+    }
+    out: list[dict[str, Any]] = []
+    signed = 0
+    for raw in mappings or []:
+        row = dict(raw)
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "")
+        if named and source not in named and target not in named:
+            out.append(row)
+            continue
+        src_t = str(row.get("source_type") or "")
+        tgt_t = str(row.get("target_type") or "")
+        needs = mapping_requires_risk_contract(row) or mapping_is_structural_review(row)
+        if src_t and tgt_t:
+            needs = needs or bool(is_lossy_coercion(src_t, tgt_t))
+        if not needs or row.get("risk_contract") or row.get("riskContract"):
+            out.append(row)
+            continue
+        contract = create_migration_risk_contract(
+            column=source or target,
+            source_type=src_t,
+            destination_type=tgt_t,
+            approved_by=approved_by,
+            reason=reason,
+            execution_policy=policy,
+            target=target or source,
+            table=table,
+            fidelity=str(row.get("fidelity") or ""),
+            transform=row.get("transform"),
+        )
+        row["risk_contract"] = contract.to_dict()
+        signed += 1
+        out.append(row)
+    if named and signed == 0:
+        raise ValueError(
+            "risk_acceptance named columns that do not require a Migration Risk Contract. "
+            "Nothing was signed."
+        )
+    return out
+
+
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -456,6 +541,7 @@ def plan_transfer(
     applied_rules: list[str] | None = None,
     cadence: str = "",
     all_tables: bool = False,
+    risk_acceptance: dict[str, Any] | None = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -664,6 +750,16 @@ def plan_transfer(
         row_rules["cursor_semantics"] = str(contracts[0]["cursor_semantics"])
     if contracts and contracts[0].get("cursor_inferred"):
         row_rules["cursor_inferred"] = True
+
+    if risk_acceptance:
+        try:
+            mappings = _sign_required_risk_contracts(
+                mappings,
+                risk_acceptance,
+                table=dst_table,
+            )
+        except ValueError as exc:
+            return _tool_result(tool, success=False, error=str(exc))
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -1514,6 +1610,7 @@ def start_transfer(
     applied_rules: list[str] | None = None,
     cadence: str = "",
     all_tables: bool = False,
+    risk_acceptance: dict[str, Any] | None = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1542,6 +1639,7 @@ def start_transfer(
         applied_rules=applied_rules,
         cadence=cadence,
         all_tables=all_tables,
+        risk_acceptance=risk_acceptance,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)

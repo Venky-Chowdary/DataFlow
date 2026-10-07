@@ -165,6 +165,7 @@ def _normalize_engine(db_type: str) -> str:
         return "redshift"
     if engine in {
         "amazon_aurora_postgresql", "amazon_rds_postgresql", "supabase", "neon", "pgvector",
+        "timescaledb", "timescale",
     }:
         return "postgresql"
     if engine in {

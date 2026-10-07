@@ -313,6 +313,20 @@ def test_dest_authoritative_resume_fast_forwards_job_behind() -> None:
     assert resume == "0/300"
 
 
+def test_open_keeps_dest_fence_when_incoming_is_unleased() -> None:
+    """A second CDC run opens before the lease exists (incoming fence 0).
+
+    The dest already stored the previous lease generation. Open must keep
+    that fence. Apply still refuses a positive generation below it.
+    """
+    dest = DestWmView(committed_lsn="0/20", fence_epoch=4, apply_seq=2)
+    opened = plan_open_session(dest=dest, incoming_fence=0, job_resume={"lsn": "0/20"})
+    assert opened.fence_epoch == 4
+    assert opened.fence_raised is False
+    with pytest.raises(ExactlyOnceRouteError):
+        plan_open_session(dest=dest, incoming_fence=3, job_resume={"lsn": "0/20"})
+
+
 def test_stale_writer_fence_refuses_zombie() -> None:
     assert_writer_fence(5, 5)
     assert_writer_fence(6, 5)

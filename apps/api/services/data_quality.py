@@ -464,7 +464,11 @@ def run_integrity_audit(
         report.checks_passed += 1
         stats["primary_key"] = None
     else:
-        pk_idx = header_index.get(pk_source, 0)
+        from services.column_case import header_index as folded_header_index
+
+        pk_idx = folded_header_index(headers, pk_source)
+        if pk_idx is None:
+            pk_idx = header_index.get(pk_source, 0)
         pk_values = [
             present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
             for row in rows

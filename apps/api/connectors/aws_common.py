@@ -13,6 +13,24 @@ def aws_credentials(cfg: dict[str, Any]) -> tuple[str, str, str]:
     return region, access_key, secret_key
 
 
+def _explicit_service_port(cfg: dict[str, Any]) -> int | None:
+    """Port the operator typed, when it names a service rather than HTTPS.
+
+    ``0`` and ``443`` stay "no custom endpoint" so a region token such as
+    ``us-east-1`` is not turned into ``http://us-east-1:443``.
+    """
+    raw = cfg.get("port")
+    if raw in (None, "", 0, "0"):
+        return None
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if port in (0, 443):
+        return None
+    return port
+
+
 def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
     """Custom endpoint for DynamoDB Local or private AWS-compatible stacks."""
     explicit = (cfg.get("endpoint_url") or cfg.get("connection_string") or "").strip()
@@ -23,11 +41,16 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
         return host.rstrip("/")
     if host.endswith(".amazonaws.com"):
         return f"https://{host}"
-    # A host with no dots (e.g. ``us-east-1``) is an AWS region, not a network
-    # endpoint.  Leave endpoint_url empty so boto3 uses its default resolver
-    # (required for moto mocks and real AWS SDK endpoints).
+    # A host with no dots is an AWS region only when no service port was
+    # given (``us-east-1``). ``minio`` + ``9000`` is a Docker endpoint;
+    # treating it as a region dropped the host and port.
     if host and "." not in host and host not in ("localhost", "127.0.0.1", "host.docker.internal"):
-        return ""
+        port = _explicit_service_port(cfg)
+        if port is None:
+            return ""
+        ssl = cfg.get("ssl", False)
+        scheme = "https" if ssl else "http"
+        return f"{scheme}://{host}:{port}"
     # If host already includes a port, extract it so we don't duplicate the port param.
     if ":" in host:
         host, _, port_from_host = host.rpartition(":")
@@ -84,6 +107,10 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     }
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
-    if cfg.get("path_style") and service == "s3":
+    # MinIO and other custom endpoints require path-style addressing.
+    # Virtual-hosted style looks up ``bucket.endpoint`` and listing fails
+    # while a hand-typed GetObject can still succeed. Real AWS (no custom
+    # endpoint) stays on the SDK default.
+    if service == "s3" and (endpoint_url or cfg.get("path_style")):
         kwargs["config"] = Config(s3={"addressing_style": "path"})
     return boto3.client(service, **kwargs)

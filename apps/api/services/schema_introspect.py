@@ -125,6 +125,7 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
             "UUID": "UUID",
             "DATE": "DATE",
             "TIMESTAMP": "DATETIME",
+            "TIMESTAMPTZ": "TIMESTAMPTZ",
             "TIME": "TIME",
             "BOOLEAN": "BOOLEAN",
             "VARCHAR": "TEXT",
@@ -4887,6 +4888,33 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     return out
 
 
+def _unbound_sampled_decimal(carrier: str) -> str:
+    """Drop a precision invented from a sample page.
+
+    Catalog ``DECIMAL(p,s)`` must not be passed here. A payload sample that
+    happened to fit ``DECIMAL(4,2)`` is not the column's contract.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    text = str(carrier or "").strip()
+    if not text:
+        return text
+    try:
+        logical = normalize_logical_type(text)
+    except (TypeError, ValueError):
+        return text
+    if logical != LOGICAL_DECIMAL:
+        return text
+    precision, _scale = parse_numeric_precision_scale(text)
+    if precision is None:
+        return text
+    return "DECIMAL"
+
+
 def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
     """Infer Qdrant payload fields from payload_schema and a bounded scroll.
 
@@ -4983,6 +5011,11 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
                 (inferred.get("logical_type") if isinstance(inferred, dict) else inferred)
                 or "TEXT"
             )
+            # A scroll of payload points is not a precision contract. DECIMAL(4,2)
+            # from the first page quarantined the rest of the collection on
+            # Postgres NUMERIC(4,2). Bare DECIMAL is unbounded there and the
+            # create-new floor elsewhere. A declared payload schema is kept.
+            carrier = _unbound_sampled_decimal(carrier)
         columns.append(
             {
                 "name": name,

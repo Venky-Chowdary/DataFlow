@@ -931,12 +931,22 @@ def _check_duplicate_keys(
         target_types=target_types,
     )
 
+    # Overwrite recreates the table. A heap (no destination PK or UNIQUE)
+    # may legally carry duplicate source keys — blocking it as "duplicate
+    # keys" refused a load the write would have accepted. Uniqueness is
+    # required only when the catalog key will still be enforced after the
+    # recreate, or when the sync mode itself is key-addressed.
+    dest_has_enforced_key = bool(destination_pk_columns) or any(
+        _unique_constraint_enforced(uk, dest_kind=dest_kind)
+        for uk in (destination_unique_keys or [])
+    )
+    overwrite_enforces_uniqueness = _is_overwrite_like(sync) and dest_has_enforced_key
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
     enforce_identity = bool(primary_key) and (
         schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
-        or not _is_append_like(sync)
+        or overwrite_enforces_uniqueness
+        or (not _is_append_like(sync) and not _is_overwrite_like(sync))
     )
     covering_single = False
     covering_composite_only = False
@@ -1117,7 +1127,7 @@ def _check_duplicate_keys(
         or covering_composite_only
         or schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
+        or overwrite_enforces_uniqueness
     )
     # Probe expected but did not complete → never invent population uniqueness.
     # Upsert/CDC/overwrite/dest-PK routes fail closed; append/create-new warns.
@@ -1186,8 +1196,8 @@ def _check_duplicate_keys(
         must_block = (
             schemaless
             or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-            or _is_overwrite_like(sync)
-            or not _is_append_like(sync)
+            or overwrite_enforces_uniqueness
+            or (not _is_append_like(sync) and not _is_overwrite_like(sync))
         )
         if must_block:
             return {

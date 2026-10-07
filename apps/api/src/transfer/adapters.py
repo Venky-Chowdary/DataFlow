@@ -141,6 +141,14 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    try:
+        from services.vectorization import take_embedding_fallback_notice
+
+        fallback = take_embedding_fallback_notice()
+        if fallback and fallback not in warnings:
+            warnings.append(fallback)
+    except ImportError:
+        pass
     # GA: never truncate rejected_details before quarantine / proof harvest.
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     out: dict[str, Any] = {

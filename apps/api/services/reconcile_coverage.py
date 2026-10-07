@@ -21,6 +21,10 @@ WRITTEN_BATCH_KEYS = "written_batch_keys"
 # checksum is not that population. Engine digest of source vs dest (same
 # engine) can still close full_checksum; this scope is COUNT-only honesty.
 CDC_SOURCE_IMAGE_COUNT = "cdc_source_image_count"
+# CDC catch-up where every source-row fingerprint was found on the dest.
+# Dest extras do not fail (changelog is not S). This is not full_checksum
+# and not platform exactly-once.
+CDC_SOURCE_IMAGE_VALUES = "cdc_source_image_values"
 # A quiet incremental poll: the reader found nothing past the watermark, so no
 # batch exists to compare and the proof is that the destination count did not
 # move. Population evidence must not be turned on such a report — comparing a
@@ -41,6 +45,7 @@ _NARROW_CHECKSUM_SCOPES: Final[frozenset[str]] = frozenset(
         WHOLE_TABLE_NOT_COMPARABLE,
         WRITTEN_BATCH_KEYS,
         CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
         NO_OP_DEST_UNCHANGED,
         LAST_STREAM_CHECKSUM,
     }
@@ -229,7 +234,8 @@ def is_cdc_source_image_count_report(report: dict[str, Any]) -> bool:
     MERGE is a hard no-op). The in-memory ladder must not treat those extras as
     a snapshot-identity failure, and must not claim ``full_checksum``.
     """
-    return str((report or {}).get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT
+    scope = str((report or {}).get("checksum_scope") or "")
+    return scope in {CDC_SOURCE_IMAGE_COUNT, CDC_SOURCE_IMAGE_VALUES}
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:

@@ -1840,6 +1840,7 @@ def _sa_type_for_logical(
             "cockroachdb",
             "yugabytedb",
             "timescale",
+            "timescaledb",
             "supabase",
             "neon",
             "risingwave",

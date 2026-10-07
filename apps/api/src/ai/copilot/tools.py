@@ -107,7 +107,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Create a saved connector from credentials the user provided "
             "(MySQL, PostgreSQL, MongoDB, etc.). Always confirm before saving. "
-            "Accepts a connection URL and/or host, port, database, username, password."
+            "Accepts a connection URL and/or host, port, database, username, password. "
+            "BigQuery also accepts service_account (the JSON key) and database as the project id."
         ),
         "input_schema": {
             "type": "object",
@@ -123,6 +124,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 "username": {"type": "string"},
                 "password": {"type": "string"},
                 "connection_string": {"type": "string"},
+                "service_account": {
+                    "type": "string",
+                    "description": (
+                        "Service-account JSON key for BigQuery or GCS. "
+                        "Paste the key file contents. It is stored on the "
+                        "server ledger and is not echoed in the preview."
+                    ),
+                },
                 "ssl": {"type": "boolean"},
                 "schema": {"type": "string"},
                 "message": {
@@ -424,6 +433,17 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Operator signature for mappings that already require a "
+                        "Migration Risk Contract. Requires approved_by, reason, "
+                        "and a continue execution_policy (QUARANTINE_ROW, "
+                        "CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, SKIP_ROW, "
+                        "STOP_COLUMN). Omitted means nothing is signed. "
+                        "FAIL_JOB does not clear a gate. Confirm is still required."
+                    ),
+                },
             },
             "required": [],
         },
@@ -500,6 +520,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
                 "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Same operator signature as plan_transfer. Applied only "
+                        "to mappings that already require a continue-policy "
+                        "Migration Risk Contract. Never signed when omitted."
+                    ),
+                },
             },
             "required": [],
         },
@@ -1386,6 +1414,7 @@ class DataPilotTools:
         username: str = "",
         password: str = "",
         connection_string: str = "",
+        service_account: str = "",
         ssl: bool = False,
         schema: str = "",
         message: str = "",
@@ -1404,6 +1433,7 @@ class DataPilotTools:
                 "username": username,
                 "password": password,
                 "connection_string": connection_string,
+                "service_account": service_account,
                 "ssl": ssl,
                 "schema": schema,
             },
@@ -1439,6 +1469,7 @@ class DataPilotTools:
                         "auth_mode": draft.get("auth_mode") or "",
                         "warehouse": draft.get("warehouse") or "",
                         "account": draft.get("account") or "",
+                        "service_account": draft.get("service_account") or "",
                     },
                 )
                 if not probe_ok:
@@ -1473,6 +1504,7 @@ class DataPilotTools:
             "auth_mode": draft.get("auth_mode") or "",
             "schema": draft.get("schema") or "",
             "has_password": bool(draft.get("password") or draft.get("connection_string")),
+            "has_service_account": bool(draft.get("service_account")),
             "test": probe_msg or "skipped",
         }
         from .ack_ledger import get_ack_ledger
@@ -2826,6 +2858,7 @@ class DataPilotTools:
         cadence: str = "",
         all_tables: bool = False,
         limit: int = 0,
+        risk_acceptance: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2856,6 +2889,7 @@ class DataPilotTools:
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
         )
 
     def _start_transfer(
@@ -2887,6 +2921,7 @@ class DataPilotTools:
         applied_rules: list | None = None,
         cadence: str = "",
         all_tables: bool = False,
+        risk_acceptance: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2918,6 +2953,7 @@ class DataPilotTools:
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
         )
 
     def _start_dataset_transfer(

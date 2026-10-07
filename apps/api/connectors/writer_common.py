@@ -747,7 +747,7 @@ def normalize_temporal_cells(
             if not ddl:
                 continue
             try:
-                cells[i] = coerce_sql_temporal(cells[i], ddl)
+                cells[i] = coerce_sql_temporal(cells[i], ddl, engine=eng)
             except ValueError:
                 # Leave raw for bind_sql_mapped_rows_with_quarantine — do not
                 # abort the whole batch on one empty DATE/TIMESTAMP cell.

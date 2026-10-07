@@ -387,6 +387,7 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
     merged.setdefault("password", "")
     merged.setdefault("host", "")
     merged.setdefault("connection_string", "")
+    merged.setdefault("service_account", "")
     merged.setdefault("ssl", False)
     from services.dialect_profiles import default_schema_for
 
@@ -437,6 +438,20 @@ def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:
     ctype = draft.get("type") or ""
     if ctype in {"sqlite", "duckdb"}:
         return _path_connector_complete(draft)
+    if ctype == "bigquery":
+        project = str(draft.get("database") or draft.get("project") or "").strip()
+        creds = str(
+            draft.get("service_account") or draft.get("connection_string") or ""
+        ).strip()
+        if not project:
+            return False, "BigQuery needs the project id in the database field."
+        if not creds.startswith("{"):
+            return (
+                False,
+                "BigQuery needs the service account JSON key in service_account "
+                "(or a JSON connection_string).",
+            )
+        return True, ""
     if draft.get("connection_string"):
         # Snowflake URLs are not fully supported yet — require structured fields.
         if ctype == "snowflake" and "snowflake" in str(draft.get("connection_string") or "").lower():

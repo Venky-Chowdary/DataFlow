@@ -340,10 +340,15 @@ def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
 
 
 def assert_writer_fence(incoming_fence: int, dest_fence: int) -> None:
-    """Estuary Open fence — a stolen-lease zombie cannot commit dest EOS.
+    """Refuse a stolen-lease zombie that presents a lower generation.
 
-    Fence 0 means unleased / single-writer tests. A positive dest fence
-    refuses a lower incoming generation.
+    Apply always calls this with the real lease generation. A positive dest
+    fence refuses a lower positive generation, and also refuses 0 — an apply
+    that has not acquired the lease must not commit over a fenced dest.
+
+    Open is different: CDC Open runs before the lease exists and passes 0.
+    ``plan_open_session`` keeps the stored dest fence in that case instead
+    of calling this check. Do not weaken this function for that opener.
     """
     incoming = int(incoming_fence or 0)
     dest = int(dest_fence or 0)
@@ -482,9 +487,25 @@ def plan_open_session(
     incoming_fence: int,
     job_resume: Any,
 ) -> EosOpenResult:
-    """Decide Open fence + dest-authoritative resume (no data)."""
-    assert_writer_fence(incoming_fence, dest.fence_epoch)
-    fence = next_dest_fence(incoming_fence, dest.fence_epoch)
+    """Decide Open fence + dest-authoritative resume (no data).
+
+    Incoming fence 0 is the unleased opener. The lease is acquired after
+    Open, and a finished run deletes it, so the next run also opens at 0.
+    The dest fence from the previous apply (lease generation, at least 1)
+    must be kept. Treating 0 as a stale writer refused every second CDC
+    run on a route that had already committed.
+
+    A positive generation lower than the dest fence is still a zombie and
+    is refused here. Apply (``decide_eos_apply``) always presents the real
+    lease generation and still calls ``assert_writer_fence``.
+    """
+    dest_fence = int(dest.fence_epoch or 0)
+    incoming = int(incoming_fence or 0)
+    if incoming == 0:
+        fence = dest_fence
+    else:
+        assert_writer_fence(incoming, dest_fence)
+        fence = next_dest_fence(incoming, dest_fence)
     resume, _proof = clamp_job_resume_to_dest(
         job_resume, dest.committed_lsn, dest.resume_blob or None
     )

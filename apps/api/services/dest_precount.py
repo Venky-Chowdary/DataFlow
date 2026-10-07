@@ -3749,29 +3749,65 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         client.close()
 
 
+def _kafka_topic_catalog(consumer: Any) -> set[str] | None:
+    """Topic names the client can see, or ``None`` when metadata did not load."""
+    try:
+        known = consumer.topics()
+    except Exception:  # noqa: BLE001 — a broker error is unproven, not an empty topic
+        return None
+    if known is None:
+        return None
+    return {str(name) for name in known}
+
+
+def _kafka_refresh_named_topic(consumer: Any, topic_name: str) -> None:
+    """Ask the broker for one topic before calling it absent.
+
+    ``topics()`` can return a catalog fetched before auto-create finished, or
+    an empty set when the first metadata response has not landed. Neither is
+    proof the topic a produce just wrote does not exist.
+    """
+    client = getattr(consumer, "_client", None)
+    loader = getattr(client, "load_metadata_for_topics", None) if client is not None else None
+    if callable(loader):
+        loader(topic_name)
+        return
+    refresh = getattr(consumer, "refresh_topic", None)
+    if callable(refresh):
+        refresh(topic_name)
+
+
 def _kafka_partitions_after_refresh(consumer: Any, topic_name: str) -> set | None:
-    """Partition ids, after one metadata refresh when the cache is cold.
+    """Partition ids, after a named-topic refresh when the cache is cold.
 
     ``partitions_for_topic`` returns ``None`` both for "topic does not exist"
     and for "the client has not loaded metadata yet". A fresh consumer used
     only for COUNT hits the second case right after a successful produce and
     used to report 0. ``None`` from this helper means the count is unproven.
-    An empty set means a refresh proved the topic is absent.
+    An empty set means a refresh that actually returned other topics proved
+    this one is absent. An empty catalog is unproven, not an empty topic.
     """
     parts = consumer.partitions_for_topic(topic_name)
     if parts:
         return set(parts)
-    # A refresh error propagates to the caller, which reports the count
-    # unproven (None) rather than an empty topic.
-    known = consumer.topics()
+    known = _kafka_topic_catalog(consumer)
     if known is None:
         return None
-    if topic_name not in known:
+    if topic_name in known:
+        parts = consumer.partitions_for_topic(topic_name)
+        return set(parts) if parts else None
+    _kafka_refresh_named_topic(consumer, topic_name)
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    known_after = _kafka_topic_catalog(consumer)
+    if not known_after:
+        # No topic list at all — the broker did not prove absence.
+        return None
+    if topic_name not in known_after:
         return set()
     parts = consumer.partitions_for_topic(topic_name)
-    if not parts:
-        return None
-    return set(parts)
+    return set(parts) if parts else None
 
 
 def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
@@ -3813,7 +3849,7 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     finally:
         try:
             consumer.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — close is best-effort after COUNT
             pass
 
 
