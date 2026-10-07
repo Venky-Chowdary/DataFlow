@@ -29,6 +29,32 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+def list_topics(cfg: dict[str, Any]) -> list[str]:
+    """User topics on the cluster. Internal topics (``_`` prefix) stay out.
+
+    An empty list is a real empty cluster, not a missing dialect. Import
+    failure is raised so the caller can say kafka-python is absent.
+    """
+    try:
+        from kafka import KafkaConsumer
+    except ImportError as exc:
+        raise ImportError("kafka-python is required to list Kafka topics") from exc
+
+    consumer = KafkaConsumer(
+        bootstrap_servers=_bootstrap(cfg),
+        consumer_timeout_ms=2000,
+        request_timeout_ms=8000,
+        api_version_auto_timeout_ms=8000,
+    )
+    try:
+        names = consumer.topics() or set()
+    finally:
+        consumer.close()
+    return sorted(
+        name for name in names if name and not str(name).startswith("_")
+    )
+
+
 def _bootstrap(cfg: dict[str, Any]) -> str:
     cs = str(cfg.get("connection_string") or "").strip()
     if cs:

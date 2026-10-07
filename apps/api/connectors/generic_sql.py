@@ -715,7 +715,15 @@ def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
-    db_type = (cfg.get("type") or "").lower().strip()
+    # EndpointConfig serialises the driver as ``format``. Procedure and query
+    # planning hand that dict to this builder; requiring ``type`` as well
+    # raised "A database type or connection_string is required" on a connector
+    # that already named its engine.
+    db_type = (
+        cfg.get("type") or cfg.get("format") or cfg.get("db_type") or ""
+    ).lower().strip()
+    if db_type and not str(cfg.get("type") or "").strip():
+        cfg["type"] = db_type
 
     if connection_string:
         if connection_string.startswith(("duckdb:", "sqlite:")):

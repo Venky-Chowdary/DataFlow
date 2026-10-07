@@ -550,6 +550,41 @@ def _map_identity_names_to_source(
     return deduped
 
 
+def mapped_catalog_upsert_key(
+    primary_key_columns: Sequence[str] | None,
+    mappings: Iterable[Any],
+) -> tuple[list[str], list[str]]:
+    """Map a source-catalog primary key through the write mapping.
+
+    Returns ``(source_columns, target_columns)``. Empty when the catalog has
+    no key, or when any key column is unmapped — upserting on a partial key
+    would match rows on the wrong identity. This does not invent ``id``.
+    """
+    from services.sync_cursor import map_source_to_target
+
+    keys = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    mapping_list = [m for m in (mappings or []) if isinstance(m, dict)]
+    if not keys or not mapping_list:
+        return [], []
+    by_lower: dict[str, str] = {}
+    for item in mapping_list:
+        src = str(item.get("source") or "").strip()
+        if src:
+            by_lower.setdefault(src.lower(), src)
+    sources: list[str] = []
+    targets: list[str] = []
+    for key in keys:
+        src = by_lower.get(key.lower())
+        if not src:
+            return [], []
+        tgt = str(map_source_to_target(src, mapping_list) or "").strip()
+        if not tgt:
+            return [], []
+        sources.append(src)
+        targets.append(tgt)
+    return sources, targets
+
+
 def resolve_primary_key_source_columns(
     mappings: Iterable[Any],
     source_columns: list[str] | None,

@@ -2310,4 +2310,15 @@ def temporal_precision_would_narrow(
             src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
         else:
             return False
+    # SQL Server DATETIME2(7) / TIMESTAMP_NTZ(7) into a destination that is
+    # already at its documented maximum (PostgreSQL microseconds) cannot be
+    # widened. Blocking that pair made every MSSQL→Postgres timestamp route
+    # unrunnable. A destination below its own cap (TIMESTAMP(3) on Postgres)
+    # still blocks so the operator can widen it.
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import _TEMPORAL_FSP_CAPS
+
+    cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
+    if cap is not None and tgt_p >= cap and src_p > cap:
+        return False
     return src_p > tgt_p

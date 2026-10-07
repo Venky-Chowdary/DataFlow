@@ -968,12 +968,9 @@ def _stream_database_transfer_impl(
             resolve_dest_table(dest_type, destination, _source_name(source)),
             mappings,
         )
-    write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
-    if requires_upsert(effective_sync) and not pk_target_cols:
-        raise ValueError(
-            f"Sync mode `{effective_sync}` requires primary_key for upsert; "
-            "refuse silent insert fallback (set primary_key on the stream contract)"
-        )
+    # Source-catalog primary key is read with the schema below. Refusing here
+    # made incremental_upsert fail before that evidence existed.
+    write_mode = "insert"
 
     from .stream_dest_procedure import open_destination_row_plan
 
@@ -1010,6 +1007,25 @@ def _stream_database_transfer_impl(
             )
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    if requires_upsert(effective_sync) and not pk_target_cols:
+        from services.primary_key import mapped_catalog_upsert_key
+
+        pk_source_cols, pk_target_cols = mapped_catalog_upsert_key(
+            (_src_rich_catalog[2] or {}).get("primary_key_columns"),
+            mappings,
+        )
+        if pk_source_cols and incremental and cursor_source_col and not cursor_pk_source:
+            cursor_pk_source = incremental_tiebreak_column(
+                src_type, cursor_source_col, pk_source_cols
+            )
+    if requires_upsert(effective_sync) and not pk_target_cols:
+        raise ValueError(
+            f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+            "refuse silent insert fallback (set primary_key on the stream contract)"
+        )
+    write_mode = (
+        "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    )
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(src_type, mappings, schema, _src_rich_catalog),
         mappings,

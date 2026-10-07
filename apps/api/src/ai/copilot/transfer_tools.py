@@ -364,16 +364,41 @@ def _declare_zone_on_schema(
 
     declared: set[str] = set()
     out: list[dict] = []
+    transform = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
     for row in src_rows:
         entry = dict(row)
+        name = str(entry.get("name") or "")
         src_type = str(entry.get("inferred_type") or "")
-        if src_type and datetime_timezone_polarity(src_type) == "ntz":
-            entry["inferred_type"] = effective_source_type(
-                src_type, f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-            )
-            declared.add(str(entry.get("name") or ""))
+        polarity = datetime_timezone_polarity(src_type) if src_type else None
+        if polarity == "ntz":
+            entry["inferred_type"] = effective_source_type(src_type, transform)
+            declared.add(name)
+        elif polarity in {"tz", "ltz"} and _samples_are_naive_wall_clock(
+            entry.get("samples") or []
+        ):
+            # MySQL/Maria TIMESTAMP is an instant in the catalog and a naive
+            # wall clock on the wire (session time_zone strips the offset).
+            # The declared zone is that wall clock. Leaving the column out
+            # kept TIMESTAMPTZ blocked on "refuses naive wall-clock".
+            declared.add(name)
         out.append(entry)
     return out, declared
+
+
+def _samples_are_naive_wall_clock(samples: Any) -> bool:
+    """True when at least one sample is a datetime with no offset."""
+    from connectors.sql_temporal import parse_sql_datetime
+    from services.type_system import temporal_value_has_timezone
+
+    saw = False
+    for sample in samples or []:
+        if sample is None or not str(sample).strip():
+            continue
+        if temporal_value_has_timezone(sample):
+            continue
+        if parse_sql_datetime(sample) is not None:
+            saw = True
+    return saw
 
 
 def _stamp_zone_transform(
@@ -1073,6 +1098,12 @@ def _stamp_callable_source_config(
 ) -> dict[str, Any]:
     """Put CALL/SELECT fields on the preflight/execute source cfg."""
     cfg = dict(source_config or {})
+    # ``endpoint_to_dict`` carries the driver as ``format``. The SQL URL
+    # builder and the procedure dialect both read ``type``.
+    if not str(cfg.get("type") or "").strip():
+        driver = str(cfg.get("format") or cfg.get("db_type") or "").strip()
+        if driver:
+            cfg["type"] = driver
     if not callable_plan:
         return cfg
     extra = dict(cfg.get("extra") or {}) if isinstance(cfg.get("extra"), dict) else {}

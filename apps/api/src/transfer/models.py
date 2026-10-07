@@ -59,7 +59,10 @@ class EndpointConfig:
             kind=kind,
             format=d.get("format", d.get("type", d.get("db_type", ""))),
             connector_id=d.get("connector_id"),
-            host=d.get("host", "localhost"),
+            # Missing host stays empty so a saved connector can fill it.
+            # Defaulting to localhost here made every job dial 127.0.0.1
+            # while Test still used the stored host.
+            host=d.get("host") or "",
             port=int(d.get("port", 0) or 0),
             database=d.get("database", ""),
             schema=d.get("schema", ""),

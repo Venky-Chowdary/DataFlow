@@ -137,6 +137,23 @@ def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:
     return columns, rows
 
 
+def list_labels(
+    *,
+    host: str = "",
+    port: int = 7474,
+    database: str = "neo4j",
+    username: str = "",
+    password: str = "",
+    ssl: bool = False,
+) -> list[str]:
+    """Node labels in the database. Empty means the graph has no labels."""
+    url = _url(host, port, ssl, database)
+    body = _run_cypher(url, username, password, "CALL db.labels() YIELD label RETURN label")
+    _columns, rows = _extract_rows(body)
+    labels = [row[0] for row in rows if row and str(row[0]).strip()]
+    return sorted(set(labels))
+
+
 def test_connection(
     *,
     host: str = "",

@@ -403,6 +403,41 @@ def _find_implicit_connector_id(
     return None
 
 
+# Form defaults and EndpointConfig parsing stamp these when the operator did
+# not type a host. They are not an override of a saved connector.
+_LOOPBACK_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+)
+
+
+def _loopback_host(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text in _LOOPBACK_HOSTS
+
+
+def _saved_host_wins_placeholder(inline: Any, saved: Any) -> bool:
+    """True when the inline host is a loopback placeholder and the saved host is not.
+
+    Studio and job payloads send ``localhost`` whenever the form default was
+    not replaced. The saved connector (bore.pub, a cloud host) is the endpoint
+    Test already proved. A real non-loopback inline host remains an override.
+    A connector that is actually localhost stays localhost.
+    """
+    return (
+        _loopback_host(inline)
+        and bool(str(saved or "").strip())
+        and not _loopback_host(saved)
+    )
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
@@ -518,9 +553,27 @@ def resolve_connector_config(
                 else (saved if saved is not None else "")
             )
 
+        inline_host = cfg.get("host")
+        saved_host = conn_dict.get("host")
+        placeholder_host = _saved_host_wins_placeholder(inline_host, saved_host)
+        chosen_host = (
+            saved_host if placeholder_host else _pick(inline_host, saved_host)
+        )
+        inline_port = cfg.get("port")
+        saved_port = conn_dict.get("port")
+        # A discarded localhost is not an instruction to keep the driver
+        # default port. The tunnel port on the saved connector is the one
+        # Test dialed. A non-default inline port is still an override.
+        if placeholder_host:
+            try:
+                inline_port_num = int(inline_port or 0)
+            except (TypeError, ValueError):
+                inline_port_num = 0
+            if inline_port_num in (0, int(default_port or 0)):
+                inline_port = 0
         merged_cfg = {
-            "host": _pick(cfg.get("host"), conn_dict.get("host")),
-            "port": _pick(cfg.get("port"), conn_dict.get("port")),
+            "host": chosen_host,
+            "port": _pick(inline_port, saved_port),
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),

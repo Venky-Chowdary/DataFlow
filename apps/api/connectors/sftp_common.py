@@ -286,6 +286,53 @@ def load_private_key(cfg: SFTPConfig) -> Any:
     )
 
 
+def _open_sftp_transport(cfg: SFTPConfig) -> Any:
+    """Handshake an SSH transport, then verify the host key before auth.
+
+    Paramiko 3.4 advertises OpenSSH strict-kex by default. Tunnels and older
+    sshd close that handshake before authentication (the socket dies during
+    kex, so no password is ever sent). One retry without strict-kex keeps
+    host-key verification and the same credentials. It does not skip auth.
+    """
+    import socket
+
+    import paramiko
+
+    last_exc: Exception | None = None
+    for strict_kex in (True, False):
+        sock = socket.create_connection((cfg.host, int(cfg.port or 22)), timeout=30)
+        transport = paramiko.Transport(sock, strict_kex=strict_kex)
+        try:
+            transport.start_client(timeout=30)
+            verify_host_key(cfg, transport)
+            return transport
+        except RuntimeError:
+            # A refused host key is not a kex failure. Retrying it with
+            # strict-kex off would not make the key trusted, and leaving the
+            # socket open would keep a rejected transport alive.
+            try:
+                transport.close()
+            except OSError:
+                logger.debug("SFTP transport close after host-key refusal", exc_info=True)
+            raise
+        except (paramiko.SSHException, OSError) as exc:
+            last_exc = exc
+            try:
+                transport.close()
+            except OSError:
+                logger.debug("SFTP transport close after handshake failure", exc_info=True)
+            if strict_kex is False:
+                raise
+            logger.info(
+                "SFTP handshake closed before auth with strict kex; retrying %s:%s",
+                cfg.host,
+                cfg.port,
+            )
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("SFTP handshake failed before authentication")
+
+
 def connect_sftp(cfg: SFTPConfig):
     """Return (transport, sftp) client pair using paramiko, host key verified."""
     try:
@@ -295,10 +342,8 @@ def connect_sftp(cfg: SFTPConfig):
 
     pkey = load_private_key(cfg)
 
-    transport = paramiko.Transport((cfg.host, cfg.port))
+    transport = _open_sftp_transport(cfg)
     try:
-        transport.start_client(timeout=30)
-        verify_host_key(cfg, transport)
         if pkey is not None:
             transport.auth_publickey(cfg.username, pkey)
         elif cfg.password:

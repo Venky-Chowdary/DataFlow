@@ -549,6 +549,26 @@ def _introspect_schema(
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
     if db_type == "sqlite":
         return _introspect_sqlite(database=database, connection_string=connection_string, host=host, table=table)
+    if db_type == "neo4j":
+        return _introspect_neo4j(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            table=table,
+            ssl=ssl,
+        )
+    if db_type == "weaviate":
+        return _introspect_weaviate(
+            host=host,
+            port=port,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            ssl=ssl,
+        )
     return {"ok": False, "error": f"Schema introspection not implemented for {db_type}", "columns": [], "tables": []}
 
 
@@ -2805,6 +2825,30 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         {"schema": schema},
                     ).fetchall()
                 ]
+                # Default dbo with no tables is the intermittent empty list:
+                # the objects live in another user schema. Qualify those names
+                # so the operator can pick them. A schema the operator named
+                # that really is empty stays empty.
+                if not tables and schema.lower() in {"", "dbo"}:
+                    tables = [
+                        (
+                            str(r[1])
+                            if str(r[0] or "").lower() in {"", "dbo"}
+                            else f"{r[0]}.{r[1]}"
+                        )
+                        for r in conn.execute(
+                            sa.text(
+                                """
+                                SELECT TABLE_SCHEMA, TABLE_NAME
+                                FROM INFORMATION_SCHEMA.TABLES
+                                WHERE TABLE_TYPE = 'BASE TABLE'
+                                  AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
+                                ORDER BY TABLE_SCHEMA, TABLE_NAME
+                                """
+                            )
+                        ).fetchall()
+                        if r[1]
+                    ]
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             tables = [table]
@@ -3314,6 +3358,24 @@ def _sf_to_logical(
     return "TEXT"
 
 
+def _bson_int_is_named_epoch(value: int, key: str) -> bool:
+    """True when a BSON integer is an epoch instant on a temporal field name.
+
+    Digit width matches the writer (``transform_engine`` 10-second / 13-millis).
+    The field-name owner is schema inference, so catalog and CSV agree.
+    """
+    if isinstance(value, bool) or not str(key or "").strip():
+        return False
+    from services.schema_inference import _is_timestamp_field_name
+
+    if not _is_timestamp_field_name(key):
+        return False
+    text = str(value)
+    if text[:1] in "+-":
+        text = text[1:]
+    return len(text) in {10, 13} and text.isdigit()
+
+
 def _sample_logical_type(value: Any, key: str = "") -> str:
     if value is None:
         # Null/absent is unknown, not TEXT. Returning "" keeps a null observation
@@ -3322,6 +3384,12 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
+        # A BSON int on a temporal name that is 10-digit seconds or 13-digit
+        # millis is an instant (Mongo extended JSON, HubSpot, Stripe). The
+        # same name rule as string inference owns this — a 13-digit ``_id``
+        # stays BIGINT. Reclassifying every large int would corrupt keys.
+        if _bson_int_is_named_epoch(value, key):
+            return "TIMESTAMPTZ"
         # Python int is unbounded — never stamp INT32; BIGINT is safe invent.
         return "BIGINT" if abs(value) > 2_147_483_647 else "INTEGER"
     if isinstance(value, float):
@@ -3725,7 +3793,32 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
 def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
     index = kwargs.get("table") or kwargs.get("database")
     if not index:
-        return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
+        try:
+            from connectors.elasticsearch_reader import _client
+
+            cfg = {
+                "host": kwargs.get("host") or "localhost",
+                "port": kwargs.get("port") or 9200,
+                "username": kwargs.get("username") or "",
+                "password": kwargs.get("password") or "",
+                "connection_string": kwargs.get("connection_string") or "",
+                "ssl": kwargs.get("ssl", False),
+            }
+            client = _client(cfg)
+            raw = client.indices.get_alias(index="*")
+            names = sorted(
+                name
+                for name in (raw or {})
+                if name and not str(name).startswith(".")
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": ""}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
     try:
         from connectors.elasticsearch_mapping import (
             carrier_for_es_field_type,
@@ -4758,7 +4851,18 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
         "schema_registry_url": registry,
     }
     if not topic:
-        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+        try:
+            from connectors.kafka_reader import list_topics
+
+            topics = list_topics(cfg)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
+        return {"ok": True, "columns": [], "tables": topics, "schema": ""}
     try:
         schema_map, native, warning = infer_topic_schema(cfg, topic, sample_limit=50)
     except Exception as exc:
@@ -4795,7 +4899,34 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
         "ssl": bool(kwargs.get("ssl", False)),
     }
     if not collection:
-        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+        try:
+            from connectors.qdrant_writer import qdrant_rest
+
+            session, base_url, headers = qdrant_rest(cfg)
+            listed = session.get(f"{base_url}/collections", headers=headers, timeout=10)
+            if listed.status_code != 200:
+                return {
+                    "ok": False,
+                    "error": f"Qdrant collection list failed: {listed.status_code}",
+                    "columns": [],
+                    "tables": [],
+                }
+            body = listed.json() if listed.content else {}
+            result = body.get("result") if isinstance(body, dict) else {}
+            collections = result.get("collections") if isinstance(result, dict) else []
+            names = sorted(
+                str(item.get("name") or "")
+                for item in (collections or [])
+                if isinstance(item, dict) and item.get("name")
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": ""}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
     try:
         from connectors.qdrant_reader import QDRANT_OMIT_PAYLOAD_KEYS, read_points_batch
         from connectors.qdrant_writer import _qdrant_live_payload_types, qdrant_rest
@@ -4858,3 +4989,105 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
             }
         )
     return {"ok": True, "columns": columns, "tables": [collection], "schema": collection}
+
+
+def _introspect_neo4j(**kwargs: Any) -> dict[str, Any]:
+    """List Neo4j labels, and sample one label's properties when named."""
+    from connectors.neo4j import list_labels, read_object
+
+    label = str(kwargs.get("table") or "").strip()
+    common = {
+        "host": str(kwargs.get("host") or ""),
+        "port": int(kwargs.get("port") or 7474),
+        "database": str(kwargs.get("database") or "neo4j"),
+        "username": str(kwargs.get("username") or ""),
+        "password": str(kwargs.get("password") or ""),
+        "ssl": bool(kwargs.get("ssl")),
+    }
+    try:
+        labels = list_labels(**common)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    if not label:
+        return {"ok": True, "columns": [], "tables": labels, "schema": common["database"]}
+    try:
+        batch = read_object(cfg=common, object=label, limit=20)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "columns": [],
+            "tables": labels or [label],
+        }
+    columns = [
+        {"name": name, "inferred_type": "TEXT", "nullable": True}
+        for name in (batch.headers or [])
+    ]
+    return {"ok": True, "columns": columns, "tables": labels or [label], "schema": label}
+
+
+def _introspect_weaviate(**kwargs: Any) -> dict[str, Any]:
+    """List Weaviate classes, and read one class's properties when named."""
+    import requests
+
+    from connectors.weaviate_writer import (
+        _base_url,
+        _headers,
+        _weaviate_property_to_carrier,
+    )
+
+    class_name = str(kwargs.get("table") or kwargs.get("database") or "").strip()
+    base = _base_url(
+        str(kwargs.get("host") or ""),
+        int(kwargs.get("port") or 8080),
+        bool(kwargs.get("ssl")),
+        str(kwargs.get("connection_string") or ""),
+    )
+    headers = _headers(str(kwargs.get("api_key") or ""))
+    try:
+        listed = requests.get(f"{base}/v1/schema", headers=headers, timeout=10)
+        listed.raise_for_status()
+        body = listed.json() if listed.content else {}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    classes = body.get("classes") if isinstance(body, dict) else []
+    names = sorted(
+        str(item.get("class") or "")
+        for item in (classes or [])
+        if isinstance(item, dict) and item.get("class")
+    )
+    if not class_name:
+        return {"ok": True, "columns": [], "tables": names, "schema": ""}
+    match = next(
+        (
+            item
+            for item in (classes or [])
+            if isinstance(item, dict)
+            and str(item.get("class") or "").lower() == class_name.lower()
+        ),
+        None,
+    )
+    if match is None:
+        return {
+            "ok": True,
+            "columns": [],
+            "tables": names,
+            "schema": class_name,
+        }
+    columns = []
+    for prop in match.get("properties") or []:
+        if not isinstance(prop, dict) or not prop.get("name"):
+            continue
+        columns.append(
+            {
+                "name": str(prop["name"]),
+                "inferred_type": _weaviate_property_to_carrier(prop.get("dataType")),
+                "nullable": True,
+            }
+        )
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": names or [str(match.get("class"))],
+        "schema": str(match.get("class") or class_name),
+    }
