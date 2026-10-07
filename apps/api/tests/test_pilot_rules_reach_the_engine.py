@@ -190,32 +190,209 @@ def test_composite_operator_key_stays_a_list():
     assert contracts[0]["primary_key"] == ["id", "tenant_id"]
 
 
+def test_incremental_upsert_binds_the_key_and_the_declared_cursor():
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "updated_at", "status"],
+        mappings=[
+            {"source": "order_id", "target": "order_id"},
+            {"source": "updated_at", "target": "updated_at"},
+            {"source": "status", "target": "status"},
+        ],
+        operator_key="order_id",
+        catalog_key="",
+        cursor_column="Updated_At",
+        cursor_semantics="modification_timestamp",
+    )
+    assert identity_error == ""
+    assert contracts == [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": ["order_id"],
+        "cursor_field": "updated_at",
+        "cursor_semantics": "modification_timestamp",
+    }]
+    from services.preflight_cursor_gate import build_sync_contract_gate
+    from services.sync_cursor import resolve_sync_contract
+
+    resolved = resolve_sync_contract(contracts)
+    assert resolved is not None
+    assert resolved.primary_key == "order_id"
+    assert resolved.cursor_field == "updated_at"
+    assert resolved.cursor_semantics == "modification_timestamp"
+    gate = build_sync_contract_gate(
+        contracts,
+        sync="incremental_deduped",
+        validation="balanced",
+        dest="postgresql",
+        src="postgresql",
+        kind="database",
+        source_columns=["order_id", "updated_at", "status"],
+        pass_status="pass",
+        block_status="block",
+    )
+    assert gate["status"] == "pass"
+
+
+def test_incremental_upsert_without_a_cursor_still_blocks():
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "status"],
+        mappings=[{"source": "order_id", "target": "order_id"}],
+        operator_key="order_id",
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert "cursor_field" not in contracts[0]
+    from services.preflight_cursor_gate import build_sync_contract_gate
+
+    gate = build_sync_contract_gate(
+        contracts,
+        sync="incremental_deduped",
+        validation="balanced",
+        dest="postgresql",
+        src="postgresql",
+        kind="database",
+        source_columns=["order_id", "status"],
+        pass_status="pass",
+        block_status="block",
+    )
+    assert gate["status"] == "block"
+    assert any("Missing cursor" in issue for issue in gate["details"]["issues"])
+
+
+def test_undeclared_cursor_semantics_still_block_incremental_upsert():
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "updated_at"],
+        mappings=[
+            {"source": "order_id", "target": "order_id"},
+            {"source": "updated_at", "target": "updated_at"},
+        ],
+        operator_key="order_id",
+        catalog_key="",
+        cursor_column="updated_at",
+    )
+    assert identity_error == ""
+    assert contracts[0]["cursor_field"] == "updated_at"
+    assert "cursor_semantics" not in contracts[0]
+    from services.preflight_cursor_gate import build_sync_contract_gate
+
+    gate = build_sync_contract_gate(
+        contracts,
+        sync="incremental_deduped",
+        validation="balanced",
+        dest="postgresql",
+        src="postgresql",
+        kind="database",
+        source_columns=["order_id", "updated_at"],
+        pass_status="pass",
+        block_status="block",
+    )
+    assert gate["status"] == "block"
+    assert any("updated_at" in issue for issue in gate["details"]["issues"])
+
+
+def test_unknown_cursor_column_and_semantics_fail_closed():
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "updated_at"],
+        mappings=[{"source": "order_id", "target": "order_id"}],
+        operator_key="order_id",
+        catalog_key="",
+        cursor_column="changed_on",
+        cursor_semantics="modification_timestamp",
+    )
+    assert contracts == []
+    assert "no column `changed_on`" in identity_error
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "updated_at"],
+        mappings=[
+            {"source": "order_id", "target": "order_id"},
+            {"source": "updated_at", "target": "updated_at"},
+        ],
+        operator_key="order_id",
+        catalog_key="",
+        cursor_column="updated_at",
+        cursor_semantics="whenever",
+    )
+    assert contracts == []
+    assert "Unknown cursor semantics" in identity_error
+
+
+def test_cdc_keeps_the_log_position_when_a_table_cursor_is_also_named():
+    contracts, identity_error = _identity_stream_contract(
+        mode="cdc",
+        source_table="orders",
+        source_columns=["order_id", "updated_at"],
+        mappings=[{"source": "order_id", "target": "order_id"}],
+        operator_key="order_id",
+        catalog_key="",
+        cursor_column="updated_at",
+        cursor_semantics="modification_timestamp",
+    )
+    assert identity_error == ""
+    assert contracts[0]["cursor_semantics"] == "cdc_position"
+    assert "cursor_field" not in contracts[0]
+
+
 def test_mcp_start_transfer_accepts_primary_key():
     import inspect
 
     from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools, get_pilot_tools
 
-    schema = next(t for t in TOOL_DEFINITIONS if t["name"] == "start_transfer")
-    props = schema["input_schema"]["properties"]
-    assert "upsert_key" in props
-    assert "primary_key" in props
+    for tool_name in ("plan_transfer", "start_transfer"):
+        schema = next(t for t in TOOL_DEFINITIONS if t["name"] == tool_name)
+        props = schema["input_schema"]["properties"]
+        assert "upsert_key" in props
+        assert "primary_key" in props
+        assert "cursor_column" in props
+        assert "cursor_semantics" in props
+    schedule = next(t for t in TOOL_DEFINITIONS if t["name"] == "create_schedule")
+    assert "cursor_semantics" in schedule["input_schema"]["properties"]
     for method in (
         DataPilotTools._plan_transfer,
         DataPilotTools._start_transfer,
         DataPilotTools._create_schedule,
     ):
-        assert "primary_key" in inspect.signature(method).parameters
+        params = inspect.signature(method).parameters
+        assert "primary_key" in params
+        assert "cursor_column" in params
+        assert "cursor_semantics" in params
     result = get_pilot_tools().execute(
         "start_transfer",
         {
             "source_connector_name": "missing-src-for-pk",
             "dest_connector_name": "missing-dst-for-pk",
             "source_table": "orders",
-            "sync_mode": "cdc",
-            "primary_key": "order_id",
+            "sync_mode": "incremental_upsert",
+            "primary_key": ["order_id"],
+            "cursor_column": "updated_at",
+            "cursor_semantics": "modification_timestamp",
         },
     )
     assert "unexpected keyword" not in (result.error or "").lower()
+
+
+def test_incremental_upsert_schedule_refuses_to_start_without_a_cursor():
+    from src.ai.copilot.schedule_tools import create_schedule
+
+    result = create_schedule(
+        source_connector_name="missing-src",
+        dest_connector_name="missing-dst",
+        source_table="orders",
+        sync_mode="incremental_upsert",
+        cadence="every 15 minutes",
+        primary_key="order_id",
+    )
+    assert result.success is False
+    assert "watermark" in (result.error or "").lower()
 
 
 def test_no_rules_leaves_the_requested_mode_untouched():

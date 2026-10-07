@@ -68,6 +68,7 @@ def create_schedule(
     cadence: str = "",
     name: str = "",
     cursor_column: str = "",
+    cursor_semantics: str = "",
     source_timezone: str = "",
     source_read_mode: str = "",
     procedure_call: str = "",
@@ -110,7 +111,13 @@ def create_schedule(
                 "transfer once."
             ),
         )
-    mode = (sync_mode or "").strip()
+    from services.sync_cursor import normalize_sync_mode
+
+    raw_mode = (sync_mode or "").strip()
+    # incremental_upsert is the tool spelling of incremental_deduped. The raw
+    # token is not in _CURSOR_MODES, so a schedule of that mode used to skip
+    # the watermark check and then fail preflight with no cursor to bind.
+    mode = normalize_sync_mode(raw_mode) if raw_mode else ""
     if mode in _CURSOR_MODES and not (cursor_column or "").strip():
         return _tool_result(
             tool,
@@ -143,6 +150,8 @@ def create_schedule(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
     )
@@ -210,7 +219,12 @@ def create_schedule(
         # writes the columns preflight judged — not a later re-derivation.
         "mappings": engine_mappings,
         "stream_contracts": plan.get("stream_contracts") or [],
-        "cursor_column": (cursor_column or "").strip(),
+        "cursor_column": str(
+            (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
+        ).strip(),
+        "cursor_semantics": str(
+            (plan.get("data_rules") or {}).get("cursor_semantics") or cursor_semantics or ""
+        ).strip().lower(),
         "primary_key": upsert,
         "source_read_mode": source.get("source_read_mode") or "",
         "procedure_call": source.get("procedure_call") or "",

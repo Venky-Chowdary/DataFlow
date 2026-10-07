@@ -16,6 +16,23 @@ from services.sync_cursor import (
 )
 
 
+def test_list_primary_key_is_not_stringified():
+    contract = resolve_sync_contract([
+        {
+            "name": "orders",
+            "selected": True,
+            "primary_key": ["order_id", "tenant_id"],
+            "cursor_field": "updated_at",
+            "cursor_semantics": "modification_timestamp",
+            "sync_mode": "incremental_deduped",
+        },
+    ])
+    assert contract is not None
+    assert contract.primary_key == "order_id,tenant_id"
+    assert contract.primary_key_columns() == ["order_id", "tenant_id"]
+    assert "['order_id'" not in contract.primary_key
+
+
 def test_resolve_sync_contract():
     contract = resolve_sync_contract([
         {"name": "orders", "sync_mode": "incremental_append", "cursor_field": "updated_at", "selected": True},

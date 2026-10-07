@@ -333,3 +333,64 @@ class OrderedChunkRunner(ChunkDispatcher):
                 self._executor.shutdown(wait=True, cancel_futures=True)
                 self._executor = None
             reader_thread.join(timeout=5)
+
+
+def shares_one_destination_connection(max_workers: int) -> bool:
+    """True when later batches must stay on the thread that opened the connection.
+
+    SQLite, Snowflake, Iceberg, and a public TCP proxy each force one writer.
+    ``ChunkDispatcher`` still runs that writer on a pool thread. psycopg2 is
+    not safe there: the next COPY waits forever, and the destination stops
+    growing after the pages that already committed.
+    """
+    try:
+        workers = int(max_workers)
+    except (TypeError, ValueError):
+        return True
+    return workers <= 1
+
+
+def drive_ordered_batches(
+    *,
+    max_workers: int,
+    initial: T,
+    fetch_next: Callable[[T], T | None],
+    prepare: Callable[[int, T], T],
+    process: Callable[[int, T], R],
+    apply_result: Callable[[int, R], None],
+    start_idx: int,
+) -> None:
+    """Write the pages after the synchronous DDL page.
+
+    ``max_workers <= 1`` runs ``process`` on the caller. A shared psycopg2 or
+    Snowflake connection created on that thread must not be handed to the pool.
+    More than one worker keeps the overlapping read/write path.
+    """
+    if shares_one_destination_connection(max_workers):
+        idx = start_idx
+        batch = fetch_next(initial)
+        while batch:
+            prepared = prepare(idx, batch)
+            apply_result(idx, process(idx, prepared))
+            batch = fetch_next(batch)
+            idx += 1
+        return
+
+    idx = start_idx
+    with ChunkDispatcher(max_workers=max_workers) as dispatcher:
+        try:
+            batch = fetch_next(initial)
+            while batch:
+                prepared = prepare(idx, batch)
+                dispatcher.submit(idx, prepared, process)
+                for ready_idx, result in dispatcher.ready():
+                    apply_result(ready_idx, result)
+                batch = fetch_next(batch)
+                idx += 1
+            for ready_idx, result in dispatcher.results():
+                apply_result(ready_idx, result)
+        except BaseException:
+            # A chunk already writing is allowed to finish. Chunks still queued
+            # must not commit past the last persisted checkpoint.
+            dispatcher.abort()
+            raise

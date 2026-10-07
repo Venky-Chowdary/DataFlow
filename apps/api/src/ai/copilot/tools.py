@@ -354,6 +354,24 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": "Alias of upsert_key. Same source identity column or composite.",
                 },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. CDC uses the log position and does "
+                        "not take a table cursor. A column named updated_at is "
+                        "never invented."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
                 "source_timezone": {
                     "type": "string",
                     "description": (
@@ -405,6 +423,24 @@ TOOL_DEFINITIONS: list[dict] = [
                 "primary_key": {
                     "type": "string",
                     "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. CDC uses the log position and does "
+                        "not take a table cursor. A column named updated_at is "
+                        "never invented."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
                 },
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
                 "source_timezone": {
@@ -573,6 +609,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 "cursor_column": {
                     "type": "string",
                     "description": "Watermark column — required for incremental modes",
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert."
+                    ),
                 },
                 "name": {"type": "string", "description": "Schedule display name"},
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
@@ -2710,6 +2754,8 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -2739,6 +2785,8 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -2768,6 +2816,8 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -2797,6 +2847,8 @@ class DataPilotTools:
             upsert_key=upsert_key or primary_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -2847,6 +2899,7 @@ class DataPilotTools:
         cadence: str = "",
         name: str = "",
         cursor_column: str = "",
+        cursor_semantics: str = "",
         source_timezone: str = "",
         source_read_mode: str = "",
         procedure_call: str = "",
@@ -2877,6 +2930,7 @@ class DataPilotTools:
             cadence=cadence,
             name=name,
             cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             source_timezone=source_timezone,
             source_read_mode=source_read_mode,
             procedure_call=procedure_call,

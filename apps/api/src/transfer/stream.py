@@ -103,7 +103,7 @@ try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.data_quality import BatchDriftDetector, run_integrity_audit
     from services.error_handling import RetryBudget, with_retry
-    from services.parallel_chunks import ChunkDispatcher
+    from services.parallel_chunks import drive_ordered_batches
     from services.reconciliation import FingerprintAccumulator
     from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
@@ -113,7 +113,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.data_quality import BatchDriftDetector, run_integrity_audit
     from src.services.error_handling import RetryBudget, with_retry
-    from src.services.parallel_chunks import ChunkDispatcher
+    from src.services.parallel_chunks import drive_ordered_batches
     from src.services.reconciliation import FingerprintAccumulator
     from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
@@ -2944,7 +2944,10 @@ def _stream_database_transfer_impl(
             write_kwargs["close_connection"] = False
             write_kwargs["skip_session_setup"] = bool(sf_conn_state["session_ready"])
         elif dest_type in ("postgresql", "redshift") and max_workers == 1:
-            # psycopg2 connections are not safely shared across worker threads.
+            # One connection for the job. Later batches stay on this thread
+            # (drive_ordered_batches). psycopg2 deadlocks once that handle
+            # is used from the pool, which is how a 100k load stopped after
+            # the pages that had already committed.
             write_kwargs["connection"] = _ensure_pg_conn()
             write_kwargs["close_connection"] = False
             write_kwargs["connection_holder"] = pg_conn_state
@@ -3259,15 +3262,15 @@ def _stream_database_transfer_impl(
 
     first_idx = chunk_idx + 1
 
-    def _prepare_and_submit(dispatcher: ChunkDispatcher, idx: int, batch: Any) -> None:
+    def _prepare_batch(idx: int, raw_batch: Any) -> Any:
         nonlocal fetch_cursor, fetch_offset
-        batch = _filter_batch(batch)
-        if incremental and cursor_source_col and _raw_page_rows(batch):
-            batch_max = _page_cursor_max(batch)
+        prepared = _filter_batch(raw_batch)
+        if incremental and cursor_source_col and _raw_page_rows(prepared):
+            batch_max = _page_cursor_max(prepared)
             if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
                 fetch_cursor = batch_max
-        dispatcher.submit(idx, batch, _process_db_chunk)
-        fetch_offset += _raw_page_rows(batch)
+        fetch_offset += _raw_page_rows(prepared)
+        return prepared
 
     from .stream_dest_procedure import run_session_after, run_session_before
 
@@ -3294,33 +3297,18 @@ def _stream_database_transfer_impl(
             batch = _fetch_next_batch(batch)
             first_idx += 1
 
-        idx = first_idx + 1
-        with ChunkDispatcher(max_workers=max_workers) as dispatcher:
-            try:
-                # Fetch the next batch (the first one has already been committed).
-                batch = _fetch_next_batch(batch)
-                while batch:
-                    _prepare_and_submit(dispatcher, idx, batch)
-
-                    # Process any completed batches in ascending index order.
-                    for ready_idx, result in dispatcher.ready():
-                        _apply_result(ready_idx, result)
-
-                    # Fetch the next batch while earlier batches are still being written.
-                    batch = _fetch_next_batch(batch)
-                    idx += 1
-
-                # Drain the remaining in-flight writes.
-                for ready_idx, result in dispatcher.results():
-                    _apply_result(ready_idx, result)
-            except BaseException:
-                # Stop queued chunks from writing. Without this the dispatcher's
-                # shutdown waited for every in-flight chunk to finish, so a
-                # cancelled transfer still committed up to `max_inflight` chunks
-                # past the persisted checkpoint — and a later resume rewrote
-                # that region as duplicates.
-                dispatcher.abort()
-                raise
+        # The first page committed above. A single shared connection (proxy,
+        # Snowflake, SQLite, Iceberg) finishes the rest on this thread.
+        # Parallel destinations still overlap the next read with the write.
+        drive_ordered_batches(
+            max_workers=max_workers,
+            initial=batch,
+            fetch_next=_fetch_next_batch,
+            prepare=_prepare_batch,
+            process=_process_db_chunk,
+            apply_result=_apply_result,
+            start_idx=first_idx + 1,
+        )
         row_path_ok = True
     finally:
         if run_after:

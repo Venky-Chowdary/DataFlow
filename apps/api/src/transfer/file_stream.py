@@ -44,7 +44,7 @@ def unique_preserve_warnings(items: list[str], *, limit: int = 10) -> list[str]:
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
-    from services.parallel_chunks import OrderedChunkRunner
+    from services.parallel_chunks import OrderedChunkRunner, shares_one_destination_connection
     from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter
@@ -58,7 +58,7 @@ try:
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
-    from src.services.parallel_chunks import OrderedChunkRunner
+    from src.services.parallel_chunks import OrderedChunkRunner, shares_one_destination_connection
     from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter
@@ -2199,9 +2199,16 @@ def stream_file_to_database(
         # committed before any parallel workers try to insert into the new table.
         _apply_file_result(first_idx, _process_file_chunk(first_idx, first_batch))
 
-        with OrderedChunkRunner(max_workers=max_workers) as runner:
-            for idx, result in runner.run(batch_enum, _process_file_chunk):
-                _apply_file_result(idx, result)
+        if shares_one_destination_connection(max_workers):
+            # The shared Postgres/Snowflake handle was opened on this thread.
+            # OrderedChunkRunner would write the tail from a pool thread and
+            # stall the load after the first committed pages.
+            for idx, item in batch_enum:
+                _apply_file_result(idx, _process_file_chunk(idx, item))
+        else:
+            with OrderedChunkRunner(max_workers=max_workers) as runner:
+                for idx, result in runner.run(batch_enum, _process_file_chunk):
+                    _apply_file_result(idx, result)
     finally:
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")

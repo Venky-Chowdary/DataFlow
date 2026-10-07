@@ -259,11 +259,16 @@ class SyncContract:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
-        pks = data.get("primary_keys")
-        if isinstance(pks, list) and pks:
-            primary_key = ",".join(str(x).strip() for x in pks if str(x).strip())
+        # Pilot stores ``primary_key`` as a list of source columns. Stringifying
+        # that list made the engine merge on the literal "['id']", so a key
+        # preflight had accepted never reached the write.
+        raw_pk = data.get("primary_key")
+        if raw_pk is None or (isinstance(raw_pk, str) and not str(raw_pk).strip()):
+            raw_pk = data.get("primary_keys")
+        if isinstance(raw_pk, (list, tuple)):
+            primary_key = ",".join(str(x).strip() for x in raw_pk if str(x).strip())
         else:
-            primary_key = str(data.get("primary_key") or "").strip()
+            primary_key = str(raw_pk or "").strip()
         return cls(
             name=str(data.get("name") or data.get("stream") or "stream"),
             # Empty inherits request sync_mode via resolve_effective_sync_mode —

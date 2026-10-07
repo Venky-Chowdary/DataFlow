@@ -450,6 +450,8 @@ def plan_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    cursor_column: str = "",
+    cursor_semantics: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -464,7 +466,9 @@ def plan_transfer(
     says which zone the source meant.
     """
     tool = "plan_transfer"
-    upsert_key = (upsert_key or primary_key or "").strip()
+    upsert_key = _column_arg(upsert_key or primary_key)
+    cursor_column = _column_arg(cursor_column)
+    cursor_semantics = str(cursor_semantics or "").strip()
     src_table = (source_table or "").strip()
     unapplied = [str(q) for q in (rule_questions or []) if str(q or "").strip()]
     if unapplied:
@@ -646,12 +650,18 @@ def plan_transfer(
         mappings=mappings,
         operator_key=str(row_rules.get("upsert_key") or ""),
         catalog_key=_source_primary_key(src_info),
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
     row_rules["stream_contracts"] = contracts
-    if contracts and not row_rules.get("upsert_key"):
+    if contracts and not row_rules.get("upsert_key") and contracts[0].get("primary_key"):
         row_rules["upsert_key"] = ",".join(contracts[0]["primary_key"])
+    if contracts and contracts[0].get("cursor_field"):
+        row_rules["cursor_column"] = str(contracts[0]["cursor_field"])
+    if contracts and contracts[0].get("cursor_semantics"):
+        row_rules["cursor_semantics"] = str(contracts[0]["cursor_semantics"])
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -732,14 +742,7 @@ def plan_transfer(
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
             "stream_contracts": row_rules["stream_contracts"],
-            "data_rules": {
-                "applied": [str(r) for r in (applied_rules or [])],
-                "upsert_key": row_rules["upsert_key"],
-                "row_filter": row_rules["filter_description"],
-                # Chat stages one run; a cadence is a Schedules object, so it is
-                # echoed back as an unmet request rather than silently honoured.
-                "cadence_not_scheduled": str(cadence or ""),
-            },
+            "data_rules": _data_rules_preview(row_rules, applied_rules, cadence),
             "mapped_count": len(mappings),
             "unmapped_source_columns": unmapped[:20],
             "type_conversions": conversions[:_MAX_PREVIEW_MAPPINGS],
@@ -780,6 +783,37 @@ def _unapplied_rules_error(questions: list[str]) -> str:
         "asked for would be dropped:"
     )
     return head + "\n" + "\n".join(f"• {q}" for q in questions[:4])
+
+
+def _column_arg(value: Any) -> str:
+    """A tool argument naming columns: one string, or a list of names.
+
+    MCP clients send either. A list must not be stringified into ``"['id']"``.
+    """
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(part).strip() for part in value if str(part).strip())
+    return str(value or "").strip()
+
+
+def _data_rules_preview(
+    row_rules: dict[str, Any],
+    applied_rules: list[str] | None,
+    cadence: str,
+) -> dict[str, Any]:
+    """The row rules the confirm preview and a schedule both read."""
+    preview: dict[str, Any] = {
+        "applied": [str(r) for r in (applied_rules or [])],
+        "upsert_key": row_rules.get("upsert_key") or "",
+        "row_filter": row_rules.get("filter_description") or "",
+        # Chat stages one run; a cadence is a Schedules object, so it is
+        # echoed back as an unmet request rather than silently honoured.
+        "cadence_not_scheduled": str(cadence or ""),
+    }
+    if row_rules.get("cursor_column"):
+        preview["cursor_column"] = row_rules["cursor_column"]
+    if row_rules.get("cursor_semantics"):
+        preview["cursor_semantics"] = row_rules["cursor_semantics"]
+    return preview
 
 
 def _ground_data_rules(
@@ -858,13 +892,17 @@ def _identity_stream_contract(
     mappings: list[dict[str, Any]],
     operator_key: str,
     catalog_key: str,
+    cursor_column: str = "",
+    cursor_semantics: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
     The operator's key wins. Otherwise a mode that requires identity uses the
     source catalog key when every column is mapped. No column named ``id`` is
     invented. CDC's cursor is the log position (``cdc_position``), not a
-    guessed ``updated_at``.
+    guessed ``updated_at``. An incremental cursor is the column the operator
+    named, and only a semantics value they declared — never one inferred from
+    the column's name.
     """
     from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
     from services.primary_key import mapped_catalog_upsert_key
@@ -904,15 +942,46 @@ def _identity_stream_contract(
             bound = [known[part.lower()] for part in parts]
             if _fully_mapped(bound):
                 chosen = bound
-    if not chosen:
+    cursor = ""
+    semantics = ""
+    if mode == "cdc":
+        # The log is the cursor. A table column here would make the snapshot
+        # reader filter on it and skip rows the log had already captured.
+        semantics = "cdc_position"
+    else:
+        raw_cursor = (cursor_column or "").strip()
+        if raw_cursor:
+            known = {col.lower(): col for col in source_columns}
+            actual = known.get(raw_cursor.lower(), "")
+            if not actual:
+                listed = ", ".join(source_columns[:12]) or "none readable"
+                return [], (
+                    f"Source has no column `{raw_cursor}`, so I cannot advance "
+                    f"on it. Columns I can see: {listed}."
+                )
+            cursor = actual
+        raw_sem = (cursor_semantics or "").strip().lower()
+        if raw_sem:
+            from services.cursor_semantics import CURSOR_SEMANTICS
+
+            if raw_sem not in CURSOR_SEMANTICS:
+                return [], (
+                    f"Unknown cursor semantics '{raw_sem}' — declare one of: "
+                    + ", ".join(sorted(CURSOR_SEMANTICS))
+                )
+            semantics = raw_sem
+    if not chosen and not cursor:
         return [], ""
     contract: dict[str, Any] = {
         "name": source_table or "stream",
         "selected": True,
-        "primary_key": chosen,
     }
-    if mode == "cdc":
-        contract["cursor_semantics"] = "cdc_position"
+    if chosen:
+        contract["primary_key"] = chosen
+    if cursor:
+        contract["cursor_field"] = cursor
+    if semantics:
+        contract["cursor_semantics"] = semantics
     return [contract], ""
 
 
@@ -1401,6 +1470,8 @@ def start_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    cursor_column: str = "",
+    cursor_semantics: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -1427,6 +1498,8 @@ def start_transfer(
         upsert_key=upsert_key or primary_key,
         primary_key=primary_key,
         dedupe_key=dedupe_key,
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
         cadence=cadence,
@@ -1551,6 +1624,10 @@ def start_transfer(
         preview["row_filter"] = rules_preview["row_filter"]
     if rules_preview.get("upsert_key"):
         preview["upsert_key"] = rules_preview["upsert_key"]
+    if rules_preview.get("cursor_column"):
+        preview["cursor_column"] = rules_preview["cursor_column"]
+    if rules_preview.get("cursor_semantics"):
+        preview["cursor_semantics"] = rules_preview["cursor_semantics"]
     if payload.get("limit"):
         preview["row_limit"] = payload["limit"]
     if rules_preview.get("cadence_not_scheduled"):
