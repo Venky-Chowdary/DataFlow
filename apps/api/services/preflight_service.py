@@ -297,68 +297,88 @@ class FilePreflightContext(PreflightContext):
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         if not columns or not self.sample_rows:
             return []
-        col = columns[0]
-        source_col = col
-        for m in self.plan.mappings:
-            if m.target == col:
-                source_col = m.source
-                break
         # Case-insensitive dest collations equate A/a — uniqueness must too
         # (MySQL utf8mb4_*_ci / SQL Server *_CI_AS / CITEXT), else Validate false-greens.
-        dest_type = ""
-        for c in getattr(self.plan.destination, "target_columns", None) or []:
-            if getattr(c, "name", None) == col:
-                dest_type = str(getattr(c, "inferred_type", "") or "")
-                break
+        # Every named column is part of the key. The first column alone false-fails
+        # a composite (same id, different tenant) and false-greens the reverse.
         from services.type_system import (
-            unique_equality_key,
+            composite_unique_equality_key,
             unique_key_forces_casefold,
             unique_key_nulls_collide,
             unique_key_row_in_scope,
         )
 
         unique_keys = getattr(self.plan, "destination_unique_keys", None) or []
-        casefold = unique_key_forces_casefold(
-            col,
-            ddl_type=dest_type,
-            unique_keys=unique_keys,
-        )
-        nulls_collide = unique_key_nulls_collide(col, unique_keys=unique_keys)
-        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        specs: list[dict[str, Any]] = []
+        for col in columns:
+            source_col = col
+            for m in self.plan.mappings:
+                if m.target == col:
+                    source_col = m.source
+                    break
+            dest_type = ""
+            for c in getattr(self.plan.destination, "target_columns", None) or []:
+                if getattr(c, "name", None) == col:
+                    dest_type = str(getattr(c, "inferred_type", "") or "")
+                    break
+            specs.append(
+                {
+                    "col": col,
+                    "source": source_col,
+                    "dest_type": dest_type,
+                    "casefold": unique_key_forces_casefold(
+                        col, ddl_type=dest_type, unique_keys=unique_keys
+                    ),
+                    "nulls_collide": unique_key_nulls_collide(col, unique_keys=unique_keys),
+                }
+            )
+        casefold = any(spec["casefold"] for spec in specs)
+        nulls_collide = any(spec["nulls_collide"] for spec in specs)
+        label = specs[0]["col"] if len(specs) == 1 else ", ".join(spec["col"] for spec in specs)
+        dest_kind = ""
+        try:
+            dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
+        except Exception:  # noqa: BLE001 — a missing plan field is an empty dest kind
+            dest_kind = ""
         seen: dict[str, int] = {}
         examples: dict[str, str] = {}
         dupes: list[dict[str, Any]] = []
         for row in self.sample_rows:
             scope = dict(row)
-            if col not in scope and source_col in scope:
-                scope[col] = scope.get(source_col)
-            if not unique_key_row_in_scope(scope, col, unique_keys=unique_keys):
+            for spec in specs:
+                if spec["col"] not in scope and spec["source"] in scope:
+                    scope[spec["col"]] = scope.get(spec["source"])
+            if any(
+                not unique_key_row_in_scope(scope, spec["col"], unique_keys=unique_keys)
+                for spec in specs
+            ):
                 continue
-            raw_cell = row.get(source_col, "")
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
-            dest_kind = ""
-            try:
-                dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
-            except Exception:
-                dest_kind = ""
-            key = unique_equality_key(
-                None if raw_cell is None else raw,
-                dest_type,
-                force_casefold=casefold,
-                null_sentinel=null_sentinel,
-                dest_kind=dest_kind,
-            )
-            if not key and not nulls_collide:
-                continue
+            parts: list[tuple[Any, str | None, bool, str | None]] = []
+            displays: list[str] = []
+            for spec in specs:
+                raw_cell = row.get(spec["source"], "")
+                raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+                sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
+                parts.append(
+                    (
+                        None if raw_cell is None else raw,
+                        spec["dest_type"],
+                        bool(spec["casefold"]),
+                        sentinel,
+                    )
+                )
+                displays.append(raw if raw else "<NULL>")
+            key = composite_unique_equality_key(parts, dest_kind=dest_kind)
             if not key:
                 continue
             seen[key] = seen.get(key, 0) + 1
-            examples.setdefault(key, raw if raw else "<NULL>")
+            shown = displays[0] if len(displays) == 1 else ", ".join(displays)
+            examples.setdefault(key, shown)
         for key, count in seen.items():
             if count > 1 and key:
                 dupes.append(
                     {
-                        "column": col,
+                        "column": label,
                         "value": examples.get(key, key),
                         "count": count,
                         "collation_casefold": casefold,

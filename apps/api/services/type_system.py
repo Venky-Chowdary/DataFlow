@@ -6421,6 +6421,46 @@ def unique_equality_key(
     return text
 
 
+# Unit separator — not a character a coerced key emits — so ("ab","c") and
+# ("a","bc") stay different tuples. One column joins to itself, unchanged.
+_COMPOSITE_KEY_SEP = "\x1f"
+
+
+def composite_unique_equality_key(
+    parts: list[tuple[Any, str | None, bool, str | None]],
+    *,
+    dest_kind: str | None = None,
+) -> str:
+    """Equality key for one identity column or a composite.
+
+    Each part is ``(value, ddl_type, force_casefold, null_sentinel)`` and is
+    normalized by :func:`unique_equality_key`. A single part is returned as
+    that key, with no separator. A composite joins the parts so uniqueness is
+    the tuple, not the first column.
+
+    An empty part is SQL UNIQUE: NULL does not equal NULL, so the row is not
+    a duplicate of another partial tuple. The caller skips an empty key
+    instead of matching on the columns that happened to be filled in.
+    """
+    keys: list[str] = []
+    for value, ddl_type, force_casefold, null_sentinel in parts:
+        key = unique_equality_key(
+            value,
+            ddl_type,
+            force_casefold=bool(force_casefold),
+            null_sentinel=null_sentinel,
+            dest_kind=dest_kind,
+        )
+        if not key:
+            return ""
+        keys.append(key)
+    if not keys:
+        return ""
+    if len(keys) == 1:
+        return keys[0]
+    return _COMPOSITE_KEY_SEP.join(keys)
+
+
 _CI_INDEX_EXPR_RE = re.compile(
     r"\b(?:lower|upper|casefold)\s*\(|::\s*citext\b|\bcitext\s*\("
     r"|\bnlssort\s*\(",

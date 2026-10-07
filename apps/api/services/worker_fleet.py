@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -23,6 +23,32 @@ _logger = logging.getLogger(__name__)
 
 _api_claim_stop: threading.Event | None = None
 _api_claim_thread: threading.Thread | None = None
+# One pool for the process. Created at the claim cap before the loop so a
+# later larger TRANSFER_WORKERS is not stuck on the first cap that ran.
+_fleet_pool: ThreadPoolExecutor | None = None
+_fleet_pool_cap: int = 0
+
+
+def fleet_executor(inflight_cap: int) -> ThreadPoolExecutor:
+    """Thread pool sized to the claim cap.
+
+    The pool used to be created on the first concurrent job and then reused
+    forever, so a loop that started at 1 worker never grew when
+    ``TRANSFER_WORKERS`` was 8. A larger cap replaces the smaller pool. A
+    smaller later cap keeps the larger pool. ``inflight_cap == 1`` does not
+    call this — that path stays serial.
+    """
+    global _fleet_pool, _fleet_pool_cap
+    cap = max(1, int(inflight_cap))
+    if _fleet_pool is not None and _fleet_pool_cap >= cap:
+        return _fleet_pool
+    previous = _fleet_pool
+    pool = ThreadPoolExecutor(max_workers=cap, thread_name_prefix="df-fleet")
+    _fleet_pool = pool
+    _fleet_pool_cap = cap
+    if previous is not None:
+        previous.shutdown(wait=False, cancel_futures=False)
+    return pool
 
 
 def _queue_coll():  # type: ignore[no-untyped-def]
@@ -263,6 +289,9 @@ def run_fleet_loop(
         inflight_cap = 8
     inflight_cap = max(1, inflight_cap)
     inflight: dict[str, Future[Any]] = {}
+    # Size the pool before the first claim. Creating it inside the loop left
+    # every later call on the first cap that happened to run.
+    pool = fleet_executor(inflight_cap) if inflight_cap > 1 else None
 
     def _reap() -> None:
         done = [jid for jid, fut in list(inflight.items()) if fut.done()]
@@ -298,17 +327,10 @@ def run_fleet_loop(
                 store.release(job_id)
             time.sleep(0.05)
             continue
-        # Concurrent path — submit onto the durable transfer scheduler pool.
-        # The lease was already acquired in claim_next_job; transfer_scheduler.submit
-        # would try to acquire again and skip. Run handler in a bare thread via
-        # the executor without a second lease: use a private pool.
-        from concurrent.futures import ThreadPoolExecutor
-
-        if not hasattr(run_fleet_loop, "_pool"):
-            run_fleet_loop._pool = ThreadPoolExecutor(  # type: ignore[attr-defined]
-                max_workers=inflight_cap, thread_name_prefix="df-fleet"
-            )
-        pool: ThreadPoolExecutor = run_fleet_loop._pool  # type: ignore[attr-defined]
+        # Concurrent path. The lease was already acquired in claim_next_job;
+        # transfer_scheduler.submit would try to acquire again and skip.
+        if pool is None:
+            raise RuntimeError("Fleet pool was not opened for a concurrent claim loop")
         inflight[job_id] = pool.submit(handler, job_id)
         time.sleep(0.05)
 

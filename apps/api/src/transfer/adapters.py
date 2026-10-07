@@ -442,7 +442,12 @@ def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    from .connector_capabilities import effective_port, resolve_driver_type
+    from .connector_capabilities import (
+        effective_port,
+        prefer_listen_port,
+        resolve_driver_type,
+        stored_listen_port,
+    )
 
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
@@ -520,9 +525,12 @@ def resolve_connector_config(
                 inline_port_num = 0
             if inline_port_num in (0, int(default_port or 0)):
                 inline_port = 0
+        dial_driver = resolve_driver_type(str(conn_dict.get("type") or fmt or ""))
         merged_cfg = {
             "host": chosen_host,
-            "port": _pick(inline_port, saved_port),
+            # Inline 5432 is the old form default, not an instruction to
+            # ignore a saved Redis 6380 / Elasticsearch 9200 / Kafka 9092.
+            "port": prefer_listen_port(dial_driver, inline_port, saved_port),
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
@@ -582,7 +590,10 @@ def resolve_connector_config(
         cfg["host"] = cfg["host"] or "localhost"
     else:
         cfg["host"] = cfg.get("host") or ""
-    cfg["port"] = effective_port(fmt, cfg.get("port"))
+    cfg["port"] = stored_listen_port(
+        resolve_driver_type(str(cfg.get("type") or fmt or "")),
+        cfg.get("port"),
+    )
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
     cfg["schema"] = normalize_schema(
@@ -1237,6 +1248,36 @@ def read_source_database(
     if db_type == "email":
         raise ValueError(
             "Email cannot be a transfer source; configure it as a destination only."
+        )
+
+    if db_type == "kafka":
+        # Buffered reads (kafka → file, or a destination that is not in the
+        # streaming set) previously raised "read not implemented". The topic
+        # reader is the same one the checkpointed stream uses. Offsets are
+        # not committed here — delivery stays at-least-once until the
+        # destination apply commits them on the streaming path.
+        from connectors.kafka_reader import read_topic_batch
+
+        topic = endpoint.table or endpoint.database or endpoint.collection or ""
+        if not topic:
+            raise ValueError("Kafka source topic name required")
+        batch, _cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, topic)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = batch.meta if isinstance(batch.meta, dict) else {}
+        typed = native.get("native_types") if isinstance(native, dict) else None
+        schema = (
+            dict(typed)
+            if isinstance(typed, dict) and typed
+            else (
+                FileParser.infer_schema(records)
+                if records
+                else {c: "string" for c in batch.headers}
+            )
+        )
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
         )
 
     raise ValueError(f"Database source '{db_type}' read not implemented")

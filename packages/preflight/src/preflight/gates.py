@@ -1671,6 +1671,35 @@ def _is_drift_noise_issue(text: str) -> bool:
     return any(marker in lower for marker in _DRIFT_DDL_NOISE)
 
 
+def _g6_sample_identity(ctx: PreflightContext, dest_kind: str) -> tuple[list[str], list[str]]:
+    """Source and target columns of the identity the sample probe must check.
+
+    A composite contract is every column. The comma-joined form is not one
+    column name, and a partial composite does not fall through to a guessed id.
+    """
+    from services.primary_key import resolve_primary_key_columns
+
+    return resolve_primary_key_columns(
+        mappings=ctx.plan.mappings,
+        source_columns=[c.name for c in ctx.plan.source.columns],
+        dest_kind=dest_kind,
+        validation_mode=ctx.plan.validation_mode,
+        purpose="uniqueness",
+        destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
+        contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
+        stream_contracts=getattr(ctx.plan, "stream_contracts", None),
+        stream_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+    )
+
+
+def _g6_identity_label(columns: list[str]) -> str | None:
+    if not columns:
+        return None
+    if len(columns) == 1:
+        return columns[0]
+    return ", ".join(columns)
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
 
@@ -1732,26 +1761,18 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     if schemaless:
         # Document stores have no CREATE/ALTER contract. Only identity-key
         # uniqueness in the sample can fail this gate.
-        source_cols = [c.name for c in ctx.plan.source.columns]
-        pk_src = pk_tgt = None
+        pk_sources: list[str] = []
+        pk_targets: list[str] = []
         try:
-            from services.primary_key import resolve_identity_key
-
-            pk_src, pk_tgt = resolve_identity_key(
-                mappings=ctx.plan.mappings,
-                source_columns=source_cols,
-                dest_kind=dest_kind,
-                validation_mode=ctx.plan.validation_mode,
-                purpose="uniqueness",
-                destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
-                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
-            )
-        except Exception:
+            pk_sources, pk_targets = _g6_sample_identity(ctx, dest_kind)
+        except Exception:  # noqa: BLE001 — identity import must not skip the gate
             for m in ctx.plan.mappings:
                 if m.target and str(m.target).lower() == "_id":
-                    pk_src, pk_tgt = m.source, m.target
+                    pk_sources, pk_targets = [m.source], [m.target]
                     break
-        if pk_tgt:
+        pk_src = _g6_identity_label(pk_sources)
+        pk_tgt = _g6_identity_label(pk_targets)
+        if pk_targets:
             # Append/overwrite: sample uniqueness is not a DDL contract unless dest has PK.
             try:
                 from services.primary_key import sync_requires_unique_identity
@@ -1772,7 +1793,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-            dupes = ctx.probe_unique_constraint([pk_tgt])
+            dupes = ctx.probe_unique_constraint(list(pk_targets))
             if dupes:
                 return _block(
                     GateId.G6_TARGET_DDL,
@@ -2012,28 +2033,20 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             ),
         )
 
-    source_cols = [c.name for c in ctx.plan.source.columns]
+    pk_sources: list[str] = []
+    pk_targets: list[str] = []
     try:
-        from services.primary_key import resolve_identity_key
-
-        pk_src, pk_tgt = resolve_identity_key(
-            mappings=ctx.plan.mappings,
-            source_columns=source_cols,
-            dest_kind=dest_kind,
-            validation_mode=ctx.plan.validation_mode,
-            purpose="uniqueness",
-            destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
-            contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
-        )
-    except Exception:
-        pk_src, pk_tgt = None, None
+        pk_sources, pk_targets = _g6_sample_identity(ctx, dest_kind)
+    except Exception:  # noqa: BLE001 — identity import must not skip the gate
         for m in ctx.plan.mappings:
             if m.target and str(m.target).lower() in {"id", "_id"}:
-                pk_src, pk_tgt = m.source, m.target
+                pk_sources, pk_targets = [m.source], [m.target]
                 break
+    pk_src = _g6_identity_label(pk_sources)
+    pk_tgt = _g6_identity_label(pk_targets)
 
-    if pk_tgt:
-        dupes = ctx.probe_unique_constraint([pk_tgt])
+    if pk_targets:
+        dupes = ctx.probe_unique_constraint(list(pk_targets))
         if dupes:
             return _block(
                 GateId.G6_TARGET_DDL,

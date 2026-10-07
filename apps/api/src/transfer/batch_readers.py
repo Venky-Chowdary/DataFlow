@@ -686,4 +686,10 @@ def _read_batch_impl(
         return read_via_registry(
             "iceberg", cfg=cfg, table=table, limit=limit, offset=offset, columns=columns
         )
+    if src_type == "neo4j":
+        # HTTP Cypher pages by elementId order. Offset is the resume point;
+        # a short page ends the stream the same way a SQL fetchmany does.
+        from connectors.neo4j import read_object
+
+        return read_object(cfg=cfg, object=table or "", limit=limit, offset=offset)
     raise ValueError(f"Streaming read not supported for source type '{src_type}'")

@@ -69,63 +69,85 @@ class RuntimePreflightContext(PreflightContext):
             return []
 
         idx_map = {h: i for i, h in enumerate(headers)}
-        pk_col = columns[0]
-        idx = idx_map.get(pk_col)
-        if idx is None:
-            for m in self.plan.mappings:
-                if m.target == pk_col:
-                    idx = idx_map.get(m.source)
-                    break
-        if idx is None:
-            return []
+        # A missing part of a composite is not a reason to probe the first
+        # column alone. That prefix is a different key.
+        indexes: list[tuple[str, int]] = []
+        for col in columns:
+            idx = idx_map.get(col)
+            if idx is None:
+                for m in self.plan.mappings:
+                    if m.target == col:
+                        idx = idx_map.get(m.source)
+                        break
+            if idx is None:
+                return []
+            indexes.append((col, idx))
 
-        dest_type = ""
-        for c in getattr(self.plan.destination, "target_columns", None) or []:
-            if getattr(c, "name", None) == pk_col:
-                dest_type = str(getattr(c, "inferred_type", "") or "")
-                break
         from services.type_system import (
-            unique_equality_key,
+            composite_unique_equality_key,
             unique_key_forces_casefold,
             unique_key_nulls_collide,
             unique_key_row_in_scope,
         )
 
         unique_keys = getattr(self.plan, "destination_unique_keys", None) or []
-        casefold = unique_key_forces_casefold(
-            pk_col,
-            ddl_type=dest_type,
-            unique_keys=unique_keys,
-        )
-        nulls_collide = unique_key_nulls_collide(pk_col, unique_keys=unique_keys)
-        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        specs: list[dict[str, Any]] = []
+        for col, idx in indexes:
+            dest_type = ""
+            for c in getattr(self.plan.destination, "target_columns", None) or []:
+                if getattr(c, "name", None) == col:
+                    dest_type = str(getattr(c, "inferred_type", "") or "")
+                    break
+            specs.append(
+                {
+                    "col": col,
+                    "idx": idx,
+                    "dest_type": dest_type,
+                    "casefold": unique_key_forces_casefold(
+                        col, ddl_type=dest_type, unique_keys=unique_keys
+                    ),
+                    "nulls_collide": unique_key_nulls_collide(col, unique_keys=unique_keys),
+                }
+            )
+        casefold = any(spec["casefold"] for spec in specs)
+        nulls_collide = any(spec["nulls_collide"] for spec in specs)
+        dest_kind = ""
+        try:
+            dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
+        except Exception:  # noqa: BLE001 — a missing plan field is an empty dest kind
+            dest_kind = ""
         seen: dict[str, int] = {}
         examples: dict[str, str] = {}
         for row in rows:
-            if idx >= len(row):
+            if any(spec["idx"] >= len(row) for spec in specs):
                 continue
             row_dict = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            if not unique_key_row_in_scope(row_dict, pk_col, unique_keys=unique_keys):
+            if any(
+                not unique_key_row_in_scope(row_dict, spec["col"], unique_keys=unique_keys)
+                for spec in specs
+            ):
                 continue
-            raw = "" if row[idx] is None else str(row[idx])
-            dest_kind = ""
-            try:
-                dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
-            except Exception:
-                dest_kind = ""
-            key = unique_equality_key(
-                None if row[idx] is None else raw,
-                dest_type,
-                force_casefold=casefold,
-                null_sentinel=null_sentinel,
-                dest_kind=dest_kind,
-            )
-            if not key and not nulls_collide:
-                continue
+            parts: list[tuple[Any, str | None, bool, str | None]] = []
+            displays: list[str] = []
+            for spec in specs:
+                cell = row[spec["idx"]]
+                raw = "" if cell is None else str(cell)
+                sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
+                parts.append(
+                    (
+                        None if cell is None else raw,
+                        spec["dest_type"],
+                        bool(spec["casefold"]),
+                        sentinel,
+                    )
+                )
+                displays.append(raw if raw else "<NULL>")
+            key = composite_unique_equality_key(parts, dest_kind=dest_kind)
             if not key:
                 continue
             seen[key] = seen.get(key, 0) + 1
-            examples.setdefault(key, raw if raw else "<NULL>")
+            shown = displays[0] if len(displays) == 1 else ", ".join(displays)
+            examples.setdefault(key, shown)
         return [
             {
                 "value": examples.get(v, v),

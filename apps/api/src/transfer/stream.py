@@ -151,6 +151,13 @@ _STREAMING_TYPES = frozenset({
     # Salesforce and HubSpot paginate with opaque cursors / capped OFFSET — do not
     # claim resumable numeric-offset streaming until continuation state is wired.
 })
+# Neo4j is a source (HTTP Cypher, offset by elementId). It is not a destination.
+_STREAMING_SOURCES = _STREAMING_TYPES | frozenset({"neo4j"})
+# Vector engines already have a batch writer. They are destinations only —
+# adding them as sources would offer a read the catalog does not implement.
+_STREAMING_DESTINATIONS = _STREAMING_TYPES | frozenset({
+    "pgvector", "weaviate", "pinecone", "milvus",
+})
 
 
 def _source_name(source: EndpointConfig) -> str:
@@ -1196,9 +1203,9 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    if src_type not in _STREAMING_TYPES:
+    if src_type not in _STREAMING_SOURCES:
         raise ValueError(f"Streaming source '{src_type}' not supported")
-    if dest_type not in _STREAMING_TYPES:
+    if dest_type not in _STREAMING_DESTINATIONS:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")
 
     table = _source_name(source)
@@ -3853,8 +3860,8 @@ def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> b
         return False
     from .connector_capabilities import resolve_driver_type
     return (
-        resolve_driver_type(source.format) in _STREAMING_TYPES
-        and resolve_driver_type(destination.format) in _STREAMING_TYPES
+        resolve_driver_type(source.format) in _STREAMING_SOURCES
+        and resolve_driver_type(destination.format) in _STREAMING_DESTINATIONS
     )
 
 
