@@ -507,6 +507,10 @@ def _parse_expires_at(raw: object) -> datetime | None:
     return parsed
 
 
+def _is_revoked(item: dict[str, Any]) -> bool:
+    return bool(str(item.get("revoked_at") or "").strip())
+
+
 def _key_expired(item: dict[str, Any], *, now: datetime | None = None) -> bool:
     """A missing expiry is a legacy key and stays valid. A corrupt date does not."""
     if "expires_at" not in item or item.get("expires_at") in (None, ""):
@@ -577,17 +581,36 @@ def load_api_key_records() -> list[dict[str, Any]]:
         logger.warning("workspace API key read failed; using the local file", exc_info=True)
         return file_keys
     by_id = {str(doc["id"]): doc for doc in docs}
+    file_rewrites: list[dict[str, Any]] = []
     for item in file_keys:
         key_id = str(item["id"])
-        if key_id in by_id:
-            continue
         stored = _record_for_store(item)
-        try:
-            coll.update_one({"id": key_id}, {"$set": stored}, upsert=True)
-        except _store_errors():
-            logger.warning("workspace API key heal into Mongo failed", exc_info=True)
-            return file_keys
-        by_id[key_id] = stored
+        current = by_id.get(key_id)
+        if current is None:
+            try:
+                coll.update_one({"id": key_id}, {"$set": stored}, upsert=True)
+            except _store_errors():
+                logger.warning("workspace API key heal into Mongo failed", exc_info=True)
+                return file_keys
+            by_id[key_id] = stored
+            continue
+        # A revoke on either side sticks. A stale file must not mint the secret
+        # again, and a revoke that reached only the file must still reach Mongo.
+        if _is_revoked(stored) and not _is_revoked(current):
+            revoked = dict(current)
+            revoked["revoked_at"] = stored.get("revoked_at")
+            try:
+                coll.update_one({"id": key_id}, {"$set": _record_for_store(revoked)}, upsert=True)
+            except _store_errors():
+                logger.warning("workspace API key revoke sync failed", exc_info=True)
+            by_id[key_id] = revoked
+        elif _is_revoked(current) and not _is_revoked(stored):
+            file_rewrites.append(current)
+    if file_rewrites:
+        merged = {str(item["id"]): item for item in file_keys}
+        for item in file_rewrites:
+            merged[str(item["id"])] = _record_for_store(item)
+        _save_file_keys(list(merged.values()))
     return list(by_id.values())
 
 
@@ -626,7 +649,11 @@ def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[
 
 
 def list_api_keys() -> list[dict[str, Any]]:
-    rows = [_public_api_key(item) for item in load_api_key_records()]
+    rows = [
+        _public_api_key(item)
+        for item in load_api_key_records()
+        if not _is_revoked(item)
+    ]
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     return rows
 
@@ -658,19 +685,22 @@ def create_api_key(
 
 
 def revoke_api_key(key_id: str) -> bool:
-    file_keys = _file_key_records()
-    found_file = any(str(item.get("id")) == key_id for item in file_keys)
-    if found_file:
-        _save_file_keys([item for item in file_keys if str(item.get("id")) != key_id])
-    found_mongo = False
-    coll = _keys_collection()
-    if coll is not None:
-        try:
-            result = coll.delete_one({"id": key_id})
-            found_mongo = bool(getattr(result, "deleted_count", 0))
-        except _store_errors():
-            logger.warning("workspace API key Mongo revoke failed", exc_info=True)
-    return found_file or found_mongo
+    """Mark the key revoked in both stores.
+
+    Deleting it let a replica whose file still held the secret copy that secret
+    back into Mongo on the next read. The hash stays so the old secret is
+    recognized and refused. A second revoke reports that there is nothing left
+    to revoke.
+    """
+    match = next(
+        (item for item in load_api_key_records() if str(item.get("id")) == key_id),
+        None,
+    )
+    if match is None or _is_revoked(match):
+        return False
+    match["revoked_at"] = _now()
+    _upsert_api_key_record(match)
+    return True
 
 
 def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
@@ -680,7 +710,7 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
     for item in load_api_key_records():
         if item.get("key_hash") != digest:
             continue
-        if _key_expired(item):
+        if _is_revoked(item) or _key_expired(item):
             return None
         item["last_used_at"] = _now()
         _upsert_api_key_record(item)

@@ -107,6 +107,11 @@ def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") 
     # Read through the module so a test that substitutes the role normalizer on
     # ``services.rbac`` is honoured here too.
     platform_role = _rbac.normalize_role(user.get("role"))
+    # A workspace API key is its own principal. The role stored on the key is
+    # the gate. Looking up the creator's membership promoted every key an
+    # admin minted to admin, so an editor key could list and revoke keys.
+    if str(user.get("auth_kind") or "") == "api_key":
+        return platform_role
     if platform_role == "admin":
         return "admin"
     email = str(user.get("email") or "").strip()

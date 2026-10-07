@@ -73,6 +73,7 @@ def _attach_user(request: Request, token: str) -> bool:
         user = {
             "email": request.state.user_email,
             "role": key_info.get("role") or "viewer",
+            "auth_kind": "api_key",
         }
         # Workspace API keys may carry tenant binding (same claims as users).
         if key_info.get("tenant_id"):
