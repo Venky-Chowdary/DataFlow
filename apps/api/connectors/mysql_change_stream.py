@@ -40,6 +40,46 @@ _DDL_RE = re.compile(
 _logger = logging.getLogger(__name__)
 
 
+def _binlog_file_index(name: str) -> tuple[str, int] | None:
+    """``mysql-bin.000123`` → ``("mysql-bin", 123)``. None when unordered."""
+    text = str(name or "")
+    prefix, dot, suffix = text.rpartition(".")
+    if not dot or not prefix or not suffix.isdigit():
+        return None
+    return prefix, int(suffix)
+
+
+def consumed_reached_binlog_head(
+    consumed_file: str,
+    consumed_pos: int,
+    head_file: str,
+    head_pos: int,
+) -> bool | None:
+    """True when this poll read up to the head captured before the stream opened.
+
+    A later file with the same prefix is past that head. Two names that cannot
+    be ordered return None so a busy server is not failed on a guess.
+    """
+    try:
+        consumed_at = int(consumed_pos)
+        head_at = int(head_pos)
+    except (TypeError, ValueError):
+        return None
+    if str(consumed_file) == str(head_file):
+        return consumed_at >= head_at
+    consumed_idx = _binlog_file_index(consumed_file)
+    head_idx = _binlog_file_index(head_file)
+    if (
+        consumed_idx is None
+        or head_idx is None
+        or consumed_idx[0] != head_idx[0]
+    ):
+        return None
+    if consumed_idx[1] != head_idx[1]:
+        return consumed_idx[1] > head_idx[1]
+    return consumed_at >= head_at
+
+
 def _serialize(value: Any) -> str:
     from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
@@ -189,25 +229,35 @@ class MySqlChangeStreamCdc:
         self._lease.release()
 
     def capture_has_pending(self) -> bool | None:
-        """True when the binlog head is past the position this poll consumed.
+        """True when this poll stopped before the head captured at poll start.
 
-        Same-file equality is caught up. A different file or a higher position
-        means a row event may still be unread. ``None`` when this reader has
-        not consumed a position yet or the head cannot be read.
+        The head is ``SHOW MASTER STATUS`` taken before the stream opens.
+        Writes that land after that snapshot belong to the next poll. Comparing
+        to the live master instead keeps a busy server pending until the round
+        budget fails a catch-up that already read this table.
+        ``None`` when this reader has not consumed a position, no head was
+        captured, or the two binlog names cannot be ordered.
         """
         consumed_file = getattr(self, "_consumed_file", None)
         consumed_pos = getattr(self, "_consumed_pos", None)
-        if not consumed_file or consumed_pos is None:
+        head_file = getattr(self, "_poll_head_file", None)
+        head_pos = getattr(self, "_poll_head_pos", None)
+        if (
+            not consumed_file
+            or consumed_pos is None
+            or not head_file
+            or head_pos is None
+        ):
             return None
-        current = self._current_binlog_position()
-        if not current or not current.get("file"):
+        reached = consumed_reached_binlog_head(
+            str(consumed_file),
+            int(consumed_pos),
+            str(head_file),
+            int(head_pos),
+        )
+        if reached is None:
             return None
-        if str(current.get("file")) != str(consumed_file):
-            return True
-        try:
-            return int(current.get("pos") or 0) > int(consumed_pos)
-        except (TypeError, ValueError):
-            return None
+        return not reached
 
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
@@ -1551,6 +1601,19 @@ class MySqlChangeStreamCdc:
                 emitted = True
                 self.resume_token = batch.resume_token
                 yield batch
+
+        # Head first, then read. A commit after this snapshot is the next poll.
+        # The live master moves under other sessions; it is not this poll's debt.
+        self._poll_head_file = None
+        self._poll_head_pos = None
+        head = self._current_binlog_position()
+        if head and head.get("file") and head.get("pos") is not None:
+            try:
+                self._poll_head_file = str(head["file"])
+                self._poll_head_pos = int(head["pos"])
+            except (TypeError, ValueError):
+                self._poll_head_file = None
+                self._poll_head_pos = None
 
         # Row changes + rotation + QueryEvent (DDL/BEGIN) + XidEvent (COMMIT).
         kwargs = self._binlog_kwargs(

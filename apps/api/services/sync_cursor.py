@@ -560,6 +560,42 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
+def cursor_keys_for_job(job_id: str) -> list[str]:
+    """Cursor keys whose stored metadata names this job.
+
+    ``set_watermark`` records ``metadata.job_id``. Slot release uses that
+    when the job document itself has no ``cursor_key``, so dropping the
+    slot also drops the watermark the next run would try to resume.
+    """
+    jid = (job_id or "").strip()
+    if not jid:
+        return []
+    found: list[str] = []
+
+    def _add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in found:
+            found.append(text)
+
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            for doc in coll.find({"metadata.job_id": jid}, {"key": 1}):
+                _add(doc.get("key"))
+        except Exception:
+            _logger.exception("Mongo cursor_keys_for_job failed for %s", jid)
+    try:
+        for entry in _load().get("cursors", []):
+            if not isinstance(entry, dict):
+                continue
+            meta = entry.get("metadata")
+            if isinstance(meta, dict) and str(meta.get("job_id") or "") == jid:
+                _add(entry.get("key"))
+    except Exception:
+        _logger.exception("File cursor_keys_for_job failed for %s", jid)
+    return found
+
+
 def list_cursor_keys() -> list[str]:
     """Every persisted cursor key, so a reset can be aimed without guessing one.
 

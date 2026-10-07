@@ -236,7 +236,10 @@ def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
         return
     from services.cdc_catchup import CdcStreamBehind, behind_message
 
-    raise CdcStreamBehind(behind_message(cdc))
+    raise CdcStreamBehind(
+        behind_message(cdc),
+        slot_name=str(getattr(cdc, "slot_name", "") or ""),
+    )
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -2205,10 +2208,12 @@ def _run_cdc_shared_multi_table(
     lag_fields = _cdc_lag_fields(cdc)
     last_summary = dict(last_summary or {})
     last_summary["streams"] = list(stream_health.values())
+    last_summary["cursor_key"] = shared_key
     last_summary["cdc"] = {
         "shared_reader": True,
         "tables": tables,
         "watermark": get_watermark(shared_key),
+        "cursor_key": shared_key,
         **lag_fields,
     }
     if eos_active:
@@ -3293,11 +3298,13 @@ def _run_cdc_single_stream(
 
         summary = state.last_dest_summary or {}
         state.dest_before.stamp(summary, str(dest_table or table_name or ""))
+        summary["cursor_key"] = cursor_key
         summary["cdc"] = {
             "inserts": state.inserts,
             "updates": state.updates,
             "deletes": state.deletes,
             "watermark": final_watermark,
+            "cursor_key": cursor_key,
             "poll_rounds": max_poll_rounds,
             **lag_fields,
         }

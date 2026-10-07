@@ -22,7 +22,16 @@ _PG_TYPES = {"postgresql", "postgres"}
 
 
 class CdcStreamBehind(RuntimeError):
-    """Catch-up stopped while the source log still held an unread change."""
+    """Catch-up stopped while the source log still held an unread change.
+
+    The slot is kept. Resume reads the change. Delivery stays at-least-once.
+    """
+
+    code = "cdc_stream_behind"
+
+    def __init__(self, message: str, *, slot_name: str = "") -> None:
+        super().__init__(message)
+        self.slot_name = slot_name
 
 
 def behind_message(cdc: Any) -> str:
@@ -129,6 +138,64 @@ def _schedule_owns_slot(job: dict[str, Any], *, schedule_id: str, job_id: str) -
     return False
 
 
+def _worker_still_holds_cdc_lease(job_id: str) -> bool:
+    """True when this job's worker still has a live CDC lease.
+
+    Peek mode leaves the Postgres slot inactive between polls. Dropping it
+    then cuts the worker off and clears the watermark under an open reader.
+    A stale lease is a worker that has already exited. A lease-store error
+    keeps the slot: the worker path drops it after ``close()``.
+    """
+    if not job_id:
+        return False
+    try:
+        from services.cdc_lease import list_lease_views
+
+        return any(
+            not view.get("stale") for view in list_lease_views(job_id=job_id)
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning(
+            "CDC slot release skipped; lease lookup failed for %s: %s",
+            job_id,
+            exc,
+        )
+        return True
+
+
+def _cursor_keys_to_clear(job: dict[str, Any], job_id: str) -> list[str]:
+    """Route keys whose watermark must go when this job's slot is dropped.
+
+    The job document is the first source. A run that advanced the cursor
+    store without stamping ``cursor_key`` is found by ``metadata.job_id``.
+    Leaving that watermark in place makes the next one-shot run see a
+    missing slot and refuse to snapshot.
+    """
+    keys: list[str] = []
+
+    def _add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in keys:
+            keys.append(text)
+
+    _add(job.get("cursor_key"))
+    _add(job.get("cdc_lease_cursor_key"))
+    nested = job.get("cdc")
+    if isinstance(nested, dict):
+        _add(nested.get("cursor_key"))
+    if job_id:
+        try:
+            from services.sync_cursor import cursor_keys_for_job
+
+            for key in cursor_keys_for_job(job_id):
+                _add(key)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "CDC watermark lookup by job %s failed: %s", job_id, exc
+            )
+    return keys
+
+
 def _slot_name_from_job(job: dict[str, Any]) -> str:
     named = str(job.get("cdc_slot_name") or "").strip()
     if named:
@@ -147,12 +214,18 @@ def release_finished_cdc_slot(
     schedule_id: str = "",
     source_cfg: dict[str, Any] | None = None,
     job_id: str = "",
+    worker_closed: bool = False,
 ) -> dict[str, Any]:
     """Drop the Postgres slot behind a completed or cancelled one-shot CDC job.
 
     Never raises. A failed release is logged so the operator can drop the
     slot by hand. Does not drop when a CDC schedule still owns the route,
     and does not clear the watermark unless the slot was actually dropped.
+
+    ``worker_closed`` is set by the worker after ``close()`` has released
+    the replication connection. A cancel request that arrives while the
+    worker still holds the lease leaves the slot; peek mode makes that
+    slot look idle between polls.
     """
     if reason not in {"completed", "cancelled"}:
         return {"released": False, "reason": "not_terminal"}
@@ -195,6 +268,17 @@ def release_finished_cdc_slot(
     slot_name = _slot_name_from_job(job)
     if not slot_name:
         return {"released": False, "reason": "no_slot_name", "job_id": jid}
+    if (
+        reason == "cancelled"
+        and not worker_closed
+        and _worker_still_holds_cdc_lease(jid)
+    ):
+        return {
+            "released": False,
+            "reason": "worker_still_holds_lease",
+            "job_id": jid,
+            "slot_name": slot_name,
+        }
     publication = str(job.get("cdc_publication_name") or "")
     from connectors.postgresql_change_stream import release_pg_capture
 
@@ -220,24 +304,34 @@ def release_finished_cdc_slot(
     if detail.get("slot") != "dropped":
         return {"released": False, "reason": str(detail.get("slot") or "kept"), "job_id": jid, **detail}
 
-    cursor_key = str(job.get("cursor_key") or "")
-    cleared = False
-    if cursor_key:
-        try:
-            from services.sync_cursor import clear_watermark
+    keys = _cursor_keys_to_clear(job, jid)
+    cleared_keys: list[str] = []
+    if not keys:
+        _logger.warning(
+            "Dropped slot %s for job %s but no cursor key was found; "
+            "the next run can hit a slot gap until the watermark is cleared",
+            slot_name,
+            jid,
+        )
+    else:
+        from services.sync_cursor import clear_watermark
 
-            cleared = bool(clear_watermark(cursor_key).get("cleared"))
-        except Exception as exc:
-            _logger.warning(
-                "Dropped slot %s but could not clear watermark %s: %s",
-                slot_name,
-                cursor_key,
-                exc,
-            )
+        for cursor_key in keys:
+            try:
+                if clear_watermark(cursor_key).get("cleared"):
+                    cleared_keys.append(cursor_key)
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "Dropped slot %s but could not clear watermark %s: %s",
+                    slot_name,
+                    cursor_key,
+                    exc,
+                )
     return {
         "released": True,
         "reason": reason,
         "job_id": jid,
-        "watermark_cleared": cleared,
+        "watermark_cleared": bool(cleared_keys),
+        "cursor_keys": cleared_keys,
         **detail,
     }

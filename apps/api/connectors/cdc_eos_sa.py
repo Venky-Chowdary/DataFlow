@@ -456,20 +456,11 @@ def _col_sql_type(
 ) -> str:
     """Planned BIGINT/TIMESTAMP DDL, with a bounded key only for a LOB primary key.
 
-    ``logical is None`` keeps the historical text carrier for callers that
-    have no plan. A planned type uses ``materialize_dest_ddl`` — the same
-    function the MySQL and Postgres writers use — so a second CDC run sees
-    the type the plan already named. Existing columns are never altered.
+    A missing plan uses the string carrier from ``materialize_dest_ddl``, the
+    same function the MySQL and Postgres writers use. A LOB primary key on
+    MySQL, SQL Server, or Oracle stays a bounded indexable type. Existing
+    columns are never altered.
     """
-    if logical is None:
-        keyed = col in pk_cols or col == DF_LSN_COL
-        if dialect in _MSSQL_LIKE:
-            return "NVARCHAR(512)" if keyed else "NVARCHAR(MAX)"
-        if dialect in _MYSQL_LIKE:
-            return "VARCHAR(512)" if keyed else "LONGTEXT"
-        if dialect in _ORACLE_LIKE:
-            return "VARCHAR2(512)" if keyed else "CLOB"
-        return "TEXT"
     emitted = _planned_sql_type(dialect, logical)
     keyed = col in pk_cols
     if (
@@ -726,9 +717,13 @@ def _eos_write_shape(
 def _prepare_eos_schema(
     engine: Any,
     dialect: str,
-    members: list[tuple[str, list[str], list[str]]],
+    members: list[tuple],
 ) -> None:
     """Create/extend the watermark and dest tables *before* the apply txn.
+
+    Each member is ``(table, columns, pk_cols)`` or
+    ``(table, columns, pk_cols, logical_by)``. A missing plan still creates
+    through ``materialize_dest_ddl``; it does not fall back to LONGTEXT.
 
     MySQL commits implicitly on DDL, so a ``CREATE TABLE IF NOT EXISTS`` issued
     inside the apply transaction committed whatever earlier bundle members had

@@ -8,8 +8,13 @@ finished one-shot job leaving its slot behind.
 from __future__ import annotations
 
 from connectors.cdc_eos_sa import _col_sql_type, _ensure_dest_table
+from connectors.mysql_change_stream import (
+    MySqlChangeStreamCdc,
+    consumed_reached_binlog_head,
+)
 from services.cdc_catchup import release_finished_cdc_slot
 from services.cdc_engine import ChangeBatch
+from services.decision_kernel import materialize_dest_ddl
 from src.transfer.cdc_transfer import _drain_log_reader, _raise_if_stream_behind
 
 
@@ -162,6 +167,16 @@ def test_unbounded_mysql_primary_key_stays_indexable() -> None:
     assert _col_sql_type("mysql", "_df_lsn", ["id"], "string") == "TEXT"
 
 
+def test_missing_plan_uses_the_writer_string_carrier() -> None:
+    mysql_note = _col_sql_type("mysql", "note", [], None)
+    pg_note = _col_sql_type("postgresql", "note", [], None)
+    assert mysql_note == materialize_dest_ddl("mysql", "string")
+    assert pg_note == materialize_dest_ddl("postgresql", "string")
+    assert "LONGTEXT" not in mysql_note.upper()
+    assert "VARCHAR(512)" not in mysql_note.upper()
+    assert _col_sql_type("mysql", "id", ["id"], None) == "VARCHAR(512)"
+
+
 def test_one_shot_completion_drops_the_slot_and_clears_the_watermark(monkeypatch) -> None:
     dropped: list[tuple] = []
 
@@ -232,6 +247,9 @@ def test_active_slot_is_not_cleared(monkeypatch) -> None:
         "services.cdc_catchup._schedule_owns_slot", lambda *a, **k: False
     )
     monkeypatch.setattr(
+        "services.cdc_catchup._worker_still_holds_cdc_lease", lambda _job_id: False
+    )
+    monkeypatch.setattr(
         "connectors.postgresql_change_stream.release_pg_capture",
         lambda *_a, **_k: {"slot": "active", "slot_name": "df_orders_slot"},
     )
@@ -248,3 +266,144 @@ def test_active_slot_is_not_cleared(monkeypatch) -> None:
     )
     assert out["released"] is False
     assert out["reason"] == "active"
+
+
+def test_mysql_pending_uses_the_head_captured_at_poll_start() -> None:
+    assert consumed_reached_binlog_head(
+        "mysql-bin.000001", 100, "mysql-bin.000001", 100
+    ) is True
+    assert consumed_reached_binlog_head(
+        "mysql-bin.000001", 80, "mysql-bin.000001", 100
+    ) is False
+    assert consumed_reached_binlog_head(
+        "mysql-bin.000002", 4, "mysql-bin.000001", 100
+    ) is True
+    assert consumed_reached_binlog_head(
+        "mysql-bin.000001", 100, "other-bin.000009", 4
+    ) is None
+
+    reader = MySqlChangeStreamCdc.__new__(MySqlChangeStreamCdc)
+    reader._consumed_file = "mysql-bin.000001"
+    reader._consumed_pos = 100
+    reader._poll_head_file = "mysql-bin.000001"
+    reader._poll_head_pos = 100
+    assert reader.capture_has_pending() is False
+    reader._poll_head_pos = 480
+    assert reader.capture_has_pending() is True
+
+
+def test_cancel_leaves_the_slot_while_the_worker_holds_the_lease(monkeypatch) -> None:
+    def _boom(*_a, **_k):
+        raise AssertionError("slot must stay while the worker holds the lease")
+
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture", _boom
+    )
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *a, **k: False
+    )
+    monkeypatch.setattr(
+        "services.cdc_catchup._worker_still_holds_cdc_lease", lambda _job_id: True
+    )
+    out = release_finished_cdc_slot(
+        {"cdc_slot_name": "df_orders_slot"},
+        reason="cancelled",
+        source_cfg={"type": "postgresql", "database": "qa"},
+        job_id="job-7721",
+    )
+    assert out["released"] is False
+    assert out["reason"] == "worker_still_holds_lease"
+
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **k: dropped.append(k["slot_name"])
+        or {"slot": "dropped", "slot_name": k["slot_name"]},
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.clear_watermark",
+        lambda _key: {"cleared": True},
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job", lambda _job_id: []
+    )
+    closed = release_finished_cdc_slot(
+        {"cdc_slot_name": "df_orders_slot", "cursor_key": "cursor-1"},
+        reason="cancelled",
+        source_cfg={"type": "postgresql", "database": "qa"},
+        job_id="job-7721",
+        worker_closed=True,
+    )
+    assert closed["released"] is True
+    assert dropped == ["df_orders_slot"]
+
+
+def test_stale_lease_does_not_block_a_cancel_drop(monkeypatch) -> None:
+    from services.cdc_catchup import _worker_still_holds_cdc_lease
+
+    monkeypatch.setattr(
+        "services.cdc_lease.list_lease_views",
+        lambda **_k: [{"stale": True, "cursor_key": "ck"}],
+    )
+    assert _worker_still_holds_cdc_lease("job-7721") is False
+    monkeypatch.setattr(
+        "services.cdc_lease.list_lease_views",
+        lambda **_k: [{"stale": False, "cursor_key": "ck"}],
+    )
+    assert _worker_still_holds_cdc_lease("job-7721") is True
+
+    def _down(**_k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr("services.cdc_lease.list_lease_views", _down)
+    assert _worker_still_holds_cdc_lease("job-7721") is True
+
+
+def test_dropped_slot_clears_the_watermark_recorded_for_the_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *a, **k: False
+    )
+    monkeypatch.setattr(
+        "services.cdc_catchup._worker_still_holds_cdc_lease", lambda _job_id: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": "dropped", "slot_name": "df_orders_slot"},
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job",
+        lambda job_id: ["pg:qa:orders→mysql:qa:orders:stream"]
+        if job_id == "job-4604"
+        else [],
+    )
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "services.sync_cursor.clear_watermark",
+        lambda key: cleared.append(key) or {"cleared": True},
+    )
+    out = release_finished_cdc_slot(
+        {"cdc_slot_name": "df_orders_slot"},
+        reason="completed",
+        source_cfg={"type": "postgresql", "database": "qa_dataflow"},
+        job_id="job-4604",
+    )
+    assert out["released"] is True
+    assert out["watermark_cleared"] is True
+    assert cleared == ["pg:qa:orders→mysql:qa:orders:stream"]
+
+
+def test_stream_behind_is_a_resumable_operator_error() -> None:
+    from services.cdc_catchup import CdcStreamBehind
+    from services.error_handling import classify_error, humanize_transfer_failure
+
+    exc = CdcStreamBehind(
+        "slot df_orders_slot still has an unread change",
+        slot_name="df_orders_slot",
+    )
+    classified = classify_error(exc)
+    assert classified["retriable"] is True
+    assert classified["evidence"] == ["cdc_stream_behind"]
+    human = humanize_transfer_failure(exc)
+    assert human["code"] == "cdc_stream_behind"
+    assert human["retriable"] is True
+    assert "Resume" in human["fix"]

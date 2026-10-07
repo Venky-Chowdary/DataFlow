@@ -4456,6 +4456,13 @@ class UniversalTransferEngine:
                 job_doc.setdefault(
                     "cdc_publication_name", dest_summary.get("cdc_publication_name")
                 )
+                if not str(job_doc.get("cursor_key") or "").strip():
+                    named = dest_summary.get("cursor_key")
+                    nested_cdc = dest_summary.get("cdc")
+                    if not named and isinstance(nested_cdc, dict):
+                        named = nested_cdc.get("cursor_key")
+                    if named:
+                        job_doc["cursor_key"] = named
                 try:
                     from src.transfer.adapters import resolve_connector_config
 

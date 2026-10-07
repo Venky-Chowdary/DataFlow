@@ -147,11 +147,18 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "operator_error": human.get("message"),
     }
     try:
+        from services.cdc_catchup import CdcStreamBehind
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
         from services.cdc_toast import CdcToastIncompleteError
         from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
-        if isinstance(exc, CdcLeaseConflict):
+        if isinstance(exc, CdcStreamBehind):
+            details["code"] = "cdc_stream_behind"
+            details["retriable"] = True
+            extras["cdc_stream_behind"] = True
+            if exc.slot_name:
+                extras["cdc_slot_name"] = exc.slot_name
+        elif isinstance(exc, CdcLeaseConflict):
             details.update(exc.to_dict())
             details["retriable"] = False
             extras.update(
@@ -258,6 +265,7 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
             schedule_id=schedule_id,
             source_cfg=source_cfg,
             job_id=job_id,
+            worker_closed=True,
         )
     except Exception as exc:
         logger.warning("CDC slot release after cancel failed for %s: %s", job_id, exc)

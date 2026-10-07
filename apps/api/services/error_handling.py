@@ -734,6 +734,29 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
         }
 
     try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "code": "cdc_stream_behind",
+                "category": "cdc_ops",
+                "title": "CDC catch-up still has an unread change",
+                "message": raw,
+                "fix": (
+                    "Resume this job. The replication slot was kept so the "
+                    "unread change can be applied. A row-count check cannot "
+                    "see an UPDATE that is still in the log. Delivery stays "
+                    "at-least-once."
+                ),
+                "raw": raw,
+                "retriable": True,
+                "confidence": "high",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    try:
         from services.cdc_lease import CdcLeaseConflict
 
         if isinstance(error, CdcLeaseConflict):
@@ -1002,6 +1025,22 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
             "message": text,
             "class": exc_name,
         }
+
+    # The slot still has the change. Resume is safe; the slot was kept.
+    try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "retriable": True,
+                "evidence": ["cdc_stream_behind"],
+                "message": text,
+                "class": exc_name,
+                "code": "cdc_stream_behind",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     # Structured CDC lease conflict — never auto-retry into a live holder.
     try:

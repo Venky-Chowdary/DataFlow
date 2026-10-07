@@ -815,9 +815,11 @@ async def cancel_transfer_job(job_id: str, request: Request):
             message="Transfer cancelled by user",
             progress_pct=job.get("progress_pct", 0),
         )
-        # The worker drops the slot when it notices the cancel and closes the
-        # replication connection. If that worker is already gone, the slot is
-        # idle and this call drops it. An attached slot is left for the worker.
+        # The worker drops the slot after it closes the replication connection.
+        # While that worker still holds the CDC lease, peek mode leaves the
+        # slot inactive between polls — this call then refuses to drop it.
+        # A worker that has already exited has no live lease, and this call
+        # drops the idle slot.
         slot_release: dict[str, Any] = {"released": False, "reason": "not_attempted"}
         try:
             from services.cdc_catchup import release_finished_cdc_slot

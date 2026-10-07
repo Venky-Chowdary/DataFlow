@@ -1764,8 +1764,10 @@ def pause_cdc_card() -> CapabilityCard | None:
             "stops the cadence; pausing CDC does not drop the replication "
             "slot or the resume token (pause_cdc). "
             "Run now still works. A one-shot CDC job drops its Postgres slot "
-            "when that job completes or is cancelled, unless a CDC schedule "
-            "still owns the route. Deleting the CDC schedule also runs "
+            "when that job completes, or when a cancel closes the replication "
+            "connection, unless a CDC schedule still owns the route. A cancel "
+            "request leaves the slot while the worker still holds the CDC "
+            "lease. Deleting the CDC schedule also runs "
             "pg_drop_replication_slot. A failed CDC job keeps the slot so "
             "resume can read the change still in the log."
         ),
