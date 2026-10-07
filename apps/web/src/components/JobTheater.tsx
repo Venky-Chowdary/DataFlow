@@ -36,7 +36,7 @@ import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
 import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
-import { presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { jobEndpointLabels, presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
 import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
@@ -194,9 +194,10 @@ export function JobTheater({
   onFailedRef.current = onFailed;
   onCancelledRef.current = onCancelled;
 
+  const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   useEffect(() => {
     setActiveData((prev) => ({
-      name: prev?.name || sourceLabel || "transfer",
+      name: prev?.name || routeLabels.source || "transfer",
       filename: prev?.filename,
       columns: prev?.columns || [],
       row_count: job?.records_processed ?? prev?.row_count ?? 0,
@@ -205,10 +206,10 @@ export function JobTheater({
       preflight_run_id: preflight?.run_id || prev?.preflight_run_id,
       job_id: jobId,
       validation_status: job?.status || prev?.validation_status,
-      route: `${sourceLabel || "source"} → ${destLabel || "destination"}`,
+      route: `${routeLabels.source} → ${routeLabels.dest}`,
       blockers: job?.error ? [job.error] : prev?.blockers,
     }));
-  }, [destLabel, job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, setActiveData, sourceLabel]);
+  }, [job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, routeLabels.dest, routeLabels.source, setActiveData]);
 
   useEffect(() => {
     startRef.current = Date.now();
@@ -476,6 +477,7 @@ export function JobTheaterView({
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
+  const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
   const destMetric = destHeadline(job);
@@ -746,7 +748,7 @@ export function JobTheaterView({
             <ConnectorIcon id={sourceType} size={22} />
             <div className="df2-theater-v3-endpoint-copy">
               <span>Source</span>
-              <strong title={sourceLabel}>{sourceLabel || "Source"}</strong>
+              <strong title={routeLabels.source}>{routeLabels.source}</strong>
             </div>
           </div>
           <div className="df2-theater-v3-arrow" aria-hidden>
@@ -756,7 +758,7 @@ export function JobTheaterView({
             <ConnectorIcon id={destType} size={22} />
             <div className="df2-theater-v3-endpoint-copy">
               <span>Destination</span>
-              <strong title={destLabel}>{destLabel || "Destination"}</strong>
+              <strong title={routeLabels.dest}>{routeLabels.dest}</strong>
             </div>
           </div>
         </div>

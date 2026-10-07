@@ -134,8 +134,13 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(mapBody, /source_schema: mapSourceSchema,\s*\n\s*target_columns: mapTargetCols,/);
     // Sampled values shown to the mapping engine follow the transform too.
     assert.match(page, /image\.sampleRows\s*\n?\s*\.slice\(0, 8\)/);
-    // The carrier of a transformed column is re-read from the transformed rows.
-    assert.match(step, /column_types: sourceSchema/);
+    // Declared carriers of the table on screen. Another table must not be
+    // previewed with the primary schema. Untouched columns keep this
+    // declaration; the server re-reads columns the recipe wrote.
+    assert.match(step, /const previewSchema = usingStreamSample && focusedSample && Object\.keys\(focusedSample\.schema \|\| \{\}\)\.length/);
+    assert.match(step, /\? focusedSample\.schema/);
+    assert.match(step, /: sourceSchema;/);
+    assert.match(step, /column_types: previewSchema/);
     assert.match(router, /out_types, retyped = shaped_column_types\(/);
   });
 
