@@ -831,8 +831,14 @@ def _ground_data_rules(
     source. An unknown column cannot be silently ignored: the run would move
     more rows than the operator asked for, and reconcile green while doing it.
     """
+    from services.sync_cursor import normalize_sync_mode as engine_sync_mode
     from .transfer_rules import filter_columns
 
+    # Pilot says cdc_incremental / incremental_upsert. The gates and the CDC
+    # runner speak cdc / incremental_deduped. Leaving the alias here downgraded
+    # CDC to upsert and then blocked it for a table cursor the log does not use.
+    if (mode or "").strip():
+        mode = engine_sync_mode(mode)
     spec = dict(source_filter or {})
     known = {c.lower(): c for c in source_columns}
     out: dict[str, Any] = {
@@ -906,7 +912,10 @@ def _identity_stream_contract(
     """
     from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
     from services.primary_key import mapped_catalog_upsert_key
+    from services.sync_cursor import normalize_sync_mode as engine_sync_mode
 
+    if (mode or "").strip():
+        mode = engine_sync_mode(mode)
     mapping_rows: list[dict[str, Any]] = []
     for item in mappings or []:
         row = item
@@ -982,6 +991,13 @@ def _identity_stream_contract(
         contract["cursor_field"] = cursor
     if semantics:
         contract["cursor_semantics"] = semantics
+    if mode:
+        # Execute prefers the contract mode. The canonical token is what the
+        # CDC branch and the progress check compare against.
+        contract["sync_mode"] = mode
+    if mode == "cdc":
+        # Debezium default: snapshot when no resume exists, then tail the log.
+        contract["snapshot_mode"] = "initial"
     return [contract], ""
 
 

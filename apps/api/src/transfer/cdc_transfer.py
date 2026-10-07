@@ -2438,9 +2438,12 @@ def _run_cdc_single_stream(
     )
     eos_active = eos_guarantee == "exactly_once"
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
-        cursor_field = cursor_field or pk_source_cols[0] or (
-            "_id" if src_type == "mongodb" else "id"
-        )
+        # Query-CDC fallback polls a column. The log position stays the cursor
+        # when the contract says cdc_position. The primary key is the only
+        # column that may stand in for that poll. A column named id is not
+        # invented when the key is something else.
+        if not cursor_field:
+            cursor_field = pk_source_cols[0]
     elif not cursor_field:
         raise ValueError("CDC sync requires cursor_field in the stream contract")
 

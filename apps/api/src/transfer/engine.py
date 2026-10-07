@@ -4066,10 +4066,17 @@ class UniversalTransferEngine:
             ) -> None:
                 _check_cancelled()
                 # CDC has no finite denominator — never invent a percentage.
-                sync_l = (request.sync_mode or "").lower()
+                # cdc_incremental is the same mode. A raw equality check treated
+                # that alias as a finite batch load and drew a percent mid-snapshot.
+                from services.sync_cursor import normalize_sync_mode
+
+                sync_l = normalize_sync_mode(request.sync_mode or "", default="")
                 contracts = request.stream_contracts or []
                 is_cdc = sync_l == "cdc" or any(
-                    str((c or {}).get("sync_mode") or "").lower() == "cdc"
+                    normalize_sync_mode(
+                        str((c or {}).get("sync_mode") or ""), default=""
+                    )
+                    == "cdc"
                     for c in contracts
                     if isinstance(c, dict)
                 )
