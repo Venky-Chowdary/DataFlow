@@ -181,8 +181,9 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "name": "prepare_cdc_source",
         "description": (
             "Stage the server settings continuous CDC needs on one saved database. "
-            "PostgreSQL: set wal_level=logical (slots and WAL senders at 10) and "
-            "restart so the postmaster reads it. MySQL: GRANT REPLICATION SLAVE, "
+            "PostgreSQL: write wal_level=logical (slots and WAL senders at 10) to "
+            "postgresql.auto.conf. Restart PostgreSQL from the host so the "
+            "postmaster reads it. MySQL: GRANT REPLICATION SLAVE, "
             "REPLICATION CLIENT to the saved user, then persist gtid_mode=ON when "
             "that user is allowed to. Nothing changes until Confirm. A role that "
             "cannot run the statement is reported; a GTID is not invented."
@@ -194,7 +195,10 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 "name": {"type": "string", "description": "Saved connector name"},
                 "restart": {
                     "type": "boolean",
-                    "description": "Restart PostgreSQL after ALTER SYSTEM. Default true.",
+                    "description": (
+                        "Record that the operator will restart PostgreSQL from the "
+                        "host after ALTER SYSTEM. Confirm writes postgresql.auto.conf only."
+                    ),
                     "default": True,
                 },
                 "enable_gtid": {
@@ -376,7 +380,7 @@ def prepare_cdc_source(
         "enable_gtid": bool(enable_gtid),
         "change": (
             "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
-            "max_wal_senders=10, then restart PostgreSQL"
+            "max_wal_senders=10. Restart PostgreSQL from the host afterward"
             if engine.lower() in {"postgresql", "postgres"}
             else "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist gtid_mode when allowed"
         ),

@@ -1,10 +1,13 @@
 """Server settings continuous CDC needs, applied with the saved connector login.
 
-The statements are fixed. A connector name never becomes SQL, and the Postgres
-restart command is ``pg_ctl`` with a data directory that contains only a plain
-path. ``wal_level`` is read at postmaster start, so the restart is part of the
-change. A role that is not superuser (or a MySQL user without the grant) is
-reported; nothing is invented in its place.
+The statements are fixed. A connector name never becomes SQL. PostgreSQL
+reads ``wal_level``, ``max_replication_slots``, and ``max_wal_senders`` only
+when the postmaster starts, so Confirm writes ``postgresql.auto.conf`` and
+the host restarts the service. This session never signals the postmaster:
+``pg_ctl restart`` and ``kill`` from inside the session stop a container
+whose init is Postgres and cannot start it again. A role that is not
+superuser (or a MySQL user without the grant) is reported; nothing is
+invented in its place.
 """
 
 from __future__ import annotations
@@ -17,14 +20,19 @@ _PG_ALTER = (
     "ALTER SYSTEM SET max_replication_slots = '10'",
     "ALTER SYSTEM SET max_wal_senders = '10'",
 )
-_PGDATA = re.compile(r"^/[A-Za-z0-9_./-]{1,240}$")
+_PG_TARGET = {
+    "wal_level": "logical",
+    "max_replication_slots": "10",
+    "max_wal_senders": "10",
+}
+_SHOW_NAMES = frozenset({"is_superuser", "data_directory", *_PG_TARGET})
 _ACCOUNT = re.compile(r"^([A-Za-z0-9_]{1,64})@([%A-Za-z0-9._-]{1,255})$")
-_RESTART_DISPATCHED = (
-    "terminating connection",
-    "server closed the connection",
-    "connection already closed",
-    "could not connect to server",
-    "the database system is shutting down",
+_HOST_RESTART = (
+    "The settings are stored in postgresql.auto.conf. PostgreSQL reads "
+    "wal_level, max_replication_slots, and max_wal_senders when the "
+    "postmaster starts. Restart the PostgreSQL service from the host, "
+    "then SHOW wal_level must read logical before a replication slot "
+    "can be created."
 )
 
 
@@ -36,78 +44,60 @@ def _cell(row: Any) -> str:
     return str(row)
 
 
-def _pgdata(raw: str) -> str:
-    path = (raw or "").strip()
-    if not _PGDATA.match(path) or ".." in path:
-        raise ValueError("refusing to restart: data_directory is not a plain path")
-    return path
+def _show(cur: Any, name: str) -> str:
+    if name not in _SHOW_NAMES:
+        raise ValueError("refusing to read an unknown PostgreSQL setting")
+    cur.execute(f"SHOW {name}")
+    return _cell(cur.fetchone()).strip()
 
 
 def apply_postgres_logical_decoding(conn: Any, *, restart: bool) -> dict[str, Any]:
-    """Set logical decoding on a superuser session. Restart when asked."""
+    """Stage logical decoding on a superuser session.
+
+    ``restart`` records that the operator wants the postmaster recycled.
+    The session writes ``postgresql.auto.conf`` only. Stopping PID 1 from
+    here exits a Docker Postgres and does not start it again.
+    """
     if hasattr(conn, "autocommit"):
         conn.autocommit = True
     cur = conn.cursor()
     try:
-        cur.execute("SHOW is_superuser")
-        superuser = _cell(cur.fetchone()).strip().lower() in {"on", "true", "t", "1"}
-        cur.execute("SHOW wal_level")
-        before = _cell(cur.fetchone()).strip()
-        cur.execute("SHOW data_directory")
-        data_directory = _cell(cur.fetchone()).strip()
+        superuser = _show(cur, "is_superuser").lower() in {"on", "true", "t", "1"}
+        before = {name: _show(cur, name) for name in _PG_TARGET}
+        data_directory = _show(cur, "data_directory")
         if not superuser:
             return {
                 "engine": "postgresql",
                 "applied": False,
-                "wal_level_before": before,
+                "wal_level_before": before["wal_level"],
                 "restarted": False,
+                "restart_required": False,
                 "error": (
                     "The saved PostgreSQL role is not a superuser, so wal_level "
                     "was left unchanged. A superuser must set wal_level=logical "
-                    "and restart PostgreSQL."
+                    "and restart PostgreSQL from the host."
                 ),
             }
         for statement in _PG_ALTER:
             cur.execute(statement)
-        restarted = False
-        restart_error = ""
-        if restart:
-            pgdata = _pgdata(data_directory)
-            # The path was checked. It has no spaces or quotes, so it cannot
-            # change the program pg_ctl runs. If pg_ctl cannot recycle the
-            # postmaster from inside the session, signal PID 1. That stops a
-            # container whose init is Postgres; a host login that does not own
-            # PID 1 gets "operation not permitted" and the staged setting stays
-            # for the next real restart.
-            commands = (
-                f"pg_ctl restart -D {pgdata} -m fast -t 90 -w",
-                "kill -TERM 1",
-            )
-            for command in commands:
-                try:
-                    cur.execute(f"COPY (SELECT 1) TO PROGRAM '{command}'")
-                    restarted = True
-                    restart_error = ""
-                    break
-                except Exception as exc:  # noqa: BLE001 — a restart drops this session
-                    restart_error = str(exc)[:400]
-                    low = restart_error.lower()
-                    if any(mark in low for mark in _RESTART_DISPATCHED):
-                        restarted = True
-                        break
+        restart_required = any(
+            before[name].lower() != target.lower() for name, target in _PG_TARGET.items()
+        )
         return {
             "engine": "postgresql",
             "applied": True,
-            "wal_level_before": before,
+            "wal_level_before": before["wal_level"],
             "wal_level_staged": "logical",
             "max_replication_slots": "10",
             "max_wal_senders": "10",
             "data_directory": data_directory,
-            "restarted": restarted,
-            "restart_error": restart_error,
-            "note": (
-                "wal_level is read at server start. After the restart, SHOW "
-                "wal_level must read logical before a slot can be created."
+            "restarted": False,
+            "restart_required": restart_required,
+            "operator_requested_restart": bool(restart),
+            "note": _HOST_RESTART if restart_required else (
+                "The running server already has wal_level=logical with "
+                "replication slots and WAL senders at 10. The same values "
+                "were written to postgresql.auto.conf."
             ),
         }
     finally:
@@ -153,7 +143,14 @@ def apply_mysql_replication_client(conn: Any, *, enable_gtid: bool) -> dict[str,
                 "error": str(exc)[:400],
                 "note": (
                     "This login cannot grant REPLICATION CLIENT to itself. "
-                    "An administrator must run the GRANT. gtid_mode was not changed."
+                    "An administrator on this server must run "
+                    f"GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '{user}'@'{host}'; "
+                    "FLUSH PRIVILEGES; "
+                    "SET PERSIST enforce_gtid_consistency = ON; "
+                    "SET PERSIST gtid_mode = OFF_PERMISSIVE; "
+                    "SET PERSIST gtid_mode = ON_PERMISSIVE; "
+                    "SET PERSIST gtid_mode = ON. "
+                    "gtid_mode was not changed."
                 ),
             }
         gtid = ""

@@ -43,48 +43,56 @@ class _Conn:
         return self._cursor
 
 
-def test_postgres_superuser_stages_logical_and_restarts():
-    cur = _Cursor(
-        {
-            "is_superuser": ("on",),
-            "wal_level": ("replica",),
-            "data_directory": ("/var/lib/postgresql/data",),
-        }
-    )
+def _postgres_answers(**overrides: tuple) -> dict[str, tuple]:
+    answers = {
+        "is_superuser": ("on",),
+        "wal_level": ("replica",),
+        "max_replication_slots": ("10",),
+        "max_wal_senders": ("10",),
+        "data_directory": ("/var/lib/postgresql/data",),
+    }
+    answers.update(overrides)
+    return answers
+
+
+def test_postgres_superuser_stages_logical_without_stopping_the_postmaster():
+    cur = _Cursor(_postgres_answers())
     out = apply_postgres_logical_decoding(_Conn(cur), restart=True)
     assert out["applied"] is True
     assert out["wal_level_staged"] == "logical"
-    assert out["restarted"] is True
+    assert out["wal_level_before"] == "replica"
+    assert out["restarted"] is False
+    assert out["restart_required"] is True
+    assert out["operator_requested_restart"] is True
+    assert "host" in out["note"]
     assert any(sql.startswith("ALTER SYSTEM SET wal_level") for sql in cur.executed)
-    assert any("pg_ctl restart -D /var/lib/postgresql/data" in sql for sql in cur.executed)
-    assert not any("kill -TERM" in sql for sql in cur.executed)
+    joined = "\n".join(cur.executed)
+    assert "COPY" not in joined
+    assert "pg_ctl" not in joined
+    assert "kill" not in joined
 
 
-def test_postgres_falls_back_to_pid1_when_pg_ctl_cannot_restart():
+def test_postgres_already_logical_does_not_ask_for_a_restart():
     cur = _Cursor(
-        {
-            "is_superuser": ("on",),
-            "wal_level": ("replica",),
-            "data_directory": ("/var/lib/postgresql/data",),
-        },
-        fail={"pg_ctl"},
+        _postgres_answers(
+            wal_level=("logical",),
+            max_replication_slots=("10",),
+            max_wal_senders=("10",),
+        )
     )
     out = apply_postgres_logical_decoding(_Conn(cur), restart=True)
-    assert out["restarted"] is True
-    assert any("kill -TERM 1" in sql for sql in cur.executed)
+    assert out["applied"] is True
+    assert out["restart_required"] is False
+    assert out["restarted"] is False
+    assert "pg_ctl" not in "\n".join(cur.executed)
 
 
-def test_postgres_refuses_a_data_directory_that_could_change_the_command():
-    cur = _Cursor(
-        {
-            "is_superuser": ("on",),
-            "wal_level": ("replica",),
-            "data_directory": ("/tmp/x; rm -rf /",),
-        }
-    )
-    with pytest.raises(ValueError, match="plain path"):
-        apply_postgres_logical_decoding(_Conn(cur), restart=True)
-    assert not any("COPY" in sql for sql in cur.executed)
+def test_postgres_reports_a_data_directory_without_executing_it():
+    cur = _Cursor(_postgres_answers(data_directory=("/tmp/x; rm -rf /",)))
+    out = apply_postgres_logical_decoding(_Conn(cur), restart=True)
+    assert out["applied"] is True
+    assert out["data_directory"] == "/tmp/x; rm -rf /"
+    assert not any("COPY" in sql or "rm -rf" in sql for sql in cur.executed)
 
 
 def test_postgres_without_superuser_does_not_alter():
@@ -105,6 +113,8 @@ def test_mysql_grant_uses_the_current_account_and_stops_when_refused():
     out = apply_mysql_replication_client(_Conn(cur), enable_gtid=True)
     assert out["applied"] is False
     assert out["account"] == "qa_dataflow@%"
+    assert "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'qa_dataflow'@'%'" in out["note"]
+    assert "gtid_mode was not changed" in out["note"]
     assert any("GRANT REPLICATION SLAVE, REPLICATION CLIENT" in sql for sql in cur.executed)
     assert not any("gtid_mode" in sql for sql in cur.executed)
 
