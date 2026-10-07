@@ -57,6 +57,20 @@ MODES_REQUIRING_PRIMARY_KEY = frozenset(
 )
 
 
+def contract_declares_primary_key(contract: dict[str, Any]) -> bool:
+    """True when the stream contract names at least one identity column.
+
+    A list of blanks (``primary_keys: [""]``) is not a key. Execute splits
+    that list and then refuses CDC, so Validate must refuse it too.
+    """
+    raw = contract.get("primary_key")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        raw = contract.get("primary_keys")
+    if isinstance(raw, (list, tuple)):
+        return any(str(item).strip() for item in raw)
+    return bool(str(raw or "").strip())
+
+
 def resolve_read_scope(
     *,
     sync_mode: str,
@@ -217,7 +231,7 @@ def build_sync_contract_gate(
     missing_primary_key = [
         c.get("name") or c.get("stream") or "stream"
         for c in contracts
-        if requires_primary_key and not (c.get("primary_key") or c.get("primary_keys"))
+        if requires_primary_key and not contract_declares_primary_key(c)
     ]
 
     # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
@@ -265,6 +279,8 @@ def build_sync_contract_gate(
             issues.append(f"CDC is not supported for source type '{src}'")
     if missing_cursor:
         issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
+    if requires_primary_key and not contracts:
+        issues.append("Missing primary key — no stream contract carries one")
     if missing_primary_key:
         issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")
     if unknown_cursor:

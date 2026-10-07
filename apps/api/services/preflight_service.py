@@ -524,7 +524,16 @@ def run_transfer_policy_gates(
     from services.schema_drift import schema_policy_honesty_line
 
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
-    sync = (sync_mode or "full_refresh_overwrite").lower()
+    # Aliases such as ``cdc_incremental`` must hit the same contract rules as
+    # ``cdc``. Leaving the raw token here let Validate approve a route Execute
+    # then refused for a missing stream primary key.
+    raw_sync = (sync_mode or "full_refresh_overwrite").strip().lower()
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        sync = normalize_sync_mode(raw_sync, default=raw_sync) if raw_sync else raw_sync
+    except Exception:
+        sync = raw_sync
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     dest = (dest_type or "").strip().lower()

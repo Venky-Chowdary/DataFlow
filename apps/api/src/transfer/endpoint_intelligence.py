@@ -23,6 +23,51 @@ from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
 
 
+def _list_sqlalchemy_tables(
+    endpoint: EndpointConfig, fmt: str
+) -> tuple[bool, list[str], str]:
+    """``(ok, table names, error)`` for engines that list through introspect_schema.
+
+    A failed catalog read is not an empty inventory. Callers must not report
+    "connected, no tables" when the connection itself failed.
+    """
+    from services.dialect_profiles import normalize_schema
+    from services.schema_introspect import introspect_schema
+
+    try:
+        cfg = resolve_connector_config(endpoint)
+        db_type = resolve_driver_type(cfg.get("type") or fmt or "")
+        info = introspect_schema(
+            db_type,
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=normalize_schema(
+                db_type, cfg.get("schema"), username=cfg.get("username")
+            )
+            or "",
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl")),
+            table="",
+        )
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        logger.warning("SQL object list failed for %s", fmt, exc_info=True)
+        return False, [], str(exc)
+    if not isinstance(info, dict) or not info.get("ok"):
+        return False, [], str((info or {}).get("error") or "object list failed")
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in info.get("tables") or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return True, names, ""
+
+
 def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
     """Dest Map already has a table name — skip SHOW TABLES / second warehouse login."""
     purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
@@ -593,11 +638,19 @@ def introspect_endpoint(
             except Exception as exc:
                 out["message"] = f"SQLite object list failed: {exc}"
             return out
-        # Other SQLAlchemy engines: attempt reflection listing when no table typed.
-        try:
-            _attach_db_sample(out, endpoint)
-        except Exception:
-            pass
+        # No table typed — list the catalog. _attach_db_sample returns immediately
+        # without a table name, which left SQL Server (and the other engines on
+        # this branch) connected with an empty object list while a named table
+        # still sampled and transferred.
+        listed_ok, tables, list_error = _list_sqlalchemy_tables(endpoint, fmt)
+        if listed_ok:
+            out["objects"] = [{"name": name, "type": "table"} for name in tables]
+            out["connected"] = True
+            out["message"] = f"{fmt.title()} connected — {len(tables)} table(s)"
+        else:
+            out["connected"] = False
+            out["objects"] = []
+            out["message"] = list_error or f"{fmt.title()} object list failed"
         return out
 
     if fmt in _SAAS_INTROSPECT_DRIVERS:

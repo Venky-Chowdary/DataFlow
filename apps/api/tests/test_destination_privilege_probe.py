@@ -75,6 +75,24 @@ def test_resolve_write_flags_disconnected():
     assert can_write is False and can_create is False
 
 
+def test_mysql_grant_database_ignores_a_foreign_schema_name():
+    from services.destination_privilege_probe import (
+        _mysql_grant_databases,
+        _mysql_role_grants,
+    )
+
+    assert _mysql_grant_databases("qa", "public") == ["qa"]
+    assert _mysql_grant_databases("qa", "dbo") == ["qa"]
+    assert _mysql_grant_databases("", "app") == ["app"]
+    assert _mysql_role_grants(
+        [
+            "GRANT USAGE ON *.* TO `app`@`%`",
+            "GRANT `app_writer`@`%` TO `app`@`%`",
+            "GRANT SELECT, INSERT ON `qa`.* TO `app`@`%`",
+        ]
+    ) == [("app_writer", "%")]
+
+
 def test_mysql_grant_covers_star_and_table_scope():
     assert _mysql_grant_covers(
         {"INSERT", "SELECT"},

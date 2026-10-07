@@ -1030,9 +1030,12 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     if live is True:
         return False
     if live is False:
-        # The run is over (or its job record is gone) but the claim was never
-        # cleared — a crashed or killed worker. Grace covers the window between
-        # job creation and the claim being written.
+        # The bound job already ended. Holding the claim for the grace window
+        # left next_run_at frozen and made Run now answer "already in progress"
+        # after a successful fire. Grace applies only before a job id exists,
+        # which is the gap between the claim and set_running_job.
+        if str(sched.running_job_id or "").strip():
+            return True
         return age > CLAIM_GRACE
     return age > CLAIM_MAX_RUNTIME
 
@@ -1153,6 +1156,11 @@ def mark_schedule_run(
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
+        # A lost callback and the beat that notices the job ended can both
+        # arrive. Recording the same job twice advanced run_count and skipped
+        # a cron slot.
+        if job_id and s.last_job_id == job_id and not s.running:
+            return s
         missed = count_missed_windows(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
         )

@@ -361,3 +361,43 @@ def test_elasticsearch_lists_user_indices(monkeypatch):
     out = _introspect_elasticsearch(host="es.example")
     assert out["ok"] is True
     assert out["tables"] == ["orders"]
+
+
+def test_cdc_uses_the_catalog_primary_key_when_the_contract_omits_it(monkeypatch):
+    from src.transfer.cdc_transfer import _catalog_cdc_primary_key
+
+    def _rich(*_a, **_k):
+        return ({"id": "INTEGER"}, {"id": False}, {"primary_key_columns": ["id"]})
+
+    monkeypatch.setattr(
+        "src.transfer.adapters._introspect_table_schema_rich",
+        _rich,
+    )
+    assert _catalog_cdc_primary_key(
+        "postgresql",
+        {},
+        "orders",
+        [{"source": "id", "target": "id"}],
+    ) == "id"
+    assert _catalog_cdc_primary_key(
+        "postgresql",
+        {},
+        "orders",
+        [{"source": "name", "target": "name"}],
+    ) == ""
+
+
+def test_sqlserver_object_list_comes_from_the_catalog(monkeypatch):
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+    from src.transfer.models import EndpointConfig
+
+    def _schema(*_a, **kwargs):
+        assert kwargs.get("table", "") == ""
+        return {"ok": True, "tables": ["dbo.orders", "sales.customers"], "columns": []}
+
+    monkeypatch.setattr("services.schema_introspect.introspect_schema", _schema)
+    out = introspect_endpoint(
+        EndpointConfig(kind="database", format="sqlserver", host="mssql.example", database="app")
+    )
+    assert out["connected"] is True
+    assert [item["name"] for item in out["objects"]] == ["dbo.orders", "sales.customers"]

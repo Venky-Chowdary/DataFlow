@@ -928,6 +928,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     sched = get_schedule(schedule_id)
     if not sched:
         return
+    if job_id and sched.last_job_id == job_id and not sched.running:
+        return
     job_doc = _job_doc(job_id)
     status = (job_doc or {}).get("status") or "failed"
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
@@ -1186,6 +1188,17 @@ def _dispatch_transfer(
         # approval on a job that never started.
         _record_authorization_use(schedule_id, rebind=authorized_drift)
     future = run_transfer_async(job_id, request)
+    # Claim-queue enqueue returns an already-completed future. Treating that
+    # as "the transfer finished" recorded the run while the job was still
+    # pending, or left the claim held when the callback raced the worker.
+    # The beat finalizes once the job document is actually terminal.
+    if future.done():
+        logger.info(
+            "Schedule %s enqueued job %s; cadence records it when the job ends",
+            schedule_id,
+            job_id,
+        )
+        return job_id
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
     )
@@ -1259,6 +1272,32 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     return job_id
 
 
+def _finalize_finished_schedule_claims() -> None:
+    """Record runs whose job ended without the in-process callback.
+
+    A worker restart, a claim-queue enqueue, or a callback that never ran
+    leaves ``running`` set and ``next_run_at`` on the slot that already fired.
+    The next beat used to skip that schedule forever, and Run now answered
+    that a run was still in progress.
+    """
+    from services.schedule_store import _load_all, _parse_ts
+
+    for sched in _load_all():
+        if not sched.running or not str(sched.running_job_id or "").strip():
+            continue
+        from services.schedule_store import _job_is_live
+
+        if _job_is_live(sched.running_job_id) is not False:
+            continue
+        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        _finalize_run(
+            sched.id,
+            sched.running_job_id,
+            sched.retry_attempt if sched.retry_at else 0,
+            started,
+        )
+
+
 def _run_due_schedules() -> int:
     if not _acquire_scheduler_lock():
         logger.debug("Scheduler lock held by another instance; skipping this beat")
@@ -1274,6 +1313,7 @@ def _run_due_schedules() -> int:
         # Dest-exists after the first create-new write is not a plan change.
         # Release only when the operator Map hash still matches.
         release_create_new_dest_exists_false_refuse()
+        _finalize_finished_schedule_claims()
         started = 0
         for sched in due_schedules():
             try:

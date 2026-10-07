@@ -732,6 +732,58 @@ def _mysql_ident(name: str) -> str:
     return (name or "").strip().strip("`").lower()
 
 
+# Schema names copied from a Postgres/SQL Server connector. They are not a
+# MySQL database, and treating them as the grant scope made SHOW GRANTS miss
+# an INSERT the session can run on the database it is connected to.
+_MYSQL_FOREIGN_SCHEMA = frozenset({"dbo", "public"})
+
+
+def _mysql_grant_databases(database: str, schema: str) -> list[str]:
+    """Databases whose grants can authorize this write.
+
+    MySQL's schema is the database. A connector that also carries ``public``
+    or ``dbo`` must still be judged against the database it logged into.
+    """
+    names: list[str] = []
+    database_name = _mysql_ident(database)
+    schema_name = _mysql_ident(schema)
+    if database_name:
+        names.append(database_name)
+    if (
+        schema_name
+        and schema_name not in names
+        and schema_name not in _MYSQL_FOREIGN_SCHEMA
+    ):
+        names.append(schema_name)
+    if not names and schema_name:
+        names.append(schema_name)
+    return names or [""]
+
+
+_MYSQL_ROLE_GRANT_RE = re.compile(
+    r"GRANT\s+`([^`]+)`@`([^`]+)`\s+TO\s+",
+    re.IGNORECASE,
+)
+
+
+def _mysql_role_grants(lines: list[str]) -> list[tuple[str, str]]:
+    """Roles named by ``GRANT role TO user`` (no ON clause)."""
+    roles: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for line in lines:
+        if " ON " in line.upper():
+            continue
+        match = _MYSQL_ROLE_GRANT_RE.search(line)
+        if not match:
+            continue
+        role = (match.group(1), match.group(2))
+        if role in seen:
+            continue
+        seen.add(role)
+        roles.append(role)
+    return roles
+
+
 def _mysql_grant_covers(
     privileges: set[str],
     scope: str,
@@ -779,7 +831,8 @@ def _probe_mysql(
 ) -> PrivilegeProbeResult:
     from connectors.mysql_conn import get_connection
 
-    db_name = schema or database
+    databases = _mysql_grant_databases(database, schema)
+    db_name = databases[0]
     # Same TLS posture as the writer. Forcing SSL here made Validate refuse
     # CREATE on a server the write path already used without TLS
     # (Error 2026: SSL is required but the server doesn't support it).
@@ -797,7 +850,24 @@ def _probe_mysql(
         with conn.cursor() as cur:
             cur.execute("SHOW GRANTS FOR CURRENT_USER()")
             rows = cur.fetchall()
-        grant_lines = [str(r[0]) for r in rows if r]
+            grant_lines = [str(r[0]) for r in rows if r]
+            # MySQL 8 default roles do not appear in the account's own GRANT
+            # lines. INSERT then succeeds in the session and the probe says
+            # it cannot. Expand the active role grants when the server accepts
+            # SHOW GRANTS ... USING.
+            roles = _mysql_role_grants(grant_lines)
+            if roles:
+                using = ", ".join(
+                    f"`{name}`@`{host}`"
+                    for name, host in roles
+                    if "`" not in name and "`" not in host
+                )
+                if using:
+                    try:
+                        cur.execute(f"SHOW GRANTS FOR CURRENT_USER() USING {using}")
+                        grant_lines.extend(str(r[0]) for r in cur.fetchall() if r)
+                    except Exception:  # noqa: BLE001 — role expansion is optional
+                        logger.debug("MySQL role grant expansion unavailable", exc_info=True)
 
         can_create = False
         can_insert = False
@@ -813,18 +883,19 @@ def _probe_mysql(
             priv_raw = m.group(1).upper()
             scope = m.group(2)
             privileges = {p.strip() for p in priv_raw.split(",") if p.strip()}
-            if _mysql_grant_covers(
-                privileges, scope, database=db_name, table=table or "*", needed={"CREATE"}
-            ):
-                can_create = True
-            if _mysql_grant_covers(
-                privileges, scope, database=db_name, table=table or "*", needed={"INSERT"}
-            ):
-                can_insert = True
-            if _mysql_grant_covers(
-                privileges, scope, database=db_name, table=table or "*", needed={"UPDATE"}
-            ):
-                can_update = True
+            for grant_db in databases:
+                if _mysql_grant_covers(
+                    privileges, scope, database=grant_db, table=table or "*", needed={"CREATE"}
+                ):
+                    can_create = True
+                if _mysql_grant_covers(
+                    privileges, scope, database=grant_db, table=table or "*", needed={"INSERT"}
+                ):
+                    can_insert = True
+                if _mysql_grant_covers(
+                    privileges, scope, database=grant_db, table=table or "*", needed={"UPDATE"}
+                ):
+                    can_update = True
 
         if not table_exists:
             can_insert = can_create

@@ -2304,6 +2304,37 @@ def _run_cdc_multi_stream_sequential(
     return total_rows, ddl_log, last_summary, headers
 
 
+def _catalog_cdc_primary_key(
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table_name: str,
+    mappings: list[dict],
+) -> str:
+    """Source-catalog primary key, mapped through the write mapping.
+
+    Empty when the catalog has no key or any key column is unmapped. Does not
+    invent ``id``. Introspect failure is empty too — the caller still refuses
+    rather than upserting on a guessed column.
+    """
+    if not (table_name or "").strip():
+        return ""
+    try:
+        from .adapters import _introspect_table_schema_rich
+
+        _schema, _nulls, keys = _introspect_table_schema_rich(
+            src_type, src_cfg, table_name, []
+        )
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return ""
+    cols = list((keys or {}).get("primary_key_columns") or [])
+    if mappings:
+        from services.primary_key import mapped_catalog_upsert_key
+
+        sources, _targets = mapped_catalog_upsert_key(cols, mappings)
+        return ",".join(sources)
+    return ",".join(str(col).strip() for col in cols if str(col or "").strip())
+
+
 def _run_cdc_single_stream(
     source: Any,
     destination: Any,
@@ -2358,6 +2389,15 @@ def _run_cdc_single_stream(
     contract = resolve_sync_contract(stream_contracts)
     primary_key = contract.primary_key if contract else ""
     cursor_field = contract.cursor_field if contract else ""
+    if not primary_key:
+        # The catalog key is the same identity upsert uses. A table that has
+        # a primary key must not fail only because the stream contract left
+        # the field blank. A table with no key still refuses below.
+        primary_key = _catalog_cdc_primary_key(
+            src_type, src_cfg, table_name, mappings
+        )
+        if contract is not None and primary_key:
+            contract.primary_key = primary_key
     if not primary_key:
         raise ValueError("CDC sync requires primary_key in the stream contract")
     # Always expand to a column list. A comma-joined composite left as one

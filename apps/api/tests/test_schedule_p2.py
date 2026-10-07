@@ -713,6 +713,72 @@ def test_manual_run_missing_connector_raises_honest_error(temp_store, monkeypatc
     assert exc.value.http_status == 400
 
 
+def test_terminal_job_releases_the_claim_without_waiting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_is_live", lambda job_id: False if job_id else None)
+    reclaimed = store.mark_schedule_running(sched.id, "inst-2")
+    assert reclaimed is not None
+    assert reclaimed.running_instance == "inst-2"
+
+
+def test_missed_callback_is_recorded_on_the_next_beat(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-1") is not None
+    frozen = store.get_schedule(sched.id).next_run_at
+    monkeypatch.setattr(store, "_job_is_live", lambda _job_id: False)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda _job_id: {"status": "completed", "records_transferred": 10},
+    )
+    runner._finalize_finished_schedule_claims()
+    done = store.get_schedule(sched.id)
+    assert done.running is False
+    assert done.run_count == 1
+    assert done.last_job_id == "job-1"
+    assert done.next_run_at != frozen
+    runner._finalize_finished_schedule_claims()
+    assert store.get_schedule(sched.id).run_count == 1
+
+
+def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
+    import concurrent.futures
+
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_resolve_connector", lambda cid: {"id": cid, "type": "postgresql"})
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        runner,
+        "build_schedule_request",
+        lambda *_a, **_k: SimpleNamespace(acknowledgment_actor=""),
+    )
+    monkeypatch.setattr(runner, "_guard_source_schema_drift", lambda *_a, **_k: False)
+
+    class _Engine:
+        def _create_pending_job(self, _request):
+            return "job-q"
+
+    monkeypatch.setattr("src.transfer.engine.get_transfer_engine", lambda: _Engine())
+    future = concurrent.futures.Future()
+    future.set_result(None)
+    monkeypatch.setattr("src.transfer.background.run_transfer_async", lambda *_a, **_k: future)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        runner,
+        "_finalize_run",
+        lambda *_a, **_k: calls.__setitem__("n", calls["n"] + 1),
+    )
+    assert runner._dispatch_transfer(sched.id) == "job-q"
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).run_count == 0
+    assert store.get_schedule(sched.id).running is True
+
+
 def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
     sched = _make(store)
     assert store.mark_schedule_running(sched.id, "inst-1") is not None

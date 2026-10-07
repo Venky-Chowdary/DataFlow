@@ -119,6 +119,41 @@ def test_scd2_blocks_on_non_sql_destination():
     assert "SQL table destination" in str(g9["details"])
 
 
+def test_cdc_incremental_alias_blocks_without_a_primary_key():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc_incremental",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
+def test_cdc_with_no_stream_contract_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
 def test_cdc_passes_for_database_source_with_cursor_and_pk():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",
