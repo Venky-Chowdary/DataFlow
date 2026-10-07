@@ -779,6 +779,108 @@ def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
     assert store.get_schedule(sched.id).running is True
 
 
+def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store):
+    """A run that finishes after the next */5 slot is due fires once, not at the following slot."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({**store.get_schedule(sched.id).to_dict(), "next_run_at": past})
+    ])
+    store.mark_schedule_run(sched.id, "job-late", status="completed", run_entry={"status": "completed"})
+    done = store.get_schedule(sched.id)
+    assert done.missed_window_count >= 1
+    assert done.run_count == 1
+    nxt = store._parse_ts(done.next_run_at)
+    assert nxt is not None and nxt <= datetime.now(timezone.utc)
+    assert done.id in {item.id for item in store.due_schedules()}
+
+
+def test_queued_claim_is_replaced_when_the_next_slot_is_due(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-q",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda job_id: "queued" if job_id == "job-q" else "unknown")
+    cancelled = {"n": 0}
+    monkeypatch.setattr(store, "_cancel_queued_job", lambda _job: cancelled.__setitem__("n", cancelled["n"] + 1) or True)
+    released = store.release_superseded_queued_claim(sched.id)
+    assert released is not None
+    assert released.running is False
+    assert cancelled["n"] == 1
+    assert released.next_run_at != past
+    assert store.get_schedule(sched.id).run_count == 0
+
+
+def test_running_claim_is_not_replaced_when_the_next_slot_is_due(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-live",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "running")
+    assert store.release_superseded_queued_claim(sched.id) is None
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-live"
+
+
+def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-1",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_is_live", lambda _job: False)
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 4})
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    started = {"ids": []}
+
+    def _fake_run(sid, manual=False):
+        started["ids"].append(sid)
+        return "job-2"
+
+    monkeypatch.setattr(runner, "_run_schedule", _fake_run)
+    assert runner._run_due_schedules() == 1
+    assert started["ids"] == [sched.id]
+    recorded = store.get_schedule(sched.id)
+    assert recorded.run_count == 1
+    assert recorded.last_job_id == "job-1"
+
+
+def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 2})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    done = store.get_schedule(sched.id)
+    assert done.run_count == 1
+    assert done.last_job_id == "job-done"
+    assert done.running is True
+
+
 def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
     sched = _make(store)
     assert store.mark_schedule_running(sched.id, "inst-1") is not None

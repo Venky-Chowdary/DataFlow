@@ -139,6 +139,53 @@ def test_cdc_incremental_alias_blocks_without_a_primary_key():
     assert "Missing primary key" in str(g9["details"])
 
 
+def test_cdc_catalog_primary_key_satisfies_a_blank_contract():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "cursor_semantics": "cdc_position",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        source_columns=["id", "updated_at"],
+        catalog_primary_key_columns=["id"],
+        mappings=[{"source": "id", "target": "id"}, {"source": "updated_at", "target": "updated_at"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+
+
+def test_cdc_unmapped_catalog_key_still_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        catalog_primary_key_columns=["id"],
+        mappings=[{"source": "name", "target": "name"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
 def test_cdc_with_no_stream_contract_blocks():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",

@@ -505,6 +505,37 @@ async def run_preflight(body: PreflightRequest):
         bucket = result.setdefault("warnings", [])
         if note not in bucket:
             bucket.append(note)
+    catalog_pk: list[str] | None = None
+    try:
+        from services.preflight_cursor_gate import (
+            MODES_REQUIRING_PRIMARY_KEY,
+            contract_declares_primary_key,
+        )
+        from services.sync_cursor import normalize_sync_mode
+
+        sync_norm = normalize_sync_mode(body.sync_mode or "", default="")
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
+        sync_norm = ""
+    if sync_norm in MODES_REQUIRING_PRIMARY_KEY:
+        selected_contracts = [
+            c
+            for c in (body.stream_contracts or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        needs_catalog = (not selected_contracts) or any(
+            not contract_declares_primary_key(c) for c in selected_contracts
+        )
+        if needs_catalog and (body.source_connector_id or "").strip():
+            from services.source_schema_authority import live_source_primary_key_columns
+
+            src_cfg = body.source_config if isinstance(body.source_config, dict) else {}
+            catalog_pk = live_source_primary_key_columns(
+                source_connector_id=body.source_connector_id or "",
+                source_table=body.source_table or "",
+                source_collection=body.source_collection or "",
+                source_schema=str(src_cfg.get("schema") or ""),
+                source_database=str(src_cfg.get("database") or ""),
+            )
     gated = apply_policy_gates(
         result,
         run_transfer_policy_gates(
@@ -534,6 +565,9 @@ async def run_preflight(body: PreflightRequest):
             # A stored watermark belongs to the column it was measured on;
             # Validate refuses a repointed cursor rather than letting Run
             # apply one column's value to another.
+            catalog_primary_key_columns=catalog_pk,
+            mappings=list(body.mappings or []),
+            source_table=str(body.source_table or body.source_collection or ""),
             read_scope=resolve_read_scope(
                 sync_mode=body.sync_mode,
                 stream_contracts=body.stream_contracts,

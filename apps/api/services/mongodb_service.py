@@ -479,6 +479,7 @@ class MongoDBService:
 
         # Pop fence flags before they leak onto the job document.
         allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
+        only_from_status = kwargs.pop("only_from_status", None)
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
@@ -530,6 +531,15 @@ class MongoDBService:
                 refuse_reason,
             )
             return False
+        only_from_allowed: set[str] | None = None
+        if only_from_status is not None:
+            only_from_allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in only_from_allowed:
+                return False
 
         try:
             from services.job_trust import attach_trust_to_updates
@@ -631,14 +641,19 @@ class MongoDBService:
             except Exception:
                 fence = None
         filt: dict = dict(key)
+        if only_from_allowed is not None:
+            # Compare-and-set: a worker that already left the queue must not
+            # be cancelled by a schedule slot that only replaces queued work.
+            filt = {"$and": [filt, {"status": {"$in": sorted(only_from_allowed)}}]}
         if fence is not None:
             updates["lease_fence"] = fence
             # Allow first write (no fence yet) or matching fence only. The key
             # itself may already be an `$or`, so both go under `$and` rather
-            # than one silently replacing the other.
+            # than one silently replacing the other. Keep a queued-only status
+            # predicate when this update is a compare-and-set cancel.
             filt = {
                 "$and": [
-                    key,
+                    filt,
                     {
                         "$or": [
                             {"lease_fence": {"$exists": False}},
@@ -1241,7 +1256,10 @@ class MemoryMongoDBService:
         return oid
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        only_from_status = kwargs.pop("only_from_status", None)
         rec = self._jobs.get(job_id)
+        if only_from_status is not None and rec is None:
+            return False
         if not rec:
             # Fail-closed resume requires a job shell — mint one for programmatic
             # execute_tracked(job_id=…) callers (memory store / tests / CLI).
@@ -1267,6 +1285,14 @@ class MemoryMongoDBService:
                 refuse_reason,
             )
             return False
+        if only_from_status is not None:
+            allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in allowed:
+                return False
         fence = kwargs.pop("lease_fence", None)
         if fence is None:
             try:

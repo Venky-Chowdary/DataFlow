@@ -519,6 +519,9 @@ def run_transfer_policy_gates(
     row_limit: int = 0,
     source_endpoint: Any = None,
     destination_endpoint: Any = None,
+    catalog_primary_key_columns: list[str] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+    source_table: str = "",
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     from services.schema_drift import schema_policy_honesty_line
@@ -553,6 +556,9 @@ def run_transfer_policy_gates(
             block_status=GateStatus.BLOCK.value,
             source_read_mode=source_read_mode,
             read_scope=read_scope,
+            catalog_primary_key_columns=catalog_primary_key_columns,
+            mappings=mappings,
+            source_table=source_table,
         )
     )
 

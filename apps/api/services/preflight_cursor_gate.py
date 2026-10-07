@@ -57,6 +57,74 @@ MODES_REQUIRING_PRIMARY_KEY = frozenset(
 )
 
 
+def _declared_primary_key_columns(contract: dict[str, Any]) -> list[str]:
+    raw = contract.get("primary_key")
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        raw = contract.get("primary_keys")
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return [part.strip() for part in str(raw or "").replace(";", ",").split(",") if part.strip()]
+
+
+def catalog_identity_applies(
+    contract: dict[str, Any], source_table: str, stream_count: int
+) -> bool:
+    """A catalog key belongs to one table, not to every stream on the route."""
+    if stream_count <= 1:
+        return True
+    name = str(contract.get("name") or contract.get("stream") or "").strip().lower()
+    table = (source_table or "").strip().lower()
+    if not name or not table:
+        return False
+    return name in {table, table.split(".")[-1]}
+
+
+def _mapping_rows(mappings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in mappings or []:
+        if isinstance(item, dict):
+            rows.append(item)
+            continue
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            dumped = dump()
+            if isinstance(dumped, dict):
+                rows.append(dumped)
+    return rows
+
+
+def resolved_stream_identity_columns(
+    contract: dict[str, Any],
+    *,
+    catalog_primary_key_columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Contract key, otherwise the fully mapped source-catalog key.
+
+    Empty when neither exists. Does not invent ``id``. An unmapped catalog
+    key is empty too — upserting on part of the key would match the wrong rows.
+    """
+    declared = _declared_primary_key_columns(contract)
+    if declared:
+        return declared
+    if catalog_primary_key_columns is None:
+        return []
+    cols = [
+        str(col).strip()
+        for col in catalog_primary_key_columns
+        if str(col or "").strip()
+    ]
+    if not cols:
+        return []
+    mapping_rows = _mapping_rows(mappings)
+    if mapping_rows:
+        from services.primary_key import mapped_catalog_upsert_key
+
+        sources, _targets = mapped_catalog_upsert_key(cols, mapping_rows)
+        return sources
+    return cols
+
+
 def contract_declares_primary_key(contract: dict[str, Any]) -> bool:
     """True when the stream contract names at least one identity column.
 
@@ -212,6 +280,9 @@ def build_sync_contract_gate(
     block_status: str,
     source_read_mode: str = "",
     read_scope: IncrementalReadScope | None = None,
+    catalog_primary_key_columns: list[str] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+    source_table: str = "",
 ) -> dict[str, Any]:
     """The g9 gate: is this route's sync contract complete and semantically sound?
 
@@ -228,11 +299,38 @@ def build_sync_contract_gate(
         for c in contracts
         if requires_cursor and not (c.get("cursor_field") or c.get("cursor"))
     ]
-    missing_primary_key = [
-        c.get("name") or c.get("stream") or "stream"
-        for c in contracts
-        if requires_primary_key and not contract_declares_primary_key(c)
-    ]
+    missing_primary_key: list[str] = []
+    catalog_identity: list[tuple[str, list[str]]] = []
+    if requires_primary_key and not contracts:
+        ident = resolved_stream_identity_columns(
+            {},
+            catalog_primary_key_columns=catalog_primary_key_columns,
+            mappings=mappings,
+        )
+        if ident:
+            catalog_identity.append(("stream", ident))
+        else:
+            # Recorded below as the no-contract sentence. An empty list here
+            # keeps that sentence from also saying "Missing primary key for stream".
+            pass
+    for c in contracts:
+        if not requires_primary_key:
+            continue
+        catalog_for_stream = (
+            catalog_primary_key_columns
+            if catalog_identity_applies(c, source_table, len(contracts))
+            else None
+        )
+        ident = resolved_stream_identity_columns(
+            c,
+            catalog_primary_key_columns=catalog_for_stream,
+            mappings=mappings,
+        )
+        stream = str(c.get("name") or c.get("stream") or "stream")
+        if not ident:
+            missing_primary_key.append(stream)
+        else:
+            catalog_identity.append((stream, ident))
 
     # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
     source_col_set = {
@@ -247,13 +345,11 @@ def build_sync_contract_gate(
                 cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
                 if cursor and cursor.lower() not in source_col_set:
                     unknown_cursor.append(f"{stream}.{cursor}")
-            if requires_primary_key:
-                raw_pk = c.get("primary_key") or c.get("primary_keys") or []
-                pk_fields = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk or [])
-                for pk in pk_fields:
-                    name = str(pk).strip()
-                    if name and name.lower() not in source_col_set:
-                        unknown_pk.append(f"{stream}.{name}")
+    if source_col_set and requires_primary_key:
+        for stream, ident in catalog_identity:
+            for name in ident:
+                if name.lower() not in source_col_set:
+                    unknown_pk.append(f"{stream}.{name}")
 
     issues: list[str] = []
     from services.procedure_source import callable_sync_refusal
@@ -279,7 +375,7 @@ def build_sync_contract_gate(
             issues.append(f"CDC is not supported for source type '{src}'")
     if missing_cursor:
         issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
-    if requires_primary_key and not contracts:
+    if requires_primary_key and not contracts and not catalog_identity:
         issues.append("Missing primary key — no stream contract carries one")
     if missing_primary_key:
         issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")

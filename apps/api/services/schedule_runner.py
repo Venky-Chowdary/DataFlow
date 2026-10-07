@@ -1240,6 +1240,23 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
             )
         return None
 
+    # A finished job can still hold the claim when its callback never ran.
+    # Record it before Run now, or the operator is told a run is in progress
+    # after the transfer already ended.
+    held = str(sched.running_job_id or "").strip()
+    if sched.running and held:
+        from services.schedule_store import _job_dispatch_state, _parse_ts
+
+        if _job_dispatch_state(held) == "terminal":
+            started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+            _finalize_run(
+                schedule_id,
+                held,
+                sched.retry_attempt if sched.retry_at else 0,
+                started,
+            )
+            sched = get_schedule(schedule_id) or sched
+
     # Concurrency guard: refuse to start when this schedule, another writer
     # on the same dest object, or the same source→dest pair is already live.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
@@ -1270,6 +1287,20 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
                 code="start_refused",
             )
     return job_id
+
+
+def _release_superseded_queued_claims() -> None:
+    """Replace a queued run when a newer slot is already due.
+
+    A running transfer is left alone. Cancelling it would start a second
+    writer against the same destination.
+    """
+    from services.schedule_store import _load_all, release_superseded_queued_claim
+
+    for sched in _load_all():
+        if not sched.running or not str(sched.running_job_id or "").strip():
+            continue
+        release_superseded_queued_claim(sched.id)
 
 
 def _finalize_finished_schedule_claims() -> None:
@@ -1313,6 +1344,7 @@ def _run_due_schedules() -> int:
         # Dest-exists after the first create-new write is not a plan change.
         # Release only when the operator Map hash still matches.
         release_create_new_dest_exists_false_refuse()
+        _release_superseded_queued_claims()
         _finalize_finished_schedule_claims()
         started = 0
         for sched in due_schedules():

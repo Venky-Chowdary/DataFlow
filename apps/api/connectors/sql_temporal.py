@@ -395,6 +395,18 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         return restore_offset_after_utc(
             value, parsed, engine=engine, dest_type=source_type
         )
+    if base == "DATETIME" and _is_mysql_engine(engine):
+        # MariaDB/MySQL DATETIME has no zone marker. The timezone policy names
+        # this utc_normalized_wall_clock: an offset-bearing instant is stored
+        # as UTC digits (session time_zone is pinned to +00:00). Stripping the
+        # offset off the civil clock shifted every timestamptz on the way to
+        # Maria. A naive value stays a wall clock — UTC is not invented.
+        parsed = parse_sql_datetime(value)
+        if parsed is None:
+            return value
+        if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     if base in {
         "DATETIME",
         "DATETIME64",

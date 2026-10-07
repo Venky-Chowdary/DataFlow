@@ -1057,6 +1057,39 @@ def _settle_locales(
         set_active_number_locale(settled)
 
 
+def _catalog_pk_for_policy(
+    request: TransferRequest,
+    source_table: str,
+) -> list[str] | None:
+    """Catalog key when this mode needs one and the contract did not name it.
+
+    ``None`` means the contract already carries the key, so Validate must not
+    replace it. An empty list means the catalog was read and has no key —
+    the same refusal Execute raises.
+    """
+    from services.preflight_cursor_gate import (
+        MODES_REQUIRING_PRIMARY_KEY,
+        contract_declares_primary_key,
+    )
+    from services.sync_cursor import normalize_sync_mode
+
+    sync = normalize_sync_mode(str(getattr(request, "sync_mode", "") or ""), default="")
+    if sync not in MODES_REQUIRING_PRIMARY_KEY:
+        return None
+    selected = [
+        c
+        for c in (getattr(request, "stream_contracts", None) or [])
+        if isinstance(c, dict) and c.get("selected", True)
+    ]
+    if selected and all(contract_declares_primary_key(c) for c in selected):
+        return None
+    if not source_table:
+        return []
+    from services.source_schema_authority import endpoint_primary_key_columns
+
+    return endpoint_primary_key_columns(getattr(request, "source", None))
+
+
 def _execute_policy_gates_for_request(
     request: TransferRequest,
     *,
@@ -1073,6 +1106,11 @@ def _execute_policy_gates_for_request(
     dest = getattr(request, "destination", None)
     src = getattr(request, "source", None)
     src_extra = getattr(src, "extra", None) or {}
+    mappings = list(getattr(request, "mappings", None) or [])
+    source_table = str(
+        getattr(src, "table", None) or getattr(src, "collection", None) or ""
+    )
+    catalog_pk = _catalog_pk_for_policy(request, source_table)
     return run_transfer_policy_gates(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
@@ -1095,6 +1133,9 @@ def _execute_policy_gates_for_request(
         row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
         source_endpoint=src,
         destination_endpoint=dest,
+        catalog_primary_key_columns=catalog_pk,
+        mappings=mappings,
+        source_table=source_table,
     )
 
 

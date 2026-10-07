@@ -117,8 +117,8 @@ def reconcile_phase_heartbeat(
                 )
             else:
                 pulse = (
-                    f"Reconciling data ({elapsed}s) — verifying row counts "
-                    f"and checksums for {processed:,} rows…"
+                    f"Reconciling data ({elapsed}s) — checksum scan still "
+                    f"running for {processed:,} rows. The job has not stalled."
                 )
             mongo.update_job_status(
                 job_id,

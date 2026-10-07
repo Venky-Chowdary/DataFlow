@@ -1040,6 +1040,143 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     return age > CLAIM_MAX_RUNTIME
 
 
+def _job_dispatch_state(job_id: str) -> str:
+    """``queued``, ``running``, ``terminal``, or ``unknown``.
+
+    A job that is still waiting for a worker is not a writer. Airbyte replaces
+    that queued sync when the next slot arrives, and keeps the claim only once
+    the sync is actually running.
+    """
+    if not (job_id or "").strip():
+        return "unknown"
+    try:
+        from services.job_status import is_terminal
+
+        job = get_mongodb_service().get_job(job_id)
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
+        return "unknown"
+    if not job:
+        return "terminal"
+    status = str(job.get("status") or "").strip().lower()
+    phase = str(job.get("phase") or "").strip().lower()
+    if is_terminal(status):
+        return "terminal"
+    if status in {"pending", "queued"} or phase in {"pending", "queued"}:
+        return "queued"
+    if status == "running":
+        return "running"
+    return "unknown"
+
+
+def following_slot_is_due(sched: PipelineSchedule, now: datetime | None = None) -> bool:
+    """True when a cadence instant after the slot in flight is already due."""
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    slot = _parse_ts(sched.next_run_at)
+    if slot is None:
+        return False
+    if slot.tzinfo is None:
+        slot = slot.replace(tzinfo=timezone.utc)
+    try:
+        following = _parse_ts(
+            compute_next_run(sched.interval, slot, cron=sched.cron, tz=sched.timezone)
+        )
+    except CronError:
+        return False
+    if following is None:
+        return False
+    if following.tzinfo is None:
+        following = following.replace(tzinfo=timezone.utc)
+    return following <= current
+
+
+def _latest_due_slot(sched: PipelineSchedule, now: datetime) -> datetime:
+    """The newest cadence instant at or before ``now``.
+
+    Replacing a queued run must serve this instant. Leaving ``next_run_at`` on
+    the slot that already passed made the next beat cancel the replacement too.
+    """
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    slot = _parse_ts(sched.next_run_at) or current
+    if slot.tzinfo is None:
+        slot = slot.replace(tzinfo=timezone.utc)
+    latest = slot
+    for _ in range(MISSED_WINDOW_SCAN_LIMIT):
+        try:
+            nxt = _parse_ts(
+                compute_next_run(sched.interval, latest, cron=sched.cron, tz=sched.timezone)
+            )
+        except CronError:
+            break
+        if nxt is None:
+            break
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=timezone.utc)
+        if nxt > current:
+            break
+        latest = nxt
+    return latest
+
+
+def _cancel_queued_job(job_id: str) -> bool:
+    """Cancel a job that has not started writing. A running job is left alone."""
+    try:
+        svc = get_mongodb_service()
+        return bool(
+            svc.update_job_status(
+                job_id,
+                "cancelled",
+                only_from_status=("pending", "queued"),
+                phase="cancelled",
+                message=(
+                    "Replaced by the next schedule slot. "
+                    "This run was still queued and had not started writing."
+                ),
+            )
+        )
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
+        return False
+
+
+def release_superseded_queued_claim(
+    schedule_id: str, now: datetime | None = None
+) -> PipelineSchedule | None:
+    """Drop a queued claim once a newer slot is due, and aim at that slot.
+
+    The queued job is cancelled only while its status is still pending or
+    queued. A running transfer keeps the claim until it finishes; the overrun
+    is then one catch-up, not a second writer.
+    """
+    current = now or datetime.now(timezone.utc)
+    schedules = _load_all()
+    for i, sched in enumerate(schedules):
+        if sched.id != schedule_id:
+            continue
+        job_id = str(sched.running_job_id or "").strip()
+        if not sched.running or not job_id:
+            return None
+        if _job_dispatch_state(job_id) != "queued":
+            return None
+        if not following_slot_is_due(sched, current):
+            return None
+        if not _cancel_queued_job(job_id):
+            return None
+        latest = _latest_due_slot(sched, current)
+        updated = PipelineSchedule.from_dict({
+            **sched.to_dict(),
+            "running": False,
+            "running_instance": "",
+            "running_started_at": None,
+            "running_job_id": "",
+            "next_run_at": latest.astimezone(timezone.utc).isoformat(),
+        })
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
+
+
 def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document."""
     svc = _mongo_backend()
@@ -1164,6 +1301,12 @@ def mark_schedule_run(
         missed = count_missed_windows(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
         )
+        # Windows that elapsed while this run was busy are counted, not
+        # replayed. The one sync that became due starts on the next beat
+        # (Airbyte: start after the running sync finishes, once).
+        next_at = compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone)
+        if missed > 0:
+            next_at = now
         history = list(s.run_history)
         if run_entry:
             entry = dict(run_entry)
@@ -1175,7 +1318,7 @@ def mark_schedule_run(
         payload = {
             **s.to_dict(),
             "last_run_at": now,
-            "next_run_at": compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone),
+            "next_run_at": next_at,
             "last_job_id": job_id,
             "last_status": status or s.last_status,
             "run_count": s.run_count + 1,
