@@ -188,6 +188,27 @@ class MySqlChangeStreamCdc:
     def close(self) -> None:
         self._lease.release()
 
+    def capture_has_pending(self) -> bool | None:
+        """True when the binlog head is past the position this poll consumed.
+
+        Same-file equality is caught up. A different file or a higher position
+        means a row event may still be unread. ``None`` when this reader has
+        not consumed a position yet or the head cannot be read.
+        """
+        consumed_file = getattr(self, "_consumed_file", None)
+        consumed_pos = getattr(self, "_consumed_pos", None)
+        if not consumed_file or consumed_pos is None:
+            return None
+        current = self._current_binlog_position()
+        if not current or not current.get("file"):
+            return None
+        if str(current.get("file")) != str(consumed_file):
+            return True
+        try:
+            return int(current.get("pos") or 0) > int(consumed_pos)
+        except (TypeError, ValueError):
+            return None
+
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
 
@@ -1647,6 +1668,15 @@ class MySqlChangeStreamCdc:
                 if event_count >= self.batch_size and buf.open_xid is None:
                     break
         finally:
+            try:
+                consumed_file = getattr(stream, "log_file", None)
+                consumed_pos = getattr(stream, "log_pos", None)
+                if consumed_file:
+                    self._consumed_file = consumed_file
+                if consumed_pos is not None:
+                    self._consumed_pos = consumed_pos
+            except Exception as exc:
+                _logger.debug("MySQL CDC consumed position unread: %s", exc)
             stream.close()
 
         # Mid-window open txn: hold only when BEGIN was seen (explicit txn).

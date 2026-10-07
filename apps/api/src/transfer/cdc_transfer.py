@@ -163,6 +163,82 @@ def _stamp_cdc_source_image(
     return summary
 
 
+def _log_capture_pending(cdc: Any) -> bool | None:
+    """Reader proof that the slot or binlog still has an unread change.
+
+    ``None`` when this reader cannot prove it (query CDC, or the head could
+    not be read). Callers must not treat ``None`` as caught up or as behind.
+    """
+    fn = getattr(cdc, "capture_has_pending", None)
+    if not callable(fn):
+        return None
+    try:
+        value = fn()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("CDC pending check failed: %s", exc)
+        return None
+    if value is None:
+        return None
+    return bool(value)
+
+
+def _drain_log_reader(
+    cdc: Any,
+    apply_one: Any,
+    *,
+    max_idle: int,
+    max_rounds: int,
+    sleep_sec: float,
+    stop_early: Any = None,
+) -> str:
+    """Poll until the log is quiet, the row limit hits, or the round budget ends.
+
+    Returns ``caught_up`` when an empty poll was proven to have nothing
+    waiting, ``unknown`` when the reader cannot prove that, ``stopped`` when
+    ``stop_early`` fired, and ``behind`` when the budget ended while a change
+    was still unread. An empty poll alone is not caught up.
+    """
+    idle = 0
+    last_had = False
+    for _ in range(max(1, max_rounds)):
+        if stop_early is not None and stop_early():
+            return "stopped"
+        had = False
+        for change in cdc.poll():
+            if apply_one(change):
+                had = True
+            if stop_early is not None and stop_early():
+                return "stopped"
+        if stop_early is not None and stop_early():
+            return "stopped"
+        last_had = had
+        pending = _log_capture_pending(cdc)
+        if had or pending is True:
+            idle = 0
+            if pending is True and not had and sleep_sec > 0:
+                time.sleep(min(float(sleep_sec), 2.0))
+            continue
+        idle += 1
+        if idle >= max(1, max_idle):
+            return "unknown" if pending is None else "caught_up"
+    # Round budget ended. A reader that cannot prove the log head keeps the
+    # previous "stop after N polls" behaviour. A proven unread change does not.
+    pending = _log_capture_pending(cdc)
+    if pending is True:
+        return "behind"
+    if pending is False and not last_had:
+        return "caught_up"
+    return "unknown"
+
+
+def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
+    if outcome != "behind":
+        return
+    from services.cdc_catchup import CdcStreamBehind, behind_message
+
+    raise CdcStreamBehind(behind_message(cdc))
+
+
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     """Collect lag / heartbeat / last-DDL / plugin fields from a CDC reader.
 
@@ -289,6 +365,10 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         "cdc_heartbeat_at": heartbeat_at,
         "cdc_plugin": plugin,
         "cdc_slot_name": slot_name,
+        "cdc_publication_name": (
+            str(getattr(cdc, "publication_name", "") or "")
+            or (str(meta.get("publication_name")) if meta.get("publication_name") else None)
+        ),
         "cdc_delivery": "at-least-once",
         **lease_fields,
         **_source_ha_lag_fields(cdc),
@@ -2077,23 +2157,17 @@ def _run_cdc_shared_multi_table(
             if run_stream and not (limit and total_rows >= limit):
                 max_idle = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
                 max_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
-                idle = 0
+                sleep_sec = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
                 with _cdc_span("cdc.poll", job_id=str(job_id or ""), shared_reader=True):
-                    for _ in range(max_rounds):
-                        had = False
-                        for change in cdc.poll():
-                            if _apply_tagged(change):
-                                had = True
-                            if limit and total_rows >= limit:
-                                break
-                        if limit and total_rows >= limit:
-                            break
-                        if had:
-                            idle = 0
-                        else:
-                            idle += 1
-                            if idle >= max_idle:
-                                break
+                    outcome = _drain_log_reader(
+                        cdc,
+                        _apply_tagged,
+                        max_idle=max_idle,
+                        max_rounds=max_rounds,
+                        sleep_sec=sleep_sec,
+                        stop_early=lambda: bool(limit and total_rows >= limit),
+                    )
+                    _raise_if_stream_behind(cdc, outcome)
     finally:
         if original_dest_table is not None:
             destination.table = original_dest_table
@@ -3144,157 +3218,191 @@ def _run_cdc_single_stream(
             f"(DDD-3 stream-wins; not blocking dump)"
         )
 
-    with cdc_destination_hooks(destination, ddl_log):
-        snapshot_resume = None
-        if run_snapshot:
-            with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
-                for change in cdc.snapshot():
-                    if change.resume_token is not None:
-                        snapshot_resume = change.resume_token
-                    _apply_and_checkpoint(change, publish_resume=False)
-            # The dump finished. This cursor is the handoff: every snapshot
-            # row was applied, so a later poll may seek past it.
-            if state.running_cursor:
-                from services.cdc_snapshot_mode import snapshot_dump_open
+    try:
+        with cdc_destination_hooks(destination, ddl_log):
+            snapshot_resume = None
+            if run_snapshot:
+                with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
+                    for change in cdc.snapshot():
+                        if change.resume_token is not None:
+                            snapshot_resume = change.resume_token
+                        _apply_and_checkpoint(change, publish_resume=False)
+                # The dump finished. This cursor is the handoff: every snapshot
+                # row was applied, so a later poll may seek past it.
+                if state.running_cursor:
+                    from services.cdc_snapshot_mode import snapshot_dump_open
 
-                still_open = snapshot_dump_open(state.running_cursor)
-                set_watermark(
-                    cursor_key,
-                    state.running_cursor,
-                    metadata={
-                        "job_id": job_id,
-                        "sync_mode": sync_mode,
-                        "snapshot_complete": not still_open,
-                        "snapshot_dump_open": still_open,
-                    },
-                )
-            if snapshot_resume is not None and hasattr(cdc, "ack"):
-                try:
-                    cdc.ack(snapshot_resume)
-                except Exception as ack_exc:
-                    logger.warning(
-                        "CDC snapshot ack failed (at-least-once redelivery): %s",
-                        ack_exc,
+                    still_open = snapshot_dump_open(state.running_cursor)
+                    set_watermark(
+                        cursor_key,
+                        state.running_cursor,
+                        metadata={
+                            "job_id": job_id,
+                            "sync_mode": sync_mode,
+                            "snapshot_complete": not still_open,
+                            "snapshot_dump_open": still_open,
+                        },
                     )
+                if snapshot_resume is not None and hasattr(cdc, "ack"):
+                    try:
+                        cdc.ack(snapshot_resume)
+                    except Exception as ack_exc:
+                        logger.warning(
+                            "CDC snapshot ack failed (at-least-once redelivery): %s",
+                            ack_exc,
+                        )
 
-        # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
-        # continuously poll until idle so a single job drains the slot/binlog/CT stream.
-        if run_stream:
-            with _cdc_span("cdc.poll", job_id=str(job_id or "")):
-                if isinstance(cdc, CdcEngine):
-                    if watermark is not None or not run_snapshot:
-                        for change in cdc.poll():
-                            _apply_and_checkpoint(change)
-                else:
-                    idle_polls = 0
-                    for _round in range(max_poll_rounds):
-                        had_data = False
-                        for change in cdc.poll():
-                            if _apply_and_checkpoint(change):
-                                had_data = True
-                        if had_data:
-                            idle_polls = 0
-                        else:
-                            idle_polls += 1
-                            if idle_polls >= max_idle_polls:
-                                break
+            # Query CDC (CdcEngine): one incremental pass when resuming. Log CDC adapters
+            # continuously poll until idle so a single job drains the slot/binlog/CT stream.
+            if run_stream:
+                with _cdc_span("cdc.poll", job_id=str(job_id or "")):
+                    if isinstance(cdc, CdcEngine):
+                        if watermark is not None or not run_snapshot:
+                            for change in cdc.poll():
+                                _apply_and_checkpoint(change)
+                    else:
+                        outcome = _drain_log_reader(
+                            cdc,
+                            lambda change: _apply_and_checkpoint(change),
+                            max_idle=max_idle_polls,
+                            max_rounds=max_poll_rounds,
+                            sleep_sec=txn_hold_sleep,
+                        )
+                        _raise_if_stream_behind(cdc, outcome)
+                        # The source COUNT below can take long enough for another
+                        # commit to land in the slot. Drain that change before the
+                        # count is treated as the catch-up image.
+                        if _log_capture_pending(cdc) is True:
+                            outcome = _drain_log_reader(
+                                cdc,
+                                lambda change: _apply_and_checkpoint(change),
+                                max_idle=max_idle_polls,
+                                max_rounds=max_poll_rounds,
+                                sleep_sec=txn_hold_sleep,
+                            )
+                            _raise_if_stream_behind(cdc, outcome)
 
-    final_watermark = state.running_cursor if state.running_cursor is not None else watermark
-    lag_fields = _cdc_lag_fields(cdc)
-    if final_watermark is not None:
-        set_watermark(
-            cursor_key,
-            final_watermark,
-            metadata={"job_id": job_id, "sync_mode": sync_mode, **lag_fields},
-        )
+        final_watermark = state.running_cursor if state.running_cursor is not None else watermark
+        lag_fields = _cdc_lag_fields(cdc)
+        if final_watermark is not None:
+            set_watermark(
+                cursor_key,
+                final_watermark,
+                metadata={"job_id": job_id, "sync_mode": sync_mode, **lag_fields},
+            )
 
-    summary = state.last_dest_summary or {}
-    state.dest_before.stamp(summary, str(dest_table or table_name or ""))
-    summary["cdc"] = {
-        "inserts": state.inserts,
-        "updates": state.updates,
-        "deletes": state.deletes,
-        "watermark": final_watermark,
-        "poll_rounds": max_poll_rounds,
-        **lag_fields,
-    }
-    summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
-    summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
-    summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")
-    summary["cdc_last_ddl_at"] = lag_fields.get("cdc_last_ddl_at")
-    summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
-    summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
-    if eos_active:
-        summary["cdc_delivery"] = "exactly_once"
-        summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
-        summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
-        summary["exactly_once_protocol"] = PROTOCOL
-        summary["exactly_once_active"] = True
-        summary["exactly_once_claimed_platform"] = False
-        summary["eos_dest_authoritative"] = True
-    else:
-        summary["cdc_delivery"] = lag_fields.get("cdc_delivery") or "at-least-once"
-        summary.setdefault("delivery_semantics", DELIVERY_SEMANTICS_ALO)
-    from services.cdc_named_eos import stamp_named_eos_on_summary
+        summary = state.last_dest_summary or {}
+        state.dest_before.stamp(summary, str(dest_table or table_name or ""))
+        summary["cdc"] = {
+            "inserts": state.inserts,
+            "updates": state.updates,
+            "deletes": state.deletes,
+            "watermark": final_watermark,
+            "poll_rounds": max_poll_rounds,
+            **lag_fields,
+        }
+        summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
+        summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
+        summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")
+        summary["cdc_last_ddl_at"] = lag_fields.get("cdc_last_ddl_at")
+        summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
+        summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
+        summary["cdc_publication_name"] = lag_fields.get("cdc_publication_name")
+        if eos_active:
+            summary["cdc_delivery"] = "exactly_once"
+            summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
+            summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
+            summary["exactly_once_protocol"] = PROTOCOL
+            summary["exactly_once_active"] = True
+            summary["exactly_once_claimed_platform"] = False
+            summary["eos_dest_authoritative"] = True
+        else:
+            summary["cdc_delivery"] = lag_fields.get("cdc_delivery") or "at-least-once"
+            summary.setdefault("delivery_semantics", DELIVERY_SEMANTICS_ALO)
+        from services.cdc_named_eos import stamp_named_eos_on_summary
 
-    summary = stamp_named_eos_on_summary(
-        summary,
-        source_type=src_type,
-        dest_type=dest_type,
-        sync_mode=sync_mode or "cdc",
-        eos_operator_requested=eos_active,
-    )
-    summary["cdc_row_filter"] = lag_fields.get("cdc_row_filter")
-    summary["cdc_lease_holder"] = lag_fields.get("cdc_lease_holder")
-    summary["cdc_lease_resource"] = lag_fields.get("cdc_lease_resource")
-    summary["cdc_lease_stale"] = lag_fields.get("cdc_lease_stale")
-    summary["cdc_lease_backend"] = lag_fields.get("cdc_lease_backend")
-    summary["cdc_lease_generation"] = lag_fields.get("cdc_lease_generation")
-    for ha_key in (
-        "source_ha_role",
-        "source_ha_topology",
-        "source_ha_enabled",
-        "source_ha_group",
-        "source_ha_replica",
-        "source_ha_open_mode",
-        "source_ha_message",
-        "cdc_row_filter",
-        "cdc_retention_status",
-        "cdc_retention_resume",
-        "cdc_retention_retained",
-        "cdc_retention_message",
-        "cdc_retention_dialect",
-    ):
-        if lag_fields.get(ha_key) is not None:
-            summary[ha_key] = lag_fields.get(ha_key)
-    summary["snapshot_mode"] = snapshot_mode.value
-    stamp = snapshot_plan_stamp(snapshot_plan)
-    if stamp:
-        summary["snapshot_plan"] = stamp
-    summary["watermark"] = final_watermark
-    summary["checksum"] = state.last_checksum
-    _stamp_cdc_source_image(
-        summary,
-        src_type=src_type,
-        src_cfg=src_cfg,
-        schema=str(src_cfg.get("schema") or getattr(source, "schema", "") or ""),
-        table_name=table_name,
-        events=int(state.inserts or 0) + int(state.updates or 0) + int(state.deletes or 0),
-    )
-    if summary.get("source_row_count_source") != "cdc_source_image_count":
-        # No live source-table image to count (log/stream source or COUNT
-        # failed): the reader's own change population is the measured count.
-        stamp_source_row_count(
+        summary = stamp_named_eos_on_summary(
             summary,
-            reader_count=int(state.source_changes_read or 0),
-            rows_written=int(state.rows_written or 0),
-            source="cdc_reader_changes",
+            source_type=src_type,
+            dest_type=dest_type,
+            sync_mode=sync_mode or "cdc",
+            eos_operator_requested=eos_active,
         )
-    if capture_downgrade:
-        summary.update(capture_downgrade)
-    if hasattr(cdc, "close"):
-        try:
-            cdc.close()
-        except Exception as exc:
-            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
-    return state.rows_written, ddl_log, summary, headers
+        summary["cdc_row_filter"] = lag_fields.get("cdc_row_filter")
+        summary["cdc_lease_holder"] = lag_fields.get("cdc_lease_holder")
+        summary["cdc_lease_resource"] = lag_fields.get("cdc_lease_resource")
+        summary["cdc_lease_stale"] = lag_fields.get("cdc_lease_stale")
+        summary["cdc_lease_backend"] = lag_fields.get("cdc_lease_backend")
+        summary["cdc_lease_generation"] = lag_fields.get("cdc_lease_generation")
+        for ha_key in (
+            "source_ha_role",
+            "source_ha_topology",
+            "source_ha_enabled",
+            "source_ha_group",
+            "source_ha_replica",
+            "source_ha_open_mode",
+            "source_ha_message",
+            "cdc_row_filter",
+            "cdc_retention_status",
+            "cdc_retention_resume",
+            "cdc_retention_retained",
+            "cdc_retention_message",
+            "cdc_retention_dialect",
+        ):
+            if lag_fields.get(ha_key) is not None:
+                summary[ha_key] = lag_fields.get(ha_key)
+        summary["snapshot_mode"] = snapshot_mode.value
+        stamp = snapshot_plan_stamp(snapshot_plan)
+        if stamp:
+            summary["snapshot_plan"] = stamp
+        summary["watermark"] = final_watermark
+        summary["checksum"] = state.last_checksum
+        _stamp_cdc_source_image(
+            summary,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            schema=str(src_cfg.get("schema") or getattr(source, "schema", "") or ""),
+            table_name=table_name,
+            events=int(state.inserts or 0) + int(state.updates or 0) + int(state.deletes or 0),
+        )
+        if summary.get("source_row_count_source") != "cdc_source_image_count":
+            # No live source-table image to count (log/stream source or COUNT
+            # failed): the reader's own change population is the measured count.
+            stamp_source_row_count(
+                summary,
+                reader_count=int(state.source_changes_read or 0),
+                rows_written=int(state.rows_written or 0),
+                source="cdc_reader_changes",
+            )
+        # COUNT(*) is slow enough for a commit to land after the drain proved
+        # the slot was empty. Read that change before this job may complete.
+        if run_stream and not isinstance(cdc, CdcEngine) and _log_capture_pending(cdc) is True:
+            outcome = _drain_log_reader(
+                cdc,
+                lambda change: _apply_and_checkpoint(change),
+                max_idle=max_idle_polls,
+                max_rounds=max_poll_rounds,
+                sleep_sec=txn_hold_sleep,
+            )
+            _raise_if_stream_behind(cdc, outcome)
+            _stamp_cdc_source_image(
+                summary,
+                src_type=src_type,
+                src_cfg=src_cfg,
+                schema=str(src_cfg.get("schema") or getattr(source, "schema", "") or ""),
+                table_name=table_name,
+                events=int(state.inserts or 0) + int(state.updates or 0) + int(state.deletes or 0),
+            )
+            if _log_capture_pending(cdc) is True:
+                _raise_if_stream_behind(cdc, "behind")
+        if capture_downgrade:
+            summary.update(capture_downgrade)
+        return state.rows_written, ddl_log, summary, headers
+    finally:
+        if hasattr(cdc, "close"):
+            try:
+                cdc.close()
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Exception suppressed: %s", exc, exc_info=exc
+                )

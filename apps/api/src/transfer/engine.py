@@ -3653,7 +3653,7 @@ class UniversalTransferEngine:
         except Exception as e:
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,
@@ -4380,6 +4380,32 @@ class UniversalTransferEngine:
             if lost is not None:
                 return lost
 
+
+            if effective_sync == "cdc" and isinstance(dest_summary, dict):
+                from services.cdc_catchup import unread_postgres_change
+
+                unread = unread_postgres_change(request.source, dest_summary)
+                if unread:
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        error=unread,
+                        phase="failed",
+                        progress_pct=99,
+                        message=unread,
+                        reconciliation=recon,
+                        destination_summary=dest_summary,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=unread,
+                        operation=request.operation,
+                        job_id=job_id,
+                        records_transferred=rows_written,
+                        destination_summary=dest_summary,
+                        reconciliation=recon,
+                    )
+
             explanation = _build_explanation(
                 request,
                 columns,
@@ -4415,6 +4441,35 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
+            if effective_sync == "cdc" and isinstance(dest_summary, dict):
+                from services.cdc_catchup import release_finished_cdc_slot
+
+                try:
+                    job_doc = mongo.get_job(job_id) or {}
+                except Exception as exc:
+                    logger.warning(
+                        "CDC slot release could not read job %s: %s", job_id, exc
+                    )
+                    job_doc = {}
+                job_doc = dict(job_doc)
+                job_doc.setdefault("cdc_slot_name", dest_summary.get("cdc_slot_name"))
+                job_doc.setdefault(
+                    "cdc_publication_name", dest_summary.get("cdc_publication_name")
+                )
+                try:
+                    from src.transfer.adapters import resolve_connector_config
+
+                    source_cfg = resolve_connector_config(request.source)
+                except Exception as exc:
+                    logger.debug("CDC completion source config unread: %s", exc)
+                    source_cfg = None
+                dest_summary["cdc_slot_release"] = release_finished_cdc_slot(
+                    job_doc,
+                    reason="completed",
+                    schedule_id=str(getattr(request, "schedule_id", "") or ""),
+                    source_cfg=source_cfg,
+                    job_id=job_id,
+                )
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -4541,7 +4596,7 @@ class UniversalTransferEngine:
         except Exception as e:
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,
@@ -5276,7 +5331,7 @@ class UniversalTransferEngine:
         except Exception as e:
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,

@@ -815,7 +815,26 @@ async def cancel_transfer_job(job_id: str, request: Request):
             message="Transfer cancelled by user",
             progress_pct=job.get("progress_pct", 0),
         )
-        return {"success": True, "job_id": job_id, "status": "cancelled", "message": "Cancellation requested"}
+        # The worker drops the slot when it notices the cancel and closes the
+        # replication connection. If that worker is already gone, the slot is
+        # idle and this call drops it. An attached slot is left for the worker.
+        slot_release: dict[str, Any] = {"released": False, "reason": "not_attempted"}
+        try:
+            from services.cdc_catchup import release_finished_cdc_slot
+
+            slot_release = release_finished_cdc_slot(
+                job, reason="cancelled", job_id=job_id
+            )
+        except Exception as exc:
+            logger.warning("CDC slot release on cancel failed for %s: %s", job_id, exc)
+            slot_release = {"released": False, "reason": "release_failed"}
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "cancelled",
+            "message": "Cancellation requested",
+            "cdc_slot_release": slot_release,
+        }
     except HTTPException:
         raise
     except Exception as e:

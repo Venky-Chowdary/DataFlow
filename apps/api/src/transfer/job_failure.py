@@ -42,6 +42,7 @@ _CDC_JOB_FIELDS = (
     "cdc_last_ddl_at",
     "cdc_plugin",
     "cdc_slot_name",
+    "cdc_publication_name",
     "cdc_delivery",
     "exactly_once_active",
     "exactly_once_claimed_platform",
@@ -224,6 +225,44 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
     return details, extras
 
 
+def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
+    """Drop a one-shot Postgres slot once the cancelled worker has closed it.
+
+    A schedule that still owns the route keeps the slot. Failures here are
+    logged; cancel itself must still be recorded.
+    """
+    try:
+        job = mongo.get_job(job_id) or {}
+    except Exception as exc:
+        logger.warning("CDC slot release skipped; job %s unread: %s", job_id, exc)
+        return
+    schedule_id = ""
+    source_cfg = None
+    if request is not None:
+        schedule_id = str(getattr(request, "schedule_id", "") or "")
+        source = getattr(request, "source", None)
+        if source is not None:
+            try:
+                from src.transfer.adapters import resolve_connector_config
+
+                source_cfg = resolve_connector_config(source)
+            except Exception as exc:
+                logger.debug("CDC cancel source config unread: %s", exc)
+                source_cfg = None
+    try:
+        from services.cdc_catchup import release_finished_cdc_slot
+
+        release_finished_cdc_slot(
+            job,
+            reason="cancelled",
+            schedule_id=schedule_id,
+            source_cfg=source_cfg,
+            job_id=job_id,
+        )
+    except Exception as exc:
+        logger.warning("CDC slot release after cancel failed for %s: %s", job_id, exc)
+
+
 def _fail_runtime_job(
     mongo: Any,
     job_id: str,
@@ -265,6 +304,8 @@ def _fail_runtime_job(
             )
     cancelled = isinstance(exc, TransferCancelled)
     status = "cancelled" if cancelled else "failed"
+    if cancelled:
+        _release_cancelled_cdc_slot(mongo, job_id, request)
     error_details, lease_extras = _job_failure_fields(exc)
     prev = {}
     try:
