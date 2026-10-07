@@ -78,6 +78,12 @@ def blob_service_client(cfg: dict[str, Any]):
         "read_timeout": read_timeout,
         "retry_total": retry_total,
     }
+    if azurite:
+        # Current blob SDK defaults (2025-x) make Azurite answer
+        # ``400 Bad Request`` on list_containers before any container exists.
+        # 2021-12-02 is the version Azurite has accepted since 3.18. Real
+        # Azure keeps the SDK default — this pin is only for the local stand-in.
+        client_kwargs["api_version"] = "2021-12-02"
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str, **client_kwargs)
 

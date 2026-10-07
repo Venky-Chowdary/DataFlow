@@ -180,17 +180,24 @@ def _normalize_dest_db(db_type: str | None) -> str:
     return db
 
 
+# Engines whose text carrier is one untyped string. A declared width or a
+# UUID domain is not enforced by any DDL the dialect can spell, so
+# ``UUID → string`` is the wire, not a narrowing that needs a Risk Contract.
+_UNENFORCED_STRING_ENGINES = frozenset({"sqlite", "redis", "dynamodb"})
+
+
 def dest_string_length_is_unenforced(db_type: str | None) -> bool:
     """True when the engine stores every text carrier as one untyped string.
 
     SQLite's dynamic typing gives ``CHAR(36)``, ``VARCHAR(36)`` and ``TEXT`` the
     same TEXT affinity: the declared length is parsed and discarded, nothing is
     blank-padded, and no domain (UUID included) is enforced by any carrier the
-    dialect can spell. A fidelity rule that reads ``UUID → TEXT`` there as a
-    narrowing is describing a carrier the engine does not have — the value is
-    carried byte-exact, and no alternative DDL enforces more.
+    dialect can spell. Redis JSON and DynamoDB ``S`` are the same shape — there
+    is no narrower UUID or ``VARCHAR(n)`` column to land in. A fidelity rule
+    that reads ``UUID → string`` there as a narrowing is describing a carrier
+    the engine does not have — the value is carried byte-exact.
     """
-    return _normalize_dest_db(db_type) == "sqlite"
+    return _normalize_dest_db(db_type) in _UNENFORCED_STRING_ENGINES
 
 
 def _collation_compatible_with_dest(db: str, collation: str) -> bool:

@@ -708,3 +708,37 @@ def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, 
             "only if the business domain is truly IEEE, then remap to FLOAT."
         ),
     }
+
+
+def cursor_declared_numeric_types(
+    headers: list[str],
+    description: Any,
+) -> dict[str, str]:
+    """``DECIMAL(p,s)`` from a DBAPI ``cursor.description``, by result position.
+
+    PEP 249 puts precision at index 4 and scale at index 5. Oracle
+    ``NUMBER(10,2)`` reports those; a sample of ``12.34`` would otherwise
+    invent ``numeric(5,2)`` and reject a later ``12345678.90``. Unconstrained
+    ``NUMBER`` (precision 0, scale -127) is omitted so inference stays the
+    owner of a type the catalog never sized.
+    """
+    if not headers or not description:
+        return {}
+    out: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        if idx >= len(description):
+            break
+        col = description[idx]
+        if not col or len(col) < 6:
+            continue
+        try:
+            precision = int(col[4])
+            scale = int(col[5])
+        except (TypeError, ValueError):
+            continue
+        if precision <= 0 or scale < 0 or scale > precision:
+            continue
+        name = str(header or "").strip()
+        if name:
+            out[name] = f"DECIMAL({precision},{scale})"
+    return out

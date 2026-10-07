@@ -733,17 +733,12 @@ def _run_sql_query(connector, body):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not create database engine: {exc}") from exc
 
-    # Append a safe limit unless the user already supplied one or the query is metadata.
-    clean_query = raw_query.rstrip(";")
-    upper = clean_query.upper()
-    append_limit = (
-        not upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE", "PRAGMA"))
-        and " LIMIT " not in upper
-        and " FETCH FIRST " not in upper
-        and " TOP " not in upper
-    )
-    if append_limit:
-        clean_query = f"{clean_query} LIMIT {body.limit}"
+    from services.dialect_profiles import append_result_limit
+
+    # Oracle/DB2 reject LIMIT (ORA-03047). A query that already has FETCH or TOP
+    # is left alone — that is why a hand-written Oracle extract succeeded while
+    # a table sample did not.
+    clean_query = append_result_limit(connector.type, raw_query, body.limit)
 
     try:
         from sqlalchemy import text
@@ -751,12 +746,24 @@ def _run_sql_query(connector, body):
         with engine.connect() as conn:
             result = conn.execute(text(clean_query), dict(body.params or {}))
             columns = list(result.keys())
+            raw_desc = getattr(getattr(result, "cursor", None), "description", None)
+            description = (
+                tuple(tuple(col) if col is not None else None for col in raw_desc)
+                if raw_desc
+                else None
+            )
             rows = []
             for i, row in enumerate(result):
                 if i >= body.limit:
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
-        return rows, columns, _column_schema(columns, rows), False
+        schema = _column_schema(columns, rows)
+        from services.decimal_observe import cursor_declared_numeric_types
+
+        declared = cursor_declared_numeric_types(columns, description)
+        if declared:
+            schema = {**schema, **declared}
+        return rows, columns, schema, False
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
 

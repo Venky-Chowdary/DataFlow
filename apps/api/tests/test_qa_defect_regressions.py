@@ -180,8 +180,9 @@ def test_sftp_handshake_retries_without_strict_kex(monkeypatch):
     calls: list[bool] = []
 
     class _Transport:
-        def __init__(self, sock, strict_kex=True):
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
             self.strict_kex = strict_kex
+            self.server_sig_algs = server_sig_algs
             calls.append(strict_kex)
 
         def start_client(self, timeout=30):
@@ -211,6 +212,47 @@ def test_sftp_handshake_retries_without_strict_kex(monkeypatch):
     assert transport.strict_kex is False
 
 
+def test_sftp_handshake_retries_after_eof_before_auth(monkeypatch):
+    """A socket drop during kex is EOFError, which is not an SSHException.
+
+    Paramiko 5 raises that when the peer closes before any auth packet.
+    The retry must still reach a login attempt.
+    """
+    import socket
+
+    import paramiko
+
+    from connectors.sftp_common import SFTPConfig, _open_sftp_transport
+
+    calls: list[tuple[bool, bool]] = []
+
+    class _Transport:
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
+            self.strict_kex = strict_kex
+            self.server_sig_algs = server_sig_algs
+            calls.append((strict_kex, server_sig_algs))
+
+        def start_client(self, timeout=30):
+            if self.strict_kex or self.server_sig_algs:
+                raise EOFError("Connection reset by peer")
+
+        def close(self):
+            return None
+
+        def get_remote_server_key(self):
+            return None
+
+    monkeypatch.setattr(paramiko, "Transport", _Transport)
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: object())
+    monkeypatch.setattr("connectors.sftp_common.verify_host_key", lambda *_a, **_k: None)
+    cfg = SFTPConfig()
+    cfg.host = "files.example"
+    cfg.port = 22
+    transport = _open_sftp_transport(cfg)
+    assert calls == [(True, True), (False, True), (False, False)]
+    assert transport.server_sig_algs is False
+
+
 def test_sftp_host_key_refusal_is_not_retried(monkeypatch):
     import socket
 
@@ -221,8 +263,9 @@ def test_sftp_host_key_refusal_is_not_retried(monkeypatch):
     calls: list[bool] = []
 
     class _Transport:
-        def __init__(self, sock, strict_kex=True):
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True):
             self.strict_kex = strict_kex
+            self.server_sig_algs = server_sig_algs
             calls.append(strict_kex)
             self.closed = False
 

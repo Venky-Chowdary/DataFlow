@@ -21,9 +21,11 @@ from __future__ import annotations
 
 from typing import Final
 
-#: Engines whose rows are written as one JSON document per key through
-#: ``services.value_serializer`` (``connectors.redis_writer.write_mapped_rows``).
-INSTANT_TEXT_WIRE_ENGINES: Final[frozenset[str]] = frozenset({"redis"})
+#: Engines whose temporal wire is offset-preserving text.
+#: Redis writes one JSON document (``isoformat`` via ``json_default``).
+#: DynamoDB ``S`` writes the same ``isoformat`` string — AttributeValue has
+#: no datetime type, and ``TypeSerializer`` rejects a ``datetime`` object.
+INSTANT_TEXT_WIRE_ENGINES: Final[frozenset[str]] = frozenset({"redis", "dynamodb"})
 
 
 def keyspace_instant_text_wire_preserved(

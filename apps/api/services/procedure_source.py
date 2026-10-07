@@ -1179,8 +1179,10 @@ def _execute_live(
 
     engine = None
     conn = None
+    description = None
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=limit is not None)
+        description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
         rows = [[_cell(v) for v in row] for row in fetched]
@@ -1195,6 +1197,7 @@ def _execute_live(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, rows)
+    schema = _overlay_declared_numerics(headers, description, schema)
     return headers, rows, schema
 
 
@@ -1210,8 +1213,10 @@ def _execute_to_jsonl(
     conn = None
     sample: list[list[str]] = []
     total = 0
+    description = None
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=False)
+        description = _copy_cursor_description(result)
         with path.open("w", encoding="utf-8") as fh:
             while True:
                 chunk = result.fetchmany(2_000)
@@ -1242,7 +1247,36 @@ def _execute_to_jsonl(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, sample)
+    schema = _overlay_declared_numerics(headers, description, schema)
     return headers, total, schema
+
+
+def _copy_cursor_description(result: Any) -> tuple | None:
+    """Snapshot PEP 249 description before the connection is closed."""
+    raw = getattr(getattr(result, "cursor", None), "description", None)
+    if not raw:
+        return None
+    copied = []
+    for col in raw:
+        if col is None:
+            copied.append(None)
+            continue
+        copied.append(tuple(col))
+    return tuple(copied)
+
+
+def _overlay_declared_numerics(
+    headers: list[str],
+    description: Any,
+    schema: dict[str, str],
+) -> dict[str, str]:
+    """Driver precision/scale wins over the sample envelope."""
+    from services.decimal_observe import cursor_declared_numeric_types
+
+    declared = cursor_declared_numeric_types(headers, description)
+    if not declared:
+        return schema
+    return {**schema, **declared}
 
 
 def _apply_timeout(conn: Any, dialect: str, timeout_s: int) -> None:

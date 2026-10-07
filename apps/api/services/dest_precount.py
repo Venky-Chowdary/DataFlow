@@ -3749,6 +3749,31 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         client.close()
 
 
+def _kafka_partitions_after_refresh(consumer: Any, topic_name: str) -> set | None:
+    """Partition ids, after one metadata refresh when the cache is cold.
+
+    ``partitions_for_topic`` returns ``None`` both for "topic does not exist"
+    and for "the client has not loaded metadata yet". A fresh consumer used
+    only for COUNT hits the second case right after a successful produce and
+    used to report 0. ``None`` from this helper means the count is unproven.
+    An empty set means a refresh proved the topic is absent.
+    """
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    # A refresh error propagates to the caller, which reports the count
+    # unproven (None) rather than an empty topic.
+    known = consumer.topics()
+    if known is None:
+        return None
+    if topic_name not in known:
+        return set()
+    parts = consumer.partitions_for_topic(topic_name)
+    if not parts:
+        return None
+    return set(parts)
+
+
 def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     """Log-end minus log-start watermarks. Does not consume the topic.
 
@@ -3771,7 +3796,11 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
         enable_auto_commit=False,
     )
     try:
-        parts = consumer.partitions_for_topic(topic_name)
+        parts = _kafka_partitions_after_refresh(consumer, topic_name)
+        if parts is None:
+            # Metadata never loaded. That is not an empty topic — reporting 0
+            # made a produce of 200 messages look like "target 0".
+            return None
         if not parts:
             return 0
         tps = [TopicPartition(topic_name, int(p)) for p in parts]

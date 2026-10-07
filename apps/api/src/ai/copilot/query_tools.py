@@ -119,12 +119,74 @@ def _quote_ident(name: str, dialect: str) -> str:
     return ".".join(f'"{p}"' for p in parts)
 
 
+# Document / object engines. Their readers live in batch_readers. Sending them
+# through ``SELECT … LIMIT`` makes preflight report "no source sample" for
+# every transfer that starts there.
+_BATCH_SAMPLE_DRIVERS = frozenset({
+    "elasticsearch",
+    "opensearch",
+    "qdrant",
+    "kafka",
+    "redis",
+    "s3",
+    "gcs",
+    "adls",
+    "dynamodb",
+})
+
+
+def _object_name_ok(table: str, *, batch: bool) -> bool:
+    """SQL idents stay strict. Object keys may contain ``-`` and ``/``."""
+    if not table or len(table) > 1024:
+        return False
+    if batch:
+        return not any(ord(ch) < 32 or ch in "\"';" for ch in table)
+    return bool(_SAFE_IDENT.match(table))
+
+
 def _sample_sql(table: str, dialect: str, limit: int) -> str:
-    quoted = _quote_ident(table, dialect)
-    d = (dialect or "").lower()
-    if d in {"mssql", "sqlserver"}:
-        return f"SELECT TOP {int(limit)} * FROM {quoted}"
-    return f"SELECT * FROM {quoted} LIMIT {int(limit)}"
+    from services.dialect_profiles import sample_select_sql
+
+    return sample_select_sql(dialect, _quote_ident(table, dialect), limit)
+
+
+def _sample_batch_source(
+    conn: dict[str, Any],
+    table: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """One page from the engine reader. Empty is an empty sample, not a SQL error."""
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+    from src.transfer.stream import _read_batch, _source_name, _unwrap_read
+
+    from .schema_tools import _endpoint_from_connector
+
+    endpoint = _endpoint_from_connector(conn, table)
+    src_type = resolve_driver_type(str(endpoint.format or ""))
+    cfg = resolve_connector_config(endpoint)
+    name = _source_name(endpoint) or table
+    probe, _cursor = _unwrap_read(
+        _read_batch(
+            src_type,
+            cfg,
+            name,
+            None,
+            0,
+            limit,
+            database=str(cfg.get("database") or ""),
+        )
+    )
+    columns = [str(h) for h in (probe.headers or [])]
+    rows = [dict(zip(columns, row)) for row in (probe.rows or [])[:limit]]
+    native = {}
+    meta = getattr(probe, "meta", None) or {}
+    if isinstance(meta, dict):
+        raw = meta.get("native_types") or meta.get("schema") or {}
+        if isinstance(raw, dict):
+            native = raw
+    schema = {c: str(native.get(c) or "string") for c in columns}
+    return rows, columns, schema
 
 
 def _is_nullish(v: Any) -> bool:
@@ -340,13 +402,12 @@ def sample_connector_object(
     """Sample rows from a saved-connector table/collection (read-only)."""
     tool = "sample_connector_object"
     table = (table or "").strip()
-    if not table or not _SAFE_IDENT.match(table):
+    if not table:
         return _tool_result(
             tool,
             success=False,
             error=(
-                "Provide a simple table/collection name "
-                "(letters, numbers, underscore, optional schema.table)."
+                "Provide a table, collection, topic, index, or object name."
             ),
         )
     limit = max(1, min(int(limit or _DEFAULT_SAMPLE), _MAX_SAMPLE))
@@ -354,7 +415,22 @@ def sample_connector_object(
     if err:
         return err
 
+    from src.transfer.connector_capabilities import resolve_driver_type
+
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    driver = resolve_driver_type(ctype)
+    batch_source = driver in _BATCH_SAMPLE_DRIVERS
+    if not _object_name_ok(table, batch=batch_source):
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                "Provide a simple table/collection name "
+                "(letters, numbers, underscore, optional schema.table)."
+                if not batch_source
+                else "That object name has quotes, a semicolon, or a control character."
+            ),
+        )
     cid = str(conn.get("id") or conn.get("_id") or "")
     resolve_note = None
     try:
@@ -391,6 +467,41 @@ def sample_connector_object(
                 ),
             )
         table = resolved
+
+        if batch_source:
+            rows, columns, schema = _sample_batch_source(conn, table, limit)
+            preview_rows = rows[: min(limit, 25)]
+            meta = {
+                "connector_id": cid,
+                "connector_name": conn.get("name"),
+                "type": ctype,
+                "table": table,
+                "limit": limit,
+                "truncated": len(rows) >= limit,
+                "column_type_source": "reader",
+            }
+            if resolve_note:
+                meta["resolve_note"] = resolve_note
+            result_id = _store_result(
+                rows=rows,
+                columns=columns,
+                column_schema=schema,
+                meta=meta,
+                session_id=session_id,
+                source=tool,
+            )
+            out = {
+                **meta,
+                "result_id": result_id,
+                "columns": columns,
+                "column_schema": schema,
+                "row_count": len(rows),
+                "rows": preview_rows,
+                "read_only": True,
+            }
+            if analyze and rows:
+                out["analysis"] = _analyze_rows(rows, columns)
+            return _tool_result(tool, success=True, output=out)
 
         if ctype == "mongodb":
             body = QueryExecuteRequest(

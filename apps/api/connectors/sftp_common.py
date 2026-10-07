@@ -298,10 +298,19 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
 
     import paramiko
 
+    # Paramiko 3.4+ advertises strict kex; 3.x/5 also sends server-sig-algs.
+    # Tunnels and older sshd close the socket during that banner (EOFError,
+    # not SSHException) before any auth packet is written. Each attempt still
+    # verifies the host key. Auth itself happens after this function returns.
+    attempts = (
+        {"strict_kex": True, "server_sig_algs": True},
+        {"strict_kex": False, "server_sig_algs": True},
+        {"strict_kex": False, "server_sig_algs": False},
+    )
     last_exc: Exception | None = None
-    for strict_kex in (True, False):
+    for index, opts in enumerate(attempts):
         sock = socket.create_connection((cfg.host, int(cfg.port or 22)), timeout=30)
-        transport = paramiko.Transport(sock, strict_kex=strict_kex)
+        transport = paramiko.Transport(sock, **opts)
         try:
             transport.start_client(timeout=30)
             verify_host_key(cfg, transport)
@@ -315,16 +324,17 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
             except OSError:
                 logger.debug("SFTP transport close after host-key refusal", exc_info=True)
             raise
-        except (paramiko.SSHException, OSError) as exc:
+        except (paramiko.SSHException, OSError, EOFError) as exc:
             last_exc = exc
             try:
                 transport.close()
             except OSError:
                 logger.debug("SFTP transport close after handshake failure", exc_info=True)
-            if strict_kex is False:
+            if index == len(attempts) - 1:
                 raise
             logger.info(
-                "SFTP handshake closed before auth with strict kex; retrying %s:%s",
+                "SFTP handshake closed before auth (%s); retrying %s:%s",
+                type(exc).__name__,
                 cfg.host,
                 cfg.port,
             )

@@ -254,7 +254,11 @@ def introspect_endpoint(
     # connection config. Leaving it out of this branch meant existence and
     # column types were never measured, so Validate refused create-new and
     # overwrite for lack of facts one catalog query answers.
-    if fmt in {"postgresql", "pgvector"}:
+    # TimescaleDB is Postgres wire. Leaving the catalog id off this branch
+    # made destination introspect say "not yet implemented" while the same
+    # connector as a source already read through the Postgres driver.
+    # CockroachDB stays off: the catalog lists it planned.
+    if fmt in {"postgresql", "pgvector", "timescaledb", "timescale"}:
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql

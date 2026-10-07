@@ -316,6 +316,10 @@ def _introspect_schema(
     must report empty columns so Studio can honestly create-on-write — not
     claim ``users`` exists in ``railway`` because another DB on the host has it.
     """
+    # Timescale is the Postgres catalog. Cockroach stays unresolved here so a
+    # planned engine does not inherit a live schema probe.
+    if db_type in {"timescaledb", "timescale"}:
+        db_type = "postgresql"
     if db_type in {
         "generic_sql",
         "duckdb",

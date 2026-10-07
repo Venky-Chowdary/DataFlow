@@ -7072,6 +7072,30 @@ from services.type_polarity_invent import (  # noqa: E402,F401 — re-export
 )
 
 
+def _dynamodb_number_wire_preserves(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when a numeric source lands on DynamoDB's unbounded ``N`` attribute.
+
+    ``N`` is not ``DECIMAL(p,s)``. The writer binds ``Decimal(str(float))``,
+    which keeps the float's shortest decimal form. A fixed ``DECIMAL(10,2)``
+    stamp is a different target and is still graded as a collapse.
+    """
+    if (dest_db or "").strip().lower() != "dynamodb":
+        return False
+    token = strip_identity_qualifier(target_type).upper().strip()
+    if token != "N":
+        return False
+    return normalize_logical_type(source_type) in {
+        LOGICAL_FLOAT,
+        LOGICAL_DECIMAL,
+        LOGICAL_INTEGER,
+    }
+
+
 def is_precision_collapse_coercion(
     source_type: str,
     target_type: str,
@@ -7098,6 +7122,10 @@ def is_precision_collapse_coercion(
         # precision is lost, and a source declaring that much is excluded above
         # so it still reports below. Without this the (datetime, date) pair read
         # as dropping the clock and demoted every timestamp mapping.
+        return False
+    if _dynamodb_number_wire_preserves(source_type, target_type, dest_db=dest_db):
+        # AttributeValue N is an unbounded decimal, not DECIMAL(p,s). A float
+        # lands as Decimal(str(value)) — the engine's only numeric carrier.
         return False
     if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
         return True
@@ -7784,6 +7812,11 @@ def is_lossy_coercion(
     # day survives. Sub-millisecond sources are excluded and fall through to
     # temporal_precision_would_narrow, which names the truncation.
     if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
+        return False
+    if _dynamodb_number_wire_preserves(source_type, target_type, dest_db=dest_db):
+        # AttributeValue N is an unbounded decimal, not DECIMAL(p,s). Float
+        # lands as Decimal(str(value)). A sized DECIMAL(p,s) stamp is excluded
+        # by the token check and stays lossy below.
         return False
     # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
     if nested_to_native_document_wire_preserved(
