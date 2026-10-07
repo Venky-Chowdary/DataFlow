@@ -106,6 +106,10 @@ class ApiKeyCreateBody(BaseModel):
         default="editor",
         description="viewer, operator, editor, or admin. Editor can create connectors, transfers, and schedules.",
     )
+    expires_in: str = Field(
+        default="90d",
+        description="7d, 30d, 60d, 90d, 365d, or never. Logging out does not revoke the key.",
+    )
 
 
 def _actor(request: Request) -> str:
@@ -348,7 +352,9 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
 
     actor = _actor(request)
     try:
-        created = create_api_key(body.name, actor, role=body.role)
+        created = create_api_key(
+            body.name, actor, role=body.role, expires_in=body.expires_in
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     append_audit_event(
@@ -361,6 +367,8 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
             "name": created["name"],
             "prefix": created["prefix"],
             "role": created["role"],
+            "lifetime": created.get("lifetime"),
+            "expires_at": created.get("expires_at"),
         },
     )
     return created

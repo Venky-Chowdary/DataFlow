@@ -3376,6 +3376,8 @@ export async function updatePilotEngine(engine: PilotEngineChoice): Promise<Pilo
 
 export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
 
+export type WorkspaceApiKeyLifetime = "7d" | "30d" | "60d" | "90d" | "365d" | "never";
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
@@ -3384,11 +3386,14 @@ export type WorkspaceApiKey = {
   created_at?: string;
   created_by?: string;
   last_used_at?: string | null;
+  expires_at?: string | null;
+  lifetime?: WorkspaceApiKeyLifetime | string;
+  expired?: boolean;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`);
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list API keys"));
   const data = await res.json();
   return data.keys ?? [];
 }
@@ -3396,11 +3401,12 @@ export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
 export async function createWorkspaceApiKey(
   name: string,
   role: WorkspaceApiKeyRole = "editor",
+  expiresIn: WorkspaceApiKeyLifetime = "90d",
 ): Promise<WorkspaceApiKey & { key: string }> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, role }),
+    body: JSON.stringify({ name, role, expires_in: expiresIn }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
   return res.json();

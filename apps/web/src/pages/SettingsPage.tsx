@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyRole } from "../lib/api";
+import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -87,6 +87,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState("Production key");
   const [newKeyRole, setNewKeyRole] = useState<WorkspaceApiKeyRole>("editor");
+  const [newKeyLifetime, setNewKeyLifetime] = useState<WorkspaceApiKeyLifetime>("90d");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
@@ -402,7 +403,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     if (!mayAdminister()) return;
     setApiKeyGenerating(true);
     try {
-      const created = await createWorkspaceApiKey(newKeyName.trim() || "API key", newKeyRole);
+      const created = await createWorkspaceApiKey(
+        newKeyName.trim() || "API key",
+        newKeyRole,
+        newKeyLifetime,
+      );
       const optimistic: WorkspaceApiKey = {
         id: created.id,
         name: created.name,
@@ -410,6 +415,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         role: created.role || newKeyRole,
         created_at: created.created_at,
         last_used_at: null,
+        expires_at: created.expires_at,
+        lifetime: created.lifetime || newKeyLifetime,
+        expired: false,
       };
       setApiKeys((prev) => [optimistic, ...prev.filter((k) => k.id !== created.id)]);
       setRevealedKey(created.key);
@@ -1055,7 +1063,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div>
                     <h2>API keys</h2>
                     <p>
-                      Authenticate programmatic transfers, schedules, and MCP. Editor can create
+                      Authenticate programmatic transfers, schedules, and MCP. A key stays valid
+                      until the expiration you choose, or until you revoke it. Logging out does
+                      not remove it. Viewer reads. Operator runs jobs. Editor creates
                       connectors, transfers, and schedules. Admin can also delete connectors.
                       A key created before roles were stored acts as an editor.
                     </p>
@@ -1095,10 +1105,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         value={newKeyRole}
                         onChange={(e) => setNewKeyRole(e.target.value as WorkspaceApiKeyRole)}
                       >
-                        <option value="viewer">Viewer — read jobs, connectors, and query</option>
-                        <option value="operator">Operator — run and manage jobs</option>
-                        <option value="editor">Editor — connectors, transfers, and schedules</option>
-                        <option value="admin">Admin — editor, plus delete and workspace admin</option>
+                        <option value="viewer">Viewer</option>
+                        <option value="operator">Operator</option>
+                        <option value="editor">Editor</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </div>
+                    <div className="df2-settings-field">
+                      <label htmlFor="api-key-expires">Expiration</label>
+                      <select
+                        id="api-key-expires"
+                        className="df2-select"
+                        data-testid="api-key-expires"
+                        value={newKeyLifetime}
+                        onChange={(e) => setNewKeyLifetime(e.target.value as WorkspaceApiKeyLifetime)}
+                      >
+                        <option value="7d">7 days</option>
+                        <option value="30d">30 days</option>
+                        <option value="60d">60 days</option>
+                        <option value="90d">90 days</option>
+                        <option value="365d">1 year</option>
+                        <option value="never">No expiration</option>
                       </select>
                     </div>
                     <button
@@ -1160,6 +1187,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                                 Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
                                 {" · "}
                                 Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
+                                {" · "}
+                                {key.expired
+                                  ? `Expired ${key.expires_at ? new Date(key.expires_at).toLocaleString() : ""}`
+                                  : key.expires_at
+                                    ? `Expires ${new Date(key.expires_at).toLocaleString()}`
+                                    : "No expiration"}
                               </span>
                             </div>
                           </div>
