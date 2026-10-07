@@ -1112,6 +1112,21 @@ def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
     return "snapshot"
 
 
+def batch_has_row_image(change: Any) -> bool | None:
+    """Whether this batch carries inserts, updates, or deletes.
+
+    ``None`` means the caller did not pass a batch, so the checksums stand
+    alone. ``False`` is a position heartbeat: MySQL (and the other log
+    readers) re-yield the committed file:pos when the log is idle.
+    """
+    if change is None:
+        return None
+    for attr in ("inserts", "updates", "deletes"):
+        if list(getattr(change, attr, None) or []):
+            return True
+    return False
+
+
 def batch_apply_checksum(
     change: Any,
     *,
@@ -1255,7 +1270,15 @@ def decide_eos_apply(
         # restart, whose payload legitimately differs from the newest committed
         # batch; comparing it refused every recovery replay as a payload
         # conflict and failed the job on a correct stream.
-        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+        # An idle poll re-yields that same LSN with no row image. Its digest
+        # is the empty payload, which does not match the committed batch, but
+        # it is not a second version of the event. MySQL→Postgres continuous
+        # CDC applied the update and advanced the watermark, then failed when
+        # the next poll repeated the file:pos with an empty batch.
+        if (
+            compare_lsn(incoming_lsn, dest_lsn or "") == 0
+            and batch_has_row_image(change) is not False
+        ):
             assert_redelivery_checksum(
                 incoming_checksum,
                 dest_checksum or None,

@@ -485,6 +485,26 @@ def test_bundle_coordinator_refuses_member_behind() -> None:
     assert_bundle_members_reached(["0/10", "0/20"], "0/10")
 
 
+def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
+    """MySQL end-of-poll yields the committed file:pos again with no rows."""
+    action, _fence = decide_eos_apply(
+        incoming_lsn="mysql-bin.000003:000000000000001234",
+        dest_lsn="mysql-bin.000003:000000000000001234",
+        incoming_phase="streaming",
+        dest_phase="streaming",
+        incoming_checksum="empty-poll",
+        dest_checksum="committed-update",
+        change=ChangeBatch(
+            resume_token={
+                "file": "mysql-bin.000003",
+                "pos": 1234,
+                "phase": "streaming",
+            }
+        ),
+    )
+    assert action == "already_committed"
+
+
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         decide_eos_apply(
@@ -999,6 +1019,49 @@ def test_sqlite_eos_checksum_mismatch_refuses_overwrite() -> None:
         finally:
             conn.close()
         assert v == "first"
+
+
+def test_sqlite_eos_idle_position_after_commit_keeps_the_row() -> None:
+    """The poll after a committed update carries the same LSN and no rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_idle.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "qty", "target": "qty", "confidence": 1.0},
+        ]
+        types = {"id": "string", "qty": "string"}
+        token = {"file": "mysql-bin.000003", "pos": 1234, "phase": "streaming"}
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(updates=[{"id": "1", "qty": "3"}], resume_token=token),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "qty"],
+            pk_target_cols=["id"],
+            cursor_key="idle|orders",
+        )
+        rows, _ck, summary, _deleted = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(resume_token=token),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "qty"],
+            pk_target_cols=["id"],
+            cursor_key="idle|orders",
+        )
+        assert summary["eos_already_committed"] is True
+        assert rows == 0
+        conn = sqlite3.connect(path)
+        try:
+            qty = conn.execute("SELECT qty FROM orders WHERE id = ?", ("1",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert qty == "3"
 
 
 def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
