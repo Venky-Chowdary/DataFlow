@@ -271,6 +271,83 @@ def test_incremental_upsert_without_a_cursor_still_blocks():
     assert any("Missing cursor" in issue for issue in gate["details"]["issues"])
 
 
+def test_sole_updated_at_is_the_incremental_cursor_when_none_is_named():
+    """MCP clients that omit cursor_column still bind the one watermark.
+
+    The column has to exist. Two modification-timestamp names are not a guess,
+    and naming the column without semantics still leaves the meaning undeclared.
+    """
+    from services.cursor_semantics import sole_modification_timestamp_column
+
+    assert sole_modification_timestamp_column(
+        ["order_id", "Updated_At", "created_at"]
+    ) == "Updated_At"
+    assert sole_modification_timestamp_column(
+        ["order_id", "updated_at", "modified_at"]
+    ) == ""
+    assert sole_modification_timestamp_column(["order_id", "created_at"]) == ""
+
+    contracts, identity_error = _identity_stream_contract(
+        mode="incremental_upsert",
+        source_table="orders",
+        source_columns=["order_id", "updated_at", "status"],
+        mappings=[
+            {"source": "order_id", "target": "order_id"},
+            {"source": "updated_at", "target": "updated_at"},
+            {"source": "status", "target": "status"},
+        ],
+        operator_key="order_id",
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts[0]["cursor_field"] == "updated_at"
+    assert contracts[0]["cursor_semantics"] == "modification_timestamp"
+    assert contracts[0]["cursor_inferred"] is True
+    assert contracts[0]["sync_mode"] == "incremental_deduped"
+    from services.preflight_cursor_gate import build_sync_contract_gate
+
+    gate = build_sync_contract_gate(
+        contracts,
+        sync="incremental_deduped",
+        validation="balanced",
+        dest="postgresql",
+        src="postgresql",
+        kind="database",
+        source_columns=["order_id", "updated_at", "status"],
+        pass_status="pass",
+        block_status="block",
+    )
+    assert gate["status"] == "pass"
+
+    ambiguous, err = _identity_stream_contract(
+        mode="incremental_deduped",
+        source_table="orders",
+        source_columns=["order_id", "updated_at", "modified_at"],
+        mappings=[
+            {"source": "order_id", "target": "order_id"},
+            {"source": "updated_at", "target": "updated_at"},
+            {"source": "modified_at", "target": "modified_at"},
+        ],
+        operator_key="order_id",
+        catalog_key="",
+    )
+    assert err == ""
+    assert "cursor_field" not in ambiguous[0]
+
+    cdc_contracts, cdc_err = _identity_stream_contract(
+        mode="cdc",
+        source_table="orders",
+        source_columns=["order_id", "updated_at"],
+        mappings=[{"source": "order_id", "target": "order_id"}],
+        operator_key="order_id",
+        catalog_key="",
+    )
+    assert cdc_err == ""
+    assert cdc_contracts[0]["cursor_semantics"] == "cdc_position"
+    assert "cursor_field" not in cdc_contracts[0]
+    assert "cursor_inferred" not in cdc_contracts[0]
+
+
 def test_undeclared_cursor_semantics_still_block_incremental_upsert():
     contracts, identity_error = _identity_stream_contract(
         mode="incremental_deduped",
@@ -464,9 +541,38 @@ def test_cdc_incremental_alias_reaches_the_cdc_runner():
     assert gate["status"] == "pass"
 
 
-def test_incremental_upsert_schedule_refuses_to_start_without_a_cursor():
+def test_incremental_upsert_schedule_refuses_to_start_without_a_cursor(monkeypatch):
+    """A schedule still refuses when the live schema has no single watermark.
+
+    Connector resolution happens first so a sole updated_at can be selected.
+    When the plan comes back with no cursor, the schedule does not start.
+    """
+    from src.ai.copilot.query_tools import _tool_result
     from src.ai.copilot.schedule_tools import create_schedule
 
+    def _plan(**_kwargs):
+        return _tool_result(
+            "plan_transfer",
+            success=True,
+            output={
+                "sync_mode": "incremental_deduped",
+                "data_rules": {},
+                "preflight": {"passed": True},
+                "engine_mappings": [{"source": "order_id", "target": "order_id"}],
+                "source": {
+                    "connector_id": "s",
+                    "table": "orders",
+                    "connector_name": "Src",
+                },
+                "destination": {
+                    "connector_id": "d",
+                    "table": "orders",
+                    "connector_name": "Dst",
+                },
+            },
+        )
+
+    monkeypatch.setattr("src.ai.copilot.schedule_tools.plan_transfer", _plan)
     result = create_schedule(
         source_connector_name="missing-src",
         dest_connector_name="missing-dst",

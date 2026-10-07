@@ -498,6 +498,44 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "replication client",
+            "replication slave",
+            "(1227,",
+            "error 1227",
+        ),
+        {
+            "code": "cdc_log_privilege",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "MySQL CDC cannot read the binary log",
+            "fix": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO the source "
+                "user. Privileges on one schema do not include them, and that user "
+                "cannot grant them to itself. gtid_mode and enforce_gtid_consistency "
+                "are separate server settings; file and position CDC does not invent "
+                "a GTID. After the grant, re-run."
+            ),
+        },
+    ),
+    (
+        (
+            "wal_level",
+        ),
+        {
+            "code": "cdc_wal_level",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "Postgres CDC needs wal_level=logical",
+            "fix": (
+                "Set wal_level=logical (max_replication_slots and max_wal_senders "
+                "above 0) and restart PostgreSQL. A reload does not apply wal_level. "
+                "Until that restart, logical decoding cannot write a resume LSN, so "
+                "dest-owned watermarks stay empty and delivery stays at-least-once upsert."
+            ),
+        },
+    ),
+    (
+        (
             "access denied",
             "permission denied",
             "insufficient privilege",
@@ -799,6 +837,8 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
             )
+        elif matched.get("code") in {"cdc_log_privilege", "cdc_wal_level"}:
+            message = f"{title}. Driver reported: {raw}."
         else:
             message = (
                 f"{title}. Driver reported: {raw}. "

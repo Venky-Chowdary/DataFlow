@@ -311,9 +311,13 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Source watermark column for incremental_append or "
-                        "incremental_upsert. CDC uses the log position and does "
-                        "not take a table cursor. A column named updated_at is "
-                        "never invented."
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
                     ),
                 },
                 "cursor_semantics": {
@@ -387,9 +391,13 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Source watermark column for incremental_append or "
-                        "incremental_upsert. CDC uses the log position and does "
-                        "not take a table cursor. A column named updated_at is "
-                        "never invented."
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
                     ),
                 },
                 "cursor_semantics": {
@@ -457,9 +465,13 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Source watermark column for incremental_append or "
-                        "incremental_upsert. CDC uses the log position and does "
-                        "not take a table cursor. A column named updated_at is "
-                        "never invented."
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
                     ),
                 },
                 "cursor_semantics": {
@@ -637,7 +649,11 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "cursor_column": {
                     "type": "string",
-                    "description": "Watermark column — required for incremental modes",
+                    "description": (
+                        "Watermark column for incremental modes. When omitted and "
+                        "the source has exactly one modification-timestamp column, "
+                        "that column is selected. Two candidates are not guessed."
+                    ),
                 },
                 "cursor_semantics": {
                     "type": "string",

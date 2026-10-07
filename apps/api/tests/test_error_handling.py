@@ -123,6 +123,33 @@ def test_humanize_missing_column_and_table_guide_to_map():
     assert "Destination" in missing["fix"]
 
 
+def test_mysql_replication_client_is_a_source_cdc_grant_not_a_dest_write():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(
+        RuntimeError(
+            "(1227, 'Access denied; you need (at least one of) the SUPER, "
+            "REPLICATION CLIENT privilege(s) for this operation')"
+        )
+    )
+    assert human["code"] == "cdc_log_privilege"
+    assert "REPLICATION CLIENT" in human["fix"]
+    assert "gtid" in human["fix"].lower()
+    assert "capacity" not in human["message"].lower()
+    assert human["title"] != "Destination rejected the write for privileges/auth"
+
+
+def test_wal_level_failure_names_the_restart():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(
+        RuntimeError("logical decoding requires wal_level=logical")
+    )
+    assert human["code"] == "cdc_wal_level"
+    assert "restart" in human["fix"].lower()
+    assert "capacity" not in human["message"].lower()
+
+
 def test_retry_budget_env_overrides(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATAFLOW_RETRY_MAX_ATTEMPTS", "5")
     monkeypatch.setenv("DATAFLOW_RETRY_BASE_DELAY_SECONDS", "0.25")

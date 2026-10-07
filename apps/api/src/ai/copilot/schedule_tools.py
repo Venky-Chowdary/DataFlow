@@ -118,16 +118,8 @@ def create_schedule(
     # token is not in _CURSOR_MODES, so a schedule of that mode used to skip
     # the watermark check and then fail preflight with no cursor to bind.
     mode = normalize_sync_mode(raw_mode) if raw_mode else ""
-    if mode in _CURSOR_MODES and not (cursor_column or "").strip():
-        return _tool_result(
-            tool,
-            success=False,
-            error=(
-                f"An {mode} schedule needs the watermark column it advances on — "
-                "without it every run would re-read the whole table. Tell me which "
-                "column carries the change time (e.g. “incremental on updated_at”)."
-            ),
-        )
+    # The watermark is resolved on the live schema. A sole modification-timestamp
+    # column is bound there; refusing here would hide that column from the schedule.
 
     planned = plan_transfer(
         source_connector_id=source_connector_id,
@@ -159,6 +151,21 @@ def create_schedule(
         return _tool_result(tool, success=False, error=planned.error)
 
     plan = planned.output or {}
+    bound_cursor = str(
+        (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
+    ).strip()
+    if mode in _CURSOR_MODES and not bound_cursor:
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                f"An {mode} schedule needs the watermark column it advances on — "
+                "without it every run would re-read the whole table. Tell me which "
+                "column carries the change time (e.g. “incremental on updated_at”). "
+                "A single updated_at on the source is selected automatically; "
+                "two candidates are not guessed."
+            ),
+        )
     preflight = plan.get("preflight") or {}
     if not _is_execute_cleared(preflight):
         decision = _transfer_decision(preflight) or (

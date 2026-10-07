@@ -662,6 +662,8 @@ def plan_transfer(
         row_rules["cursor_column"] = str(contracts[0]["cursor_field"])
     if contracts and contracts[0].get("cursor_semantics"):
         row_rules["cursor_semantics"] = str(contracts[0]["cursor_semantics"])
+    if contracts and contracts[0].get("cursor_inferred"):
+        row_rules["cursor_inferred"] = True
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -907,8 +909,11 @@ def _identity_stream_contract(
     source catalog key when every column is mapped. No column named ``id`` is
     invented. CDC's cursor is the log position (``cdc_position``), not a
     guessed ``updated_at``. An incremental cursor is the column the operator
-    named, and only a semantics value they declared — never one inferred from
-    the column's name.
+    named. When they name none and the source has exactly one conventional
+    modification-timestamp column, that column is selected and declared
+    ``modification_timestamp`` — the plan says so. Two candidates are not a
+    guess, a missing column is not invented, and a named cursor with no
+    semantics stays undeclared so the gate can still refuse it.
     """
     from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
     from services.primary_key import mapped_catalog_upsert_key
@@ -953,6 +958,7 @@ def _identity_stream_contract(
                 chosen = bound
     cursor = ""
     semantics = ""
+    inferred = False
     if mode == "cdc":
         # The log is the cursor. A table column here would make the snapshot
         # reader filter on it and skip rows the log had already captured.
@@ -979,6 +985,20 @@ def _identity_stream_contract(
                     + ", ".join(sorted(CURSOR_SEMANTICS))
                 )
             semantics = raw_sem
+        elif not cursor:
+            from services.cursor_semantics import (
+                MODIFICATION_TIMESTAMP,
+                sole_modification_timestamp_column,
+            )
+            from services.preflight_cursor_gate import MODES_REQUIRING_CURSOR
+
+            picked = ""
+            if mode in MODES_REQUIRING_CURSOR:
+                picked = sole_modification_timestamp_column(source_columns)
+            if picked:
+                cursor = picked
+                semantics = MODIFICATION_TIMESTAMP
+                inferred = True
     if not chosen and not cursor:
         return [], ""
     contract: dict[str, Any] = {
@@ -991,6 +1011,8 @@ def _identity_stream_contract(
         contract["cursor_field"] = cursor
     if semantics:
         contract["cursor_semantics"] = semantics
+    if inferred:
+        contract["cursor_inferred"] = True
     if mode:
         # Execute prefers the contract mode. The canonical token is what the
         # CDC branch and the progress check compare against.
@@ -1644,6 +1666,15 @@ def start_transfer(
         preview["cursor_column"] = rules_preview["cursor_column"]
     if rules_preview.get("cursor_semantics"):
         preview["cursor_semantics"] = rules_preview["cursor_semantics"]
+    if rules_preview.get("cursor_inferred"):
+        col = rules_preview.get("cursor_column") or "the watermark"
+        preview["cursor_inferred"] = True
+        preview["cursor_assumption"] = (
+            f"{col} is the only modification-timestamp column on the source, "
+            "so this incremental upsert advances on it as modification_timestamp. "
+            "That assumes the source maintains the column on every change. "
+            "Pass cursor_column and cursor_semantics to choose a different watermark."
+        )
     if payload.get("limit"):
         preview["row_limit"] = payload["limit"]
     if rules_preview.get("cadence_not_scheduled"):
