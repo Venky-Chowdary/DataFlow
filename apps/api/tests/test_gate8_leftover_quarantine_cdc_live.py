@@ -406,6 +406,75 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
         _pg_drop(src_t, dst_t)
 
 
+def test_cdc_upsert_completion_uses_source_image_not_event_ack(tmp_path: Path) -> None:
+    """200 snapshot rows plus one update of an existing key is a complete CDC run.
+
+    Writer ack is 201 and dest COUNT is 200. That is not a short write, and
+    the blank changelog digest must not be compared to the full-table dest hash.
+    """
+    from src.transfer.reconcile_step import run_reconciliation
+
+    db = tmp_path / "dest.db"
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, qty INTEGER)")
+        conn.executemany(
+            "INSERT INTO orders VALUES (?, ?)",
+            [(1, 3), (2, 1)],
+        )
+    conn.close()
+    endpoint = EndpointConfig(
+        kind="database", format="sqlite", database=str(db), table="orders"
+    )
+    summary = {
+        "table": "orders",
+        "sync_mode": "cdc",
+        "checksum_mode": "cdc_source_image",
+        "source_row_count": 2,
+        "source_row_count_source": "cdc_source_image_count",
+        "checksum": "last-batch-only",
+    }
+    report = run_reconciliation(
+        endpoint=endpoint,
+        records=[],
+        columns=["id", "qty"],
+        rows_written=3,
+        writer_checksum="last-batch-only",
+        dest_summary=summary,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "qty", "target": "qty"},
+        ],
+        validation_mode="balanced",
+    )
+    assert report["passed"] is True, report
+    assert report["source_rows"] == 2
+    assert report["target_rows"] == 2
+    assert "CDC catch-up" in report["message"]
+    assert "Checksum mismatch" not in report["message"]
+
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM orders WHERE id = 2")
+    conn.close()
+    short = run_reconciliation(
+        endpoint=endpoint,
+        records=[],
+        columns=["id", "qty"],
+        rows_written=3,
+        writer_checksum="last-batch-only",
+        dest_summary=summary,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "qty", "target": "qty"},
+        ],
+        validation_mode="balanced",
+    )
+    assert short["passed"] is False, short
+    assert "short of the live source image" in short["message"]
+    assert "Checksum mismatch" not in short["message"]
+
+
 def test_cdc_source_image_count_scope_does_not_claim_full_checksum() -> None:
     from services.reconciliation import reconcile
     from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT

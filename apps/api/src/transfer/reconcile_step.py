@@ -2511,7 +2511,14 @@ def run_reconciliation(
         return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
-    if target_rows < rows_written_accounted:
+    # A CDC update of an existing key is a write that does not add a row, so
+    # dest COUNT is below the event ack on a correct stream. The source image
+    # count further down is the population. Comparing the blank CDC source
+    # digest to the full-table dest digest here failed MySQL→Postgres after
+    # the snapshot and the live update had both landed.
+    if target_rows < rows_written_accounted and not _cdc_source_image_gate(
+        dest_summary
+    ):
         report = reconcile(
             source_rows=source_rows,
             target_rows=target_rows,
