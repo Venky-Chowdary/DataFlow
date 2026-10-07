@@ -1881,22 +1881,51 @@ def verify_mysql_table(
             password=password,
             connection_string=connection_string,
             ssl=ssl,
+            purpose="reconcile",
         )
-        from connectors.sql_identifiers import quote_table_ref
+        from connectors.mysql_conn import enable_autocommit
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
 
+        enable_autocommit(conn)
         table_ref = quote_table_ref(table_name, dialect="mysql")
         with conn.cursor() as cur:
+            # A metadata lock from the writer must fail closed, not sit at 99%.
+            # max_execution_time is MySQL milliseconds; MariaDB uses
+            # max_statement_time in seconds. Either name may be absent.
+            for session_sql in (
+                "SET SESSION lock_wait_timeout = 120",
+                "SET SESSION innodb_lock_wait_timeout = 120",
+                "SET SESSION max_execution_time = 1800000",
+                "SET SESSION max_statement_time = 1800",
+            ):
+                try:
+                    cur.execute(session_sql)
+                except Exception:  # noqa: BLE001 — MariaDB and MySQL name this differently
+                    logger.debug("MySQL reconcile session guard skipped", exc_info=True)
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
         ids, pk = keyed_readback_scope(written_ids, pk_column)
+        select_list = "*"
+        wanted = [str(c) for c in (target_columns or []) if str(c).strip()]
+        if wanted:
+            try:
+                select_list = quote_column_list(wanted, quote_char="`")
+            except Exception:  # noqa: BLE001 — bad identifier falls back to SELECT *
+                select_list = "*"
         with streaming_readback_cursor(conn, engine="mysql") as cur:
+            # One statement on the streaming cursor. A failed projected select
+            # must not be retried on the same cursor — PyMySQL's SSCursor
+            # waits on the unread result and the job sits at 99%.
             if ids:
                 where = keyed_readback_where(
                     pk, ids, dialect="mysql", placeholders=["%s"] * len(ids)
                 )
-                cur.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+                cur.execute(
+                    f"SELECT {select_list} FROM {table_ref} {where}",  # nosec B608
+                    ids,
+                )
             else:
-                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
             columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(

@@ -1011,6 +1011,7 @@ def _apply_change_batch(
     job_id: str = "",
     census_acc: Any | None = None,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
     cursor_key: str = "",
     stream_name: str = "",
     writer_fence: int = 0,
@@ -1019,7 +1020,12 @@ def _apply_change_batch(
     align_lock: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
-    from services.cdc_exactly_once import normalize_delivery_guarantee
+    from services.cdc_exactly_once import (
+        DELIVERY_SEMANTICS_ALO,
+        REASON_NO_LSN,
+        delivery_for_batch,
+        normalize_delivery_guarantee,
+    )
     from services.cdc_snapshot_window import _pk_columns
 
     clean_inserts, rej_inserts = _split_unparsed_sql_redo(change.inserts)
@@ -1055,7 +1061,16 @@ def _apply_change_batch(
         for name in headers:
             column_types.setdefault(name, "string")
 
-    if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
+    effective_delivery = delivery_for_batch(
+        delivery_guarantee,
+        change.resume_token,
+        pinned=delivery_pinned,
+    )
+    eos_downgraded = (
+        normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
+        and effective_delivery != "exactly_once"
+    )
+    if effective_delivery == "exactly_once":
         from connectors.cdc_eos_sql import apply_change_batch_exactly_once
 
         rows, checksum, dest_summary, deleted = apply_change_batch_exactly_once(
@@ -1260,6 +1275,13 @@ def _apply_change_batch(
         inherit_note,
     )
 
+    if eos_downgraded and isinstance(dest_summary, dict):
+        # The contract said cdc_position, but this batch has no captured
+        # LSN/GTID/SCN/resume token. Stay at-least-once. Do not invent one.
+        dest_summary["cdc_delivery"] = "at-least-once"
+        dest_summary["exactly_once_active"] = False
+        dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
+        dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
     return rows_written, last_checksum, dest_summary, deleted
 
 
@@ -1298,6 +1320,7 @@ def run_cdc_database_transfer(
     validation_mode: str = "strict",
     limit: int = 0,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
     workspace_id: str = "",
     schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
@@ -1324,6 +1347,7 @@ def run_cdc_database_transfer(
             validation_mode=validation_mode,
             limit=limit,
             delivery_guarantee=delivery_guarantee,
+            delivery_pinned=delivery_pinned,
             workspace_id=workspace_id,
             schedule_id=schedule_id,
         )
@@ -1342,6 +1366,7 @@ def run_cdc_database_transfer(
         validation_mode=validation_mode,
         limit=limit,
         delivery_guarantee=delivery_guarantee,
+        delivery_pinned=delivery_pinned,
         workspace_id=workspace_id,
         schedule_id=schedule_id,
     )
@@ -1364,6 +1389,7 @@ def _run_cdc_multi_stream(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
     workspace_id: str = "",
     schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
@@ -1437,6 +1463,7 @@ def _run_cdc_multi_stream(
         validation_mode=validation_mode,
         limit=limit,
         delivery_guarantee=delivery_guarantee,
+        delivery_pinned=delivery_pinned,
         workspace_id=workspace_id,
         schedule_id=schedule_id,
     )
@@ -2157,6 +2184,7 @@ def _run_cdc_multi_stream_sequential(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
     workspace_id: str = "",
     schedule_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
@@ -2239,6 +2267,7 @@ def _run_cdc_multi_stream_sequential(
                         validation_mode=validation_mode,
                         limit=limit,
                         delivery_guarantee=delivery_guarantee,
+                        delivery_pinned=delivery_pinned,
                         workspace_id=workspace_id,
                         schedule_id=schedule_id,
                         mappings_inherited=not declared_maps,
@@ -2351,6 +2380,7 @@ def _run_cdc_single_stream(
     validation_mode: str = "strict",
     limit: int = 0,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
     workspace_id: str = "",
     schedule_id: str = "",
     mappings_inherited: bool = False,
@@ -2822,6 +2852,17 @@ def _run_cdc_single_stream(
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+    if capture_downgrade:
+        # Query CDC has no slot LSN, binlog GTID, or change-stream resume token.
+        # Auto had already selected exactly-once from the contract's cdc_position.
+        # That declaration is not a captured position. Stay at-least-once.
+        eos_guarantee = "at_least_once"
+        eos_active = False
+        ddl_log.append(
+            "CDC delivery stays at-least-once upsert — no durable "
+            "LSN/GTID/resume token was captured "
+            "(exactly_once_requires_durable_lsn). None was invented."
+        )
     state = CdcState(cursor_key=cursor_key, watermark=watermark)
     # Chunk progress only. The cursor itself was resolved before the reader
     # was opened, and a checkpoint must not replace it here.
@@ -2854,7 +2895,7 @@ def _run_cdc_single_stream(
         next run continues ``snapshot()`` from that key. The slot or LSN is
         acked when the dump finishes.
         """
-        nonlocal chunk_idx, total_chunks
+        nonlocal chunk_idx, total_chunks, eos_active
         from services.cdc_resume_tokens import (
             is_durable_log_resume_token,
             is_side_channel_resume_token,
@@ -2903,6 +2944,7 @@ def _run_cdc_single_stream(
                 job_id=str(job_id or ""),
                 census_acc=state.acc_for(str(dest_table or "")),
                 delivery_guarantee=eos_guarantee,
+                delivery_pinned=delivery_pinned,
                 cursor_key=cursor_key,
                 stream_name=str(table_name or dest_table or ""),
                 mappings_inherited=mappings_inherited,
@@ -2925,6 +2967,8 @@ def _run_cdc_single_stream(
                 job_id=str(job_id or ""),
                 destination=destination,
             )
+        if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
+            eos_active = False
 
         _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 

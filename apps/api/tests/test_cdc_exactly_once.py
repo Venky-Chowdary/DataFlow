@@ -106,6 +106,31 @@ def test_platform_never_claims_all_cdc_is_exactly_once() -> None:
         assert_delivery_guarantee_allowed("at_most_once")
 
 
+def test_unpinned_batch_without_a_log_position_stays_at_least_once() -> None:
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        delivery_for_batch,
+        operator_pinned_delivery,
+    )
+
+    snapshot = {"phase": "snapshot", "table": "orders", "offset": 1}
+    assert operator_pinned_delivery("auto") is False
+    assert operator_pinned_delivery("") is False
+    assert operator_pinned_delivery("exactly_once") is True
+    assert delivery_for_batch("exactly_once", snapshot, pinned=False) == "at_least_once"
+    assert delivery_for_batch("exactly_once", None, pinned=False) == "at_least_once"
+    assert (
+        delivery_for_batch(
+            "exactly_once",
+            {"file": "mysql-bin.000001", "pos": 4, "gtid": "uuid:1-9"},
+            pinned=False,
+        )
+        == "exactly_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError, match="durable LSN"):
+        delivery_for_batch("exactly_once", snapshot, pinned=True)
+
+
 def test_classify_fail_closed_ineligible_routes() -> None:
     csv = classify_exactly_once_route(
         dest_type="csv", sync_mode="cdc", has_primary_key=True

@@ -355,7 +355,7 @@ def test_mcp_start_transfer_accepts_primary_key():
 
     from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools, get_pilot_tools
 
-    for tool_name in ("plan_transfer", "start_transfer"):
+    for tool_name in ("plan_transfer", "start_transfer", "plan_transfer_route"):
         schema = next(t for t in TOOL_DEFINITIONS if t["name"] == tool_name)
         props = schema["input_schema"]["properties"]
         assert "upsert_key" in props

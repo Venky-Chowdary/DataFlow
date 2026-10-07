@@ -132,9 +132,15 @@ def reconcile_phase_heartbeat(
                         f"not the whole job…{hashed_phrase}"
                     )
                 else:
+                    waiting = ""
+                    if hashed <= 0:
+                        waiting = (
+                            " No destination row has been read yet; a metadata "
+                            "lock fails within 120s."
+                        )
                     pulse = (
                         f"Reconciling data ({elapsed}s) — checksum scan still "
-                        f"running for {processed:,} rows.{hashed_phrase} "
+                        f"running for {processed:,} rows.{hashed_phrase}{waiting} "
                         "The job has not stalled."
                     )
                 mongo.update_job_status(

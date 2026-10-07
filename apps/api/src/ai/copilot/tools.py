@@ -296,6 +296,35 @@ TOOL_DEFINITIONS: list[dict] = [
                 "table": {"type": "string", "description": "Source table — required for a real plan"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. CDC uses the log position and does "
+                        "not take a table cursor. A column named updated_at is "
+                        "never invented."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
                 "leftover_nl": {
                     "type": "string",
                     "description": "Remaining operator prose (contract / migrate / data rules). Never parse skip_preflight.",
@@ -2142,6 +2171,10 @@ class DataPilotTools:
         table: str = "",
         dest_table: str = "",
         sync_mode: str = "",
+        upsert_key: str = "",
+        primary_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         leftover_nl: str = "",
         contract_id: str = "",
         require_signed_contract: Any = None,
@@ -2181,6 +2214,10 @@ class DataPilotTools:
                 dest_connector_name=destination,
                 dest_table=dest_table or table,
                 sync_mode=sync_mode or workload,
+                upsert_key=upsert_key or primary_key,
+                primary_key=primary_key,
+                cursor_column=cursor_column,
+                cursor_semantics=cursor_semantics,
                 **bind,
             )
             if planned.success:

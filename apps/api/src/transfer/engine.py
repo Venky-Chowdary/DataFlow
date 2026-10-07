@@ -1921,6 +1921,7 @@ class UniversalTransferEngine:
         from services.cdc_exactly_once import (
             ExactlyOnceRouteError,
             dest_allow_append_only,
+            operator_pinned_delivery,
             route_declares_log_position,
             route_has_cdc_pk,
             select_route_delivery,
@@ -1930,8 +1931,10 @@ class UniversalTransferEngine:
         from services.procedure_source import is_callable_source
 
         try:
+            requested_delivery = getattr(request, "delivery_guarantee", None) or "auto"
+            request.delivery_pinned = operator_pinned_delivery(requested_delivery)
             request.delivery_guarantee = select_route_delivery(
-                getattr(request, "delivery_guarantee", None) or "auto",
+                requested_delivery,
                 sync_mode=getattr(request, "sync_mode", "") or "",
                 dest_type=str(getattr(request.destination, "format", "") or ""),
                 source_type=str(getattr(request.source, "format", "") or ""),
@@ -4264,6 +4267,7 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     delivery_guarantee=getattr(request, "delivery_guarantee", None)
                     or "at_least_once",
+                    delivery_pinned=bool(getattr(request, "delivery_pinned", False)),
                     workspace_id=str(getattr(request, "workspace_id", "") or ""),
                     schedule_id=str(getattr(request, "schedule_id", "") or ""),
                 )

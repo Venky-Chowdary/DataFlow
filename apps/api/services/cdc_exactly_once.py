@@ -1512,6 +1512,39 @@ def select_route_delivery(
     )
 
 
+def operator_pinned_delivery(requested: str | None) -> bool:
+    """True when the operator named a guarantee. ``auto`` / empty is not a pin."""
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    return raw not in _AUTO_TOKENS
+
+
+def delivery_for_batch(
+    guarantee: str | None,
+    resume_token: Any,
+    *,
+    pinned: bool,
+) -> str:
+    """One batch's delivery. Unpinned EOS without a log position stays at-least-once.
+
+    ``auto`` may already have been rewritten to ``exactly_once`` because the
+    contract declared ``cdc_position``. That declaration is not a captured
+    LSN, GTID, SCN, or change-stream resume token. Query CDC and a snapshot
+    page that has not captured a log position must not fail the job, and
+    must not invent a position. An operator pin of ``exactly_once`` still
+    fails closed.
+    """
+    raw = normalize_delivery_guarantee(guarantee)
+    if raw != DELIVERY_CLASS_EXACTLY_ONCE:
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    if batch_lsn(resume_token):
+        return DELIVERY_CLASS_EXACTLY_ONCE
+    if pinned:
+        require_batch_lsn(resume_token)
+    return DELIVERY_CLASS_AT_LEAST_ONCE
+
+
 def require_batch_lsn(resume_token: Any) -> str:
     lsn = batch_lsn(resume_token)
     if not lsn:
