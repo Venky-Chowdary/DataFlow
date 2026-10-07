@@ -92,3 +92,28 @@ def test_multi_stream_heartbeat_does_not_call_the_job_total_checksum_proof():
     assert "counts + checksum proof" not in first
     assert any("Reconciling data" in (c.get("message") or "") for c in mongo.calls[1:])
     assert any("not the whole job" in (c.get("message") or "") for c in mongo.calls[1:])
+
+
+def test_checksum_publishes_hashed_rows_without_moving_the_job_counter():
+    """The scan count moves. The written-row counter and the 99% pin do not."""
+    from services.fingerprint_accumulator import FingerprintAccumulator
+
+    mongo = _FakeMongo()
+    with _reconcile_phase_heartbeat(
+        mongo,
+        "job-1m",
+        processed=1_000_000,
+        total=1_000_000,
+        interval_s=0.05,
+    ):
+        acc = FingerprintAccumulator()
+        for i in range(9000):
+            acc.add(str(i), f"fp-{i}")
+        acc.digest()
+        time.sleep(0.12)
+
+    pulses = [c.get("message") or "" for c in mongo.calls[1:]]
+    assert any("9,000" in message and "row fingerprints" in message for message in pulses)
+    assert any("has not stalled" in message for message in pulses)
+    assert all(c["progress_pct"] == 99 for c in mongo.calls)
+    assert all(c["records_processed"] == 1_000_000 for c in mongo.calls)

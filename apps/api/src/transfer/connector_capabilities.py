@@ -316,6 +316,22 @@ def default_port(driver_type: str) -> int:
     }.get((driver_type or "").lower(), 5432)
 
 
+def effective_port(driver_type: str, port: Any) -> int:
+    """Listen port for a driver: an explicit port, otherwise :func:`default_port`.
+
+    ``0`` and empty mean the caller did not choose a port. A second fallback
+    chain used to send that case to 443, so Redis and Elasticsearch dialed
+    the HTTPS port instead of 6379 and 9200.
+    """
+    try:
+        parsed = int(port or 0)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed < 0:
+        parsed = 0
+    return parsed or default_port(driver_type)
+
+
 def resolve_driver_type(catalog_id: str) -> str:
     """Map catalog entry id to implemented driver or file format key."""
     cid = (catalog_id or "").lower().strip()

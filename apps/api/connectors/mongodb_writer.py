@@ -106,6 +106,36 @@ def _declares_calendar_day(mapping: Mapping[str, Any]) -> bool:
     return normalize_logical_type(declared) == LOGICAL_DATE
 
 
+def declared_source_is_instant(source_type: str) -> bool:
+    """True when the source type is an offset-bearing instant.
+
+    A naive Python value of that type already lost ``tzinfo`` in the driver.
+    MySQL TIMESTAMP is read after the session is pinned to UTC, and live
+    introspect stamps it ``TIMESTAMPTZ``. Stamping UTC keeps the clock.
+    Bare ``TIMESTAMP`` / ``DATETIME`` / ``TIMESTAMP_NTZ`` stay wall-clock and
+    still need the operator's UTC contract.
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    return datetime_timezone_polarity(source_type) in {"tz", "ltz"}
+
+
+def _mapping_source_type(
+    mapping: Mapping[str, Any], column_types: Mapping[str, str]
+) -> str:
+    """Source DDL for one mapping. The mapping stamp wins over the schema."""
+    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    source_name = str(mapping.get("source") or "")
+    if not source_name:
+        return ""
+    looked = column_types.get(source_name)
+    if looked is None:
+        looked = column_types.get(source_name.lower(), "")
+    return str(looked or "").strip()
+
+
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
 MONGO_WRITE_BATCH_SIZE = int(getenv_brand("MONGO_BATCH_SIZE", "1000"))
@@ -620,9 +650,19 @@ def write_mapped_rows(
             for m in mappings
             if _declares_calendar_day(m)
         }
+        source_type_by_col = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            ): _mapping_source_type(m, column_types)
+            for m in mappings
+        }
 
         def _to_bson(
-            value: Any, stype: str, transform: str = "", column: str = ""
+            value: Any,
+            stype: str,
+            transform: str = "",
+            column: str = "",
+            source_type: str = "",
         ) -> Any:
             from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
@@ -745,20 +785,25 @@ def write_mapped_rows(
                 if coerced is None:
                     return None
                 if isinstance(coerced, _datetime):
-                    # Never invent UTC on a naive wall-clock (would silently shift
-                    # polarity). Require offset/Z from the wire, a prior coerce, or
-                    # an accepted UTC-normalize risk on this column.
+                    # A declared instant (TIMESTAMPTZ / TIMESTAMP_TZ / LTZ) that
+                    # arrives naive already had its offset stripped by the
+                    # driver. Stamp UTC and keep the clock. A wall-clock source
+                    # still needs an accepted UTC-normalize risk — stamping one
+                    # quietly would shift polarity.
                     if coerced.tzinfo is None:
                         from datetime import timezone as _tzu
 
-                        if column not in utc_normalize_ack:
+                        if declared_source_is_instant(source_type):
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
+                        elif column not in utc_normalize_ack:
                             raise ValueError(
                                 "MongoDB date/time refused naive wall-clock — "
                                 "provide offset/Z, or accept the UTC-normalize "
                                 "risk on this column (refuse silent UTC invent)"
                             )
-                        utc_normalized_cols.add(column)
-                        coerced = coerced.replace(tzinfo=_tzu.utc)
+                        else:
+                            utc_normalized_cols.add(column)
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -832,7 +877,13 @@ def write_mapped_rows(
                 col = target_cols[i] if i < len(target_cols) else f"col_{i}"
                 try:
                     cells.append(
-                        _to_bson(v, t, transform_by_col.get(col, ""), column=col)
+                        _to_bson(
+                            v,
+                            t,
+                            transform_by_col.get(col, ""),
+                            column=col,
+                            source_type=source_type_by_col.get(col, ""),
+                        )
                     )
                 except (ValueError, TypeError, InvalidOperation) as exc:
                     append_write_quarantine_detail(

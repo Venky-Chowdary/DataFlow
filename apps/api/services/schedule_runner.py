@@ -1293,14 +1293,11 @@ def _release_superseded_queued_claims() -> None:
     """Replace a queued run when a newer slot is already due.
 
     A running transfer is left alone. Cancelling it would start a second
-    writer against the same destination.
+    writer against the same destination. One store load covers the fleet.
     """
-    from services.schedule_store import _load_all, release_superseded_queued_claim
+    from services.schedule_store import release_all_superseded_queued_claims
 
-    for sched in _load_all():
-        if not sched.running or not str(sched.running_job_id or "").strip():
-            continue
-        release_superseded_queued_claim(sched.id)
+    release_all_superseded_queued_claims()
 
 
 def _finalize_finished_schedule_claims() -> None:

@@ -1139,6 +1139,34 @@ def _cancel_queued_job(job_id: str) -> bool:
         return False
 
 
+def _superseded_queued_replacement(
+    sched: PipelineSchedule, current: datetime
+) -> PipelineSchedule | None:
+    """The schedule with its queued claim dropped, or None when it stays.
+
+    Cancels the job only while its status is still pending or queued. A
+    running transfer keeps the claim until it finishes.
+    """
+    job_id = str(sched.running_job_id or "").strip()
+    if not sched.running or not job_id:
+        return None
+    if _job_dispatch_state(job_id) != "queued":
+        return None
+    if not following_slot_is_due(sched, current):
+        return None
+    if not _cancel_queued_job(job_id):
+        return None
+    latest = _latest_due_slot(sched, current)
+    return PipelineSchedule.from_dict({
+        **sched.to_dict(),
+        "running": False,
+        "running_instance": "",
+        "running_started_at": None,
+        "running_job_id": "",
+        "next_run_at": latest.astimezone(timezone.utc).isoformat(),
+    })
+
+
 def release_superseded_queued_claim(
     schedule_id: str, now: datetime | None = None
 ) -> PipelineSchedule | None:
@@ -1153,28 +1181,33 @@ def release_superseded_queued_claim(
     for i, sched in enumerate(schedules):
         if sched.id != schedule_id:
             continue
-        job_id = str(sched.running_job_id or "").strip()
-        if not sched.running or not job_id:
+        updated = _superseded_queued_replacement(sched, current)
+        if updated is None:
             return None
-        if _job_dispatch_state(job_id) != "queued":
-            return None
-        if not following_slot_is_due(sched, current):
-            return None
-        if not _cancel_queued_job(job_id):
-            return None
-        latest = _latest_due_slot(sched, current)
-        updated = PipelineSchedule.from_dict({
-            **sched.to_dict(),
-            "running": False,
-            "running_instance": "",
-            "running_started_at": None,
-            "running_job_id": "",
-            "next_run_at": latest.astimezone(timezone.utc).isoformat(),
-        })
         schedules[i] = updated
         _save_all(schedules)
         return updated
     return None
+
+
+def release_all_superseded_queued_claims(now: datetime | None = None) -> int:
+    """Drop every queued claim a newer slot has passed.
+
+    One load and one save for the whole fleet. Releasing each id on its own
+    re-read the store once per schedule on every beat.
+    """
+    current = now or datetime.now(timezone.utc)
+    schedules = _load_all()
+    released = 0
+    for i, sched in enumerate(schedules):
+        updated = _superseded_queued_replacement(sched, current)
+        if updated is None:
+            continue
+        schedules[i] = updated
+        released += 1
+    if released:
+        _save_all(schedules)
+    return released
 
 
 def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:

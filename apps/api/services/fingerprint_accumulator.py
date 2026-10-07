@@ -29,8 +29,12 @@ import tempfile
 from collections.abc import Iterable
 
 from services.brand_env import getenv_brand
+from services.reconcile_progress import note_hashed_rows
 
 SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+# Publish scan progress in batches. A per-row Mongo write is what made a
+# million-row checksum look frozen; the heartbeat reads the counter.
+_PROGRESS_EVERY = 8192
 
 
 class FingerprintAccumulator:
@@ -47,11 +51,21 @@ class FingerprintAccumulator:
         self.buffer: list[tuple[str, str]] = []
         self.chunk_files: list[str] = []
         self.total = 0
+        self._progress_noted = 0
         self._tempdir: tempfile.TemporaryDirectory | None = None
+
+    def _flush_progress(self) -> None:
+        pending = self.total - self._progress_noted
+        if pending <= 0:
+            return
+        note_hashed_rows(pending)
+        self._progress_noted = self.total
 
     def add(self, key: str, fingerprint: str) -> None:
         self.buffer.append((key, fingerprint))
         self.total += 1
+        if self.total - self._progress_noted >= _PROGRESS_EVERY:
+            self._flush_progress()
         if len(self.buffer) >= self.threshold:
             self._spill()
 
@@ -130,6 +144,7 @@ class FingerprintAccumulator:
         only; this one also hashes the row key, so two populations with the
         same cells and different identities do not align.
         """
+        self._flush_progress()
         h = hashlib.sha256()
         for key, fp in self._identity_stream():
             h.update(key.encode("utf-8"))
@@ -140,6 +155,7 @@ class FingerprintAccumulator:
 
     def digest(self) -> str:
         """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
+        self._flush_progress()
         h = hashlib.sha256()
         for _, fp in self._sorted_stream():
             h.update(fp.encode("utf-8"))

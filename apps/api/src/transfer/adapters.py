@@ -442,63 +442,12 @@ def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import effective_port, resolve_driver_type
 
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
-    default_port = (
-        27017
-        if fmt == "mongodb"
-        else 3306
-        if fmt == "mysql"
-        else 1433
-        if fmt == "sqlserver"
-        else 1521
-        if fmt == "oracle"
-        else 9092
-        if fmt == "kafka"
-        else 6379
-        if fmt == "redis"
-        else 9200
-        if fmt == "elasticsearch"
-        else 5439
-        if fmt == "redshift"
-        else 0
-        if fmt in ("sqlite", "generic_sql", "iceberg")
-        else 22
-        if fmt == "sftp"
-        else 587
-        if fmt == "email"
-        else 6333
-        if fmt == "qdrant"
-        else 8080
-        if fmt == "weaviate"
-        else 19530
-        if fmt == "milvus"
-        else 443
-        if fmt
-        in (
-            "snowflake",
-            "bigquery",
-            "dynamodb",
-            "s3",
-            "gcs",
-            "adls",
-            "salesforce",
-            "hubspot",
-            "stripe",
-            "shopify",
-            "zendesk",
-            "notion",
-            "airtable",
-            "rest_api",
-            "influxdb",
-            "neo4j",
-            "couchbase",
-            "pinecone",
-        )
-        else 5432
-    )
+    # One owner with the writer. Neo4j is 7474, InfluxDB 8086, Redis 6379.
+    default_port = effective_port(fmt, 0)
     from services.dialect_profiles import normalize_schema
 
     # Start with inline endpoint values only; driver defaults are applied after the
@@ -633,7 +582,7 @@ def resolve_connector_config(
         cfg["host"] = cfg["host"] or "localhost"
     else:
         cfg["host"] = cfg.get("host") or ""
-    cfg["port"] = cfg["port"] or default_port
+    cfg["port"] = effective_port(fmt, cfg.get("port"))
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
     cfg["schema"] = normalize_schema(
@@ -1480,7 +1429,7 @@ def _write_destination_database(
     zone, which must land every source row for inspection even when the job is
     strict. Callers that omit it keep the validation-mode-derived policy.
     """
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
 
     cfg = resolve_connector_config(endpoint)
@@ -1525,34 +1474,7 @@ def _write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"]
-        or (
-            5439
-            if db_type == "redshift"
-            else 5432
-            if db_type == "postgresql"
-            else 3306
-            if db_type == "mysql"
-            else 1433
-            if db_type == "sqlserver"
-            else 1521
-            if db_type == "oracle"
-            else 9092
-            if db_type == "kafka"
-            else 6333
-            if db_type == "qdrant"
-            else 8080
-            if db_type == "weaviate"
-            else 19530
-            if db_type == "milvus"
-            else 22
-            if db_type == "sftp"
-            else 587
-            if db_type == "email"
-            else 0
-            if db_type in ("generic_sql", "iceberg", "sqlite")
-            else 443
-        ),
+        "port": effective_port(db_type, cfg.get("port")),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),

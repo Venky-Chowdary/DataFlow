@@ -7,6 +7,12 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+from services.reconcile_progress import (
+    ReconcileScan,
+    bind_reconcile_scan,
+    reset_reconcile_scan,
+)
+
 
 def reconcile_heartbeat_scope(dest_summary: Any) -> dict[str, Any]:
     """Kwargs for :func:`reconcile_phase_heartbeat` from the summary already built.
@@ -73,6 +79,8 @@ def reconcile_phase_heartbeat(
     table_phrase = (
         f"{int(stream_count)} tables" if int(stream_count or 0) >= 2 else "the selected tables"
     )
+    scan = ReconcileScan()
+    token = bind_reconcile_scan(scan)
     if write_pass:
         enter_msg = (
             "All rows written — dest COUNT + dest fingerprint vs write-pass "
@@ -89,55 +97,66 @@ def reconcile_phase_heartbeat(
             "All rows written — reconciling destination "
             f"({processed:,} rows: counts + checksum proof)…"
         )
-    mongo.update_job_status(
-        job_id,
-        "running",
-        phase="reconcile",
-        progress_pct=99,
-        records_processed=processed,
-        total_rows=total,
-        message=enter_msg,
-    )
-    stop = threading.Event()
-    started = time.monotonic()
-
-    def _pulse() -> None:
-        while not stop.wait(interval_s):
-            elapsed = int(time.monotonic() - started)
-            if write_pass:
-                pulse = (
-                    f"Reconciling ({elapsed}s) — dest COUNT and fingerprint for "
-                    f"{processed:,} rows (write-pass compare, not migration_proven)…"
-                )
-            elif last_stream:
-                pulse = (
-                    f"Reconciling data ({elapsed}s) — {processed:,} rows written "
-                    f"across the job. Checksum is the last stream ({table}), "
-                    "not the whole job…"
-                )
-            else:
-                pulse = (
-                    f"Reconciling data ({elapsed}s) — checksum scan still "
-                    f"running for {processed:,} rows. The job has not stalled."
-                )
-            mongo.update_job_status(
-                job_id,
-                "running",
-                phase="reconcile",
-                progress_pct=99,
-                records_processed=processed,
-                total_rows=total,
-                message=pulse,
-            )
-
-    thread = threading.Thread(
-        target=_pulse,
-        name=f"reconcile-heartbeat-{job_id[:8]}",
-        daemon=True,
-    )
-    thread.start()
     try:
-        yield
+        mongo.update_job_status(
+            job_id,
+            "running",
+            phase="reconcile",
+            progress_pct=99,
+            records_processed=processed,
+            total_rows=total,
+            message=enter_msg,
+        )
+        stop = threading.Event()
+        started = time.monotonic()
+
+        def _pulse() -> None:
+            while not stop.wait(interval_s):
+                elapsed = int(time.monotonic() - started)
+                hashed = scan.rows_hashed
+                hashed_phrase = (
+                    f" Hashed {hashed:,} row fingerprints so far."
+                    if hashed > 0
+                    else ""
+                )
+                if write_pass:
+                    pulse = (
+                        f"Reconciling ({elapsed}s) — dest COUNT and fingerprint for "
+                        f"{processed:,} rows (write-pass compare, not migration_proven)…"
+                        f"{hashed_phrase}"
+                    )
+                elif last_stream:
+                    pulse = (
+                        f"Reconciling data ({elapsed}s) — {processed:,} rows written "
+                        f"across the job. Checksum is the last stream ({table}), "
+                        f"not the whole job…{hashed_phrase}"
+                    )
+                else:
+                    pulse = (
+                        f"Reconciling data ({elapsed}s) — checksum scan still "
+                        f"running for {processed:,} rows.{hashed_phrase} "
+                        "The job has not stalled."
+                    )
+                mongo.update_job_status(
+                    job_id,
+                    "running",
+                    phase="reconcile",
+                    progress_pct=99,
+                    records_processed=processed,
+                    total_rows=total,
+                    message=pulse,
+                )
+
+        thread = threading.Thread(
+            target=_pulse,
+            name=f"reconcile-heartbeat-{job_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=1.0)
     finally:
-        stop.set()
-        thread.join(timeout=1.0)
+        reset_reconcile_scan(token)

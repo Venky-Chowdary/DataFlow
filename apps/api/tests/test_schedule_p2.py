@@ -818,6 +818,74 @@ def test_queued_claim_is_replaced_when_the_next_slot_is_due(temp_store, monkeypa
     assert store.get_schedule(sched.id).run_count == 0
 
 
+def test_fleet_queued_claims_release_in_one_load(temp_store, monkeypatch):
+    """A beat drops every superseded queued claim with one store read."""
+    queued = _make(store, name="q", dest_table="q_tbl", cron="*/5 * * * *", interval="hourly")
+    other = _make(
+        store, name="q2", dest_table="q2_tbl", source_connector_id="src-2",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    live = _make(
+        store, name="live", dest_table="live_tbl", source_connector_id="src-3",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    parked = {
+        queued.id: "job-q1",
+        other.id: "job-q2",
+        live.id: "job-live",
+    }
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched_id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": job_id,
+            "running_started_at": past,
+        })
+        for sched_id, job_id in parked.items()
+    ])
+    loads = {"n": 0}
+    real_load = store._load_all
+
+    def _counting():
+        loads["n"] += 1
+        return real_load()
+
+    monkeypatch.setattr(store, "_load_all", _counting)
+    monkeypatch.setattr(
+        store,
+        "_job_dispatch_state",
+        lambda job_id: "running" if job_id == "job-live" else "queued",
+    )
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        store,
+        "_cancel_queued_job",
+        lambda job_id: cancelled.append(job_id) or True,
+    )
+    released = store.release_all_superseded_queued_claims()
+    assert released == 2
+    assert loads["n"] == 1
+    assert set(cancelled) == {"job-q1", "job-q2"}
+    assert store.get_schedule(live.id).running is True
+    assert store.get_schedule(live.id).running_job_id == "job-live"
+    assert store.get_schedule(queued.id).running is False
+    assert store.get_schedule(queued.id).run_count == 0
+    assert store.get_schedule(other.id).running is False
+
+
+def test_scheduler_beat_releases_the_fleet_once(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(
+        store,
+        "release_all_superseded_queued_claims",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+    runner._release_superseded_queued_claims()
+    assert called["n"] == 1
+
+
 def test_running_claim_is_not_replaced_when_the_next_slot_is_due(temp_store, monkeypatch):
     sched = _make(store, cron="*/5 * * * *", interval="hourly")
     past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
