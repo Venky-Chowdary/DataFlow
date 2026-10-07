@@ -26,6 +26,7 @@ from services.cdc_exactly_once import (
     assert_bundle_members_reached,
     batch_apply_checksum,
     combine_change_batch,
+    committed_apply_checksum,
     decide_from_view,
     encode_resume_blob,
     extract_snapshot_last_pk,
@@ -417,7 +418,9 @@ def _sqlite_apply_member(
             fence_epoch=fence,
             prev_lsn=dest.committed_lsn,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
             window_id=window_id,
@@ -432,7 +435,9 @@ def _sqlite_apply_member(
             already_committed=True,
             fence_epoch=fence,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             apply_seq=dest_seq,
             window_id=window_id,
             snapshot_signal_id=signal_id,

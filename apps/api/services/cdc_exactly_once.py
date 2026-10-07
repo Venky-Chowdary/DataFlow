@@ -1112,19 +1112,32 @@ def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
     return "snapshot"
 
 
-def batch_has_row_image(change: Any) -> bool | None:
-    """Whether this batch carries inserts, updates, or deletes.
+def is_position_heartbeat(change: Any) -> bool:
+    """True when a batch was supplied and it has no inserts, updates, or deletes.
 
-    ``None`` means the caller did not pass a batch, so the checksums stand
-    alone. ``False`` is a position heartbeat: MySQL (and the other log
-    readers) re-yield the committed file:pos when the log is idle.
+    Log readers re-yield the committed file:pos / LSN when the log is idle.
+    ``None`` is not a heartbeat: a caller that passed only checksums still
+    compares them.
     """
     if change is None:
-        return None
+        return False
     for attr in ("inserts", "updates", "deletes"):
         if list(getattr(change, attr, None) or []):
-            return True
-    return False
+            return False
+    return True
+
+
+def committed_apply_checksum(incoming: str, dest: str | None, change: Any) -> str:
+    """Checksum to store with the watermark.
+
+    A position heartbeat has a digest of the empty payload. Writing that
+    digest over the committed batch makes a later redelivery of the real
+    rows look like a conflict. The committed payload identity stays.
+    """
+    kept = dest or ""
+    if is_position_heartbeat(change) and kept:
+        return kept
+    return incoming or kept
 
 
 def batch_apply_checksum(
@@ -1265,19 +1278,12 @@ def decide_eos_apply(
         ):
             return "handoff_phase", fence
         # The dest checksum describes the batch dest committed *at* its
-        # watermark, so it is only comparable to a redelivery of that same LSN.
-        # A strictly older LSN is an ordinary at-least-once replay from a
-        # restart, whose payload legitimately differs from the newest committed
-        # batch; comparing it refused every recovery replay as a payload
-        # conflict and failed the job on a correct stream.
-        # An idle poll re-yields that same LSN with no row image. Its digest
-        # is the empty payload, which does not match the committed batch, but
-        # it is not a second version of the event. MySQL→Postgres continuous
-        # CDC applied the update and advanced the watermark, then failed when
-        # the next poll repeated the file:pos with an empty batch.
-        if (
-            compare_lsn(incoming_lsn, dest_lsn or "") == 0
-            and batch_has_row_image(change) is not False
+        # watermark, so it is only comparable to a redelivery of that same LSN
+        # that still carries rows. A strictly older LSN is an at-least-once
+        # replay of an earlier batch. An idle poll repeats this LSN with no
+        # rows; its empty digest is not a second version of the event.
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0 and not is_position_heartbeat(
+            change
         ):
             assert_redelivery_checksum(
                 incoming_checksum,

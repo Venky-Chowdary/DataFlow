@@ -485,6 +485,19 @@ def test_bundle_coordinator_refuses_member_behind() -> None:
     assert_bundle_members_reached(["0/10", "0/20"], "0/10")
 
 
+def test_heartbeat_keeps_the_committed_payload_checksum() -> None:
+    from services.cdc_exactly_once import committed_apply_checksum, is_position_heartbeat
+
+    heartbeat = ChangeBatch(resume_token={"file": "mysql-bin.000003", "pos": 4})
+    rows = ChangeBatch(updates=[{"id": "1", "qty": "3"}])
+    assert is_position_heartbeat(heartbeat) is True
+    assert is_position_heartbeat(rows) is False
+    assert is_position_heartbeat(None) is False
+    assert committed_apply_checksum("empty", "payload", heartbeat) == "payload"
+    assert committed_apply_checksum("next", "payload", rows) == "next"
+    assert committed_apply_checksum("alone", "", None) == "alone"
+
+
 def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
     """MySQL end-of-poll yields the committed file:pos again with no rows."""
     action, _fence = decide_eos_apply(
@@ -1032,7 +1045,7 @@ def test_sqlite_eos_idle_position_after_commit_keeps_the_row() -> None:
         ]
         types = {"id": "string", "qty": "string"}
         token = {"file": "mysql-bin.000003", "pos": 1234, "phase": "streaming"}
-        apply_change_batch_exactly_once(
+        _rows, _ck, landed, _deleted = apply_change_batch_exactly_once(
             dest_type="sqlite",
             dest_cfg=dest_cfg,
             dest_table="orders",
@@ -1043,6 +1056,8 @@ def test_sqlite_eos_idle_position_after_commit_keeps_the_row() -> None:
             pk_target_cols=["id"],
             cursor_key="idle|orders",
         )
+        committed = landed["eos_apply_checksum"]
+        assert committed
         rows, _ck, summary, _deleted = apply_change_batch_exactly_once(
             dest_type="sqlite",
             dest_cfg=dest_cfg,
@@ -1056,6 +1071,7 @@ def test_sqlite_eos_idle_position_after_commit_keeps_the_row() -> None:
         )
         assert summary["eos_already_committed"] is True
         assert rows == 0
+        assert dest_watermark_view(dest_cfg, "idle|orders").apply_checksum == committed
         conn = sqlite3.connect(path)
         try:
             qty = conn.execute("SELECT qty FROM orders WHERE id = ?", ("1",)).fetchone()[0]
@@ -1088,7 +1104,9 @@ def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
             pk_target_cols=["id"],
             cursor_key="ho|orders",
         )
-        assert dest_watermark_view(dest_cfg, "ho|orders").phase == "snapshot"
+        before = dest_watermark_view(dest_cfg, "ho|orders")
+        assert before.phase == "snapshot"
+        assert before.apply_checksum
         stream = ChangeBatch(
             resume_token={"lsn": "0/90", "phase": "streaming"},
         )
@@ -1109,6 +1127,7 @@ def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
         view = dest_watermark_view(dest_cfg, "ho|orders")
         assert view.phase == "streaming"
         assert view.committed_lsn == "0/90"
+        assert view.apply_checksum == before.apply_checksum
 
 
 def _bundle_stream(table: str, key: str, change: ChangeBatch) -> EosBundleStream:
