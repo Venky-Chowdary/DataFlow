@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from services.brand_env import getenv_brand
 import time
 from collections.abc import Iterator
@@ -47,6 +48,7 @@ from services.cdc_capability import (
     LogCaptureUnavailable,
     classify_log_capture_failure,
 )
+from services.cdc_catchup import stamp_capture_identity
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
 from services.tombstone import (
@@ -2179,6 +2181,7 @@ def _run_cdc_shared_multi_table(
                     )
                     _raise_if_stream_behind(cdc, outcome)
     finally:
+        stamp_capture_identity(sys.exc_info()[1], cdc)
         if original_dest_table is not None:
             destination.table = original_dest_table
         if original_dest_collection is not None:
@@ -3490,6 +3493,7 @@ def _run_cdc_single_stream(
             summary.update(capture_downgrade)
         return state.rows_written, ddl_log, summary, headers
     finally:
+        stamp_capture_identity(sys.exc_info()[1], cdc)
         if hasattr(cdc, "close"):
             try:
                 cdc.close()

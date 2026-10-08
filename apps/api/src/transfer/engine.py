@@ -4845,6 +4845,9 @@ class UniversalTransferEngine:
                 already_persisted=_quarantine_persisted,
             )
             block_msg = str(blocked)
+            from services.cdc_catchup import capture_identity_from
+
+            capture = capture_identity_from(blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
@@ -4857,7 +4860,14 @@ class UniversalTransferEngine:
                     dest_summary.get("rejected_details") or []
                 )[:2000],
                 destination_summary=dest_summary,
+                **capture,
             )
+            if capture:
+                from .job_failure import release_cdc_capture_after_failure
+
+                release_cdc_capture_after_failure(
+                    mongo, job_id, request, blocked, retriable=False
+                )
             return TransferResult(
                 success=False,
                 error=block_msg,

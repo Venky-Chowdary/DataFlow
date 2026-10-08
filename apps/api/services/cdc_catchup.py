@@ -6,9 +6,10 @@ A later COUNT(*) still matches after an UPDATE, so a count gate stays green
 while the slot is behind.
 
 A paused or live CDC schedule still resumes from its slot, so that slot is
-kept. A failed job is kept too. A one-shot job that completed or was
-cancelled drops the slot, because nothing else will read it and an idle
-slot retains WAL until the source disk fills.
+kept. A retriable failure keeps it too. A one-shot job that completed, was
+cancelled, or failed for a reason a resume on the same slot cannot clear
+drops the slot, because nothing else will read it and an idle slot retains
+WAL until the source disk fills.
 """
 
 from __future__ import annotations
@@ -32,6 +33,64 @@ class CdcStreamBehind(RuntimeError):
     def __init__(self, message: str, *, slot_name: str = "") -> None:
         super().__init__(message)
         self.slot_name = slot_name
+
+
+_CAPTURE_IDENTITY_ATTR = "cdc_capture_identity"
+
+
+def capture_identity(cdc: Any) -> dict[str, str]:
+    """Slot and publication a Postgres log reader names at construction.
+
+    The names are deterministic before the first poll. A writer that fails
+    on its first batch never checkpoints, so the job document has no slot
+    name and a terminal release would otherwise skip it and leak the slot.
+    Query-CDC and non-Postgres readers return an empty identity.
+    """
+    from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
+
+    if not isinstance(cdc, PostgreSqlChangeStreamCdc):
+        return {}
+    slot = str(getattr(cdc, "slot_name", "") or "").strip()
+    if not slot:
+        return {}
+    out = {"cdc_slot_name": slot}
+    publication = str(getattr(cdc, "publication_name", "") or "").strip()
+    if publication:
+        out["cdc_publication_name"] = publication
+    return out
+
+
+def stamp_capture_identity(exc: BaseException | None, cdc: Any) -> None:
+    """Attach the reader's slot identity to an exception leaving the CDC run."""
+    if exc is None or cdc is None:
+        return
+    try:
+        identity = capture_identity(cdc)
+    except Exception as err:  # noqa: BLE001
+        _logger.debug("CDC capture identity unread: %s", err)
+        return
+    if not identity:
+        return
+    prior = getattr(exc, _CAPTURE_IDENTITY_ATTR, None)
+    if isinstance(prior, dict) and prior.get("cdc_slot_name"):
+        return
+    try:
+        setattr(exc, _CAPTURE_IDENTITY_ATTR, identity)
+    except Exception as err:  # noqa: BLE001
+        _logger.debug("CDC capture identity not attachable: %s", err)
+
+
+def capture_identity_from(exc: BaseException | None) -> dict[str, str]:
+    """Slot identity stamped by :func:`stamp_capture_identity`, else empty."""
+    seen: set[int] = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        identity = getattr(current, _CAPTURE_IDENTITY_ATTR, None)
+        if isinstance(identity, dict) and identity.get("cdc_slot_name"):
+            return dict(identity)
+        current = current.__cause__ or current.__context__
+    return {}
 
 
 def behind_message(cdc: Any) -> str:

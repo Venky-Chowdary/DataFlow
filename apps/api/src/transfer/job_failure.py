@@ -259,24 +259,39 @@ def _cdc_dest_release_args(request: Any) -> tuple[str, dict[str, Any] | None]:
     return dest_type, cfg if isinstance(cfg, dict) else None
 
 
+def _with_capture_identity(
+    job: dict[str, Any], identity: dict[str, str] | None
+) -> dict[str, Any]:
+    """Job copy that names the reader's slot when no checkpoint recorded it."""
+    merged = dict(job or {})
+    for key, value in (identity or {}).items():
+        if value and not str(merged.get(key) or "").strip():
+            merged[key] = value
+    return merged
+
+
 def _release_failed_cdc_slot(
     mongo: Any,
     job_id: str,
     request: Any,
     *,
     job: dict[str, Any] | None = None,
+    identity: dict[str, str] | None = None,
 ) -> None:
     """Drop a one-shot Postgres slot after a non-retriable CDC failure.
 
     The reader closes in its own finally before this runs, so the slot is
     inactive unless a schedule still owns the route. A retriable failure
-    never reaches this helper. Historical slots are not enumerated here.
+    never reaches this helper. ``identity`` is the slot the reader named;
+    a first-batch failure has no checkpoint that would have put it on the
+    job. Historical slots are not enumerated here.
     """
     try:
         loaded = job if isinstance(job, dict) and job else (mongo.get_job(job_id) or {})
     except Exception as exc:
         logger.warning("CDC slot release skipped; job %s unread: %s", job_id, exc)
         return
+    loaded = _with_capture_identity(loaded, identity)
     schedule_id = ""
     source_cfg = None
     if request is not None:
@@ -309,7 +324,13 @@ def _release_failed_cdc_slot(
         logger.warning("CDC slot release after failure failed for %s: %s", job_id, exc)
 
 
-def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
+def _release_cancelled_cdc_slot(
+    mongo: Any,
+    job_id: str,
+    request: Any,
+    *,
+    identity: dict[str, str] | None = None,
+) -> None:
     """Drop a one-shot Postgres slot once the cancelled worker has closed it.
 
     A schedule that still owns the route keeps the slot. Failures here are
@@ -320,6 +341,7 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
     except Exception as exc:
         logger.warning("CDC slot release skipped; job %s unread: %s", job_id, exc)
         return
+    job = _with_capture_identity(job, identity)
     schedule_id = ""
     source_cfg = None
     if request is not None:
@@ -349,6 +371,34 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
         )
     except Exception as exc:
         logger.warning("CDC slot release after cancel failed for %s: %s", job_id, exc)
+
+
+def release_cdc_capture_after_failure(
+    mongo: Any,
+    job_id: str,
+    request: Any,
+    exc: BaseException,
+    *,
+    retriable: bool,
+    job: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Terminal slot release for every failure branch of a CDC run.
+
+    Returns the slot identity the reader named so the caller can stamp it on
+    the job. A retriable failure keeps the slot for the resume; a refused
+    batch or other non-retriable failure drops it, and the next run
+    snapshots current keys.
+    """
+    from services.cdc_catchup import capture_identity_from
+
+    identity = capture_identity_from(exc)
+    if isinstance(exc, TransferCancelled):
+        _release_cancelled_cdc_slot(mongo, job_id, request, identity=identity)
+    elif not retriable:
+        _release_failed_cdc_slot(
+            mongo, job_id, request, job=job, identity=identity
+        )
+    return identity
 
 
 def _records_after_failure(prior: Any, incoming: Any) -> int:
@@ -407,10 +457,13 @@ def _fail_runtime_job(
                 qexc,
                 exc_info=qexc,
             )
+    from services.cdc_catchup import capture_identity_from
+
+    capture = capture_identity_from(exc)
     cancelled = isinstance(exc, TransferCancelled)
     status = "cancelled" if cancelled else "failed"
     if cancelled:
-        _release_cancelled_cdc_slot(mongo, job_id, request)
+        _release_cancelled_cdc_slot(mongo, job_id, request, identity=capture)
     error_details, lease_extras = _job_failure_fields(exc)
     prev = {}
     try:
@@ -439,6 +492,9 @@ def _fail_runtime_job(
         "error_details": error_details,
         **lease_extras,
     }
+    for key, value in capture.items():
+        if not str(prev.get(key) or "").strip():
+            status_kwargs.setdefault(key, value)
     if stamped_details:
         from services.job_document_budget import slim_rejected_details
 
@@ -466,7 +522,9 @@ def _fail_runtime_job(
         **status_kwargs,
     )
     if not cancelled and not bool(error_details.get("retriable")):
-        _release_failed_cdc_slot(mongo, job_id, request, job=prev)
+        _release_failed_cdc_slot(
+            mongo, job_id, request, job=prev, identity=capture
+        )
     if lineage is not None and not cancelled:
         lineage.emit_run_failed(
             run_id=job_id,
