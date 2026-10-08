@@ -973,6 +973,25 @@ def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeyp
     assert done.running is True
 
 
+def test_manual_run_after_an_orphaned_claim_with_a_naive_start(temp_store, monkeypatch):
+    """DEF-B2-011: Mongo returns the claim's start naive; Run now raised TypeError."""
+    sched = _make(store)
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "running": True,
+            "running_job_id": "job-orphan",
+            "running_started_at": datetime(2026, 10, 7, 23, 50),
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "cancelled"})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    assert store.get_schedule(sched.id).last_job_id == "job-orphan"
+
+
 def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
     sched = _make(store)
     assert store.mark_schedule_running(sched.id, "inst-1") is not None
