@@ -476,6 +476,28 @@ def mysql_timestamp_instant_wire(value: Any) -> Any:
     return value
 
 
+def mysql_catalog_instant_sample(value: Any, source_type: str) -> Any:
+    """Naive digits of a MySQL TIMESTAMP column, as the reader would emit them.
+
+    The session is pinned to UTC, so those digits are the instant. Validate
+    used to refuse them until the operator set ``source_timezone``, and that
+    declaration also rewrote every DATETIME column. Only a catalog instant
+    is wired. A wall-clock DATETIME is returned unchanged.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.source_engine_scope import active_source_engine
+    from services.type_system import datetime_timezone_polarity
+
+    if _normalize_dest_db(active_source_engine()) != "mysql":
+        return value
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return value
+    wired = mysql_timestamp_instant_wire(value)
+    if not isinstance(wired, datetime):
+        return value
+    return wired.isoformat()
+
+
 def is_mysql_timestamp_data_type(data_type: str) -> bool:
     """True for information_schema ``DATA_TYPE = timestamp`` (not datetime)."""
     return (data_type or "").strip().lower() == "timestamp"

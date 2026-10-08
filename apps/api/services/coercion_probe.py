@@ -555,6 +555,8 @@ def analyze_coercion(
         use_uuid_wire = tgt_logical == "uuid" and dest_l in _uuid_binary_dests
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
+        from services.timezone_policy import mysql_catalog_instant_sample
+
         _date_token = bind_column_date_locale(
             (
                 lookup_row_value(row, src, None) if isinstance(row, dict) else None
@@ -676,7 +678,13 @@ def analyze_coercion(
                     observed_values.append(cell)
                     continue
                 observed_values.append(cell)
-                converted, err = apply_transform(cell, transform)
+                # A MySQL TIMESTAMP sample is UTC digits with the offset
+                # stripped by the driver. Wiring it here matches the reader.
+                # DATETIME stays a wall clock.
+                bind_cell = mysql_catalog_instant_sample(cell, src_type)
+                if not isinstance(bind_cell, str):
+                    bind_cell = cell
+                converted, err = apply_transform(bind_cell, transform)
                 # Transform refuse of null sentinels (N/A, "null", …) is non-null →
                 # NULL loss, not a bind failure. Count as sentinel_nulls so strict
                 # blocks and balanced warns — matching the severity model below.

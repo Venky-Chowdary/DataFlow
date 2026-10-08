@@ -3,9 +3,10 @@
 DEF-B-029: a plan of TIMESTAMP(7) must not CREATE Oracle TIMESTAMP(6), and
 reading the column back must keep the scale the catalog stored.
 
-RETEST-R1 case 3.3, writer half: a MySQL TIMESTAMP stamp stays TIMESTAMP on
-MySQL and MariaDB. A PostgreSQL timestamptz still lands on DATETIME(6).
-The PostgreSQL destination half of that case is not covered here.
+RETEST-R1 case 3.3: a MySQL TIMESTAMP stamp stays TIMESTAMP on MySQL and
+MariaDB. A PostgreSQL timestamptz still lands on DATETIME(6). A naive
+MySQL TIMESTAMP sample reaches PostgreSQL TIMESTAMPTZ without a zone
+declaration; DATETIME is not rewritten.
 
 DEF-C-048: an ambiguous America/New_York wall clock follows PostgreSQL
 (the later occurrence). A spring-forward gap is an error, not an invented
@@ -173,3 +174,54 @@ def test_leap_day_and_unambiguous_instants_stay() -> None:
     )
     assert err is None
     assert stated == "2024-01-05T10:30:00+05:00"
+
+
+def test_mysql_timestamp_reaches_postgres_without_rewriting_datetime() -> None:
+    """A naive MySQL TIMESTAMP sample is the pinned UTC instant.
+
+    Setting source_timezone to clear that refusal also rewrote DATETIME.
+    The catalog instant is wired on its own. The wall clock is not.
+    """
+    from services.coercion_probe import analyze_coercion
+
+    sample = [{"ts": "2024-03-01 12:00:00", "wall": "2024-03-01 12:00:00"}]
+    mappings = [
+        {"source": "ts", "target": "ts", "target_type": "TIMESTAMPTZ"},
+        {"source": "wall", "target": "wall", "target_type": "TIMESTAMP"},
+    ]
+    with bind_source_engine("mysql"):
+        report = analyze_coercion(
+            sample_rows=sample,
+            mappings=mappings,
+            source_types={"ts": "TIMESTAMPTZ(6)", "wall": "TIMESTAMP_NTZ(6)"},
+            dest_types={"ts": "TIMESTAMPTZ", "wall": "TIMESTAMP"},
+            dest_db_type="postgresql",
+            table_exists=True,
+        )
+    by_source = {col["source"]: col for col in report["columns"]}
+    assert report["has_blocking_failures"] is False
+    assert by_source["ts"]["failed"] == 0
+    assert "assume_timezone" not in str(by_source["ts"].get("transform") or "")
+    assert by_source["wall"]["source_type"] == "TIMESTAMP_NTZ(6)"
+
+    with bind_source_engine("mysql"):
+        wall_as_instant = analyze_coercion(
+            sample_rows=[{"wall": "2024-03-01 12:00:00"}],
+            mappings=[{"source": "wall", "target": "wall", "target_type": "TIMESTAMPTZ"}],
+            source_types={"wall": "TIMESTAMP_NTZ(6)"},
+            dest_types={"wall": "TIMESTAMPTZ"},
+            dest_db_type="postgresql",
+            table_exists=True,
+        )
+    assert wall_as_instant["has_blocking_failures"] is True
+
+    with bind_source_engine("postgresql"):
+        other = analyze_coercion(
+            sample_rows=[{"ts": "2024-03-01 12:00:00"}],
+            mappings=[{"source": "ts", "target": "ts", "target_type": "TIMESTAMPTZ"}],
+            source_types={"ts": "TIMESTAMPTZ"},
+            dest_types={"ts": "TIMESTAMPTZ"},
+            dest_db_type="postgresql",
+            table_exists=True,
+        )
+    assert other["has_blocking_failures"] is True
