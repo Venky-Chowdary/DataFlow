@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 75
+- not fixed: 70
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 14
-- fixed in code, unit-proven — not a live QA retest: 12
-- partly fixed in code: 5
+- fixed in code, unit-proven — not a live QA retest: 14
+- partly fixed in code: 8
 
 ## Every row
 
@@ -23,7 +23,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-007 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-006 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-CDC-COUNT-ONLY-RECONCILE | P1 | OPEN | fixed in code, unit-proven (test_cdc_source_image_count_scope_does_not_claim_full_checksum). Count-only now fails the job. A finished source-row fingerprint scan can still pass. Not a live QA retest. |
-| DEF-B2-008 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B2-008 | P1 | OPEN | partly fixed. Scale-0 integer columns, including NUMBER(38,0), now bind canonical boolean wire as 0/1 (test_scale_zero_integer_accepts_canonical_boolean_wire, test_bind_accepts_boolean_wire_on_number_38). Fractional columns still refuse. The leftover slot and publication are not dropped. Not a live Oracle CDC retest. |
 | DEF-B2-010 | P1 | OPEN | partly fixed in code, unit-proven (test_materialize_widens_copied_nvarchar_stamp_for_sqlserver). A bound SQL Server source now materializes VARCHAR(n) CHARACTER SET utf8mb4. A MySQL source NVARCHAR and an unknown engine stay the utf8mb3 alias on purpose. Not a live MySQL retest. |
 | DEF-B2-012 | P1 | OPEN | partly fixed. _records_after_failure keeps the larger committed count (test_records_after_failure_keeps_a_committed_prefix). Enforced-key refuse-before-insert was already in tree at f125e5df. Rows committed by an orphaned run are not deleted. Not a live QA retest. |
 | DEF-B2-014 | P1 | OPEN | fixed in code, unit-proven (test_ensure_product_lsn_column_on_an_existing_table). The column is ALTER'd before the physical check. A snapshot already committed on build 6436aaa38583 is not rolled back here. Not a live SQL Server retest. |
@@ -36,11 +36,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-036 | P1 | OPEN | already in tree at f125e5df: unproven RI is a warning; measured orphans still block. Unit-proven. Needs QA retest. Rollback of a real block is unchanged. |
 | DEF-B-028 | P1 | OPEN | already in tree at f125e5df: page size 200 and tables_truncated is reported. Unit-proven. Needs QA retest on a database with more than 50 tables. |
 | DEF-C-041 | P1 | OPEN | fixed in code, unit-proven (test_business_soft_delete_is_not_a_hard_delete, test_sqlite_upsert_tombstone_drops_dest_count, test_completed_job_does_not_report_the_validate_root_as_rejected). CDC __deleted/__op still delete. Not a live QA retest. |
-| DEF-C-043 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-043 | P1 | OPEN | partly fixed. A parquet export with no destination columns now aborts before upload (test_parquet_export_refuses_a_zero_column_file). Why that route resolved zero columns while CSV on the same route did not is not reproduced here. Not a live MinIO retest. |
 | DEF-B-025 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-026 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-010 | P1 | OPEN | already in tree before this wave. Needs QA retest on a build after that commit. |
-| DEF-B-009 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-009 | P1 | OPEN | partly fixed. Uppercase keys are found (test_uppercase_oracle_keys_are_not_null_failures). A declared NUMBER is not relabelled BOOLEAN (test_declared_number_is_not_relabelled_boolean). TIMESTAMP_TZ to TIMESTAMPTZ on PostgreSQL is already not lossy and was not re-proven live. Not a live Oracle retest. |
 | DEF-B-010 | P1 | OPEN | partly fixed in code, unit-proven (test_mongo_timestamp_to_timestamp_is_not_a_false_polarity_collapse). Postgres, Oracle, and SQL Server identical TIMESTAMP pairs are not a polarity collapse when the source engine is mongodb. MySQL bare TIMESTAMP stays lossy; create-new stamps DATETIME(3). Not a live Mongo retest. |
 | DEF-A-001 | P1 | OPEN | fixed in code, unit-proven (test_sftp_host_key_refusal_is_not_called_an_auth_failure, test_sftp_preauth_close_is_not_called_an_auth_failure). A real bad password is still an authentication failure. Not a live SSH retest. Not a go-live. |
 | DEF-C-031 | P1 | UNCONFIRMED-ENV-DEPLOY | same long-writer path as 059974d8. Status on the register is UNCONFIRMED-ENV-DEPLOY. Not re-run live here. |
@@ -73,7 +73,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-002 | P2 | OPEN | fixed in code, unit-proven (test_sftp_create_keeps_host_from_the_uri, test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host, test_extract_url_credentials_reads_sftp_uri). An explicit host is not overwritten. Not a live connector retest. |
 | DEF-A-018 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-011 | P2 | OPEN | fixed in code, unit-proven (test_declared_number_is_not_relabelled_boolean, test_oracle_number_type_object_is_decimal_not_boolean, test_create_new_does_not_stamp_boolean_on_a_declared_number). File 0/1 on is_active stays BOOLEAN. Not a live Oracle query retest. |
 | DEF-C-003 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-009 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-010 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -107,7 +107,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-A-014 | P3 | OPEN | partly fixed in code. describe_stored_cadence now says Every 5 minutes, and the create_schedule preview interval uses that label. The stored interval token remains a preset because the runner only accepts hourly/daily/weekly. Not a live retest. |
 | DEF-B-006 | P3 | OPEN | partly fixed. The cadence label uses describe_stored_cadence while the stored interval stays a preset. The blocker is no longer copied onto a completed job as a __DF_SQL_NULL__ quarantine row (unit-proven with DEF-B-022). Not a live QA retest. |
 | DEF-B-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B-008 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-008 | P3 | OPEN | fixed in code, unit-proven (test_folding_dialect_create_quotes_uppercase_physical_names). Folding dialects emit quoted uppercase physical names. The column key stays the operator spelling. PostgreSQL names are unchanged. Not a live Oracle retest. |
 | DEF-B-012 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-015 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |

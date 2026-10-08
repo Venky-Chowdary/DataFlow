@@ -16,6 +16,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from services.column_case import lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS
 from services.value_serializer import is_null_evidence, present_cell_text
 
@@ -44,8 +45,17 @@ class ExpectationResult:
         }
 
 
+def _row_cell(row: dict[str, Any], column: str) -> Any:
+    """Cell for ``column``, including an unambiguous case fold.
+
+    Oracle, Snowflake and DB2 readers hand back ``ID`` while the expectation
+    names the operator spelling ``id``. ``row.get`` counted every row as null.
+    """
+    return lookup_row_value(row, column)
+
+
 def _col_values(rows: list[dict[str, Any]], column: str) -> list[Any]:
-    return [row.get(column) for row in rows]
+    return [_row_cell(row, column) for row in rows]
 
 
 def _is_absent(value: Any) -> bool:
@@ -77,7 +87,7 @@ def expect_column_unique(
     seen: dict[str, int] = {}
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
-        val = row.get(column)
+        val = _row_cell(row, column)
         key = _present_text(val)
         if key is None:
             continue
@@ -107,7 +117,7 @@ def expect_column_not_null(
     null_count = 0
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
-        val = row.get(column)
+        val = _row_cell(row, column)
         if _is_absent(val):
             null_count += 1
             if len(failures) < 10:
@@ -138,7 +148,7 @@ def expect_column_accepted_values(
     checked = 0
     bad = 0
     for i, row in enumerate(rows):
-        val = row.get(column)
+        val = _row_cell(row, column)
         if _is_absent(val):
             continue
         text = _present_text(val)
@@ -181,7 +191,7 @@ def expect_column_values_between(
     checked = 0
     bad = 0
     for i, row in enumerate(rows):
-        raw = row.get(column)
+        raw = _row_cell(row, column)
         if _is_absent(raw):
             continue
         parsed = decimal_wire_value(raw)
@@ -225,7 +235,7 @@ def expect_column_values_match_regex(
     checked = 0
     bad = 0
     for i, row in enumerate(rows):
-        val = row.get(column)
+        val = _row_cell(row, column)
         if _is_absent(val):
             continue
         text = _present_text(val)
@@ -285,7 +295,7 @@ def expect_column_pair_values_equal(
     compared = 0
     bad = 0
     for i, row in enumerate(rows):
-        a, b = row.get(column_a), row.get(column_b)
+        a, b = _row_cell(row, column_a), _row_cell(row, column_b)
         if _is_absent(a) and _is_absent(b):
             continue
         compared += 1

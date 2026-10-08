@@ -33,14 +33,24 @@ class TestBooleanCarrierDetection:
         assert boolean_carrier_numeric_value(value, 1, 0) is None
 
     @pytest.mark.parametrize(
-        ("precision", "scale"), [(12, 2), (2, 0), (38, 0), (1, 1), (None, None)]
+        ("precision", "scale"), [(12, 2), (1, 1), (None, None)]
     )
-    def test_wider_numeric_columns_refuse_boolean_wire(
+    def test_fractional_numeric_columns_refuse_boolean_wire(
         self, precision: int | None, scale: int | None
     ) -> None:
-        # A real money/quantity column is not a boolean carrier: refusing here
-        # keeps "true" quarantined instead of silently becoming 1.
+        # A money/quantity column (scale > 0, or an unsized decimal) is not a
+        # boolean carrier: refusing here keeps "true" quarantined.
         assert boolean_carrier_numeric_value("true", precision, scale) is None
+
+    @pytest.mark.parametrize(("precision", "scale"), [(1, 0), (2, 0), (38, 0)])
+    def test_scale_zero_integer_accepts_canonical_boolean_wire(
+        self, precision: int, scale: int
+    ) -> None:
+        # PG BOOLEAN → Oracle NUMBER(38,0) passed preflight (boolean→integer
+        # is lossless) and the writer then refused "true" (DEF-B2-008).
+        # Scale 0 holds 0/1. Informal yes/on still refuses above.
+        assert boolean_carrier_numeric_value("true", precision, scale) == 1
+        assert boolean_carrier_numeric_value("false", precision, scale) == 0
 
 
 class TestDecimalFitGate:
@@ -72,3 +82,15 @@ class TestBindPath:
 
         with pytest.raises(ValueError, match="refuse"):
             coerce_decimal_wire(True, ddl_type="NUMBER(12,2)", engine="oracle")
+
+    def test_bind_accepts_boolean_wire_on_number_38(self) -> None:
+        from decimal import Decimal
+
+        from connectors.sql_bind import coerce_decimal_wire
+
+        assert coerce_decimal_wire(
+            "true", ddl_type="NUMBER(38,0)", engine="oracle"
+        ) == Decimal(1)
+        assert coerce_decimal_wire(
+            "f", ddl_type="NUMBER(38,0)", engine="oracle"
+        ) == Decimal(0)

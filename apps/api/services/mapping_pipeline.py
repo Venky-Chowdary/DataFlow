@@ -1201,6 +1201,13 @@ def run_mapping_pipeline(
             except Exception:
                 risk_cleared = False
             if not risk_cleared:
+                from services.decision_kernel.type_invent import (
+                    refuse_boolean_invent_from_numeric_source,
+                )
+
+                tgt_type = refuse_boolean_invent_from_numeric_source(
+                    src_type, tgt_type, destination_db_type or ""
+                )
                 tgt_type = refuse_create_new_numeric_collapse(
                     src_type, tgt_type, destination_db_type or ""
                 )

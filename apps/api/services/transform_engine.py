@@ -1297,13 +1297,12 @@ def boolean_carrier_numeric_value(
 ) -> int | None:
     """1/0 when a boolean lands on an engine's boolean carrier, else ``None``.
 
-    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``,
-    so a ``BIT``/``BOOLEAN`` source arriving as ``"true"`` is in range there —
-    quarantining it as "decimal does not fit DECIMAL(1,0)" held out every
-    boolean column on those routes. Anything wider than a single integer digit
-    is a real numeric column and keeps refusing boolean wire.
+    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``.
+    A PostgreSQL ``BOOLEAN`` that landed on an existing ``NUMBER(38,0)`` is the
+    same 0/1 integer: preflight treats boolean→integer as lossless, and the
+    writer must bind it. A fractional column (money, quantity) still refuses.
     """
-    if precision is None or int(precision) > 1 or int(scale or 0) != 0:
+    if precision is None or int(scale or 0) != 0:
         return None
     if isinstance(value, bool):
         return int(value)

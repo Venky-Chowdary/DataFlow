@@ -2787,6 +2787,7 @@ def _build_table_for_write(
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
     from connectors.writer_common import resolve_conflict_targets
+    from services.dialect_profiles import denormalize_result_key
 
     try:
         conflict_cols = resolve_conflict_targets(
@@ -2924,11 +2925,17 @@ def _build_table_for_write(
                 logger.warning(
                     "collation %s could not be applied to %s", collation, col
                 )
+        # Oracle/Snowflake/DB2 fold unquoted names to UPPER. Quoting the
+        # operator's lowercase spelling created "is_active", which unquoted
+        # SQL then could not see (ORA-00904). The Column key stays the
+        # operator spelling so bind dicts do not change.
+        physical = denormalize_result_key(dialect_name, col)
         cols.append(
             sa.Column(
-                col,
+                physical,
                 sa_type,
                 *identity_arg,
+                key=col,
                 primary_key=is_pk,
                 nullable=nullable,
                 autoincrement=autoincrement,
@@ -2952,6 +2959,11 @@ def _build_table_for_write(
             sa.CheckConstraint(sa.text(predicate), name=check_name or None)
         )
 
+    physical_table = denormalize_result_key(dialect_name, table_name)
+    physical_schema = (
+        denormalize_result_key(dialect_name, schema) if schema else schema
+    )
+
     if dialect_name == "clickhouse" and ch_engines is not None:
         # Airbyte-class: upsert identity is ORDER BY on ReplacingMergeTree, not
         # a SQL PRIMARY KEY. Plain MergeTree + delete+insert is the wrong algorithm.
@@ -2969,22 +2981,22 @@ def _build_table_for_write(
         else:
             ch_engine = ch_engines.MergeTree(order_by=sa.text("tuple()"))
         return sa.Table(
-            table_name,
+            physical_table,
             metadata,
             *cols,
             *constraints,
             ch_engine,
-            schema=schema,
+            schema=physical_schema,
             quote=True,
             quote_schema=True,
         )
 
     return sa.Table(
-        table_name,
+        physical_table,
         metadata,
         *cols,
         *constraints,
-        schema=schema,
+        schema=physical_schema,
         quote=True,
         quote_schema=True,
     )

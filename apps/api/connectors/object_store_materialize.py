@@ -227,6 +227,11 @@ class ObjectStoreEncoder:
 
         from services.arrow_write import logical_to_arrow_type
 
+        if not self.target_cols:
+            raise ValueError(
+                "Parquet export resolved no destination columns — "
+                "refuse a 0-column file"
+            )
         self._arrow_types = [
             logical_to_arrow_type(
                 str(self.dest_types.get(c, "TEXT") or "TEXT"), pa, dialect="parquet"
@@ -331,6 +336,11 @@ class ObjectStoreEncoder:
 
         from services.arrow_write import logical_to_arrow_type
 
+        if not self.target_cols:
+            raise ValueError(
+                "Parquet export resolved no destination columns — "
+                "refuse a 0-column file"
+            )
         arrow_types = [
             logical_to_arrow_type(
                 str(self.dest_types.get(c, "TEXT") or "TEXT"), pa, dialect="parquet"
@@ -420,6 +430,24 @@ def materialize_object_store_export(
     policy = transform_error_policy(error_policy)
     dest_types = dest_types or {}
     column_types = column_types or {}
+    # A parquet object with no columns is a 0-column file the reader then
+    # counts as an empty destination (DEF-C-043). CSV on the same route still
+    # has a header line; parquet must fail closed instead of uploading that.
+    if str(key or "").lower().endswith(".parquet") and not target_cols:
+        return ObjectStoreMaterializeResult(
+            export=None,
+            rows_written=0,
+            rejected_details=[],
+            transform_errors=[],
+            checksum="",
+            meta={},
+            abort_error=(
+                "Parquet export resolved no destination columns — "
+                "refuse a 0-column file"
+            ),
+            rejected_rows=0,
+            coerced_null_rows=0,
+        )
     tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
     close_spool = source_spool is None
     if source_spool is not None:

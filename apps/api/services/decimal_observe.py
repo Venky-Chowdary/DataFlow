@@ -850,9 +850,22 @@ def _carrier_for_cursor_column(col: Any) -> str:
             if precision > 76 or scale > 38:
                 return "VARCHAR"
         return ""
-    name = str(getattr(type_code, "__name__", "") or type_code).lower()
+    # oracledb.DbType exposes ``name`` (``DB_TYPE_NUMBER``). Its class
+    # ``__name__`` is ``DbType`` for every column, which hid the carrier and
+    # left 0/1 samples free to invent BOOLEAN (DEF-B-011). A real class
+    # name (``int``, ``INTEGER``) still wins so exact-code checks stay exact.
+    class_name = str(getattr(type_code, "__name__", "") or "")
+    named = getattr(type_code, "name", None)
+    if class_name and class_name.lower() not in {"dbtype", "type"}:
+        name = class_name.lower()
+    elif named:
+        name = str(named).lower()
+    else:
+        name = str(type_code).lower()
     if "json" in name:
         return "JSON"
+    if "number" in name or "numeric" in name or name.endswith("decimal"):
+        return "DECIMAL"
     if any(token in name for token in ("varchar", "char", "text", "string")):
         return "VARCHAR"
     if "timestamptz" in name or "timestamp with time zone" in name:

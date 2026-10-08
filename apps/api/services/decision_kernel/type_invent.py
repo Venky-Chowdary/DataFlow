@@ -1110,6 +1110,9 @@ def _stamp_create_new_mapping_target_type(
     stamp = unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db, source_type=src_type
     )
+    stamp = refuse_boolean_invent_from_numeric_source(
+        src_type, stamp, dest_db_type
+    )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
     # A file has no column width. Re-inheriting VARCHAR(16777216) from a
     # warehouse source would make Map look like an unread Snowflake sink and
@@ -1132,6 +1135,31 @@ def _stamp_create_new_mapping_target_type(
         source_type=src_type,
     )
     return collated
+
+
+def refuse_boolean_invent_from_numeric_source(
+    src_type: str, stamp: str, dest_db_type: str
+) -> str:
+    """Create-new must not turn a declared number into BOOLEAN.
+
+    File inference promotes flag-shaped ``0``/``1`` to BOOLEAN. A query or
+    table that declared ``DECIMAL(1,0)`` / ``NUMBER(5,0)`` then copied that
+    guess onto the destination, and Validate blocked its own invent
+    (DEF-B-011). ``TINYINT(1)`` / ``BIT(1)`` already normalize to boolean, so
+    they keep the boolean stamp.
+    """
+    src = (src_type or "").strip()
+    dest = (stamp or "").strip()
+    if not src or not dest:
+        return stamp
+    src_logical = normalize_logical_type(src)
+    if src_logical not in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_FLOAT}:
+        return stamp
+    if normalize_logical_type(dest) != LOGICAL_BOOLEAN:
+        return stamp
+    db = (dest_db_type or "").strip()
+    recovered = ddl_type(db, src) if db else src
+    return recovered or src
 
 
 def refuse_create_new_numeric_collapse(

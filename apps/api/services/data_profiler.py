@@ -381,6 +381,26 @@ UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
 _NUMERIC_DOMAIN_LOGICALS = frozenset({"decimal", "integer", "float"})
 
 
+def _inference_would_invent_boolean(declared: str, inferred: str) -> bool:
+    """True when samples would relabel a declared number as BOOLEAN.
+
+    ``is_active`` holding ``0``/``1`` is a boolean on a file. Oracle
+    ``NUMBER(1,0)`` and ``DECIMAL(5,0)`` declared that domain; copying the
+    sample guess onto the destination then blocked ``DECIMAL → BOOLEAN``.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        return (
+            normalize_logical_type(declared) in {"integer", "decimal", "float"}
+            and normalize_logical_type(inferred) == "boolean"
+        )
+    except Exception:  # noqa: BLE001 — an unreadable type token is not a boolean invent
+        return False
+
+
 def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
     """True when profiling stringified samples would erase a typed declaration.
 
@@ -513,6 +533,10 @@ def merge_profiler_schema(
             if declared:
                 continue
             merged[col] = inferred
+            continue
+        if _inference_would_invent_boolean(declared, str(inferred)):
+            # Flag-shaped 0/1 samples promote to BOOLEAN. A declared
+            # NUMBER/DECIMAL is still a number (DEF-B-011).
             continue
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue
