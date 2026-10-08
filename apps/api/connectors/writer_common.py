@@ -3866,6 +3866,7 @@ def quarantine_unfit_floats(
     policy: str,
     *,
     dialect_label: str = "FLOAT",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out empty / non-finite / non-numeric cells into FLOAT/DOUBLE sinks.
 
@@ -3886,6 +3887,7 @@ def quarantine_unfit_floats(
 
     from connectors.sql_bind import coerce_float_wire
 
+    engine = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(dialect_label)
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
@@ -3896,7 +3898,7 @@ def quarantine_unfit_floats(
             raw = cells[col_idx]
             reason = ""
             try:
-                coerced = coerce_float_wire(raw, ddl_type=typ)
+                coerced = coerce_float_wire(raw, ddl_type=typ, engine=engine)
             except ValueError as exc:
                 reason = str(exc)
                 coerced = None
@@ -4643,6 +4645,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} FLOAT",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_bitstrings(
             mapped_rows, target_cols, target_types, rejected_details, policy

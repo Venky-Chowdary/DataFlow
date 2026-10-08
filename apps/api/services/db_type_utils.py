@@ -78,11 +78,66 @@ def overwrite_replaces_rows(dest_db_type: str | None) -> bool:
     return kind in {"iceberg", "apache_iceberg"} or kind not in DESTS_WITHOUT_SCHEMA_RECREATE
 
 
-def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
-    """True when overwrite actually drops and recreates destination DDL."""
+# Overwrite of an existing relational table empties rows in place. DROP+CREATE
+# threw away primary key, unique, NOT NULL, check, foreign key and identity
+# (DEF-V7-E1-021). Warehouses that still DROP stay on the recreate path.
+_OVERWRITE_KEEPS_EXISTING_TABLE = frozenset({
+    "postgresql",
+    "redshift",
+    "mysql",
+    "mariadb",
+    "sqlite",
+    "oracle",
+    "sqlserver",
+    "generic_sql",
+    "cockroachdb",
+    "greenplum",
+    "timescaledb",
+    "db2",
+    "teradata",
+})
+
+
+_SQLSERVER_OVERWRITE_ALIASES = frozenset({
+    "mssql",
+    "sql_server",
+    "microsoft_sql_server",
+    "azure_sql",
+    "azure_sql_database",
+    "amazon_rds_sql_server",
+    "google_cloud_sql_sql_server",
+    "synapse",
+    "synapse_analytics",
+    "azure_synapse_dedicated",
+    "azure_synapse_serverless",
+})
+
+
+def overwrite_engine_kind(dest_db_type: str | None) -> str:
+    """Canonical engine for the overwrite-keeps-table decision.
+
+    ``mssql`` and ``sql_server`` are the same carrier. Leaving them off the
+    keep-set made an overwrite DROP the table and lose its constraints.
+    """
     kind = normalize_dest_kind(dest_db_type)
+    if kind in _SQLSERVER_OVERWRITE_ALIASES or kind.startswith("mssql"):
+        return "sqlserver"
+    if kind in {"postgres", "pg"}:
+        return "postgresql"
+    return kind
+
+
+def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
+    """True when overwrite drops the object and creates it again.
+
+    Relational engines empty an existing table instead, so the operator's
+    constraints stay and the live column types are this run's contract.
+    """
+    kind = overwrite_engine_kind(dest_db_type)
     if not kind:
         return True
+    if kind in _OVERWRITE_KEEPS_EXISTING_TABLE:
+        return False
     if kind in DESTS_WITHOUT_SCHEMA_RECREATE:
         return False
     if kind in SCHEMALESS_DESTS or kind in NO_RELATIONAL_DDL_DESTS:

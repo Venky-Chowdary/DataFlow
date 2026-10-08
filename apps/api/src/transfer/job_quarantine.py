@@ -26,6 +26,60 @@ def rows_with_findings(details: list[dict[str, Any]]) -> int:
     )
 
 
+def align_reported_rejects(summary: dict[str, Any]) -> int:
+    """Make the headline rejected count equal the rows the quarantine table stores.
+
+    Writers count ``source - kept``. A batch can therefore say 7 rejected when
+    only 5 findings exist to write into ``{table}_df_quarantine``. The job
+    must report the stored count. A refused unit with no finding still reports
+    0 — there is no row to open.
+    """
+    details = [
+        d
+        for d in (summary.get("rejected_details") or [])
+        if isinstance(d, dict)
+    ]
+    reported = int(summary.get("rejected_rows") or 0)
+    try:
+        from services.quarantine_dlq import replay_quarantine_details
+
+        stored = len(replay_quarantine_details(details))
+    except Exception:
+        stored = rows_with_findings(details)
+    if stored == 0:
+        return split_refused_unit(details, reported, summary)
+    if reported != stored:
+        summary["rejected_count_aligned_from"] = reported
+        if reported > stored:
+            summary["rows_refused_unit"] = reported
+            summary["rows_rolled_back"] = reported - stored
+        summary["rejected_rows"] = stored
+        return stored
+    summary["rejected_rows"] = stored
+    return stored
+
+
+def align_rejects_to_stored_table(
+    summary: dict[str, Any], dest_result: dict[str, Any] | None
+) -> None:
+    """After the dest quarantine write, the headline is the row count that landed.
+
+    A failed write (``rows_written`` 0, or not ok) must not be aligned down to
+    zero — that would hide the rejects. A skipped sink is not a table.
+    """
+    if not isinstance(dest_result, dict):
+        return
+    if not dest_result.get("ok") or dest_result.get("skipped"):
+        return
+    written = dest_result.get("rows_written")
+    if not isinstance(written, int) or written <= 0:
+        return
+    current = int(summary.get("rejected_rows") or 0)
+    if written != current:
+        summary["rejected_count_aligned_from"] = current
+        summary["rejected_rows"] = written
+
+
 def split_refused_unit(
     details: list[dict[str, Any]], rejected_rows: int, summary: dict[str, Any]
 ) -> int:
@@ -148,12 +202,13 @@ def _persist_job_quarantine(
     only the delta is appended to the control-plane DLQ (no duplicate rows).
     Destination quarantine table is still written once here (not mid-stream).
     """
+    align_reported_rejects(dest_summary)
     details = list(dest_summary.get("rejected_details") or [])
     if not details:
         rejected = int(dest_summary.get("rejected_rows") or 0)
         if rejected:
             split_refused_unit(details, rejected, dest_summary)
-            dest_summary["rejected_details_total"] = 0
+        dest_summary["rejected_details_total"] = 0
         dest_summary["quarantine_durable"] = True
         return
     from services.quarantine_dlq import (
@@ -252,6 +307,7 @@ def _persist_job_quarantine(
             if dest_result.get("ok") and not dest_result.get("skipped"):
                 dest_summary["dest_quarantine_table"] = dest_result.get("table")
                 dest_summary["dest_quarantine_rows"] = dest_result.get("rows_written")
+                align_rejects_to_stored_table(dest_summary, dest_result)
         except Exception as exc:
             dest_summary["dest_quarantine_error"] = str(exc)[:300]
             dest_summary.setdefault(

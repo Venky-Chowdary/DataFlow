@@ -1047,12 +1047,18 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             return engine
         from services.engine_pool import pool_settings
 
+        driver = str(getattr(url, "drivername", "")).lower()
+        if db_type == "oracle" or driver.startswith("oracle"):
+            from connectors.oracle_numbers import install_oracle_exact_fetch
+
+            # Before the first connect, so NUMBER is text+Decimal, not float64.
+            install_oracle_exact_fetch()
+
         engine = create_engine(url, pool_pre_ping=True, **pool_settings())
         from sqlalchemy import event
 
         from services.dest_dialect_facts import _normalize_dest_db
 
-        driver = str(getattr(url, "drivername", "")).lower()
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
             db_type in {
@@ -2833,6 +2839,7 @@ def _to_sa_value(
         return coerce_float_wire(
             value,
             ddl_type=str(sa_type or logical or "FLOAT"),
+            engine=str(db_type or dialect_name or ""),
         )
 
     if t in (LOGICAL_STRING, LOGICAL_TEXT) or _is_string_type(sa_type):
@@ -6217,10 +6224,27 @@ def write_mapped_rows(
                 )
 
             if write_mode == "replace" and table_exists:
-                conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
-                conn.commit()
-                table_exists = False
-                reflection_cache.invalidate_table(engine, schema_name, table_name)
+                from connectors.table_manager import (
+                    empty_existing_for_overwrite,
+                    overwrite_clear_kind,
+                )
+
+                # DROP+CREATE threw away PK, unique, NOT NULL, check, FK and
+                # identity (DEF-V7-E1-021). Relational engines empty in place.
+                if overwrite_clear_kind(db_type) == "empty":
+                    outcome = empty_existing_for_overwrite(
+                        db_type, cfg, table_name, schema_name
+                    )
+                    if outcome == "absent":
+                        table_exists = False
+                        reflection_cache.invalidate_table(
+                            engine, schema_name, table_name
+                        )
+                else:
+                    conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
+                    conn.commit()
+                    table_exists = False
+                    reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if not table_exists and not create_table:
                 _cleanup_spool()

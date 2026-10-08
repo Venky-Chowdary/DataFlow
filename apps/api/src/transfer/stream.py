@@ -66,7 +66,7 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
-from .job_quarantine import split_refused_unit
+from .job_quarantine import align_reported_rejects, split_refused_unit
 from .stream_row_accounting import (
     _mark_raw_page,
     _raw_page_cursor,
@@ -3816,6 +3816,9 @@ def _stream_database_transfer_impl(
     dest_summary["rejected_details"] = all_details
     dest_summary["rejected_details_sample"] = all_details[:2000]
     dest_summary["rejected_details_total"] = len(all_details)
+    # Writer source-minus-kept can exceed the findings the quarantine table
+    # stores (reported 7, table 5). The headline is the stored count.
+    align_reported_rejects(dest_summary)
     if len(all_details) > 2000:
         dest_summary["rejected_details_sample_capped"] = True
     dest_summary["warnings"] = warning_samples[:10]

@@ -7903,8 +7903,12 @@ def assess_create_new_type_risk(
         and normalize_logical_type(tgt) != LOGICAL_OBJECTID
         and specialty_wire_preserves_value("OBJECTID", tgt)
     ):
+        # VARCHAR(24) / BINARY(12) keeps every ObjectId byte. Postgres has no
+        # ObjectId type, so this note must not lock Map the way a real collapse
+        # does — that lock blocked every Mongo collection, including plain
+        # scalars, as an unnamed mapping-confidence root (E1-031).
         risks.append({
-            "kind": "objectid_domain",
+            "kind": "objectid_carrier_equivalent",
             "severity": "warn",
             "message": (
                 f"Create-new stores ObjectId as {tgt}"

@@ -1246,18 +1246,30 @@ def run_file_preflight(
     except Exception:
         sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
 
-    # An overwrite drops the destination and recreates it from the source shape,
-    # so the table standing there now is not the carrier the rows land in. Every
-    # type verdict below reads the DDL this run will create, or a route whose own
-    # CREATE declares ``LONGTEXT`` is refused for a ``TEXT → VARCHAR(64)``
-    # collapse against a table it is about to drop. Append/upsert/CDC/mirror keep
-    # the live contract — there the existing column really is authoritative.
+    # Relational overwrite empties the existing table and keeps its constraints,
+    # so the live column types stay the contract. Only an engine that still
+    # DROP+CREATEs (see dest_schema_is_recreated_on_overwrite) replaces the
+    # carrier: there a stale VARCHAR(64) must not refuse a TEXT source whose
+    # own CREATE would have been LONGTEXT. Append/upsert/CDC/mirror keep the
+    # live contract too.
     from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
 
     dest_recreated = is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(
         destination_db_type
     )
+    if (
+        destination_table_exists is True
+        and not dest_recreated
+        and destination_live_column_types
+    ):
+        # The table stays, so a planned recreate DDL is not the carrier the
+        # rows hit. Measured types override the plan. A caller that cleared
+        # the plan because it still thought overwrite dropped the table still
+        # has the live catalog.
+        merged = dict(destination_column_types or {})
+        merged.update(destination_live_column_types)
+        destination_column_types = merged
 
     # Every sample-judging gate below needs rows. A caller that posted none
     # (failed copilot sampler, a client that never fetched) gets the Execute
@@ -1686,10 +1698,10 @@ def run_file_preflight(
     # - unknown existence: keep type hints for G6 lossy/width checks, but drift
     #   still treats the dest as non-live (no fingerprint / orphan locks)
     # - existing table: full live contract
-    # - overwrite: the table is dropped and recreated from the source shape, so
-    #   the carrier standing there now is not the one the rows land in. Judging
-    #   against it refused a run for loss that cannot happen (``TEXT →
-    #   VARCHAR(64)`` on a route whose own DDL creates ``LONGTEXT``).
+    # - overwrite that really DROP+CREATEs: the carrier standing there now is
+    #   not the one the rows land in. Judging against it refused a run for loss
+    #   that cannot happen (``TEXT → VARCHAR(64)`` on a route whose own DDL
+    #   creates ``LONGTEXT``). Relational overwrite keeps the live table.
     hinted_dest_types = dict(destination_column_types or {})
     if schemaless or dest_table_exists is False or dest_recreated:
         drift_dest_types: dict[str, str] = {}
@@ -2648,10 +2660,10 @@ def run_file_preflight(
             },
         ]
 
-    # G19 — an overwrite recreates the destination, so the type standing there
-    # now is discarded for every verdict above. Where that discarded type is
-    # narrower than the source, the operator declared a carrier this run
-    # replaces; say so instead of writing through the replacement.
+    # G19 — only an overwrite that DROP+CREATEs replaces the declared carrier.
+    # Relational overwrite keeps the table, so G3/G6 judge the live column and
+    # G19 stays quiet. Where a recreate would discard a narrower type, say so
+    # instead of writing through the replacement.
     from services.dest_schema_replacement import build_dest_schema_replacement_gate
 
     replacement_gate = build_dest_schema_replacement_gate(

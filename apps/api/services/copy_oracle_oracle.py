@@ -143,9 +143,13 @@ def _oracle_connect(cfg: dict[str, Any]) -> Any:
     if not dsn or "://" in dsn.lower() or dsn.lower().startswith("oracle"):
         dsn = f"{host}:{port}/{service}"
     try:
-        return oracledb.connect(user=user, password=password, dsn=dsn)
+        conn = oracledb.connect(user=user, password=password, dsn=dsn)
     except Exception as exc:
         raise FastPathUnavailable(f"Oracle connect failed: {exc}") from exc
+    from connectors.oracle_numbers import attach_oracle_number_output
+
+    attach_oracle_number_output(conn)
+    return conn
 
 
 def oracle_cfg_is_public_proxy(cfg: dict[str, Any]) -> bool:

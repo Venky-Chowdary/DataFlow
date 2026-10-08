@@ -1575,13 +1575,75 @@ _IEEE_NONFINITE_TOKENS = frozenset({
 })
 
 
-def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
+def _float_magnitude_bounds(
+    ddl_type: str | None, engine: str
+) -> tuple[float, float] | None:
+    """Inclusive magnitude window the carrier can store, or None when IEEE fits.
+
+    SQL Server FLOAT(53) rejects subnormals (the documented floor is about
+    2.23e-308). ``5e-324`` then aborts the whole executemany instead of
+    quarantining that row. REAL / FLOAT(n≤24) is the 4-byte window on every
+    engine. MySQL DOUBLE stores subnormals, so a bare DOUBLE is not refused.
+    """
+    ddl = (ddl_type or "").strip().lower()
+    base = ddl.split("(", 1)[0].strip()
+    width: int | None = None
+    if "(" in ddl and ")" in ddl:
+        inside = ddl[ddl.find("(") + 1 : ddl.find(")")]
+        token = inside.split(",", 1)[0].strip()
+        if token.isdigit():
+            width = int(token)
+    if base in {"real", "float4", "float32"} or (
+        base == "float" and width is not None and width <= 24
+    ):
+        return (1.18e-38, 3.40e38)
+    eng = (engine or "").strip().lower().replace(" ", "_")
+    sqlserver = eng in {
+        "sqlserver",
+        "mssql",
+        "sql_server",
+        "microsoft_sql_server",
+        "azure_sql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "google_cloud_sql_sql_server",
+        "synapse",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+    } or eng.startswith("mssql")
+    if sqlserver:
+        return (2.23e-308, 1.79e308)
+    return None
+
+
+def coerce_float_wire(
+    value: Any, *, ddl_type: str | None = None, engine: str = ""
+) -> Any:
     """Normalize IEEE FLOAT/REAL/DOUBLE bind — write-path digit strings → float.
 
     Auto ``1,234`` / ``1.234`` refuse (``float(token)`` invented 1.234). Locale
     money the write path binds still lands. Non-finite Python floats are kept;
     string ``NaN``/``Infinity`` stay explicit IEEE wire. Boolean tokens refuse.
+    A finite value outside the destination carrier raises so that one row is
+    quarantined. SQL Server otherwise aborts the whole batch on ``5e-324``.
     """
+    def _within_carrier(num: float) -> float:
+        if num != num or num in {float("inf"), float("-inf")} or num == 0.0:
+            return num
+        bounds = _float_magnitude_bounds(ddl_type, engine)
+        if bounds is None:
+            return num
+        lo, hi = bounds
+        mag = abs(num)
+        if mag < lo or mag > hi:
+            raise ValueError(
+                f"float {num!r} is outside {ddl_type or 'FLOAT'} on "
+                f"{engine or 'destination'} (carrier {lo:.2e}..{hi:.2e}) "
+                "— quarantined (one unfit value must not abort the load)"
+            )
+        return num
+
     handled, bound = _absent_sql_bind(value)
     if handled:
         return bound
@@ -1591,23 +1653,25 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
             f"float cannot bind bool — refuse invent into {ddl_type or 'FLOAT'}"
         )
     if isinstance(value, float):
-        return value
+        return _within_carrier(value)
     from services.transform_engine import float_carrier_or_refuse
 
     if isinstance(value, int):
         try:
-            return float_carrier_or_refuse(Decimal(value))
+            num = float_carrier_or_refuse(Decimal(value))
         except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             ) from exc
+        return _within_carrier(num)
     if isinstance(value, Decimal):
         try:
-            return float_carrier_or_refuse(value)
+            num = float_carrier_or_refuse(value)
         except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from decimal {value!r}"
             ) from exc
+        return _within_carrier(num)
     if isinstance(value, str):
         token = value.strip()
         if not token:
@@ -1630,11 +1694,12 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             )
         try:
-            return float_carrier_or_refuse(parsed)
+            num = float_carrier_or_refuse(parsed)
         except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             ) from exc
+        return _within_carrier(num)
     raise ValueError(
         f"unsupported float wire type: {type(value).__name__}"
     )

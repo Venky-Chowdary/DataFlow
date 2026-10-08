@@ -998,14 +998,21 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         cols.append(left)
             cols.extend(_columns_from_details(details))
         cols = list(dict.fromkeys(cols))
+        named = ", ".join(cols[:8])
+        more = f" (+{len(cols) - 8} more)" if len(cols) > 8 else ""
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("mapping_confidence", cols, absorbed),
                 kind="mapping_confidence",
                 title="Mapping confidence below floor",
                 summary=(
-                    f"{len(cols) or 'Some'} mapping(s) below the Map confidence floor "
-                    f"— owned by g4_mapping_confidence (not re-blocked by proof/G9)"
+                    (
+                        f"{len(cols)} mapping(s) below the Map confidence floor: "
+                        f"{named}{more}"
+                        if cols
+                        else "Some mapping(s) below the Map confidence floor"
+                    )
+                    + " — owned by g4_mapping_confidence (not re-blocked by proof/G9)"
                 ),
                 business_impact=(
                     "Low semantic confidence increases wrong-column risk. Execute stays "

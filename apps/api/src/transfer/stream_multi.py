@@ -13,8 +13,6 @@ from typing import Any, Callable
 
 from services.row_conservation import record_stream_health
 
-from .adapters import resolve_connector_config, resolve_dest_table
-from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .stream_foreign_keys import (
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
@@ -57,40 +55,15 @@ def _publish_stream_written(job_id: str | None, stream_name: str, rows: int) -> 
 
 
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
-    """Drop the remapped destination object (overwrite sync, multi-stream).
+    """Clear one remapped destination the same way a single-stream overwrite does.
 
-    Raises :class:`FullRefreshDropFailed` on a failed drop for the same reason
-    as the buffered path: a swallowed failure turns an overwrite into an append
-    against a table that still holds the previous generation of rows. Returns
-    ``False`` only when the driver cannot drop at all.
+    Relational tables are emptied in place. Mongo is renamed aside so a failed
+    load can restore the collection. Returns ``False`` only when the driver
+    cannot clear the object at all.
     """
-    if destination.kind != "database":
-        return False
+    from .engine import _drop_destination_table
 
-    from connectors.table_manager import TableDropError, drop_table
-    from services.error_handling import FullRefreshDropFailed
-
-    try:
-        db_type = resolve_driver_type(destination.format)
-        cfg = resolve_connector_config(destination)
-        table_name = resolve_dest_table(db_type, destination)
-        schema = cfg.get("schema")
-    except Exception as exc:
-        raise FullRefreshDropFailed(
-            "unknown", f"could not resolve destination for drop: {exc}"
-        ) from exc
-
-    from .adapters import carry_dest_spelling_across_drop
-
-    carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
-    try:
-        return drop_table(db_type, cfg, table_name, schema)
-    except TableDropError as exc:
-        logger.error("Overwrite drop failed for %s: %s", table_name, exc)
-        raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
-    except Exception as exc:
-        logger.error("Overwrite drop failed for %s: %s", table_name, exc, exc_info=exc)
-        raise FullRefreshDropFailed(table_name, str(exc)) from exc
+    return _drop_destination_table(destination)
 
 
 def run_non_cdc_multi_stream_sequential(

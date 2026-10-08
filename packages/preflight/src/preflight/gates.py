@@ -1594,9 +1594,11 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}",
+            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
             start,
             _with_scope({"low_confidence": names}, g4_scope),
         )
@@ -1614,9 +1616,11 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             f"{m.source}→{m.target} (gap {m.score_gap:.2f})"
             for m in ambiguous
         ]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(ambiguous)} ambiguous mapping(s) require review",
+            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
             start,
             _with_scope({"ambiguous_mappings": names}, g4_scope),
         )

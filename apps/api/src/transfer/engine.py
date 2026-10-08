@@ -640,17 +640,21 @@ def _destination_schema_probe(
             extra.pop("schema_types", None)
             destination.extra = extra
             return {}, exists
-        # Dest-exists overwrite keeps nullability/defaults so G14/G15 write by
-        # dest column name and never invent create-new on a listed table, but
-        # its *types* are stale too: the table is dropped and recreated from
-        # the source shape, so stamping the doomed carrier onto the mappings
-        # refused a route for loss it cannot suffer (``TEXT → VARCHAR(64)`` on
-        # a run whose own CREATE declares ``LONGTEXT``).
-        overwrite_recreates_existing = is_overwrite_sync(sync_mode) and exists is True
-        # Kept for G19 alone: the carrier the operator declared, which this run
-        # is about to drop. No typing decision may read it — that is the bug
-        # clearing the types above fixes — but the operator is owed the fact
-        # that their declaration is being replaced.
+        # Dest-exists overwrite on a relational engine empties rows and keeps
+        # the table, so the live types, nullability and constraints are the
+        # contract. Engines that still DROP+CREATE must not bind the doomed
+        # carrier (a stale VARCHAR(64) refused a TEXT source whose CREATE
+        # would have been LONGTEXT).
+        from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+        overwrite_recreates_existing = (
+            is_overwrite_sync(sync_mode)
+            and exists is True
+            and dest_schema_is_recreated_on_overwrite(
+                str(getattr(destination, "format", "") or "")
+            )
+        )
+        # G19 reads this only when the run really replaces the declaration.
         extra["overwrite_replaced_column_types"] = (
             dict(schema) if overwrite_recreates_existing else {}
         )
@@ -727,7 +731,9 @@ def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]
         "destination_identity_columns": list(meta.get("identity_columns") or []),
         "destination_generated_columns": list(meta.get("generated_columns") or []),
         "destination_live_column_types": dict(
-            meta.get("overwrite_replaced_column_types") or {}
+            meta.get("schema_types")
+            or meta.get("overwrite_replaced_column_types")
+            or {}
         ),
     }
 
@@ -1154,9 +1160,8 @@ def _destination_schema_types(
 ) -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
-    For full-refresh overwrite sync modes the destination table will be dropped
-    and recreated, so any existing schema is irrelevant and should not influence
-    mapping or preflight decisions.
+    Relational overwrite keeps an existing table, so its live types stay in
+    force. Engines that still drop and recreate return an empty type map.
     """
     schema, _exists = _destination_schema_probe(destination, sync_mode=sync_mode)
     return schema
@@ -1174,9 +1179,14 @@ def _apply_schema_auto_propagate(
     from services.schema_drift import apply_propagate_mappings, detect_schema_drift
 
     contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
-    dest_recreated = should_drop_destination_for_sync(
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+    clears_rows = should_drop_destination_for_sync(
         request_sync_mode=getattr(request, "sync_mode", None),
         contract_sync_mode=contract.sync_mode if contract else None,
+    )
+    dest_recreated = clears_rows and dest_schema_is_recreated_on_overwrite(
+        str(getattr(getattr(request, "destination", None), "format", "") or "")
     )
     drift = detect_schema_drift(
         source_columns=columns,
@@ -1476,7 +1486,8 @@ def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> st
         return message or "Reconciliation failed"
     destination = getattr(request, "destination", None)
     extra = dict(getattr(destination, "extra", None) or {})
-    if extra.get("overwrite_backup") and extra.get("overwrite_backup_engine") == "mysql":
+    backup_engine = str(extra.get("overwrite_backup_engine") or "")
+    if extra.get("overwrite_backup") and backup_engine in {"mysql", "mongodb"}:
         backup_name = str(extra.get("overwrite_backup") or "")
         restored = _settle_overwrite_backup(destination, restore=True)
         if restored:
@@ -1518,14 +1529,17 @@ def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -
 
 
 def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
-    """Drop the MySQL backup after success, or put it back after failure.
+    """Drop a rename-aside backup after success, or put it back after failure.
 
-    Rename-aside leaves the previous table under ``__df_bak``. A cancelled or
-    failed CREATE must not leave the live name missing.
+    MySQL and Mongo leave the previous object under ``__df_bak``. A failed
+    load must not leave the live name missing. Relational overwrite empties
+    in place and has no backup — TRUNCATE on MySQL commits, so the previous
+    rows are not restored. The constraints on that table stay.
     """
     extra = dict(getattr(destination, "extra", None) or {})
     backup = extra.get("overwrite_backup")
-    if not backup or extra.get("overwrite_backup_engine") != "mysql":
+    engine_name = str(extra.get("overwrite_backup_engine") or "")
+    if not backup or engine_name not in {"mysql", "mongodb"}:
         return False
     from .adapters import resolve_connector_config, resolve_dest_table
     from .connector_capabilities import resolve_driver_type
@@ -1535,7 +1549,17 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
         table_name = resolve_dest_table(db_type, destination)
-        if restore:
+        if engine_name == "mongodb":
+            from connectors.table_manager import (
+                discard_mongodb_overwrite,
+                restore_mongodb_overwrite,
+            )
+
+            if restore:
+                restore_mongodb_overwrite(cfg, table_name, str(backup))
+            else:
+                discard_mongodb_overwrite(cfg, str(backup))
+        elif restore:
             from connectors.table_manager import restore_mysql_overwrite
 
             restore_mysql_overwrite(cfg, table_name, str(backup))
@@ -1546,7 +1570,7 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
         ok = True
     except Exception as exc:  # noqa: BLE001 - backup settle must not hide the transfer result
         logger.error(
-            "MySQL overwrite backup %s failed for %s: %s",
+            "Overwrite backup %s failed for %s: %s",
             "restore" if restore else "discard",
             backup,
             exc,
@@ -1608,20 +1632,31 @@ def _drop_destination_table(
         ) from exc
 
     carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
-    if db_type == "mysql":
-        from connectors.table_manager import retire_mysql_overwrite
+    from connectors.table_manager import overwrite_clear_kind
+
+    clear_kind = overwrite_clear_kind(db_type)
+    if clear_kind == "rename_collection":
+        from connectors.table_manager import retire_mongodb_overwrite
 
         try:
-            backup, kept = retire_mysql_overwrite(cfg, table_name, mappings)
+            backup = retire_mongodb_overwrite(cfg, table_name)
         except TableDropError as exc:
-            logger.error("full_refresh retire failed for %s: %s", table_name, exc)
+            logger.error("full_refresh mongo retire failed for %s: %s", table_name, exc)
             raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
-        _remember_preserved_columns(destination, kept)
         if backup:
             extra = dict(destination.extra or {})
             extra["overwrite_backup"] = backup
-            extra["overwrite_backup_engine"] = "mysql"
+            extra["overwrite_backup_engine"] = "mongodb"
             destination.extra = extra
+        return True
+    if clear_kind == "empty":
+        from connectors.table_manager import empty_existing_for_overwrite
+
+        try:
+            empty_existing_for_overwrite(db_type, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh empty failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
         return True
     if db_type in ("postgresql", "redshift"):
         try:
