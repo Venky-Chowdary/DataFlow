@@ -32,6 +32,16 @@ _SQLSERVER = {
     "amazon_rds_sql_server",
 }
 _ORACLE = {"oracle"}
+_POSTGRES = {
+    "postgresql",
+    "postgres",
+    "citus",
+    "cockroach",
+    "cockroachdb",
+    "greenplum",
+    "timescaledb",
+}
+_MONGO = {"mongodb", "mongo", "documentdb", "amazon_documentdb"}
 
 
 @dataclass(frozen=True)
@@ -88,8 +98,47 @@ def probe_log_capture(
     missing driver on this process). Connectivity has its own gate, so an
     undecided probe never blocks.
     """
+    kind = str(source_type or "").strip().lower().replace("-", "_")
+    # Postgres capture is the slot probe. This gate must not invent a second
+    # pass or a second block for it.
+    if kind in _POSTGRES:
+        return LogCaptureProbe(dialect="postgresql", available=None)
+    if kind in _MONGO:
+        if not cfg or not table:
+            return LogCaptureProbe(dialect="mongodb", available=None)
+        from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+
+        ok, _reader = _try_reader(
+            MongodbChangeStreamCdc,
+            cfg,
+            collection=table,
+            primary_key=primary_key or "_id",
+            batch_size=1,
+        )
+        if ok:
+            return LogCaptureProbe("mongodb", True, "change_stream")
+        if ok is False:
+            return LogCaptureProbe(
+                "mongodb",
+                False,
+                "change_stream",
+                CAUSE_SERVER_NOT_CONFIGURED,
+                "change streams need a replica set",
+            )
+        return LogCaptureProbe(dialect="mongodb", available=None)
     dialect = _dialect(source_type)
-    if not dialect or not cfg or not table or not primary_key:
+    if not dialect:
+        # A database this probe does not know has no change log. Omitting the
+        # gate let CDC preflight pass on sources that cannot do CDC.
+        if not kind:
+            return LogCaptureProbe(dialect="", available=None)
+        return LogCaptureProbe(
+            dialect=kind,
+            available=False,
+            cause=CAUSE_SERVER_NOT_CONFIGURED,
+            detail="this source does not emit a change log",
+        )
+    if not cfg or not table or not primary_key:
         return LogCaptureProbe(dialect=dialect, available=None)
     common = {"table": table, "primary_key": primary_key, "batch_size": 1}
     if dialect in {"mysql", "mariadb"}:
@@ -182,13 +231,15 @@ def build_log_capture_gate(
             "duration_ms": 0,
             "details": probe.to_dict(),
         }
+    # A declared timestamp still drops deletes. That is incremental, not CDC.
+    # Passing the pre-run check told the operator the source could do CDC.
     return {
         "id": "g9c_cdc_log_capture",
-        "status": pass_status,
-        "severity": "warn",
+        "status": block_status,
         "message": (
-            f"{probe.dialect} does not emit a change log; CDC runs as a cursor poll on "
-            f"'{cursor}'. Inserts and updates are carried; deletes are not."
+            f"{probe.dialect} does not emit a change log, so CDC cannot start. "
+            "A cursor poll would drop deletes. Enable the change log, or run "
+            "this sync as incremental."
         ),
         "duration_ms": 0,
         "details": {**probe.to_dict(), "cdc_delete_capture": False},

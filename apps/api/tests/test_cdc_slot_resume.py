@@ -203,7 +203,7 @@ def test_slot_drop_retires_the_prior_lsn(retired_store, monkeypatch) -> None:
         "services.sync_cursor.clear_watermark",
         lambda _key: {"cleared": True, "prior_watermark": "lsn=0/11744550|slot=df_orders"},
     )
-    out = release_finished_cdc_slot(
+    kept = release_finished_cdc_slot(
         {
             "cdc_slot_name": "df_orders",
             "cursor_key": "pg:qa:orders",
@@ -211,6 +211,19 @@ def test_slot_drop_retires_the_prior_lsn(retired_store, monkeypatch) -> None:
         reason="completed",
         source_cfg={"type": "postgresql", "database": "qa"},
         job_id="job-c004",
+    )
+    assert kept["released"] is False
+    assert kept["reason"] == "resume_keeps_slot"
+    assert slot_lsn_retired("0/11744550", cursor_key="pg:qa:orders") is False
+    out = release_finished_cdc_slot(
+        {
+            "cdc_slot_name": "df_orders",
+            "cursor_key": "pg:qa:orders",
+        },
+        reason="failed",
+        source_cfg={"type": "postgresql", "database": "qa"},
+        job_id="job-c004",
+        worker_closed=True,
     )
     assert out["released"] is True
     assert out["retired_lsns"] == ["0/11744550"]

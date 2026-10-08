@@ -298,23 +298,18 @@ def test_live_oracle_sqlserver_resume_skips_complete_range(monkeypatch):
         ss_cur.execute(f"DELETE FROM dbo.[{dest}] WHERE id = %s", (lo,))
         ss_cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}]")
         assert int(ss_cur.fetchone()[0]) == 7999
-        second = copy_oracle_to_sqlserver(
-            source_cfg=_ora_cfg(),
-            source_table=src,
-            dest_cfg=_ss_cfg(),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            copy_oracle_to_sqlserver(
+                source_cfg=_ora_cfg(),
+                source_table=src,
+                dest_cfg=_ss_cfg(),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
+                replace_destination=False,
+            )
         ss_cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}]")
-        assert int(ss_cur.fetchone()[0]) == 8000
+        assert int(ss_cur.fetchone()[0]) == 7999
     finally:
         _drop_ora(ora.cursor(), src)
         ora.commit()

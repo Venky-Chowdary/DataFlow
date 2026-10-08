@@ -71,15 +71,38 @@ def test_validate_blocks_a_grant_failure_instead_of_degrading() -> None:
     assert "refusing to fall back to query CDC" in gate["message"]
 
 
-def test_validate_warns_that_a_declared_timestamp_poll_drops_deletes() -> None:
+def test_validate_blocks_a_declared_timestamp_poll_that_drops_deletes() -> None:
     gate = _gate(
         LogCaptureProbe("sqlserver", False, "", CAUSE_SERVER_NOT_CONFIGURED, ""),
         cursor_field="updated_at",
         cursor_semantics="modification_timestamp",
     )
-    assert gate["status"] == "pass"
-    assert gate["severity"] == "warn"
+    assert gate["status"] == "block"
+    assert "does not emit a change log" in gate["message"]
+    assert "CDC cannot start" in gate["message"]
     assert gate["details"]["cdc_delete_capture"] is False
+
+
+def test_unknown_source_blocks_and_postgres_stays_on_the_slot_probe() -> None:
+    sqlite = probe_mod.probe_log_capture(
+        "sqlite", {"database": ":memory:"}, table="orders", primary_key="id"
+    )
+    assert sqlite.available is False
+    gate = _gate(
+        sqlite,
+        cursor_field="updated_at",
+        cursor_semantics="modification_timestamp",
+    )
+    assert gate is not None
+    assert gate["status"] == "block"
+    assert "does not emit a change log" in gate["message"]
+    postgres = probe_mod.probe_log_capture(
+        "postgresql", {"host": "h"}, table="orders", primary_key="id"
+    )
+    assert postgres.available is None
+    assert postgres.dialect == "postgresql"
+    assert _gate(postgres) is None
+    assert probe_mod.probe_log_capture("", {}, table="orders", primary_key="id").available is None
 
 
 def test_readable_log_passes_and_an_undecided_probe_adds_no_gate() -> None:

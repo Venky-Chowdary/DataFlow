@@ -2,8 +2,8 @@
 
 Source COUNT is ``count_documents({})`` inside a replica-set snapshot
 transaction — never ``estimatedDocumentCount``. Payload is ``find()`` in
-that same snapshot encoded as CSV (HEADER, ``\\N`` = NULL, ``""`` =
-empty string), then ``upload_file``. Dest COUNT is object-store artifact
+that same snapshot encoded as CSV (HEADER, NULL is an empty field,
+``""`` = empty string), then ``upload_file``. Dest COUNT is object-store artifact
 COUNT of that CSV (header skipped) — never writer PUT ack, never
 ListObjects length. Empty dest is PUT, **not** ``mongoexport`` /
 ``aws s3 cp``. Occupied dest whose COUNT already equals the source

@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from services.copy_fast_path import (
+    occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
     plan_fast_path_create,
@@ -495,6 +496,7 @@ def copy_mysql_to_postgres(
                             part["action"] = "load"
                             to_copy.append(str(part.get("predicate") or ""))
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             pred = pk_range_predicate(
                                 dest_ident,
                                 _pg_quoted_literal(dst_cur, part["lo"])

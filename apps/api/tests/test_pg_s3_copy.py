@@ -14,7 +14,12 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
-from services.copy_pg_s3 import copy_postgres_to_s3, pg_s3_copy_enabled, pg_s3_type_is_copy_safe  # noqa: E402
+from services.copy_pg_s3 import (  # noqa: E402
+    _pg_csv_export_expr,
+    copy_postgres_to_s3,
+    pg_s3_copy_enabled,
+    pg_s3_type_is_copy_safe,
+)
 from services.dest_precount import destination_row_count  # noqa: E402
 
 
@@ -24,6 +29,18 @@ def _minio_or_skip():
             pass
     except OSError:
         pytest.skip("MinIO 9000 not reachable")
+
+
+def test_pg_csv_export_spells_booleans_and_empty_null():
+    import inspect
+
+    boolean = _pg_csv_export_expr("active", "BOOLEAN", "active")
+    assert "CASE WHEN" in boolean
+    assert "'true'" in boolean and "'false'" in boolean
+    assert "CASE" not in _pg_csv_export_expr("id", "BIGINT", "id")
+    source = inspect.getsource(copy_postgres_to_s3)
+    assert "NULL ''" in source
+    assert "NULL '\\\\N'" not in source
 
 
 def _pg_or_skip():
@@ -230,7 +247,8 @@ def test_live_pg_s3_empty_string_and_null_preserved():
         body = client.get_object(Bucket=bucket, Key=dest)["Body"].read().decode("utf-8")
         lines = [ln for ln in body.splitlines() if ln]
         assert lines[0].startswith("id")
-        assert "\\N" in body or lines[1].endswith(",")
+        assert "\\N" not in body
+        assert lines[1].endswith(",")
     finally:
         with pg.cursor() as cur:
             _drop_pg(cur, src)

@@ -7,8 +7,8 @@ CREATE/DROP is DDL (implicit commit on 21c), so it runs first.
 
 Python does not format a row. Proof is dest ``COUNT(*)`` vs the source
 count taken under that lock. A mapped single PK still proves dest
-``COUNT(*)`` per key range; a non-empty dest skips complete ranges and
-DELETE+reloads partial ones.
+``COUNT(*)`` per key range; a non-empty dest skips a complete range. Append declines a partial range to the row
+path; overwrite DELETE+reloads it.
 
 Declines (row path keeps quarantine): transforms that change values,
 public proxy, cross-host (no DB link / Data Pump yet), copy onto the
@@ -22,6 +22,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import (
+    occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
     plan_fast_path_create,
@@ -548,6 +549,7 @@ def copy_oracle_to_oracle(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
+                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                         _delete_range(cur, dest_ref, dest_ident, part)
                         part["action"] = "reload"
                         to_copy.append(part)

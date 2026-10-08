@@ -11,7 +11,7 @@ were originally empty strings therefore arrive here as ``None`` and
 bind as NULL. That is not a row drop.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
-skips complete ranges and DELETE+reloads partial ones. No mapped single
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
@@ -25,7 +25,7 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
 from services.copy_oracle_oracle import (
     _count as _ora_count,
     _ident as _ora_ident,
@@ -227,6 +227,7 @@ def copy_oracle_to_sqlserver(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
+                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                         _ss_delete_range(
                             dst_cur, dest_ref, dest_ident, part
                         )

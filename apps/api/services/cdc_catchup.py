@@ -281,19 +281,23 @@ def release_finished_cdc_slot(
 ) -> dict[str, Any]:
     """Drop the Postgres slot behind a finished one-shot CDC job.
 
-    Completed and cancelled one-shots drop the slot. A failed one-shot
-    drops it only when the failure is not retriable and the worker has
-    closed the replication connection — a 1292 or a fence refusal will
-    not resume on the same slot, and leaving it holds WAL. A retriable
-    failure (the slot still has the change, or the lease store blipped)
-    keeps the slot. A CDC schedule, including a paused one, keeps it.
+    A completed or cancelled run keeps the slot. The next start of the
+    same route resumes the log, so a row deleted while the job was
+    stopped is applied instead of being left behind by a fresh snapshot
+    (E3-006). A failed one-shot drops the slot only when the failure is
+    not retriable and the worker has closed the replication connection —
+    a 1292 or a fence refusal will not resume on the same slot, and
+    leaving it holds WAL. A retriable failure keeps the slot. A CDC
+    schedule, including a paused one, keeps it. An operator release of
+    the schedule still drops the slot.
 
     Never raises. A failed release is logged so the operator can drop the
     slot by hand. Does not clear the watermark unless the slot was
     actually dropped. A dropped slot also retires the destination
     exactly-once LSN for those cursor keys. The writer fence is not
-    changed. The next run snapshots current keys instead of streaming
-    the dead LSN. Historical slots are not enumerated here.
+    changed. Historical slots are not enumerated here. A kept slot is
+    the resume point: the next run streams from it and does not snapshot
+    over a delete that landed while the job was stopped.
 
     ``worker_closed`` is set by the worker after ``close()`` has released
     the replication connection. A cancel request that arrives while the
@@ -374,6 +378,16 @@ def release_finished_cdc_slot(
         return {
             "released": False,
             "reason": "worker_still_holds_lease",
+            "job_id": jid,
+            "slot_name": slot_name,
+        }
+    # Stop and successful completion keep the capture. Dropping it here
+    # made the next run snapshot current keys, so a delete committed
+    # while the job was stopped stayed in the destination (E3-006).
+    if reason in {"completed", "cancelled"}:
+        return {
+            "released": False,
+            "reason": "resume_keeps_slot",
             "job_id": jid,
             "slot_name": slot_name,
         }

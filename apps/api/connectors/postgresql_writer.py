@@ -1356,6 +1356,15 @@ def _copy_upsert_batch(
         except Exception as exc:
             logger.debug("TEMP upsert stage drop skipped: %s", exc)
 
+    def _rollback_aborted() -> None:
+        """A failed COPY aborts the transaction. The values fallback must not run in it."""
+        if conn is None:
+            return
+        try:
+            conn.rollback()
+        except Exception:
+            logger.debug("upsert stage rollback skipped", exc_info=True)
+
     try:
         cur.execute(
             sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
@@ -1404,10 +1413,21 @@ def _copy_upsert_batch(
         cur.execute(merge)
         _drop_stage_best_effort()
         return len(batch)
-    except Exception:
-        # Clear aborted txn + orphan stage, then values-based upsert.
+    except Exception as exc:
+        # COPY or the merge failed. PostgreSQL then rejects every later
+        # statement with "current transaction is aborted" and hides the
+        # first error (MariaDB → Postgres upsert). Roll back, then the
+        # values path. If that path only repeats the aborted-transaction
+        # error, raise the original failure.
+        _rollback_aborted()
         _drop_stage_best_effort()
-        _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        try:
+            _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        except Exception as fallback_exc:
+            fallback = str(fallback_exc).lower()
+            if "current transaction is aborted" in fallback or "infailedsqltransaction" in fallback:
+                raise exc from fallback_exc
+            raise
         return len(batch)
 
 

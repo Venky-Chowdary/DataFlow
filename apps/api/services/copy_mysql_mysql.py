@@ -11,7 +11,7 @@ FIFO TSV (LOAD DATA encoder) → STRICT ``LOAD DATA LOCAL INFILE``. Same dest
 id to share).
 
 A mapped single PK still proves dest ``COUNT(*)`` per key range. Non-empty dest
-skips complete ranges and DELETE+reloads partial ones.
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it.
 
 Declines (row path keeps quarantine): transforms that change values, public
 proxy, cross-host when LOAD DATA is off or types are not LOAD-DATA-safe,
@@ -25,6 +25,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import (
+    occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
     settle_fast_path_create_on,
@@ -327,6 +328,7 @@ def copy_mysql_to_mysql(
                             part["action"] = "load"
                             to_copy.append(str(part.get("predicate") or ""))
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             _delete_mysql_range(
                                 dst_cur, dest_local, dest_ident, part
                             )

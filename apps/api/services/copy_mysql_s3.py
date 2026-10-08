@@ -1,8 +1,8 @@
 """MySQL SELECT CSV → S3 PUT (cross-engine bulk).
 
 One ``START TRANSACTION WITH CONSISTENT SNAPSHOT`` streams ``SELECT``
-(SSCursor) into a CSV tempfile (HEADER, ``\\N`` = NULL, ``""`` = empty
-string), then ``upload_file``. Dest COUNT is object-store artifact COUNT
+(SSCursor) into a CSV tempfile (HEADER, NULL is an empty field, ``""``
+= empty string), then ``upload_file``. Dest COUNT is object-store artifact COUNT
 of that CSV (header skipped) — never writer PUT ack, never ListObjects
 length. Empty dest is PUT, **not** upsert / ``aws s3 cp``. Occupied dest
 whose COUNT already equals the source snapshot is skip-complete.

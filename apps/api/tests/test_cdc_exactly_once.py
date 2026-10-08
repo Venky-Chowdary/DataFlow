@@ -545,6 +545,49 @@ def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     assert exc.value.reason == REASON_CHECKSUM
 
 
+def test_snapshot_and_binlog_spellings_of_one_row_share_a_checksum() -> None:
+    """E3-008: a restart re-read the same LSN as text and refused the snapshot image.
+
+    Hashes stored by build 6a2bae9aaa00 were computed before this canonical
+    form. A retest on the new build starts from a fresh watermark.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+
+    from services.cdc_exactly_once import batch_apply_checksum
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    def _sum(row: dict) -> str:
+        return batch_apply_checksum(
+            ChangeBatch(inserts=[row]),
+            incoming_lsn="mysql-bin.000001:100",
+            pk_cols=["id"],
+        )
+
+    snapshot = _sum(
+        {
+            "id": "1",
+            "updated_at": datetime(2024, 1, 1),
+            "note": SQL_NULL_SENTINEL,
+            "qty": Decimal("1.50"),
+        }
+    )
+    binlog = _sum(
+        {
+            "id": "1",
+            "updated_at": "2024-01-01 00:00:00",
+            "note": None,
+            "qty": "1.5",
+        }
+    )
+    assert snapshot == binlog
+    assert _sum({"id": "1", "qty": "9"}) != snapshot
+    assert _sum({"id": "1", "flag": True}) != _sum({"id": "1", "flag": 1})
+    assert _sum({"id": "1", "qty": 3, "_df_lsn": "a"}) == _sum(
+        {"id": "1", "qty": 3, "_df_lsn": "b"}
+    )
+
+
 def test_load_reduce_keeps_dest_columns_absent_from_cdc() -> None:
     dest_rows = {
         "1": {"id": "1", "v": "first", "extra": "keep", DF_LSN_COL: "0/10"},

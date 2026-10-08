@@ -177,7 +177,7 @@ def test_missing_plan_uses_the_writer_string_carrier() -> None:
     assert _col_sql_type("mysql", "id", ["id"], None) == "VARCHAR(512)"
 
 
-def test_one_shot_completion_drops_the_slot_and_clears_the_watermark(monkeypatch) -> None:
+def test_one_shot_completion_keeps_the_slot_so_the_next_run_resumes(monkeypatch) -> None:
     dropped: list[tuple] = []
 
     def _drop(cfg, *, slot_name, publication_name):
@@ -205,9 +205,11 @@ def test_one_shot_completion_drops_the_slot_and_clears_the_watermark(monkeypatch
         source_cfg={"type": "postgresql", "database": "qa_dataflow"},
         job_id="job-4604",
     )
-    assert out["released"] is True
-    assert dropped == [("df_orders_slot", "df_pub_orders", "qa_dataflow")]
-    assert cleared == ["pg:qa:orders→mysql:qa:orders:stream"]
+    assert out["released"] is False
+    assert out["reason"] == "resume_keeps_slot"
+    assert out["slot_name"] == "df_orders_slot"
+    assert dropped == []
+    assert cleared == []
 
 
 def test_running_job_keeps_its_slot(monkeypatch) -> None:
@@ -299,9 +301,10 @@ def test_active_slot_is_not_cleared(monkeypatch) -> None:
     monkeypatch.setattr("services.sync_cursor.clear_watermark", _no_clear)
     out = release_finished_cdc_slot(
         {"cdc_slot_name": "df_orders_slot", "cursor_key": "cursor-1"},
-        reason="cancelled",
+        reason="failed",
         source_cfg={"type": "postgresql", "database": "qa"},
         job_id="job-7721",
+        worker_closed=True,
     )
     assert out["released"] is False
     assert out["reason"] == "active"
@@ -373,8 +376,9 @@ def test_cancel_leaves_the_slot_while_the_worker_holds_the_lease(monkeypatch) ->
         job_id="job-7721",
         worker_closed=True,
     )
-    assert closed["released"] is True
-    assert dropped == ["df_orders_slot"]
+    assert closed["released"] is False
+    assert closed["reason"] == "resume_keeps_slot"
+    assert dropped == []
 
 
 def test_stale_lease_does_not_block_a_cancel_drop(monkeypatch) -> None:
@@ -420,11 +424,21 @@ def test_dropped_slot_clears_the_watermark_recorded_for_the_job(monkeypatch) -> 
         "services.sync_cursor.clear_watermark",
         lambda key: cleared.append(key) or {"cleared": True},
     )
-    out = release_finished_cdc_slot(
+    kept = release_finished_cdc_slot(
         {"cdc_slot_name": "df_orders_slot"},
         reason="completed",
         source_cfg={"type": "postgresql", "database": "qa_dataflow"},
         job_id="job-4604",
+    )
+    assert kept["released"] is False
+    assert kept["reason"] == "resume_keeps_slot"
+    assert cleared == []
+    out = release_finished_cdc_slot(
+        {"cdc_slot_name": "df_orders_slot"},
+        reason="failed",
+        source_cfg={"type": "postgresql", "database": "qa_dataflow"},
+        job_id="job-4604",
+        worker_closed=True,
     )
     assert out["released"] is True
     assert out["watermark_cleared"] is True

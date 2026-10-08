@@ -8,7 +8,7 @@ the same thread (``read()`` fetches the next SQL Server batch). Dest
 ``COUNT(*)`` must equal the source snapshot count.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
-skips complete ranges and DELETE+reloads partial ones. No mapped single
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action, _quote
 from services.copy_mysql_pg import (
     _pg_connect,
     _pg_create_sql,
@@ -312,6 +312,7 @@ def copy_sqlserver_to_postgres(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
+                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                         pred = pk_range_predicate(
                             dest_ident,
                             _pg_quoted_literal(dst_cur, part["lo"])

@@ -3,8 +3,8 @@
 The reverse of ``copy_s3_iceberg``. Source COUNT is Iceberg file footers
 via ``destination_row_count`` / ``iceberg_mor`` — never
 ``scan().count()``. Payload is current-snapshot data files read as
-Arrow (no ``scan().to_arrow()``), encoded as CSV (HEADER, ``\\N`` =
-NULL), then ``upload_file``. Dest COUNT is object-store artifact COUNT
+Arrow (no ``scan().to_arrow()``), encoded as CSV (HEADER, NULL is an
+empty field), then ``upload_file``. Dest COUNT is object-store artifact COUNT
 of that CSV (header skipped) — never writer PUT ack, never ListObjects
 length. Empty dest is PUT, **not** ``MERGE INTO`` / ``aws s3 cp``.
 Occupied dest whose COUNT already equals the source footer COUNT is

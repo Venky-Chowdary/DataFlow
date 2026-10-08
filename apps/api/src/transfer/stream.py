@@ -1459,11 +1459,24 @@ def _stream_database_transfer_impl(
         _schema_baseline = None
 
     from services.keyset_pagination import (
+        catalog_incremental_tiebreak,
         cursor_unique_evidence,
         incremental_read_needs_filtered_scan,
     )
 
     _cat_types, _cat_nulls, _cat_keys = _src_rich_catalog
+    if incremental and cursor_source_col and not cursor_pk_source:
+        # The keyset decision later seeks on the catalog primary key. The
+        # filtered-scan check has to see that same column or the two owners
+        # disagree on the first incremental run (E3-002).
+        cursor_pk_source = catalog_incremental_tiebreak(
+            src_type,
+            cursor_source_col,
+            contract_pk=pk_source_cols,
+            catalog_pk=list(_cat_keys.get("primary_key_columns") or []),
+            unique_keys=list(_cat_keys.get("unique_keys") or []),
+            nullable=_cat_nulls,
+        )
     _cursor_is_unique = cursor_unique_evidence(
         cursor_source_col,
         primary_key_columns=pk_source_cols or (_cat_keys.get("primary_key_columns") or []),

@@ -1161,6 +1161,48 @@ def committed_apply_checksum(incoming: str, dest: str | None, change: Any) -> st
     return incoming or kept
 
 
+def _checksum_cell(value: Any) -> Any:
+    """One canonical JSON value so a restart hashes the same row twice.
+
+    A snapshot SELECT and a binlog redelivery of the same LSN do not share
+    a Python type: ``datetime`` versus its ISO text, ``Decimal`` versus
+    digits, SQL NULL versus the extract sentinel. Hashing those spellings
+    separately made MySQL CDC refuse to restart (E3-008) on a row the
+    destination had already committed.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    if value is None or value == SQL_NULL_SENTINEL:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        import base64
+
+        return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, str):
+        text = value.strip()
+        if text == SQL_NULL_SENTINEL:
+            return None
+        # Binlog isoformat and a snapshot ``YYYY-MM-DD HH:MM:SS`` are one instant.
+        if len(text) >= 19 and text[4] == "-" and text[7] == "-" and text[10] in {" ", "T"}:
+            return text.replace(" ", "T", 1)
+        return value
+    return value
+
+
 def batch_apply_checksum(
     change: Any,
     *,
@@ -1178,10 +1220,15 @@ def batch_apply_checksum(
     for rec in list(combined.inserts or []) + list(combined.updates or []):
         if not isinstance(rec, dict):
             continue
+        cols = {
+            str(k): _checksum_cell(rec.get(k))
+            for k in sorted(rec)
+            if not str(k).startswith("_df_")
+        }
         updates.append(
             {
                 "pk": _pk_value(rec, pk_cols) or "",
-                "cols": {str(k): rec.get(k) for k in sorted(rec)},
+                "cols": cols,
             }
         )
     updates.sort(key=lambda row: str(row.get("pk") or ""))
