@@ -5573,6 +5573,28 @@ def write_mapped_rows(
             physical[name] = ddl
             physical[name.lower()] = ddl
             physical[name.upper()] = ddl
+        from connectors.schema_drift import ensure_product_lsn_column
+
+        lsn_err = ensure_product_lsn_column(
+            engine,
+            table_name,
+            schema_name,
+            list(target_cols or []),
+            physical,
+            table_existed=table_existed,
+        )
+        if lsn_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=lsn_err,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,
             physical=physical,

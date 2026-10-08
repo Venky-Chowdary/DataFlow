@@ -1592,6 +1592,13 @@ class DataPilotTools:
         quarantine = merge_job_quarantine(job)
         row_ids = {d.get("row") for d in quarantine if d.get("row") is not None}
         quarantine_row_count = len(row_ids) if row_ids else len(quarantine)
+        from services.quarantine_from_preflight import drop_phantom_identity_rows
+
+        stored_rejected = int(job.get("rejected_rows") or 0)
+        stored_details = list(job.get("rejected_details") or [])
+        if stored_details and not drop_phantom_identity_rows(stored_details) and not quarantine:
+            stored_rejected = 0
+        reported_rejected = stored_rejected or quarantine_row_count
         samples = [
             {
                 "row": d.get("row"),
@@ -1657,7 +1664,7 @@ class DataPilotTools:
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
-                "rejected_rows": int(job.get("rejected_rows") or 0) or quarantine_row_count,
+                "rejected_rows": reported_rejected,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
                 "quarantine_issue_count": len(quarantine),
                 "quarantine_row_count": quarantine_row_count,

@@ -593,6 +593,20 @@ def run_transfer_policy_gates(
     validation = (validation_mode or "strict").lower()
     dest = (dest_type or "").strip().lower()
     src = (source_type or "").strip().lower()
+    product = str((source_config or {}).get("type") or "").strip().lower()
+    # A TimescaleDB connector must not pass g9 because a driver alias rewrote
+    # the format to postgresql. The product id is the one the operator saved.
+    if product in {
+        "timescaledb",
+        "timescale",
+        "cockroachdb",
+        "citus",
+        "greenplum",
+        "yugabytedb",
+        "redshift",
+        "duckdb",
+    }:
+        src = product
     kind = (source_kind or "file").strip().lower()
     gates: list[dict[str, Any]] = []
     gates.append(

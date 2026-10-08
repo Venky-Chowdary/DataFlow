@@ -351,6 +351,23 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
         logger.warning("CDC slot release after cancel failed for %s: %s", job_id, exc)
 
 
+def _records_after_failure(prior: Any, incoming: Any) -> int:
+    """Keep the larger committed count when a later attempt writes nothing.
+
+    A prefix that already checkpointed must stay visible after the next
+    chunk fails with ``rows_written=0``. A negative or unreadable value
+    counts as zero.
+    """
+
+    def _n(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return max(_n(prior), _n(incoming))
+
+
 def _fail_runtime_job(
     mongo: Any,
     job_id: str,
@@ -432,12 +449,17 @@ def _fail_runtime_job(
         status_kwargs["rejected_details"] = preview
         status_kwargs["rejected_details_total"] = total
         status_kwargs["rejected_details_truncated"] = truncated
-        status_kwargs["records_processed"] = int(getattr(exc, "rows_written", 0) or 0)
+        status_kwargs["records_processed"] = _records_after_failure(
+            prev.get("records_processed"), getattr(exc, "rows_written", 0)
+        )
     elif hasattr(exc, "rows_written"):
         # A duplicate-key abort often has no quarantine rows. Leaving the
         # counter at 0 while the destination already committed a prefix hid
-        # the partial write.
-        status_kwargs["records_processed"] = int(getattr(exc, "rows_written") or 0)
+        # the partial write. A later chunk that writes nothing must not
+        # erase the count the earlier chunk already stored on this job.
+        status_kwargs["records_processed"] = _records_after_failure(
+            prev.get("records_processed"), getattr(exc, "rows_written")
+        )
     mongo.update_job_status(
         job_id,
         status,

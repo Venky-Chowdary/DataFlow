@@ -140,6 +140,11 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             parsed = _as_issue_dict(item)
             if parsed and not _issue_is_non_blocking_warn(parsed):
                 out.append(_enrich_from_message(parsed))
+        # A collapsed root cause explains the gate. It is not a cell, and
+        # wiring a missing sample as SQL NULL invented a rejected row of
+        # ``__DF_SQL_NULL__`` on a load the destination accepted in full.
+        if (details or {}).get("root_cause"):
+            continue
         msg = blocker.get("message")
         if msg and not out:
             parsed = _enrich_from_message({"message": str(msg), "reason": str(msg)})
@@ -183,6 +188,7 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             row_i = int(row_num) if row_num is not None else None
         except (TypeError, ValueError):
             row_i = None
+        had_cell = "sample" in issue or "value" in issue
         value = issue.get("sample")
         if value is None:
             value = issue.get("value")
@@ -218,7 +224,8 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
                 suggested_transform = "strip_controls"
             else:
                 suggested_transform = None
-        wired = quarantine_cell_wire(value)
+        # No sample means the finding is a policy sentence, not a SQL NULL cell.
+        wired = quarantine_cell_wire(value) if had_cell else ""
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
@@ -252,12 +259,40 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             if r.get("row") is not None
             or (str(r.get("column") or ""), str(r.get("target") or "")) not in located
         ]
+    rows = drop_phantom_identity_rows(rows)
     try:
         from services.quarantine_row_contract import normalize_quarantine_rows
 
         return normalize_quarantine_rows(rows, job_id="", connector="preflight")
     except Exception:
         return rows
+
+
+def drop_phantom_identity_rows(details: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Drop a Validate identity sentence that was stored as a rejected cell.
+
+    The row has no source record and no column. Its value is the SQL NULL
+    wire sentinel because nothing was sampled. A destination that holds every
+    row is not missing that cell.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    kept: list[dict[str, Any]] = []
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            continue
+        reason = str(detail.get("reason") or "")
+        value = str(detail.get("value") or "")
+        column = detail.get("column")
+        if (
+            detail.get("row") is None
+            and not column
+            and value in {"", SQL_NULL_SENTINEL}
+            and reason.lower().startswith("duplicate identity keys")
+        ):
+            continue
+        kept.append(detail)
+    return kept
 
 
 def quarantine_evidence_source(
@@ -299,6 +334,7 @@ def merge_job_quarantine(
     dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     if not details:
         details = list((dest or {}).get("rejected_details") or [])
+    details = drop_phantom_identity_rows(details)
 
     # Job documents identify themselves with ``_id``; ``id``/``job_id`` are the
     # API-shaped aliases. Reading only the aliases meant a raw Mongo document
@@ -338,7 +374,12 @@ def merge_job_quarantine(
             details = dlq_rows
 
     if not details:
-        details = quarantine_rows_from_preflight(job.get("preflight"))
+        status = str(job.get("status") or "").strip().lower()
+        # A completed load with no write rejects did not quarantine the
+        # Validate root. Hydrating that root made get_job report rejected_rows
+        # while list_jobs, which reads the stored counter, reported 0.
+        if status not in {"completed", "succeeded", "success"}:
+            details = quarantine_rows_from_preflight(job.get("preflight"))
 
     if details:
         try:

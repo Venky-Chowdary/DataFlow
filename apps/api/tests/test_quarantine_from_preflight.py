@@ -295,3 +295,60 @@ def test_preflight_quarantine_preserves_sql_null_not_empty():
     assert rows
     assert rows[0]["value"] == SQL_NULL_SENTINEL
     assert rows[0]["values"]["note"] == SQL_NULL_SENTINEL
+
+
+def test_root_cause_identity_sentence_is_not_a_null_quarantine_row():
+    """DEF-B-022: a Validate root with no cell must not become __DF_SQL_NULL__."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": True,
+        "gates": [],
+        "blockers": [
+            {
+                "id": "rc-duplicate-identity",
+                "message": (
+                    "Duplicate identity keys: Identity / uniqueness checks failed "
+                    "on the Validate sample — impacts 2 gate check(s)"
+                ),
+                "details": {
+                    "root_cause": True,
+                    "kind": "duplicate_identity",
+                    "quarantine_policy": "n/a — identity must be fixed, not quarantined away",
+                },
+            }
+        ],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert rows == []
+    assert SQL_NULL_SENTINEL not in str(rows)
+
+
+def test_completed_job_does_not_report_the_validate_root_as_rejected():
+    """DEF-B-022 / DEF-C-041: a finished load with every row at rest has no reject."""
+    job = {
+        "status": "completed",
+        "records_processed": 50,
+        "rejected_rows": 1,
+        "rejected_details": [
+            {
+                "row": None,
+                "column": None,
+                "value": "__DF_SQL_NULL__",
+                "reason": (
+                    "Duplicate identity keys: Identity / uniqueness checks failed "
+                    "on the Validate sample — impacts 2 gate check(s)"
+                ),
+            }
+        ],
+        "preflight": {
+            "passed": True,
+            "blockers": [
+                {
+                    "message": "Duplicate identity keys: Identity / uniqueness checks failed on the Validate sample",
+                    "details": {"root_cause": True},
+                }
+            ],
+        },
+    }
+    assert merge_job_quarantine(job) == []

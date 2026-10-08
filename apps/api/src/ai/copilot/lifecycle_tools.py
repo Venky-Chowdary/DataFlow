@@ -361,6 +361,80 @@ def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] 
     return conn, None
 
 
+def describe_cdc_prepare(engine: str) -> dict[str, Any]:
+    """Operator text for CDC setup. Only Postgres and MySQL-family engines are staged.
+
+    SQL Server, Oracle, and TimescaleDB used to receive the MySQL grant
+    preview, marked destructive, even though Confirm cannot run that SQL
+    on those engines.
+    """
+    key = (engine or "").strip().lower()
+    if key in {"postgresql", "postgres"}:
+        return {
+            "stage": True,
+            "change": (
+                "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
+                "max_wal_senders=10. Restart PostgreSQL from the host afterward"
+            ),
+        }
+    if key == "mysql":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist "
+                "gtid_mode when allowed"
+            ),
+        }
+    if key == "mariadb":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT on MariaDB. "
+                "gtid_mode is MySQL-only and is not applied."
+            ),
+        }
+    if key in {
+        "sqlserver",
+        "mssql",
+        "microsoft_sql_server",
+        "sql_server",
+        "azure_sql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+    }:
+        return {
+            "stage": False,
+            "change": (
+                "SQL Server CDC is enabled with sys.sp_cdc_enable_db and "
+                "sys.sp_cdc_enable_table. No MySQL replication grant was staged."
+            ),
+        }
+    if key == "oracle":
+        return {
+            "stage": False,
+            "change": (
+                "Oracle CDC needs supplemental logging and LogMiner privileges. "
+                "No MySQL replication grant was staged."
+            ),
+        }
+    if key in {"timescaledb", "timescale"}:
+        return {
+            "stage": False,
+            "change": (
+                "CDC is not supported for source type 'timescaledb'. "
+                "No server change was staged."
+            ),
+        }
+    label = key or "this engine"
+    return {
+        "stage": False,
+        "change": (
+            f"CDC server prerequisites are not defined for {label}. "
+            "No grant was staged."
+        ),
+    }
+
+
 def prepare_cdc_source(
     connector_id: str = "",
     name: str = "",
@@ -374,16 +448,19 @@ def prepare_cdc_source(
     assert conn is not None
     brief = _connector_brief(conn)
     engine = str(brief.get("type") or conn.get("type") or "")
+    described = describe_cdc_prepare(engine)
+    if not described.get("stage"):
+        return _tool_result(
+            "prepare_cdc_source",
+            success=False,
+            output={**brief, "change": described.get("change"), "staged": False},
+            error=str(described.get("change") or "CDC setup was not staged."),
+        )
     preview = {
         **brief,
         "restart": bool(restart),
-        "enable_gtid": bool(enable_gtid),
-        "change": (
-            "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
-            "max_wal_senders=10. Restart PostgreSQL from the host afterward"
-            if engine.lower() in {"postgresql", "postgres"}
-            else "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist gtid_mode when allowed"
-        ),
+        "enable_gtid": bool(enable_gtid) and engine.strip().lower() == "mysql",
+        "change": described["change"],
     }
     return _stage(
         "prepare_cdc_source",
@@ -391,7 +468,7 @@ def prepare_cdc_source(
             "connector_id": brief["connector_id"],
             "name": brief["name"],
             "restart": bool(restart),
-            "enable_gtid": bool(enable_gtid),
+            "enable_gtid": bool(preview["enable_gtid"]),
         },
         preview=preview,
         label=f"Prepare CDC on {brief['name']}",

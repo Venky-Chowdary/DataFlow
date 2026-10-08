@@ -827,3 +827,86 @@ def add_missing_columns(
     else:
         _run(connection)
     return log
+
+
+def ensure_product_lsn_column(
+    engine: Any,
+    table_name: str,
+    schema: str | None,
+    target_cols: list[str],
+    physical: dict[str, str],
+    *,
+    table_existed: bool,
+) -> str | None:
+    """Add ``_df_lsn`` when CDC mapped it onto a table that does not have it.
+
+    The column is the product's change token, not a source column. Treating
+    it as a missing mapped column refused the snapshot after the rows had
+    already landed and then reported zero records. Returns an error when the
+    ALTER fails, before any insert in this batch. ``physical`` is updated
+    when the column is present afterward.
+    """
+    from connectors.lsn_guards import DF_LSN_COL
+
+    if not table_existed:
+        return None
+    pending = [
+        str(col)
+        for col in target_cols or []
+        if str(col).casefold() == DF_LSN_COL.casefold()
+        and not (
+            physical.get(str(col))
+            or physical.get(str(col).lower())
+            or physical.get(str(col).upper())
+        )
+    ]
+    if not pending:
+        return None
+    import sqlalchemy as sa
+
+    try:
+        add_missing_columns(
+            engine,
+            table_name,
+            schema,
+            pending,
+            {col: sa.Text() for col in pending},
+            backfill=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — the ALTER error is the operator result
+        return (
+            f"Could not add CDC column {DF_LSN_COL} on the existing table "
+            f"{table_name}: {exc}. No rows from this batch were written."
+        )
+    inspector = sa.inspect(engine)
+    try:
+        existing = inspector.get_columns(table_name, schema=schema)
+    except Exception as exc:  # noqa: BLE001 — unread catalog must not look like success
+        return (
+            f"Added {DF_LSN_COL} but could not re-read {table_name}: {exc}. "
+            "No rows from this batch were written."
+        )
+    for col_meta in existing or []:
+        name = str(col_meta.get("name") or "")
+        if not name:
+            continue
+        typ = col_meta.get("type")
+        ddl = str(typ) if typ is not None else "TEXT"
+        physical[name] = ddl
+        physical[name.lower()] = ddl
+        physical[name.upper()] = ddl
+    still = [
+        col
+        for col in pending
+        if not (
+            physical.get(col)
+            or physical.get(col.lower())
+            or physical.get(col.upper())
+        )
+    ]
+    if still:
+        return (
+            f"CDC column {DF_LSN_COL} is still missing on {table_name} after "
+            "ALTER. No rows from this batch were written."
+        )
+    return None
