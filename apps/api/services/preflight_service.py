@@ -180,6 +180,12 @@ class FilePreflightContext(PreflightContext):
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
         if not self.sample_rows:
+            reason = str(getattr(self, "sample_unavailable_reason", "") or "").strip()
+            if reason:
+                return False, [
+                    f"No sample rows available for dry-run validation — {reason}. "
+                    "Fix the source read, then re-run Validate."
+                ]
             return False, [
                 (
                     "No sample rows available for dry-run validation. "
@@ -1126,6 +1132,31 @@ def run_file_preflight(
         destination_db_type
     )
 
+    # Every sample-judging gate below needs rows. A caller that posted none
+    # (failed copilot sampler, a client that never fetched) gets the Execute
+    # reader's own sample; a read that fails is named on Gate-8, not hidden.
+    sample_unavailable_reason = ""
+    if not sample_rows:
+        from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT as _SAMPLE_LIMIT
+        from services.preflight_sample import engine_sample_rows
+
+        _cfg = dict(source_config or {})
+        _extra = _cfg.get("extra") if isinstance(_cfg.get("extra"), dict) else {}
+        engine_sample = engine_sample_rows(
+            source_kind=source_kind,
+            source_format=source_format,
+            source_connector_id=source_connector_id,
+            source_config=source_config,
+            source_table=source_table,
+            limit=_SAMPLE_LIMIT,
+            source_filter=source_filter
+            or (_cfg.get("source_filter") if isinstance(_cfg.get("source_filter"), dict) else None)
+            or (_extra.get("source_filter") if isinstance(_extra.get("source_filter"), dict) else None),
+        )
+        if engine_sample.rows:
+            sample_rows = engine_sample.rows
+        sample_unavailable_reason = engine_sample.unavailable_reason
+
     # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
     # search index — report ``None`` rather than inventing a total, which is the
     # honest answer and used to crash this comparison before a single gate ran.
@@ -1735,6 +1766,7 @@ def run_file_preflight(
         source_duplicate_probe_message=source_duplicate_probe_message,
         source_duplicate_probe_expected=source_duplicate_probe_expected,
     )
+    ctx.sample_unavailable_reason = sample_unavailable_reason
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
     # refuses to move rows when any blocker remains (passed=False).

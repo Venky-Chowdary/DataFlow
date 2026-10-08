@@ -1555,6 +1555,8 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
     would turn preflight into theatre, so an unavailable sample yields an empty
     list and lets those gates report SKIP honestly.
     """
+    from services.preflight_sample import engine_sample_rows
+
     from .query_tools import sample_connector_object
 
     try:
@@ -1564,12 +1566,23 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
             limit=limit,
             analyze=False,
         )
-        if not res.success:
-            return []
-        return list((res.output or {}).get("rows") or [])
+        if res.success:
+            rows = list((res.output or {}).get("rows") or [])
+            if rows:
+                return rows
+        else:
+            _LOG.warning("preview sampler failed for %s: %s", table, res.error)
     except Exception as exc:
-        _LOG.info("sample for preflight unavailable: %s", exc)
-        return []
+        _LOG.warning("preview sampler failed for %s: %s", table, exc)
+    # The query sampler and the Execute reader are different paths; a failure
+    # in the first must not leave Map and Gate-8 judging no rows.
+    return engine_sample_rows(
+        source_kind="database",
+        source_format=str(conn.get("type") or ""),
+        source_connector_id=str(conn.get("id") or ""),
+        source_table=table,
+        limit=limit,
+    ).rows
 
 
 def _require_signed_flag(contract_id: str, require_signed_contract: Any) -> bool:

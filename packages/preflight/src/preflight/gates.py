@@ -61,6 +61,37 @@ def _risk_cleared(m: Any) -> bool:
     return mapping_risk_cleared(m)
 
 
+def _document_instant_sample_truncation(
+    ctx: Any, source: str, source_type: str, target_type: str, dest_kind: str
+) -> Any:
+    """First sample cell the document instant would truncate, else ``None``.
+
+    The writer refuses that cell; naming it here keeps Validate from passing a
+    run whose rows the write then quarantines.
+    """
+    try:
+        from services.document_instant import (
+            cell_exceeds_document_instant,
+            is_document_instant_token,
+        )
+        from services.type_system import (
+            LOGICAL_DATE,
+            LOGICAL_DATETIME,
+            normalize_logical_type,
+        )
+    except ImportError:  # pragma: no cover — standalone package
+        return None
+    if not is_document_instant_token(dest_kind, target_type):
+        return None
+    if normalize_logical_type(source_type) not in {LOGICAL_DATE, LOGICAL_DATETIME}:
+        return None
+    for row in getattr(ctx, "sample_rows", None) or []:
+        value = row.get(source) if isinstance(row, dict) else None
+        if value is not None and cell_exceeds_document_instant(value):
+            return value
+    return None
+
+
 def _dest_accepts_empty_string(dest_type: str) -> bool:
     """True when ``''`` is a present NOT NULL value, not SQL NULL invent.
 
@@ -468,6 +499,31 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                             )
                     else:
                         affinity_warnings.append(label)
+                truncated = _document_instant_sample_truncation(
+                    ctx, m.source, src_type, str(tgt_type or src_type), dest_kind
+                )
+                if truncated is not None:
+                    label = (
+                        f"{m.source} → {m.target}: sample value {truncated!r} has "
+                        "digits below the millisecond; this store keeps milliseconds"
+                    )
+                    affinity_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": src_type,
+                        "target_type": tgt_type,
+                        "kind": "document_instant_truncation",
+                        "severity": "block",
+                        "message": label,
+                        "risk_acknowledged": _risk_cleared(m),
+                    })
+                    if _risk_cleared(m):
+                        affinity_warnings.append(label + " (risk contract)")
+                    else:
+                        affinity_issues.append(
+                            label + " — map to a string, or sign a Migration Risk "
+                            "Contract to accept millisecond truncation"
+                        )
 
         if affinity_issues:
             return GateResult(
@@ -2414,15 +2470,21 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     sample_rows = getattr(ctx, "sample_rows", None) or []
     if not sample_rows:
         # Fail closed: SKIP used to unlock Execute with zero reconcile proof.
+        reason = str(getattr(ctx, "sample_unavailable_reason", "") or "").strip()
         return _block(
             GateId.G8_RECONCILIATION,
             "Gate-8 cannot prove reconciliation without sample rows — "
-            "load a source sample before Execute",
+            + (
+                f"{reason}. Fix the source read, then re-run Validate"
+                if reason
+                else "load a source sample before Execute"
+            ),
             start,
             _with_scope(
                 {
                     "preview_only": True,
                     "source_rows": 0,
+                    **({"sample_unavailable_reason": reason} if reason else {}),
                     "note": (
                         "Pre-write Gate-8 simulation requires Validate sample rows; "
                         "refusing Execute unlock without evidence"
