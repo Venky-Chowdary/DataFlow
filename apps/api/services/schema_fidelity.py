@@ -491,6 +491,60 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+_APPEND_KEY_REASON = (
+    "Append create-new does not declare a key. A second copy of the same row "
+    "is legal on this sync. Upsert or merge is what enforces the source key."
+)
+
+
+def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityPlan:
+    """Drop PK, UNIQUE, and key generators from an append create-new plan.
+
+    The certificate records the skip. Leaving ``primary_key`` set while the
+    writer omitted it made the next append abort on a key the operator never
+    asked this sync to enforce.
+    """
+    for item in plan.report.items:
+        if item.aspect in {"primary_key", "unique"} and item.status == "carried":
+            item.status = "skipped"
+            item.reason = _APPEND_KEY_REASON
+            item.dest_ddl = ""
+        elif item.aspect == "identity" and item.status == "carried":
+            item.status = "skipped"
+            item.reason = (
+                "Append create-new does not declare the source key, so the key "
+                "generator is not emitted. The load writes the source values."
+            )
+            item.dest_ddl = ""
+    plan.primary_key = []
+    plan.unique_constraints = []
+    plan.identity_columns = {}
+    plan.identity_insert_columns = []
+    plan.table_constraints = [
+        clause
+        for clause in plan.table_constraints
+        if not str(clause).strip().upper().startswith(("PRIMARY KEY", "UNIQUE"))
+    ]
+    plan.post_create_sql = [
+        stmt
+        for stmt in plan.post_create_sql
+        if "UNIQUE" not in str(stmt).upper()
+    ]
+    cleaned: dict[str, list[str]] = {}
+    for col, suffixes in (plan.column_suffixes or {}).items():
+        kept = [
+            suffix
+            for suffix in suffixes
+            if "AUTO_INCREMENT" not in str(suffix).upper()
+            and "IDENTITY" not in str(suffix).upper()
+            and not str(suffix).upper().startswith("GENERATED")
+        ]
+        if kept:
+            cleaned[col] = kept
+    plan.column_suffixes = cleaned
+    return plan
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,
@@ -502,6 +556,7 @@ def resolve_create_fidelity_plan(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    carry_keys: bool = True,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -531,6 +586,8 @@ def resolve_create_fidelity_plan(
         dest_schema=dest_schema,
         dest_tablespaces=dest_tablespaces,
     )
+    if not carry_keys:
+        plan = withhold_append_key_constraints(plan)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:

@@ -1314,18 +1314,30 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         absorbed = sorted({str(i.get("id")) for i in collision_findings if i.get("id")})
         details = collision_findings[0].get("details") or {}
         key = str((details.get("primary_key") or {}).get("target") or "") or "the identity key"
-        stored = len(details.get("sample_collisions") or [])
+        if details.get("collision_count") is not None:
+            stored = int(details.get("collision_count") or 0)
+        else:
+            stored = len(details.get("sample_collisions") or [])
         sync_mode = str(details.get("sync_mode") or "append")
+        enforced = bool(details.get("key_enforced", True))
+        if enforced:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}, which enforces uniqueness — "
+                f"a {sync_mode} insert aborts on the first one"
+            )
+        else:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}. That table does not enforce the key, "
+                f"so a {sync_mode} insert would store a second copy"
+            )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("destination_key_collision", [key], absorbed),
                 kind="destination_key_collision",
                 title="Destination already stores these keys",
-                summary=(
-                    f"{stored or 'Some'} key value(s) in this batch are already at rest "
-                    f"in the destination on {key}, which enforces uniqueness — "
-                    f"a {sync_mode} insert aborts on the first one"
-                ),
+                summary=summary,
                 business_impact=(
                     "The write fails outright, so no rows land. Nothing is "
                     "duplicated and nothing at the destination is damaged."

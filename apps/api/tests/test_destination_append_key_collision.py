@@ -100,10 +100,8 @@ def test_append_passes_when_batch_keys_are_new(tmp_path: Path) -> None:
     assert g6["status"] != "block", g6
 
 
-def test_append_blocks_a_repeated_key_when_the_table_does_not_enforce_it(
-    tmp_path: Path,
-) -> None:
-    """No unique constraint must not make a second copy of the same key legal."""
+def test_append_warns_when_a_heap_already_holds_the_key(tmp_path: Path) -> None:
+    """A table with no key stores the second copy. That is append."""
     db_path = tmp_path / "heap.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
@@ -117,10 +115,10 @@ def test_append_blocks_a_repeated_key_when_the_table_does_not_enforce_it(
         destination_pk_columns=[],
     )
     g6 = _gate(result, "g6_target_ddl")
-    assert g6["status"] == "block", g6
+    assert g6["status"] == "warn", g6
     assert "second copy" in g6["message"]
     assert "upsert/merge" in g6["message"]
-    assert result["passed"] is False
+    assert result["passed"] is True
 
 
 def test_append_blocks_the_same_mapped_row_when_there_is_no_key(tmp_path: Path) -> None:
@@ -158,8 +156,8 @@ def test_append_blocks_the_same_mapped_row_when_there_is_no_key(tmp_path: Path) 
         validation_mode="strict",
     )
     g6 = _gate(result, "g6_target_ddl")
-    assert g6["status"] == "block", g6
-    assert result["passed"] is False
+    assert g6["status"] == "warn", g6
+    assert result["passed"] is True
 
     fresh = run_file_preflight(
         columns=["body", "city"],

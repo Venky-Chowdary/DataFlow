@@ -467,7 +467,7 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
-    if fmt == "mysql":
+    if fmt in {"mysql", "mariadb"}:
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql
@@ -484,6 +484,7 @@ def introspect_endpoint(
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):

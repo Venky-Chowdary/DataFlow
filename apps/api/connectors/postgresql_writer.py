@@ -1896,6 +1896,7 @@ def write_mapped_rows(
                     dest_tablespaces=list_destination_tablespaces(
                         "postgresql", cursor
                     ),
+                    carry_keys=write_mode != "insert",
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -2423,6 +2424,42 @@ def write_mapped_rows(
                             rejected_details=rejected_details,
                             warnings=transform_errors,
                         )
+
+            if write_mode == "insert" and table_existed and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config={
+                        "type": "postgresql",
+                        "host": host,
+                        "port": port,
+                        "database": database,
+                        "username": username,
+                        "password": password,
+                        "schema": schema,
+                        "connection_string": connection_string,
+                        "ssl": ssl,
+                    },
+                    destination_db_type="postgresql",
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             use_copy = (
                 write_mode == "insert"

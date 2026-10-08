@@ -552,3 +552,29 @@ def test_g22_blocks_orphans_and_unproven() -> None:
     }
     assert referential_integrity_proven(clean) is True
     assert build_dest_ri_gate(clean, has_relationships=True)["status"] == "pass"
+
+    unproven = {
+        "verified": False,
+        "asked": True,
+        "orphan_rows": 0,
+        "unavailable_relations": ["customer_id->customers"],
+        "reason": "parent scan did not run",
+        "relations": [
+            {
+                "columns": ["customer_id"],
+                "referred_table": "customers",
+                "status": "unavailable",
+                "available": False,
+                "orphan_count": 0,
+            }
+        ],
+    }
+    unproven_gate = build_dest_ri_gate(unproven, has_relationships=True)
+    assert unproven_gate["status"] == "warn", unproven_gate
+    kept = apply_dest_ri_to_reconcile(
+        {"passed": True, "message": "checksums match"},
+        evidence=unproven,
+        has_relationships=True,
+    )
+    assert kept["passed"] is True
+    assert "unproven" in kept["message"]

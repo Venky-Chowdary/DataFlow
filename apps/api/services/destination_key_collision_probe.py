@@ -92,6 +92,9 @@ class DestinationCollisionResult:
     # An incremental run reads past its watermark, so only that delta can
     # collide. Recorded so an operator can see which rows were actually probed.
     delta_scope: dict[str, Any] = field(default_factory=dict)
+    # True when this batch is the interrupted run being delivered again.
+    # A heap would store that overlap a second time, so resume still blocks.
+    resume_redelivery: bool = False
 
     @property
     def ran(self) -> bool:
@@ -323,11 +326,10 @@ def probe_append_key_collisions(
     table, overwrite/upsert semantics), which is different from a probe that
     could not run and must not block.
 
-    An append of a key, or of a whole mapped row, that the destination already
-    stores is a duplicate whether or not the table has a unique constraint.
-    A constraint makes the insert abort. Without one, the second copy lands.
-    Both refuse Validate. Upsert, merge, and overwrite already say what a
-    colliding key becomes, so they are not probed.
+    An append of a key the destination enforces aborts the insert, so Validate
+    blocks before Execute. A table with no key stores the second copy; that is
+    append, so Validate warns and the write proceeds. Upsert, merge, and
+    overwrite already say what a colliding key becomes, so they are not probed.
     """
     if not sync_mode_appends_without_key_resolution(sync_mode):
         return None
@@ -396,6 +398,7 @@ def probe_append_key_collisions(
     # only when the destination rejects a second copy of the key. A heap table
     # would store that overlap again, so resume does not excuse it.
     result.idempotent_apply = bool(resume and enforced)
+    result.resume_redelivery = bool(resume)
     return result
 
 
@@ -463,7 +466,7 @@ def probe_destination_key_collisions(
     destination_table: str = "",
     key_column: str = "",
     values: list[Any] | None = None,
-    limit: int = 5,
+    limit: int = MAX_PROBE_VALUES,
 ) -> DestinationCollisionResult:
     """Find keys already present at the destination for an append batch."""
     key = (key_column or "").strip()
@@ -545,7 +548,7 @@ def probe_destination_tuple_collisions(
     destination_table: str = "",
     columns: list[str] | None = None,
     tuples: list[tuple[Any, ...]] | None = None,
-    limit: int = 5,
+    limit: int = MAX_PROBE_VALUES,
 ) -> DestinationCollisionResult:
     """Find mapped rows already stored, compared column by column.
 
@@ -708,3 +711,109 @@ def _mongo_existing_tuples(
         ]
     finally:
         client.close()
+
+
+def live_single_column_unique_keys(
+    destination_config: Mapping[str, Any],
+    destination_table: str,
+) -> list[str]:
+    """Single-column PRIMARY KEY or UNIQUE names on the live table.
+
+    A composite key does not reject a repeated first column, so it is not an
+    enforced append key. An unreadable catalog returns an empty list: the
+    database still rejects a real duplicate, and a false empty list must not
+    invent a blocker on a heap.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+
+    cfg = dict(destination_config)
+    schema, table_name = split_qualified_table(
+        destination_table, (cfg.get("schema") or "").strip() or None
+    )
+    try:
+        engine = _engine(cfg)
+        insp = sa_inspect(engine)
+        pk = insp.get_pk_constraint(table_name, schema=schema) or {}
+    except Exception as exc:  # noqa: BLE001 — catalog miss is not a heap
+        logger.warning("append key catalog read failed: %s", exc)
+        return []
+    names: list[str] = []
+    pk_cols = [str(c) for c in (pk.get("constrained_columns") or []) if c]
+    if len(pk_cols) == 1:
+        names.append(pk_cols[0])
+    try:
+        uniques = insp.get_unique_constraints(table_name, schema=schema) or []
+    except Exception as exc:  # noqa: BLE001 — PK alone is still enforced
+        logger.debug("unique constraint catalog read failed: %s", exc)
+        uniques = []
+    for item in uniques:
+        cols = [str(c) for c in (item.get("column_names") or []) if c]
+        if len(cols) == 1 and cols[0] not in names:
+            names.append(cols[0])
+    return names
+
+
+def refuse_enforced_append_before_write(
+    *,
+    destination_config: Mapping[str, Any] | None,
+    destination_db_type: str,
+    destination_table: str,
+    headers: list[str],
+    data_rows: list[Any],
+    mappings: list[dict[str, Any]] | None,
+) -> str | None:
+    """Refuse an insert that the live key would abort, before any row lands.
+
+    Validate is supposed to catch this. When that probe did not run, Execute
+    inserted until the engine aborted and reported zero rows over a prefix
+    that had already committed.
+    """
+    if not data_rows or not destination_config or not destination_table:
+        return None
+    keys = live_single_column_unique_keys(destination_config, destination_table)
+    if not keys:
+        return None
+    target_to_source: dict[str, str] = {}
+    for item in mappings or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if source and target:
+            target_to_source[target.casefold()] = source
+    header_index = {str(name): index for index, name in enumerate(headers or [])}
+    for key in keys:
+        source = target_to_source.get(str(key).casefold())
+        if source is None or source not in header_index:
+            continue
+        index = header_index[source]
+        values = [
+            row[index]
+            if isinstance(row, (list, tuple)) and index < len(row)
+            else None
+            for row in data_rows
+        ]
+        result = probe_destination_key_collisions(
+            destination_config=destination_config,
+            destination_db_type=destination_db_type,
+            destination_table=destination_table,
+            key_column=key,
+            values=values,
+        )
+        if result.status == "error":
+            return (
+                f"Append refused before insert: the destination enforces {key} "
+                f"and the collision probe could not run ({result.message}). "
+                "No rows from this batch were written."
+            )
+        if result.findings:
+            return (
+                f"Append refused before insert: {len(result.findings)} key "
+                f"value(s) in this batch are already stored on {key}, which "
+                "enforces uniqueness. No rows from this batch were written. "
+                "Switch this sync to upsert/merge or overwrite."
+            )
+    return None

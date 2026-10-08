@@ -416,7 +416,11 @@ def build_dest_ri_gate(
     *,
     has_relationships: bool | None = None,
 ) -> dict[str, Any]:
-    """Execute Gate-8 G22 from dest RI evidence. Fail closed on orphans/unproven."""
+    """Execute Gate-8 G22 from dest RI evidence.
+
+    Measured orphans fail the job. An unproven scan that counted zero orphans
+    warns and keeps a checksum-matching load — failing it deleted the rows.
+    """
     relations = []
     if isinstance(evidence, Mapping):
         relations = [
@@ -441,10 +445,12 @@ def build_dest_ri_gate(
     if not isinstance(evidence, Mapping) or not evidence:
         return {
             "id": GATE_ID,
-            "status": "block",
+            "status": "warn",
             "message": (
                 "Destination referential integrity is unproven — the dest-side "
-                "orphan scan did not run. Fail closed."
+                "orphan scan did not run. No orphan rows were measured, so the "
+                "load is kept. Re-run the scan before treating the relationship "
+                "as proven."
             ),
             "duration_ms": 0,
             "details": {
@@ -496,12 +502,12 @@ def build_dest_ri_gate(
     named_unavail = ", ".join(str(r) for r in unavailable[:4])
     return {
         "id": GATE_ID,
-        "status": "block",
+        "status": "warn",
         "message": (
             "Destination referential integrity is unproven"
             + (f" ({named_unavail})" if named_unavail else "")
             + (f": {reason}" if reason else "")
-            + ". Fail closed."
+            + ". No orphan rows were measured, so the load is kept."
         ),
         "duration_ms": 0,
         "details": {
@@ -521,7 +527,7 @@ def apply_dest_ri_to_reconcile(
     evidence: Mapping[str, Any] | None = None,
     has_relationships: bool | None = None,
 ) -> dict[str, Any]:
-    """Stamp G22 onto a Gate-8 report and fail the job on dest orphans/unproven."""
+    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans."""
     phys = stamped.get("physical_state") if isinstance(stamped.get("physical_state"), dict) else {}
     ri = evidence
     if not isinstance(ri, Mapping):
@@ -532,8 +538,10 @@ def apply_dest_ri_to_reconcile(
     )
     out = dict(stamped)
     out["g22_dest_referential_integrity"] = gate
-    if gate.get("status") == "block":
-        out["passed"] = False
+    status = str(gate.get("status") or "")
+    if status in {"block", "warn"}:
+        if status == "block":
+            out["passed"] = False
         prior = str(out.get("message") or "").rstrip()
         extra = str(gate.get("message") or "G22 destination referential integrity failed")
         out["message"] = f"{prior} {extra}".strip() if prior else extra

@@ -378,10 +378,31 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_ts(value: str | None) -> datetime | None:
-    if not value:
+def _parse_ts(value: str | datetime | None) -> datetime | None:
+    """UTC-aware instant, or None when the stored value cannot be read.
+
+    Mongo returns ``datetime``; the file store returns ISO text. A naive value
+    is UTC, the same clock ``_now`` writes. Mixing that naive value with
+    ``datetime.now(timezone.utc)`` raised ``TypeError`` inside ``due_schedules``
+    and aborted every schedule on the beat.
+    """
+    if value is None or value == "":
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def compute_next_run(
@@ -1047,7 +1068,7 @@ def _job_is_live(job_id: str) -> bool | None:
             or job.get("heartbeat_at")
             or job.get("last_progress_at")
         )
-        seen = _parse_ts(str(stamp)) if stamp else None
+        seen = _parse_ts(stamp) if stamp else None
         if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
             return False
     return True
@@ -1487,27 +1508,35 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     due: list[PipelineSchedule] = []
     for s in _load_all():
-        if not s.enabled:
-            continue
-        if not persisted_mapping_rows(s.mappings):
-            continue
-        if s.running and not _is_running_stale(s):
-            continue
-        if has_open_approval(s):
-            # A deterministic refusal waiting on a decision is not a cadence
-            # event: the same inputs would produce the same refusal, so running
-            # it again only buries the finding under identical failures.
-            continue
-        retry_at = _parse_ts(s.retry_at)
-        if retry_at is not None:
-            # A parked retry owns the schedule until it runs: the cadence must
-            # not start a fresh attempt on top of the one still owed.
-            if retry_at <= current:
+        try:
+            if not s.enabled:
+                continue
+            if not persisted_mapping_rows(s.mappings):
+                continue
+            if s.running and not _is_running_stale(s):
+                continue
+            if has_open_approval(s):
+                # A deterministic refusal waiting on a decision is not a cadence
+                # event: the same inputs would produce the same refusal, so running
+                # it again only buries the finding under identical failures.
+                continue
+            retry_at = _parse_ts(s.retry_at)
+            if retry_at is not None:
+                # A parked retry owns the schedule until it runs: the cadence must
+                # not start a fresh attempt on top of the one still owed.
+                if retry_at <= current:
+                    due.append(s)
+                continue
+            nxt = _parse_ts(s.next_run_at)
+            if nxt is None or nxt <= current:
                 due.append(s)
-            continue
-        nxt = _parse_ts(s.next_run_at)
-        if nxt is None or nxt <= current:
-            due.append(s)
+        except Exception:  # noqa: BLE001 — one document must not zero the beat
+            logging.getLogger(__name__).exception(
+                "Schedule %s skipped this beat; its due time could not be read",
+                getattr(s, "id", ""),
+            )
     return due

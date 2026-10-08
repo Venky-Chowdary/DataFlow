@@ -1949,6 +1949,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             )
         delta_scope = getattr(collision, "delta_scope", {}) or {}
         enforced = bool(getattr(collision, "key_enforced", True))
+        collision_count = len(found)
         if delta_scope:
             # The collision is inside the delta this cursor will re-read, so the
             # operator needs to know the key returns with a newer cursor value —
@@ -1968,26 +1969,45 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             )
         else:
             cause = (
-                f"Append would store a second copy of {len(found)} row(s) the "
+                f"Append would store a second copy of {collision_count} row(s) the "
                 f"destination already holds on {key}. The destination does not "
                 "reject that insert, so the duplicate would land. Use upsert/merge "
                 "(key-resolved) or overwrite."
+            )
+        details = {
+            "sample_collisions": found[:5],
+            "collision_count": collision_count,
+            "key_enforced": enforced,
+            "primary_key": {"target": key},
+            "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+            "rule_id": "g6_target_ddl.append_key_collision",
+            "remediation_kind": "change_sync_mode",
+            "probe_status": getattr(collision, "status", ""),
+            "values_probed": getattr(collision, "values_probed", 0),
+            "delta_scope": delta_scope,
+        }
+        # A heap stores the second copy. That is what append means on a table
+        # with no key. Resume is the exception: the same batch is re-delivered,
+        # and a heap would store it twice.
+        if not enforced and not delta_scope and not getattr(
+            collision, "resume_redelivery", False
+        ):
+            return _warn(
+                GateId.G6_TARGET_DDL,
+                cause,
+                start,
+                _scope(
+                    details,
+                    coverage="sample",
+                    note="Destination key collision probe on append batch",
+                ),
             )
         return _block(
             GateId.G6_TARGET_DDL,
             cause,
             start,
             _scope(
-                {
-                    "sample_collisions": found[:5],
-                    "primary_key": {"target": key},
-                    "sync_mode": getattr(ctx.plan, "sync_mode", ""),
-                    "rule_id": "g6_target_ddl.append_key_collision",
-                    "remediation_kind": "change_sync_mode",
-                    "probe_status": getattr(collision, "status", ""),
-                    "values_probed": getattr(collision, "values_probed", 0),
-                    "delta_scope": delta_scope,
-                },
+                details,
                 coverage="sample",
                 note="Destination key collision probe on append batch",
             ),

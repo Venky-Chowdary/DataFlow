@@ -1226,6 +1226,7 @@ def write_mapped_rows(
                             dest_dialect="sqlite",
                             table_already_exists=bool(table_existed),
                             dest_table=table_name,
+                            carry_keys=write_mode != "insert",
                         )
                     except Exception as exc:
                         logger.warning(

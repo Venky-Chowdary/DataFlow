@@ -2773,12 +2773,14 @@ def _build_table_for_write(
     db_type: str = "",
     conflict_columns: list[str] | None = None,
     fidelity_plan: Any = None,
+    declare_key: bool = True,
 ) -> sa.Table:
     """Build an explicit Table definition for CREATE/INSERT using the target schema.
 
     When ``conflict_columns`` are supplied for upsert, add a PRIMARY KEY over them
     so native ``ON CONFLICT`` / ``ON DUPLICATE KEY`` upsert has the required
-    unique constraint and retries are truly idempotent.
+    unique constraint and retries are truly idempotent. Append (``declare_key``
+    false) does not copy the source key: a second copy of the same row is legal.
     """
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
@@ -2796,7 +2798,7 @@ def _build_table_for_write(
             f"against the planned schema ({exc})."
         ) from exc
     pk_set = set()
-    if conflict_cols:
+    if declare_key and conflict_cols:
         pk_set = set(conflict_cols)
 
     # Source semantics come from the one canonical planner, never from a second
@@ -2838,10 +2840,15 @@ def _build_table_for_write(
             [by_fold[c.casefold()] for c in u if c.casefold() in by_fold]
             for u in plan_uniques
         ]
-        if not pk_set and plan_pk and len(plan_pk) == len(
-            getattr(fidelity_plan, "primary_key", []) or []
+        if (
+            declare_key
+            and not pk_set
+            and plan_pk
+            and len(plan_pk) == len(getattr(fidelity_plan, "primary_key", []) or [])
         ):
             pk_set = set(plan_pk)
+        if not declare_key:
+            plan_uniques = []
 
     # dest column -> the generator clause the planner decided, which carries the
     # source's own seed and increment.
@@ -2931,7 +2938,7 @@ def _build_table_for_write(
         )
 
     constraints: list[Any] = []
-    if conflict_cols and not pk_set.issubset(set(columns)):
+    if declare_key and conflict_cols and not pk_set.issubset(set(columns)):
         # ``quote=`` is a Column kwarg; on a constraint SQLAlchemy rejects it
         # as an unknown dialect argument and the whole CREATE fails.
         constraints.append(sa.UniqueConstraint(*conflict_cols))
@@ -5465,6 +5472,7 @@ def write_mapped_rows(
         target_column_types,
         db_type=cfg.get("type", ""),
         conflict_columns=conflict_columns,
+        declare_key=write_mode != "insert",
     )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
@@ -5955,6 +5963,7 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             _fidelity_dialect(dest_db, dialect_name), conn
                         ),
+                        carry_keys=write_mode != "insert",
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(
@@ -5966,6 +5975,7 @@ def write_mapped_rows(
                         db_type=cfg.get("type", ""),
                         conflict_columns=conflict_columns,
                         fidelity_plan=fidelity_plan,
+                        declare_key=write_mode != "insert",
                     )
                     _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                 except Exception as exc:
@@ -6155,6 +6165,32 @@ def write_mapped_rows(
                 # Drift backfill may have added or widened columns; anything
                 # reflected before this point describes the old shape.
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
+
+            if write_mode == "insert" and table_exists and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config=cfg,
+                    destination_db_type=str(cfg.get("type") or ""),
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema_name or (cfg.get("database") or ""),
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             # The rows carry the source's own key values; on SQL Server an
             # IDENTITY column rejects them unless the session says so.

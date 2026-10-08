@@ -1359,7 +1359,7 @@ def _finalize_finished_schedule_claims() -> None:
 
 def _run_due_schedules() -> int:
     if not _acquire_scheduler_lock():
-        logger.debug("Scheduler lock held by another instance; skipping this beat")
+        logger.warning("Scheduler lock held by another instance; skipping this beat")
         return 0
     try:
         from services.schedule_approvals import release_same_declaration_source_drift
@@ -1442,7 +1442,14 @@ def _clear_stale_running_schedules() -> None:
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
-    await asyncio.get_running_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _executor, _clear_stale_running_schedules
+        )
+    except Exception:  # noqa: BLE001 — a bad document must not kill the loop
+        logger.exception(
+            "Startup schedule reclaim failed; the beat will continue"
+        )
     try:
         from services.schedule_store import import_file_schedules_into_mongo
 

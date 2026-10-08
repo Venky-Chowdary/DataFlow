@@ -946,6 +946,7 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
+                    carry_keys=write_mode != "insert",
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(
@@ -1353,6 +1354,41 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
+
+            if write_mode == "insert" and table_existed and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config={
+                        "type": "mysql",
+                        "host": host,
+                        "port": port,
+                        "database": database,
+                        "username": username,
+                        "password": password,
+                        "connection_string": connection_string,
+                        "ssl": ssl,
+                    },
+                    destination_db_type="mysql",
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             rows_skipped = 0
 

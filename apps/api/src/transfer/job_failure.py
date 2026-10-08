@@ -433,6 +433,11 @@ def _fail_runtime_job(
         status_kwargs["rejected_details_total"] = total
         status_kwargs["rejected_details_truncated"] = truncated
         status_kwargs["records_processed"] = int(getattr(exc, "rows_written", 0) or 0)
+    elif hasattr(exc, "rows_written"):
+        # A duplicate-key abort often has no quarantine rows. Leaving the
+        # counter at 0 while the destination already committed a prefix hid
+        # the partial write.
+        status_kwargs["records_processed"] = int(getattr(exc, "rows_written") or 0)
     mongo.update_job_status(
         job_id,
         status,
