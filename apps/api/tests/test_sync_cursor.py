@@ -59,6 +59,62 @@ def test_requires_incremental_and_upsert():
     assert not requires_upsert("incremental_append")
 
 
+def test_oracle_table_case_shares_one_bookmark():
+    """DEF-B-030: qa6b_ua_tsor and QA6B_UA_TSOR are one Oracle table."""
+    from services.sync_cursor import bookmark_identifier, build_cursor_key
+
+    lower = build_cursor_key(
+        source_type="mysql",
+        source_database="qa",
+        source_object="orders",
+        dest_type="oracle",
+        dest_database="qa",
+        dest_object="qa6b_ua_tsor",
+        stream_name="orders",
+    )
+    upper = build_cursor_key(
+        source_type="mysql",
+        source_database="qa",
+        source_object="orders",
+        dest_type="oracle",
+        dest_database="QA",
+        dest_object="QA6B_UA_TSOR",
+        stream_name="orders",
+    )
+    assert lower == upper
+    assert "QA6B_UA_TSOR" in lower
+    quoted = build_cursor_key(
+        source_type="mysql",
+        source_database="qa",
+        source_object="orders",
+        dest_type="oracle",
+        dest_database="qa",
+        dest_object='"qa6b_ua_tsor"',
+        stream_name="orders",
+    )
+    assert quoted != lower
+    pg_mixed = build_cursor_key(
+        source_type="postgresql",
+        source_database="src",
+        source_object="Orders",
+        dest_type="postgresql",
+        dest_database="dst",
+        dest_object="Orders",
+        stream_name="orders",
+    )
+    pg_lower = build_cursor_key(
+        source_type="postgresql",
+        source_database="src",
+        source_object="orders",
+        dest_type="postgresql",
+        dest_database="dst",
+        dest_object="orders",
+        stream_name="orders",
+    )
+    assert pg_mixed != pg_lower
+    assert bookmark_identifier("snowflake", "analytics.orders") == "ANALYTICS.ORDERS"
+
+
 def test_watermark_roundtrip(tmp_path, monkeypatch):
     store = tmp_path / "sync_cursors.json"
     monkeypatch.setattr("services.sync_cursor.STORE_PATH", store)

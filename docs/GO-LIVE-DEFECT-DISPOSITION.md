@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 31
+- not fixed: 29
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 55
+- fixed in code, unit-proven — not a live QA retest: 57
 - partly fixed in code: 9
 
 ## Every row
@@ -59,7 +59,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-CDC-PG-MYSQL-TSTZ-BIND | P1 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-B-003 | P2 | OPEN | fixed in code for the coercion report: it binds the plan source engine before analyze_coercion. Unit-proven that a bound postgresql engine is not lossy (test_pg_varchar_to_sqlserver_nvarchar_is_preserve_when_the_source_engine_is_bound). Not a live preflight retest. |
 | DEF-B-005 | P2 | OPEN | fixed in code, unit-proven (test_bare_five_field_cron_is_a_schedule). The runner's validate_cron is the acceptor. Not a live create_schedule retest. |
-| DEF-B-013 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-013 | P2 | OPEN | fixed in code, unit-proven (test_completion_pin_does_not_fire_before_the_cron_grid, test_resume_catch_up_lands_on_the_next_boundary). A completion pin moves to the next cron boundary and does not start a load. Resume still runs one catch-up, then waits for the grid. Not a live scheduler retest. |
 | DEF-B-014 | P2 | OPEN | already in tree before this wave (parse_cadence). Unit-proven in test_weekdays_and_hourly_minute_keep_their_anchor. QA build 6436aaa38583 predates it. Needs retest. |
 | DEF-B-017 | P2 | OPEN | fixed in code, unit-proven (test_declared_decimal_beats_the_sample_envelope, test_cursor_precision_wins_over_a_narrow_sample). Cursor precision and scale replace the sample envelope, including CAST(... AS DECIMAL(10,2)). Not a live query-mode retest. |
 | DEF-B-019 | P2 | OPEN | fixed in code, unit-proven (test_mariadb_display_widths_stay_their_carriers). A type code that names a carrier wins over precision and scale, so DATE, DATETIME, TIMESTAMP, TINYINT and VARCHAR stay themselves. Not a live MariaDB retest. |
@@ -111,7 +111,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-012 | P3 | OPEN | fixed in code, unit-proven (test_expired_transfer_ack_does_not_say_create_the_connector). An expired transfer says to plan the transfer again. An unknown id says to stage the action again. A create_connector ack still says to create the connector. Not a live UI retest. |
 | DEF-B-015 | P3 | OPEN | fixed in code, unit-proven (test_humanize_missing_column_and_table_guide_to_map). A missing relation is table_not_found. The title does not call it a destination miss, and the message says it is not a capacity problem. Not a live job retest. |
 | DEF-B-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B-030 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-030 | P3 | OPEN | fixed in code, unit-proven (test_oracle_table_case_shares_one_bookmark). Unquoted Oracle, Snowflake, and DB2 names share one bookmark. A quoted Oracle name stays distinct. Postgres case stays distinct. A watermark already stored under the other spelling can cause one re-read. Not a live Oracle retest. |
 | DEF-A-013 | P3 | OPEN | fixed in code, unit-proven (test_sheet_suffix_is_not_a_fuzzy_typo, test_sample_fuzzy_resolves_typo). file.xlsx#Data keeps the sheet. A missing file#sheet is not swapped for another workbook. A typo with no sheet still fuzzy-matches. Not a live file retest. |
 | DEF-A-016 | P3 | OPEN | fixed in code, unit-proven (test_unreadable_workbook_is_operator_text_not_the_library_sentence). Password, bad-zip, and bad-magic opens become operator text. Legacy .xls is still unsupported. Not a live file retest. |
 | DEF-A-020 | P3 | OPEN | fixed in code, unit-proven (test_missing_object_and_raw_primary_key_are_operator_text, test_s3_missing_object_is_measured_zero). A missing object is operator text and is measured as zero rows. Not a live scheduled S3 retest. |

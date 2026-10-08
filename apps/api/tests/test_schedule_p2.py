@@ -801,6 +801,74 @@ def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store)
     assert done.id not in {item.id for item in store.due_schedules()}
 
 
+def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypatch):
+    """DEF-B-013: a catch-up that stored next_run_at = last_run_at fired again.
+
+    The extra run was 23 seconds before the real */5 tick. The beat must move
+    that pin onto the next boundary and not start a load.
+    """
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    pinned = "2026-10-08T01:19:32.636921+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": True,
+            "last_run_at": pinned,
+            "next_run_at": pinned,
+            "run_count": 1,
+            "last_job_id": "job-catchup",
+        })
+    ])
+    started: list[str] = []
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    monkeypatch.setattr(runner, "_run_schedule", lambda sid, manual=False: started.append(sid) or "job-extra")
+    assert runner._run_due_schedules() == 0
+    assert started == []
+    done = store.get_schedule(sched.id)
+    nxt = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert nxt is not None and last is not None
+    assert nxt > datetime.now(timezone.utc)
+    assert nxt.second == 0 and nxt.microsecond == 0
+    assert abs((nxt - last).total_seconds()) > 2
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
+    """Enabling a paused cron whose slot is past runs one catch-up, then the grid."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = "2026-10-08T01:10:00+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": False,
+            "next_run_at": past,
+        })
+    ])
+    resumed = store.update_schedule(sched.id, {"enabled": True})
+    assert resumed is not None
+    assert resumed.next_run_at == past
+    claimed = store.mark_schedule_running(sched.id, "beat")
+    assert claimed is not None
+    claimed_next = store._parse_ts(claimed.next_run_at)
+    assert claimed_next is not None
+    assert claimed_next > datetime.now(timezone.utc)
+    assert claimed_next.second == 0 and claimed_next.microsecond == 0
+    store.set_running_job(sched.id, "job-catchup")
+    done = store.mark_schedule_run(
+        sched.id, "job-catchup", status="completed", run_entry={"status": "completed"}
+    )
+    assert done is not None
+    final = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert final is not None and last is not None
+    assert final > datetime.now(timezone.utc)
+    assert final.second == 0 and final.microsecond == 0
+    assert abs((final - last).total_seconds()) > 2
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
 def test_queued_claim_is_kept_when_the_next_slot_is_due(temp_store, monkeypatch):
     """A queued fire has not read yet. The next slot must not cancel it."""
     sched = _make(store, cron="*/5 * * * *", interval="hourly")

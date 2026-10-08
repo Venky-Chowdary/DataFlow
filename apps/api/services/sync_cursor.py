@@ -305,6 +305,36 @@ def resolve_selected_sync_contracts(
     return out
 
 
+# Unquoted identifiers on these engines are one object regardless of the
+# case the operator typed. Oracle stores QA6B_UA_TSOR for qa6b_ua_tsor.
+# A bookmark that kept the typed spelling treated the second run as a new
+# route and re-read the whole table.
+_BOOKMARK_FOLD_UPPER = frozenset({"oracle", "oracledb", "snowflake", "db2"})
+
+
+def bookmark_identifier(engine: str, name: str) -> str:
+    """Fold an unquoted identifier to the engine's stored case.
+
+    A quoted part (``"qa6b_ua_tsor"``) is a different object and stays as
+    written. Other engines keep the operator's spelling: Postgres ``Orders``
+    and ``orders`` are not the same table.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    eng = (engine or "").strip().lower()
+    if eng not in _BOOKMARK_FOLD_UPPER:
+        return raw
+    parts: list[str] = []
+    for part in raw.split("."):
+        piece = part.strip()
+        if len(piece) >= 2 and piece[0] == piece[-1] and piece[0] in {'"', "`"}:
+            parts.append(piece)
+        else:
+            parts.append(piece.upper())
+    return ".".join(parts)
+
+
 def build_cursor_key(
     *,
     source_type: str,
@@ -324,6 +354,10 @@ def build_cursor_key(
     the bookmark: the second load would treat the first destination's
     watermark as its own and skip rows it has never written.
     """
+    source_database = bookmark_identifier(source_type, source_database)
+    source_object = bookmark_identifier(source_type, source_object)
+    dest_database = bookmark_identifier(dest_type, dest_database)
+    dest_object = bookmark_identifier(dest_type, dest_object)
     base = (
         f"{source_type}:{source_database}:{source_object}"
         f"→{dest_type}:{dest_database}:{dest_object}:{stream_name}"
