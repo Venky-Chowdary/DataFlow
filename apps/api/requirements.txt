@@ -39,11 +39,12 @@ pyhive>=0.7.0  # Presto / Hive via SQLAlchemy
 # Data Processing
 ijson>=3.2.0
 openpyxl>=3.1.0
-# Paramiko 4/5 removed diffie-hellman-group14-sha1 and ssh-rsa. SFTP
-# appliances that still speak only those algorithms drop the socket during
-# kex, before any auth packet. 3.5 keeps the code; the client offers them
-# only after a modern handshake fails, and still checks the host key first.
-paramiko>=3.5.1,<4
+# SFTP appliances that only offer diffie-hellman-group14-sha1 / ssh-rsa drop
+# the socket during kex, before any auth packet. The client registers those
+# two algorithms when this Paramiko build removed them, and advertises them
+# only after a modern handshake fails. Host-key verification stays on.
+# group1-sha1 is not offered.
+paramiko>=3.5.1
 pyarrow>=23.0.1
 pyiceberg[pyarrow,sql-sqlite,glue,rest-sigv4,s3fs]>=0.11.1
 fastavro>=1.9.0

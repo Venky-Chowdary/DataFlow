@@ -10,6 +10,45 @@ def _is_local(host: str, port: int) -> bool:
     return host in ("localhost", "127.0.0.1", "host.docker.internal") or port == 10000
 
 
+def _emulator_endpoint(cfg: dict[str, Any]) -> bool:
+    """True when this config is Azurite or another local Blob stand-in.
+
+    Real Azure keeps the SDK's current service version. Azurite answers
+    ``400 Bad Request`` to that version on ``list_containers`` before any
+    container exists. A tunneled emulator is not always ``localhost``.
+    """
+    host = str(cfg.get("host") or "").strip().lower()
+    port = int(cfg.get("port") or 0)
+    blob = " ".join(
+        str(cfg.get(key) or "")
+        for key in ("connection_string", "endpoint", "account_url", "url")
+    ).lower()
+    if _is_local(host, port) or port == 10000:
+        return True
+    if "azurite" in host or "azurite" in blob:
+        return True
+    if "devstoreaccount1" in blob or "usedevelopmentstorage=true" in blob:
+        return True
+    if cfg.get("emulator") or cfg.get("azurite"):
+        return True
+    return False
+
+
+def api_version_rejected(exc: BaseException) -> bool:
+    """True when the service refused the request's ``x-ms-version``.
+
+    A bad account key or a missing container is a different 400. Only a
+    version refusal is retried against the Azurite-compatible pin.
+    """
+    text = str(exc).lower()
+    return (
+        "x-ms-version" in text
+        or "rest version" in text
+        or "specified api version" in text
+        or ("invalidheadervalue" in text and "version" in text)
+    )
+
+
 def _connection_string(cfg: dict[str, Any]) -> str | None:
     raw = (cfg.get("connection_string") or "").strip()
     if raw and ("AccountName" in raw or "BlobEndpoint" in raw):
@@ -67,9 +106,7 @@ def blob_service_client(cfg: dict[str, Any]):
     from azure.storage.blob import BlobServiceClient
 
     conn_str = _connection_string(cfg)
-    azurite = _is_local(str(cfg.get("host") or ""), int(cfg.get("port") or 0)) or (
-        "devstoreaccount1" in str(conn_str or "").lower()
-    )
+    azurite = _emulator_endpoint({**cfg, "connection_string": conn_str or cfg.get("connection_string") or ""})
     connection_timeout = cfg.get("connection_timeout", 5 if azurite else 60)
     read_timeout = cfg.get("read_timeout", 5 if azurite else 60)
     retry_total = cfg.get("retry_total", 0 if azurite else 3)
@@ -78,11 +115,15 @@ def blob_service_client(cfg: dict[str, Any]):
         "read_timeout": read_timeout,
         "retry_total": retry_total,
     }
-    if azurite:
+    pinned = str(cfg.get("api_version") or "").strip()
+    if pinned:
+        client_kwargs["api_version"] = pinned
+    elif azurite:
         # Current blob SDK defaults (2025-x) make Azurite answer
         # ``400 Bad Request`` on list_containers before any container exists.
         # 2021-12-02 is the version Azurite has accepted since 3.18. Real
-        # Azure keeps the SDK default — this pin is only for the local stand-in.
+        # Azure keeps the SDK default — this pin is only for the stand-in,
+        # or for an explicit retry after the service rejected x-ms-version.
         client_kwargs["api_version"] = "2021-12-02"
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str, **client_kwargs)

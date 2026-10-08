@@ -289,19 +289,66 @@ def load_private_key(cfg: SFTPConfig) -> Any:
 
 
 def _legacy_ssh_available() -> bool:
-    """True when this Paramiko build can still speak the pre-sha2 handshake.
+    """True when a last-attempt handshake can still speak group14-sha1 / ssh-rsa.
 
-    Paramiko 4 and 5 removed ``diffie-hellman-group14-sha1`` and ``ssh-rsa``.
-    Appliances that only offer those algorithms close the socket during kex,
-    before authentication. The algorithms are offered only on a last attempt.
+    Paramiko 3.5 ships both names. Paramiko 4 and 5 removed them from the
+    default tables, which closed the socket during kex — before any auth
+    packet — on appliances that offer nothing newer. This process can register
+    those two algorithms on the real Transport class without putting them on
+    the default preferred list. ``group1-sha1`` stays unavailable.
+    A test double that replaced ``Transport`` has no algorithm table; the
+    legacy attempt is then skipped so unit fakes keep the modern retry count.
     """
     try:
         import paramiko
     except ImportError:
         return False
-    kex = getattr(paramiko.Transport, "_kex_info", {}) or {}
-    keys = getattr(paramiko.Transport, "_key_info", {}) or {}
-    return "diffie-hellman-group14-sha1" in kex or "ssh-rsa" in keys
+    kex = getattr(paramiko.Transport, "_kex_info", None)
+    if not isinstance(kex, dict):
+        return False
+    if "diffie-hellman-group14-sha1" in kex:
+        return True
+    try:
+        from paramiko.kex_group14 import KexGroup14SHA256  # noqa: F401
+        from paramiko.rsakey import RSAKey  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _register_legacy_ssh(paramiko_mod: Any) -> None:
+    """Register group14-sha1 and ssh-rsa on this Paramiko, if it dropped them.
+
+    Default ``_preferred_kex`` / ``_preferred_keys`` are not extended. Only a
+    transport that calls :func:`_enable_legacy_ssh` advertises them, and only
+    after the modern handshake has already failed. Host-key verification still
+    runs before authentication.
+    """
+    from hashlib import sha1
+
+    from cryptography.hazmat.primitives import hashes
+    from paramiko.kex_group14 import KexGroup14SHA256
+    from paramiko.rsakey import RSAKey
+
+    kex_info = getattr(paramiko_mod.Transport, "_kex_info", None)
+    key_info = getattr(paramiko_mod.Transport, "_key_info", None)
+    if isinstance(kex_info, dict) and "diffie-hellman-group14-sha1" not in kex_info:
+
+        class KexGroup14SHA1(KexGroup14SHA256):
+            """RFC 4253 group14 with SHA-1. Offered only on the last attempt."""
+
+            name = "diffie-hellman-group14-sha1"
+            hash_algo = sha1
+
+        kex_info["diffie-hellman-group14-sha1"] = KexGroup14SHA1
+    if isinstance(key_info, dict) and "ssh-rsa" not in key_info:
+        key_info["ssh-rsa"] = RSAKey
+    # Verification looks the algorithm up on the key class, not the transport.
+    # Advertising ssh-rsa without this entry would fail every host-key check
+    # for that algorithm. Modern attempts never list ssh-rsa, so they cannot
+    # select it.
+    if "ssh-rsa" not in RSAKey.HASHES:
+        RSAKey.HASHES["ssh-rsa"] = hashes.SHA1
 
 
 def _modern_disabled_algorithms() -> dict[str, list[str]]:
@@ -327,9 +374,13 @@ def _modern_disabled_algorithms() -> dict[str, list[str]]:
 
 
 def _enable_legacy_ssh(transport: Any) -> None:
-    """Add sha1 group14 and ssh-rsa on this transport only, when implemented."""
+    """Add sha1 group14 and ssh-rsa on this transport only.
+
+    ``group1-sha1`` is not added. Host-key verification is unchanged.
+    """
     import paramiko
 
+    _register_legacy_ssh(paramiko)
     kex_info = getattr(paramiko.Transport, "_kex_info", {}) or {}
     key_info = getattr(paramiko.Transport, "_key_info", {}) or {}
     options = transport.get_security_options()

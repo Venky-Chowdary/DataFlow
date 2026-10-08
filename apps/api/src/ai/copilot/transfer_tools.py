@@ -513,6 +513,29 @@ def _sign_required_risk_contracts(
     return out
 
 
+def _plan_source_types_authoritative(
+    src_conn: dict, src_info: dict, callable_plan: dict | None
+) -> bool:
+    """Whether Map may treat the peeked source types as declared DDL.
+
+    A procedure extract and an object store do not declare precision. Calling
+    them authoritative made the plan bind TEXT while the integrity check
+    expected the profiled DECIMAL. Warehouse catalogs stay authoritative.
+    """
+    if callable_plan:
+        return False
+    from services.data_profiler import source_types_are_authoritative
+
+    kind = str(src_conn.get("kind") or "database")
+    fmt = str(
+        src_info.get("db_type")
+        or src_conn.get("type")
+        or src_conn.get("db_type")
+        or ""
+    )
+    return source_types_are_authoritative(kind, fmt)
+
+
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -721,8 +744,12 @@ def plan_transfer(
         schema_policy=schema_policy,
         sync_mode=mode,
         destination_table_exists=dest_exists,
-        # Both ends were introspected, so their DDL is fact, not a guess.
-        source_types_authoritative=not bool(callable_plan),
+        # Warehouse DDL is fact. Object stores, files, and procedure extracts
+        # are a sample: marking them authoritative made the plan say TEXT
+        # while the integrity check bound the profiled DECIMAL.
+        source_types_authoritative=_plan_source_types_authoritative(
+            src_conn, src_info, callable_plan
+        ),
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])

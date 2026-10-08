@@ -254,3 +254,217 @@ def test_overwrite_heap_does_not_block_duplicate_keys() -> None:
         destination_pk_columns=["id"],
     )
     assert keyed["blocks_transfer"] is True
+
+
+def test_legacy_ssh_is_registered_only_for_the_last_attempt() -> None:
+    """Paramiko 5 dropped group14-sha1 and ssh-rsa. The last attempt adds them.
+
+    The class preferred lists stay modern, group1-sha1 is never offered, and
+    a fresh transport does not advertise the legacy names.
+    """
+    import socket
+
+    import paramiko
+
+    from connectors.sftp_common import _enable_legacy_ssh, _register_legacy_ssh
+
+    preferred_kex = tuple(paramiko.Transport._preferred_kex)
+    preferred_keys = tuple(paramiko.Transport._preferred_keys)
+    _register_legacy_ssh(paramiko)
+
+    assert "diffie-hellman-group14-sha1" in paramiko.Transport._kex_info
+    assert "diffie-hellman-group1-sha1" not in paramiko.Transport._kex_info
+    assert paramiko.Transport._key_info.get("ssh-rsa") is paramiko.rsakey.RSAKey
+    assert "ssh-rsa" in paramiko.rsakey.RSAKey.HASHES
+    assert tuple(paramiko.Transport._preferred_kex) == preferred_kex
+    assert tuple(paramiko.Transport._preferred_keys) == preferred_keys
+    assert "diffie-hellman-group14-sha1" not in preferred_kex
+    assert "ssh-rsa" not in preferred_keys
+
+    left, right = socket.socketpair()
+    modern = legacy = None
+    try:
+        modern = paramiko.Transport(left)
+        legacy = paramiko.Transport(right)
+        _enable_legacy_ssh(legacy)
+        assert "diffie-hellman-group14-sha1" not in modern.get_security_options().kex
+        assert "ssh-rsa" not in modern.get_security_options().key_types
+        assert "diffie-hellman-group14-sha1" in legacy.get_security_options().kex
+        assert "ssh-rsa" in legacy.get_security_options().key_types
+        assert "diffie-hellman-group1-sha1" not in legacy.get_security_options().kex
+        assert tuple(paramiko.Transport._preferred_kex) == preferred_kex
+    finally:
+        for transport in (modern, legacy):
+            if transport is not None:
+                transport.close()
+        left.close()
+        right.close()
+
+
+def test_adls_emulator_pins_version_and_real_azure_does_not(monkeypatch) -> None:
+    from connectors.adls import test_adls
+    from connectors.adls_common import (
+        _emulator_endpoint,
+        api_version_rejected,
+        blob_service_client,
+    )
+
+    assert _emulator_endpoint({"host": "127.0.0.1", "port": 10000}) is True
+    assert _emulator_endpoint(
+        {"connection_string": "AccountName=devstoreaccount1;BlobEndpoint=http://azurite:10000/devstoreaccount1"}
+    ) is True
+    assert _emulator_endpoint(
+        {"host": "prodacct.blob.core.windows.net", "port": 443, "username": "prodacct"}
+    ) is False
+    assert api_version_rejected(RuntimeError("The specified API version is invalid x-ms-version"))
+    assert api_version_rejected(RuntimeError("AuthenticationFailed account key")) is False
+
+    captured: list[dict] = []
+
+    class _Client:
+        def __init__(self, account_url, credential=None, **kwargs):
+            captured.append({"url": account_url, **kwargs})
+
+        @staticmethod
+        def from_connection_string(_cs, **kwargs):
+            captured.append(dict(kwargs))
+            return object()
+
+    monkeypatch.setattr("azure.storage.blob.BlobServiceClient", _Client)
+    blob_service_client(
+        {
+            "connection_string": (
+                "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;"
+                "AccountKey=abc;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
+            )
+        }
+    )
+    blob_service_client(
+        {
+            "username": "prodacct",
+            "password": "key",
+            "host": "prodacct.blob.core.windows.net",
+            "port": 443,
+        }
+    )
+    blob_service_client(
+        {
+            "username": "prodacct",
+            "password": "key",
+            "host": "prodacct.blob.core.windows.net",
+            "api_version": "2025-01-05",
+        }
+    )
+    assert captured[0]["api_version"] == "2021-12-02"
+    assert "api_version" not in captured[1]
+    assert captured[2]["api_version"] == "2025-01-05"
+
+    probes: list[str | None] = []
+
+    class _Probe:
+        def list_containers(self):
+            version = probes[-1]
+            if version != "2021-12-02":
+                raise RuntimeError("x-ms-version is not supported")
+            return []
+
+    def _factory(cfg):
+        probes.append(cfg.get("api_version"))
+        return _Probe()
+
+    monkeypatch.setattr("connectors.adls.blob_service_client", _factory)
+    result = test_adls(
+        host="tunnel.example",
+        port=443,
+        database="",
+        username="devstoreaccount1",
+        password="key",
+        schema="",
+        connection_string="",
+        ssl=False,
+    )
+    assert result.ok is True
+    assert probes == [None, "2021-12-02"]
+
+
+def test_object_store_plan_types_are_not_authoritative() -> None:
+    from src.ai.copilot.transfer_tools import _plan_source_types_authoritative
+
+    assert (
+        _plan_source_types_authoritative(
+            {"kind": "object_store", "type": "s3"},
+            {"db_type": "s3"},
+            None,
+        )
+        is False
+    )
+    assert (
+        _plan_source_types_authoritative(
+            {"kind": "database", "type": "postgresql"},
+            {"db_type": "postgresql"},
+            None,
+        )
+        is True
+    )
+    assert (
+        _plan_source_types_authoritative(
+            {"kind": "database", "type": "postgresql"},
+            {"db_type": "postgresql"},
+            {"name": "extract_orders"},
+        )
+        is False
+    )
+
+
+def test_pgvector_create_adds_numeric_column_and_skips_text() -> None:
+    from psycopg2 import sql
+
+    from connectors.pgvector_writer import (
+        _exec_schema_table,
+        _pgvector_extra_cells,
+        _pgvector_typed_extras,
+    )
+
+    extras = _pgvector_typed_extras(
+        [
+            {"source": "price", "target": "price", "target_type": "DECIMAL(10,2)"},
+            {"source": "title", "target": "title", "target_type": "TEXT"},
+            {"source": "payload", "target": "payload", "target_type": "JSON"},
+            {"source": "id", "target": "id", "target_type": "BIGINT"},
+            {"source": "flag", "target": "active", "target_type": "BOOLEAN"},
+        ],
+        {},
+    )
+    assert extras == [("price", "NUMERIC(10,2)"), ("active", "BOOLEAN")]
+    assert _pgvector_extra_cells({"Price": "10.50", "ACTIVE": False}, extras) == [
+        "10.50",
+        False,
+    ]
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def execute(self, query, params=None) -> None:
+            self.calls.append((query, params))
+
+    cur = _Cur()
+    _exec_schema_table(cur, "public", "chunks", 32, extras)
+    alters = [
+        call
+        for call in cur.calls
+        if isinstance(call[0], sql.Composed)
+        and any(
+            getattr(part, "_wrapped", None) == " ADD COLUMN IF NOT EXISTS "
+            for part in call[0].seq
+        )
+    ]
+    assert len(alters) == 2
+    tokens = [
+        part._wrapped
+        for _query, _params in alters
+        for part in _query.seq
+        if isinstance(part, sql.SQL) and part._wrapped not in {" ", " ADD COLUMN IF NOT EXISTS "}
+    ]
+    assert "NUMERIC(10,2)" in tokens
+    assert "BOOLEAN" in tokens

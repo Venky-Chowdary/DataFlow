@@ -1701,9 +1701,17 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
 
 
 def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
-    """change_target_type actions Approve may stamp — proven and not live DDL."""
+    """change_target_type actions Approve may stamp — proven and not live DDL.
+
+    A blocking gate already lists those actions. A continue-policy gate only
+    warns ("N rows will be held out") and omits them, so a create-new table
+    we still own kept the peeked narrow carrier and forecast a quarantine the
+    CREATE should have widened away. Held-out findings with a proven wider
+    type are the same CREATE decision when the destination column does not
+    exist yet.
+    """
     gate = build_population_fit_gate(report)
-    return [
+    actions = [
         a
         for a in (gate.get("details") or {}).get("suggested_actions") or []
         if a.get("kind") == "change_target_type"
@@ -1712,6 +1720,33 @@ def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
         and not a.get("requires_ddl")
         and a.get("mapping_applyable") is not False
     ]
+    if actions:
+        return actions
+    for finding in report.findings:
+        target = finding.target
+        if target.binds_live_ddl or not finding.apply_proven:
+            continue
+        if not finding.suggested_target_type:
+            continue
+        if target.carrier not in _WIDENABLE_CARRIERS:
+            continue
+        actions.append(
+            {
+                "kind": "change_target_type",
+                "column": target.source,
+                "target": target.target,
+                "to_type": finding.suggested_target_type,
+                "label": (
+                    f"Widen '{target.source}' CREATE type to "
+                    f"{finding.suggested_target_type}"
+                ),
+                "requires_ddl": False,
+                "mapping_applyable": True,
+                "apply_proven": True,
+                "apply_proven_scope": finding.apply_proven_scope,
+            }
+        )
+    return actions
 
 
 @dataclass(frozen=True)
