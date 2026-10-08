@@ -2581,41 +2581,126 @@ class DataPilotTools:
         ]
 
     def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
-        schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
-        columns = schema.columns if schema else []
-        pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
+        """Profile one named upload. A miss or two same-named files is not a profile.
+
+        The six gate sentences used to come back for every string, including a
+        name that is not a dataset, and PII was a four-token substring that
+        missed ``ACCT_NO``. Duplicate stems (CSV and TSV both called
+        ``sample_payments``) were silently reduced to the wider file.
+        """
+        from services.dataset_resolve import exact_datasets
+
         gate_ids = self._engine_gate_ids()
-        return ToolResult(name="profile_quality_rules", success=True, output={
-            "dataset": schema.name if schema else dataset_name or "active dataset",
-            "rules": [
-                "declared types validated by G3 schema contract (sample-aware when rows exist)",
-                "null rate checked against inferred required / NOT NULL fields",
-                "primary key uniqueness when candidate key exists",
-                "PII columns tagged before destination write",
-                "row rejection quarantine enabled for lossy coercions",
-                "post-write row count and checksum reconciliation (G8/G9)",
-            ],
-            "honesty": (
-                "No invented numeric parse-success floor — cite preflight_gates / "
-                "evidence pack measurements, not marketing thresholds."
+        name = (dataset_name or "").strip()
+        honesty = (
+            "No invented numeric parse-success floor — cite preflight_gates / "
+            "evidence pack measurements, not marketing thresholds."
+        )
+        empty_steps = [
+            "Upload a file in Transfer or name a dataset to analyze",
+            "Or: sample <table> on <connector>",
+            "Ask what quality gates do you have for the G1–G9 list",
+        ]
+
+        def _miss(message: str, *, candidates: list[dict] | None = None) -> ToolResult:
+            return ToolResult(
+                name="profile_quality_rules",
+                success=True,
+                output={
+                    "dataset": name,
+                    "rules": [],
+                    "honesty": honesty,
+                    "message": message,
+                    "preflight_gates": gate_ids,
+                    "pii_candidates": [],
+                    "column_count": 0,
+                    "has_dataset": False,
+                    "ambiguous": bool(candidates),
+                    "candidates": candidates or [],
+                    "next_steps": empty_steps,
+                },
+            )
+
+        if not name:
+            return _miss("Name a dataset to profile. No file was measured.")
+
+        schemas = []
+        feeder = getattr(self.analyst, "feeder", None)
+        if feeder is not None and hasattr(feeder, "feed_all"):
+            schemas = list(feeder.feed_all() or [])
+        matches = exact_datasets(schemas, name)
+        shapes = {
+            (
+                (getattr(s, "file_type", "") or "").lower(),
+                tuple(getattr(s, "columns", []) or []),
+            )
+            for s in matches
+        }
+        if len(matches) > 1 and len(shapes) > 1:
+            candidates = [
+                {
+                    "name": getattr(s, "name", ""),
+                    "file_type": getattr(s, "file_type", "") or "",
+                    "column_count": len(getattr(s, "columns", []) or []),
+                    "columns": list(getattr(s, "columns", []) or []),
+                    "row_count": int(getattr(s, "row_count", 0) or 0),
+                }
+                for s in matches
+            ]
+            listed = ", ".join(
+                f"{c['name']}.{c['file_type'] or 'file'} "
+                f"({c['column_count']} columns, {c['row_count']} rows)"
+                for c in candidates
+            )
+            return _miss(
+                f"More than one dataset is named {name}. Name the file: {listed}.",
+                candidates=candidates,
+            )
+
+        schema = self.analyst.resolve_dataset(name)
+        columns = list(schema.columns) if schema else []
+        if not schema or not columns:
+            return _miss(
+                f"Dataset {name!r} was not found. No quality rules were measured for it."
+            )
+
+        insight = self.analyst.analyze_schema(schema)
+        pii_candidates = list(getattr(insight, "pii_columns", []) or [])
+        rules = [
+            (
+                f"Measured {len(columns)} columns"
+                + (f" and {int(schema.row_count):,} rows" if schema.row_count else "")
+                + f" on {schema.name}"
+                + (f" ({schema.file_type})" if getattr(schema, "file_type", "") else "")
             ),
+            (
+                "PII columns tagged before destination write: "
+                + ", ".join(pii_candidates)
+                if pii_candidates
+                else "Pattern engine found no PII columns on this dataset"
+            ),
+            "null rate checked against inferred required / NOT NULL fields",
+            "primary key uniqueness when candidate key exists",
+            "row rejection quarantine enabled for lossy coercions",
+            "post-write row count and checksum reconciliation (G8/G9)",
+        ]
+        return ToolResult(name="profile_quality_rules", success=True, output={
+            "dataset": schema.name,
+            "file_type": getattr(schema, "file_type", "") or "",
+            "rules": rules,
+            "honesty": honesty,
+            "message": "",
             "preflight_gates": gate_ids,
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
-            "has_dataset": bool(schema and columns),
-            "next_steps": (
-                [
-                    "Sample a live table to profile real null/type rates",
-                    "Say fix bad data to open Transfer Studio remediation (Confirm)",
-                    "Run Validate (9 gates) before Execute",
-                ]
-                if schema and columns
-                else [
-                    "Upload a file in Transfer or name a dataset to analyze",
-                    "Or: sample <table> on <connector>",
-                    "Ask what quality gates do you have for the G1–G9 list",
-                ]
-            ),
+            "has_dataset": True,
+            "ambiguous": False,
+            "candidates": [],
+            "next_steps": [
+                "Sample a live table to profile real null/type rates",
+                "Say fix bad data to open Transfer Studio remediation (Confirm)",
+                "Run Validate (9 gates) before Execute",
+            ],
         })
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):

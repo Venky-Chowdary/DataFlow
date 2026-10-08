@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 
-from connectors.adls_common import blob_service_client
+from connectors.adls_common import blob_service_client, list_service_containers
 from connectors.base import ConnectResult
 
 
@@ -42,9 +42,10 @@ def test_adls(
 
     try:
         client = blob_service_client(cfg)
-        # Lightweight connectivity probe. No include= list: an empty include
-        # query is itself a 400 on Azurite.
-        list(client.list_containers())[:1]
+        # The public list_containers() sends include= (empty list). Azurite
+        # answers 400 to that query. The generated call with include=None
+        # omits it.
+        list_service_containers(client, maxresults=1)
     except Exception as exc:  # noqa: BLE001 — probe must return ConnectResult
         if api_version_rejected(exc) and not cfg.get("api_version"):
             # A tunneled Azurite does not look local. Retry once on the
@@ -52,7 +53,7 @@ def test_adls(
             # so this does not pin production accounts.
             try:
                 client = blob_service_client({**cfg, "api_version": "2021-12-02"})
-                list(client.list_containers())[:1]
+                list_service_containers(client, maxresults=1)
             except Exception as retry_exc:  # noqa: BLE001 — probe must return ConnectResult
                 return ConnectResult(
                     ok=False, tables=[], error=str(retry_exc), driver="azure-storage-blob"

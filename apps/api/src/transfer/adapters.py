@@ -1860,7 +1860,11 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"REDIS FIELD {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+        )
         if not result.ok:
             raise_writer_failure(result, "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
@@ -1870,6 +1874,9 @@ def _write_destination_database(
             {
                 "type": "redis",
                 "prefix": result.table_name,
+                # Reconcile reads dest_summary["table"]. The prefix-only key
+                # left the table name empty and Gate-8 scanned the whole database.
+                "table": result.table_name,
                 "checksum": result.checksum,
                 "driver": result.driver,
                 **_writer_diagnostics(result),

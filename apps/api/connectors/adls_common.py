@@ -101,6 +101,18 @@ def _service_principal_credential(cfg: dict[str, Any]):
         return None
 
 
+def list_service_containers(client: Any, *, maxresults: int = 1) -> Any:
+    """One page of account containers, without an empty ``include=`` query.
+
+    ``BlobServiceClient.list_containers`` always passes ``include=[]``. The
+    generated serializer writes that as ``?comp=list&include=``, and Azurite
+    answers ``400 Bad Request`` before any container exists. ``include=None``
+    omits the parameter. Metadata, deleted, and system flags are not requested.
+    """
+    service = client._client.service
+    return service.list_containers_segment(include=None, maxresults=maxresults)
+
+
 def blob_service_client(cfg: dict[str, Any]):
     """Build a BlobServiceClient from connection string, service principal, or account URL + key."""
     from azure.storage.blob import BlobServiceClient

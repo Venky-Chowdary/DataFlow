@@ -1659,7 +1659,14 @@ def run_reconciliation(
     from services.dialect_profiles import schema_from_cfg
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
-    table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
+    table_name = (
+        dest_summary.get("table")
+        or dest_summary.get("prefix")
+        or dest_summary.get("index")
+        or endpoint.table
+        or endpoint.collection
+        or ""
+    )
     if db_type in VECTOR_IDENTITY_ENGINES:
         vector_stamp_ctx.update(
             cfg=cfg,

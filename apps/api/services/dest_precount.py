@@ -3533,13 +3533,19 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
     absent prefix is 0 (a known-empty destination is a proof); an unreachable
     server stays ``None`` rather than substituting writer acknowledgement.
     """
-    from connectors.redis_reader import _redis_client
+    from connectors.redis_reader import _redis_client, keys_for_prefix
 
+    prefix = (prefix or "").strip()
+    if not prefix:
+        # An unnamed prefix is not "every key in the database".
+        return None
     client = _redis_client(cfg)
-    pattern = f"{prefix}:*" if prefix else "*"
+    pattern = f"{prefix}:*"
     # SCAN guarantees each key at least once, not exactly once (a rehash during
     # the walk repeats slots), so the keys are de-duplicated before counting —
     # an inflated pre-count would understate the delta of the next append.
+    # MATCH is then checked again: a walk that returned unrelated hashes
+    # (dbsize of another prefix) must not count as this destination.
     seen: set[str] = set()
     cursor = 0
     while True:
@@ -3547,7 +3553,7 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
         for raw in batch:
             seen.add(raw.decode() if isinstance(raw, bytes) else str(raw))
         if cursor == 0:
-            return len(seen)
+            return len(keys_for_prefix(list(seen), prefix))
 
 
 def _redis_key_hits(

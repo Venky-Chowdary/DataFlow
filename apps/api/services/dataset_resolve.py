@@ -73,6 +73,26 @@ def _keyword_in_name(keyword: str, name: str) -> bool:
     return False
 
 
+def exact_datasets(schemas: list[Any], hint: str | None) -> list[Any]:
+    """Every schema whose folded name is the hint, optionally narrowed by file type.
+
+    Two uploads can share a stem (``sample_payments`` as CSV and as TSV). Callers
+    that profile or explain must see both. :func:`pick_dataset` still prefers the
+    measured sibling for a transfer bind; a profile must not pretend they are one.
+    """
+    if not schemas or not hint or not str(hint).strip():
+        return []
+    folded, file_type = _split_hint(str(hint))
+    if not folded:
+        return []
+    exact = [s for s in schemas if _fold_name(getattr(s, "name", "")) == folded]
+    if file_type:
+        typed = [s for s in exact if (getattr(s, "file_type", "") or "").lower() == file_type]
+        if typed:
+            return typed
+    return exact
+
+
 def pick_dataset(schemas: list[Any], hint: str | None) -> Any | None:
     if not schemas:
         return None

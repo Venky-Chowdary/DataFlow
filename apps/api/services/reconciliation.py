@@ -3237,8 +3237,18 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _redis_client, redis_json_row, scan_all_keys
+        from connectors.redis_reader import (
+            _redis_client,
+            keys_for_prefix,
+            redis_json_row,
+            scan_all_keys,
+        )
 
+        prefix = (prefix or "").strip()
+        if not prefix:
+            # No prefix is not the whole database. dbsize of unrelated hashes
+            # was reported as rows of this destination.
+            return -1, ""
         client = _redis_client(
             {
                 "host": host,
@@ -3250,8 +3260,8 @@ def verify_redis_prefix(
                 "ssl": ssl,
             }
         )
-        pattern = f"{prefix}:*" if prefix else "*"
-        keys: list[str] = scan_all_keys(client, pattern)
+        pattern = f"{prefix}:*"
+        keys: list[str] = keys_for_prefix(scan_all_keys(client, pattern), prefix)
         total = len(keys)
         scoped_ids, _pk = keyed_readback_scope(written_ids, pk_column)
         if scoped_ids:

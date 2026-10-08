@@ -3238,6 +3238,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if sibling_docs and cols <= 0:
                     continue
                 if cols <= 0:
+                    named = str(o.get("message") or "").strip()
+                    if named:
+                        parts.append(named)
+                        continue
                     gates = o.get("preflight_gates") or []
                     gate_line = (
                         f"\n\nValidate runs **{len(gates)} preflight gates**: "

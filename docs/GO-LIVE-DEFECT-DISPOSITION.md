@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 23
+- not fixed: 18
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 63
-- partly fixed in code: 9
+- fixed in code, unit-proven — not a live QA retest: 67
+- partly fixed in code: 10
 
 ## Every row
 
@@ -76,7 +76,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-011 | P2 | OPEN | fixed in code, unit-proven (test_declared_number_is_not_relabelled_boolean, test_oracle_number_type_object_is_decimal_not_boolean, test_create_new_does_not_stamp_boolean_on_a_declared_number). File 0/1 on is_active stays BOOLEAN. Not a live Oracle query retest. |
 | DEF-C-003 | P2 | OPEN | partly fixed in code, unit-proven (test_kafka_listing_drops_an_unrecognized_timeout). Topic listing keeps the timeout only when this client accepts it. The g4 contract block is not claimed fixed. Not a live Kafka retest. |
 | DEF-C-009 | P2 | OPEN | fixed in code, unit-proven (test_three_decimal_wire_stays_decimal_auto_does_not). A typed source renders canonical decimals, so the wire locale keeps NUMERIC(p,3). Not a live QA retest. |
-| DEF-C-010 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-010 | P2 | OPEN | fixed in code, unit-proven (test_pending_id_mapping_stays_a_redis_column, test_redis_write_receives_primary_key_and_table_name, test_prefix_count_drops_unrelated_keys_when_scan_ignores_match). An explicit primary_key is passed through. An empty prefix is unmeasured, not dbsize. Not a live Redis retest. |
 | DEF-C-011 | P2 | OPEN | fixed in code, unit-proven (test_explicit_overwrite_keeps_its_mode_when_a_primary_key_is_named, test_explicit_append_keeps_its_mode_when_a_primary_key_is_named, test_upsert_key_becomes_a_stream_contract_and_switches_the_mode). An explicit overwrite or append keeps that mode and records the key; no cursor is inferred. Omitting the mode and naming a key still becomes incremental upsert. Not a live QA retest. |
 | DEF-C-013 | P2 | OPEN | fixed in code, unit-proven (test_dynamodb_endpoint_collapses_doubled_scheme_and_default_port). A saved http://host:port is used as is. Not a live DynamoDB Local retest. |
 | DEF-C-015 | P2 | OPEN | fixed in code, unit-proven (test_near_realtime_updates_and_deletes_recommend_cdc, test_query_with_deletes_recommends_overwrite_without_a_cursor, test_recommend_sync_mode_refuses_cdc_for_procedure). Near-real-time updates or deletes with a primary key recommend Incremental CDC (at-least-once upsert, log required). A query or procedure whose workload mentions deletes recommends Full Refresh Overwrite and does not require a cursor. CDC on a procedure without deletes stays the non-destructive Full Refresh Append refusal. Not a live QA retest. |
@@ -94,9 +94,9 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-SCHEMALESS-DST-CONTRACT | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-DECIMAL-SAMPLE-INFER | P2 | OPEN | fixed in code, unit-proven (test_qdrant_price_page_does_not_invent_numeric_4_2). A payload or document sample page stays unbounded numeric. A spreadsheet still invents from its cells. Not a live Qdrant retest. |
 | DEF-TSTZ-NAME-INFER | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-REDIS-SRC-HEADERS | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-REDIS-SRC-HEADERS | P2 | OPEN | fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0). db0 means the selected database. The connector lists key prefixes, not the keyspace label. Not a live Redis retest. |
 | DEF-S3-ENDPOINT-FORM | P2 | OPEN | fixed in code, unit-proven (connectorListenPort.test.ts). A typed port is kept. An endpoint URL that names a port is the port the preview shows. Real AWS with no other port stays 443. Not a live MinIO retest. |
-| DEF-ADLS-EMPTY-INCLUDE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-ADLS-EMPTY-INCLUDE | P2 | OPEN | fixed in code, unit-proven (test_container_list_omits_empty_include). The probe calls list_containers_segment with include=None, so the query is comp=list. Not a live Azurite retest. |
 | DEF-GCS-DST-CREATE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-OUTAGE | P2 | UNCONFIRMED-ENV-DEPLOY | not fixed. Diagnose-only. No code change. |
@@ -120,7 +120,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-014 | P3 | OPEN | fixed in code, unit-proven (test_ordinary_sql_functions_are_not_schema_identifiers). A token followed by ( or a ::type is not a schema identifier. A bare unknown column is still refused. Not a live query retest. |
 | DEF-C-016 | P3 | OPEN | fixed in code, unit-proven (test_what_cant_you_do_answers_with_the_limits, test_describe_pilot_names_confirm_gated_delete, test_cdc_does_not_require_an_incremental_cursor, test_gtid_answer_says_file_and_position_is_enough, test_resume_fact_restarts_a_full_refresh). Delete connector and create schedule stay Confirm-gated. Full refresh restarts from the beginning. MySQL file and position is enough; GTID is optional. Not a live QA retest. |
 | DEF-C-018 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-019 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-019 | P3 | OPEN | fixed in code, unit-proven (test_unknown_dataset_is_not_a_measured_profile, test_duplicate_stem_is_named_not_silently_widened, test_named_file_profiles_account_number_as_pii). A missing name returns no rules. Two different files with one stem are both named. ACCT_NO is PII from the pattern engine. Not a live QA retest. |
 | DEF-C-021 | P3 | OPEN | fixed in code, unit-proven (test_bad_tool_argument_names_the_schema_not_the_python_signature, test_connector_name_is_accepted_as_the_connector_argument). Unknown arguments name the accepted parameters. connector_name binds to name. Not a live Pilot retest. |
 | DEF-C-028 | P3 | OPEN | fixed in code, unit-proven (test_result_store_no_cross_session_leak, test_explicit_result_id_reloads_across_stores, test_missing_result_id_is_not_the_no_sample_sentence). An explicit result_id is the credential and is reloaded from disk. Omitting the id still returns only that session's latest. A missing id and a session with no sample are different sentences. Not a live QA retest. |
 | DEF-C-032 | P3 | OPEN | fixed in code, unit-proven (test_a_completed_job_overrules_an_older_failed_probe, test_a_failed_job_does_not_clear_a_failed_probe, test_a_probe_that_fails_after_the_transfer_is_failed_again, test_pilot_list_and_briefing_bucket_on_the_same_rule). connector_store.connector_health is the one rule: a failed probe is overruled only by a transfer that completed after it, the same rule the web client applies. Not a live QA retest. |
@@ -132,7 +132,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-MINIO-ALIAS | P3 | OPEN | fixed in code, unit-proven (test_minio_list_uses_the_s3_probe). Those formats list and sample through the S3 probe. Not a live MinIO retest. |
 | GAP-XLS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-BQ-FORM | P3 | PARTLY FIXED | fixed in code, unit-proven (test_bigquery_probe_failure_names_the_service_account, test_sql_probe_failure_still_names_host_and_port, test_service_account_camel_case_binds). BigQuery and GCS name the service_account JSON and project id. S3-compatible names the endpoint, bucket, and keys. SQL still names host/port/Railway. Not a live BigQuery retest. |
-| DEF-SPECIALTY-SAMPLE | P3 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-SPECIALTY-SAMPLE | P3 | PARTLY FIXED | partly fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0). Redis db0 is the database and the connector lists key prefixes. Kafka sample 0 is not fixed. Not a live retest. |
 | DEF-ES-PRICE-STRING | P3 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-CSV-TSTZ-OFFSET | P3 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-ES-META-INDEX | n/r | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |

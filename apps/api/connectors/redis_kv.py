@@ -59,13 +59,20 @@ def test_redis(
                 socket_timeout=8,
             )
         client.ping()
-        info = client.info("keyspace")
-        keyspaces = list(info.keys()) or ["db0 (empty)"]
+        from connectors.redis_reader import redis_prefix_inventory
+
+        # INFO keyspace returns "db0". That is the database index, not a key
+        # prefix, so sampling it scanned db0:* and read none of the hashes.
+        prefixes = redis_prefix_inventory(client)
         client.close()
         return ConnectResult(
             ok=True,
-            tables=keyspaces,
-            message=f"Redis connected — {len(keyspaces)} keyspace(s)",
+            tables=prefixes,
+            message=(
+                f"Redis connected — {len(prefixes)} key prefix(es)."
+                if prefixes
+                else "Redis connected — no keys in this database."
+            ),
             driver="redis-py",
         )
     except Exception as exc:
