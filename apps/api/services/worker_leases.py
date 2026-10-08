@@ -94,6 +94,26 @@ class WorkerLeaseStore:
         with _active_lock:
             _active_fences[job_id] = fence
 
+    @staticmethod
+    def _job_fence_floor(job_id: str) -> int:
+        """Highest fence the job document has accepted.
+
+        ``release`` deletes the lease and a restart empties the memory store,
+        so the lease alone would hand the next run fence 1 while the job
+        still holds the dead run's fence. Every status write of the new run
+        would then be refused and the job would freeze at the old progress.
+        """
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            job = get_mongodb_service().get_job(job_id) or {}
+            return max(0, int(job.get("lease_fence") or 0))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug(
+                "job fence floor unread for %s: %s", job_id, exc
+            )
+            return 0
+
     def acquire(self, job_id: str, ttl_seconds: int = 60) -> bool:
         """Try to acquire a lease for ``job_id`` for this worker.
 
@@ -107,7 +127,13 @@ class WorkerLeaseStore:
         if coll is not None:
             try:
                 existing = coll.find_one({"_id": job_id})
-                next_fence = int((existing or {}).get("fence") or 0) + 1
+                next_fence = (
+                    max(
+                        int((existing or {}).get("fence") or 0),
+                        self._job_fence_floor(job_id),
+                    )
+                    + 1
+                )
                 # CAS: only steal when expired / unowned / already ours. No upsert
                 # against a live foreign lease (avoids DuplicateKey → false own).
                 result = coll.find_one_and_update(
@@ -163,10 +189,11 @@ class WorkerLeaseStore:
             )
             return False
 
+        floor = self._job_fence_floor(job_id)
         with self._lock:
             existing = self._memory.get(job_id)
             if existing is None or existing.get("expires_at", now) < now:
-                fence = int((existing or {}).get("fence") or 0) + 1
+                fence = max(int((existing or {}).get("fence") or 0), floor) + 1
                 self._memory[job_id] = {
                     "worker_id": self.worker_id,
                     "expires_at": expires,

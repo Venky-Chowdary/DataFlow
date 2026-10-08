@@ -200,54 +200,14 @@ async def lifespan(app: FastAPI):
                 )
 
             if orphan_resume_enabled():
-                from .services.mongodb_service import get_mongodb_service
-                from .services.worker_leases import get_worker_lease_store
-                from .transfer.background import run_transfer_async
-                from .transfer.models import transfer_request_from_dict
+                from services.orphan_jobs import start_orphan_sweeper, sweep_orphan_jobs
 
-                mongo = get_mongodb_service()
-                lease_store = get_worker_lease_store()
-                resumed = 0
-                for job in mongo.list_jobs(limit=200):
-                    if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
-                        payload = job["transfer_request"]
-                        if lease_store.is_held(job["_id"]):
-                            continue
-                        request = transfer_request_from_dict(payload)
-                        try:
-                            from services.transfer_file_staging import (
-                                file_source_bytes_available,
-                                hydrate_file_source,
-                            )
-
-                            hydrate_file_source(request)
-                            if request.source.kind == "file" and not file_source_bytes_available(
-                                request
-                            ):
-                                mongo.update_job_status(
-                                    job["_id"],
-                                    "failed",
-                                    error="File re-upload required after restart",
-                                )
-                                continue
-                        except Exception as hydrate_exc:
-                            logging.getLogger(__name__).warning(
-                                "Orphan resume hydrate failed for %s: %s",
-                                job.get("_id"),
-                                hydrate_exc,
-                            )
-                        from services.execution_engine_contract import resolve_reclaim_resume
-
-                        # Fresh pending / zero-progress reclaim → resume=False.
-                        # Forcing resume=True on append/Excel falsely fails Module 14.
-                        # Claim mode enqueues here; it does not start a local executor.
-                        run_transfer_async(
-                            job["_id"],
-                            request,
-                            resume=resolve_reclaim_resume(job),
-                        )
-                        resumed += 1
-                print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
+                settled = sweep_orphan_jobs()
+                counts: dict[str, int] = {}
+                for row in settled:
+                    counts[row["action"]] = counts.get(row["action"], 0) + 1
+                start_orphan_sweeper()
+                print(f"[+] Orphaned job sweep started (first pass: {counts or 'none'})")
             else:
                 print("[+] Orphan resume scan skipped")
         except Exception as e:

@@ -143,6 +143,21 @@ def cancel_queued_job(job_id: str) -> dict[str, Any]:
     return {"queue": "not_waiting"}
 
 
+def queue_row_status(job_id: str) -> str | None:
+    """Status of the job's queue row, or None when there is no row or queue."""
+    coll = _queue_coll()
+    if coll is None or not job_id:
+        return None
+    try:
+        doc = coll.find_one({"_id": job_id}, {"status": 1})
+    except Exception:
+        _logger.debug("queue row lookup failed for %s", job_id, exc_info=True)
+        return None
+    if not doc:
+        return None
+    return str(doc.get("status") or "") or None
+
+
 def _transfer_job_cancelled(job_id: str) -> bool:
     """True when the operator already cancelled this transfer."""
     if not job_id:

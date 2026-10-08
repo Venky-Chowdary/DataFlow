@@ -817,12 +817,29 @@ async def cancel_transfer_job(job_id: str, request: Request):
         except Exception as exc:
             logger.warning("Queue cancel failed for %s: %s", job_id, exc)
             queue_release = {"queue": "unavailable"}
-        mongo.update_job_status(
+        recorded = mongo.update_job_status(
             job_id, "cancelled",
             phase="cancelled",
             message="Transfer cancelled by user",
             progress_pct=job.get("progress_pct", 0),
+            operator_command=True,
         )
+        if not recorded:
+            current = mongo.get_job(job_id) or {}
+            actual = str(current.get("status") or job.get("status") or "")
+            if actual != "cancelled":
+                return {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": actual,
+                    "message": (
+                        "Cancel was requested but the job status was not changed "
+                        f"(it is {actual or 'unknown'}). The running worker stops "
+                        "at its next checkpoint; nothing was rolled back."
+                    ),
+                    "cancel_requested": True,
+                    "queue_release": queue_release,
+                }
         # The worker drops the slot after it closes the replication connection.
         # While that worker still holds the CDC lease, peek mode leaves the
         # slot inactive between polls — this call then refuses to drop it.
