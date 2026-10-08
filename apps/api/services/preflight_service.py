@@ -1070,7 +1070,91 @@ from services.preflight_policy_gates import (  # noqa: E402
 from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
 
 
+def _apply_overwrite_emptied_gate(
+    out: dict[str, Any],
+    *,
+    sync_mode: str,
+    destination_table_exists: bool | None,
+    live_dest_columns: list[str],
+    mappings: list[dict[str, Any]] | None,
+    regenerated: list[str],
+    schema_policy: str,
+    acknowledged: bool,
+    dest_kind: str,
+    validation_mode: str,
+) -> None:
+    """Name the destination values an overwrite will empty (DEF-C-025).
+
+    MySQL and PostgreSQL keep a destination column no mapping writes (other
+    engines recreate without it), but either way the reload replaces every row
+    and the values it holds now are gone. That needs no schema history to see:
+    the live table and the mapping already say it. Under review policies it is a decision, otherwise a
+    warning — never a silent loss.
+    """
+    from services.overwrite_keep import overwrite_emptied_columns
+    from services.sync_cursor import is_overwrite_sync
+
+    from services.db_type_utils import overwrite_replaces_rows
+
+    if (
+        destination_table_exists is not True
+        or not is_overwrite_sync(sync_mode)
+        or not overwrite_replaces_rows(dest_kind)
+    ):
+        return
+    skip = {str(c).casefold() for c in regenerated}
+    emptied = [
+        c for c in overwrite_emptied_columns(live_dest_columns, mappings)
+        if c.casefold() not in skip
+    ]
+    if not emptied:
+        return
+    shown = ", ".join(emptied[:8]) + (f" (+{len(emptied) - 8} more)" if len(emptied) > 8 else "")
+    message = (
+        f"Overwrite empties {len(emptied)} destination column(s) no mapping writes "
+        f"({shown}): every row is replaced and nothing writes these columns, so "
+        "the values they hold now are lost"
+    )
+    details = {
+        "columns": emptied,
+        "sync_mode": sync_mode,
+        "schema_policy": schema_policy,
+        "rule_id": "schema_drift.overwrite_emptied_columns",
+    }
+    policy = (schema_policy or "manual_review").strip().lower()
+    if acknowledged or policy not in {"manual_review", "pause_on_change", "type_locked"}:
+        out.setdefault("warnings", []).append(
+            {"id": "overwrite_emptied_columns", "message": message, "details": details}
+        )
+        return
+    message += " — map a source column to it, or acknowledge the schema change to empty it"
+    details.update({"remediation_kind": "acknowledge_schema_drift", "ack_required": True})
+    gate = {
+        "id": "overwrite_emptied_columns",
+        "status": "block",
+        "message": message,
+        "duration_ms": 0,
+        "details": details,
+    }
+    from services.preflight_rules import enrich_blockers
+
+    out["gates"] = [*out.get("gates", []), gate]
+    out["blockers"] = [
+        *out.get("blockers", []),
+        *enrich_blockers(
+            [{"id": gate["id"], "message": message, "details": details}],
+            dest_kind=dest_kind,
+            validation_mode=validation_mode,
+        ),
+    ]
+    out["passed"] = False
+    out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+    out["total_gates"] = len(out["gates"])
+    out["readiness_score"] = round(out["passed_count"] / max(out["total_gates"], 1) * 100, 1)
+
+
 @_with_date_locale
+@_with_source_engine
 def run_file_preflight(
     *,
     columns: list[str],
@@ -3211,6 +3295,25 @@ def run_file_preflight(
         out["readiness_score"] = round(
             out["passed_count"] / max(out["total_gates"], 1) * 100, 1
         )
+
+    _apply_overwrite_emptied_gate(
+        out,
+        sync_mode=sync_mode,
+        destination_table_exists=destination_table_exists,
+        live_dest_columns=list(
+            (destination_live_column_types or destination_column_types or {}).keys()
+        ),
+        mappings=mappings,
+        regenerated=[
+            *(destination_identity_columns or []),
+            *(destination_generated_columns or []),
+            *(["_id"] if schemaless else []),
+        ],
+        schema_policy=schema_policy,
+        acknowledged=schema_drift_acknowledged,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
 
     from services.root_cause_engine import apply_root_causes_to_preflight
     from services.validation_mode_contract import stamp_validation_mode

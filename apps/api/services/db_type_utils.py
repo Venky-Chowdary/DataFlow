@@ -65,6 +65,19 @@ DESTS_WITHOUT_SCHEMA_RECREATE = frozenset({
 })
 
 
+def overwrite_replaces_rows(dest_db_type: str | None) -> bool:
+    """True when an overwrite replaces every row, so unwritten columns lose values.
+
+    SaaS objects, REST, Kafka and vector stores upsert on "overwrite": a
+    property the run does not write keeps its value. Iceberg keeps its schema
+    but its overwrite does replace the data files.
+    """
+    kind = normalize_dest_kind(dest_db_type)
+    if kind in NO_RELATIONAL_DDL_DESTS:
+        return False
+    return kind in {"iceberg", "apache_iceberg"} or kind not in DESTS_WITHOUT_SCHEMA_RECREATE
+
+
 def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
     """True when overwrite actually drops and recreates destination DDL."""
     kind = normalize_dest_kind(dest_db_type)

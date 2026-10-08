@@ -44,6 +44,19 @@ def columns_to_keep(
     return kept
 
 
+def overwrite_emptied_columns(
+    live_dest_columns: list[str] | None, mappings: list[Any] | None
+) -> list[str]:
+    """Kept destination columns an overwrite leaves NULL on every reloaded row.
+
+    Engine bookkeeping (``_df_*``) is rewritten by the engine, not by mapping.
+    """
+    kept = columns_to_keep(
+        [{"name": str(c)} for c in live_dest_columns or []], mappings
+    )
+    return [c["name"] for c in kept if not c["name"].casefold().startswith("_df_")]
+
+
 def append_kept_column_sql(
     col_defs: str,
     kept: list[dict[str, Any]] | None,
