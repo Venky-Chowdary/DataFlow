@@ -2798,7 +2798,10 @@ def _run_cdc_single_stream(
                     cursor_key=cursor_key,
                 )
                 if not cdc.is_available():
-                    raise RuntimeError("SQL Server CDC/CT not available; falling back to query CDC")
+                    raise RuntimeError(
+                        f"SQL Server change data capture is not enabled for "
+                        f"{ss_schema}.{table_name} and Change Tracking is off"
+                    )
                 ddl_log = [
                     f"CDC(change_tracking) {src_type}.{table_name} → {dest_type}.{dest_table} "
                     f"(pk={primary_key}, resume={'set' if watermark else 'initial'})"
@@ -2808,6 +2811,7 @@ def _run_cdc_single_stream(
 
                 if isinstance(exc, CdcLeaseConflict):
                     raise
+                capture_downgrade = _query_cdc_downgrade(exc, "sqlserver")
                 cdc = CdcEngine(
                     src_cfg,
                     src_driver,
@@ -2873,7 +2877,10 @@ def _run_cdc_single_stream(
                     cursor_key=cursor_key,
                 )
                 if not cdc.is_available():
-                    raise RuntimeError("Oracle LogMiner/flashback not available; falling back to query CDC")
+                    raise RuntimeError(
+                        "Oracle LogMiner and flashback are not available: supplemental "
+                        f"logging is not enabled for {ora_schema}.{table_name}"
+                    )
                 ddl_log = [
                     f"CDC(flashback) {src_type}.{table_name} → {dest_type}.{dest_table} "
                     f"(pk={primary_key}, resume={'set' if watermark else 'initial'})"
@@ -2883,6 +2890,7 @@ def _run_cdc_single_stream(
 
                 if isinstance(exc, CdcLeaseConflict):
                     raise
+                capture_downgrade = _query_cdc_downgrade(exc, "oracle")
                 cdc = CdcEngine(
                     src_cfg,
                     src_driver,
@@ -2941,6 +2949,28 @@ def _run_cdc_single_stream(
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+    if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"} and isinstance(
+        cdc, CdcEngine
+    ):
+        from services.cdc_capability import query_cdc_change_refusal
+
+        refusal_text = query_cdc_change_refusal(
+            dialect=src_format or src_type,
+            cursor_field=cursor_field,
+            cursor_semantics=str(getattr(contract, "cursor_semantics", "") or ""),
+            primary_key_columns=pk_source_cols,
+            downgrade_cause=str(capture_downgrade.get("cdc_capture_downgrade_cause") or ""),
+        )
+        if refusal_text:
+            raise RuntimeError(refusal_text)
+        if not capture_downgrade:
+            capture_downgrade = {
+                "cdc_capture_requested": "log_based",
+                "cdc_capture_used": "query_cursor",
+                "cdc_capture_downgraded": True,
+                "cdc_capture_dialect": src_format or src_type,
+                "cdc_delete_capture": False,
+            }
     if capture_downgrade:
         # Query CDC has no slot LSN, binlog GTID, or change-stream resume token.
         # Auto had already selected exactly-once from the contract's cdc_position.

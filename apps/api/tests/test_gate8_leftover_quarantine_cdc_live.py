@@ -413,10 +413,12 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
 
 
 def test_cdc_upsert_completion_uses_source_image_not_event_ack(tmp_path: Path) -> None:
-    """200 snapshot rows plus one update of an existing key is a complete CDC run.
+    """Snapshot rows plus one update of an existing key is not a short write.
 
-    Writer ack is 201 and dest COUNT is 200. That is not a short write, and
-    the blank changelog digest must not be compared to the full-table dest hash.
+    Writer ack is 3 and dest COUNT is 2. The count is the source image count,
+    and the blank changelog digest must not be compared to the full-table dest
+    hash. A count-only scope still does not pass: values were not compared
+    (DEF-CDC-COUNT-ONLY-RECONCILE).
     """
     from src.transfer.reconcile_step import run_reconciliation
 
@@ -453,10 +455,12 @@ def test_cdc_upsert_completion_uses_source_image_not_event_ack(tmp_path: Path) -
         ],
         validation_mode="balanced",
     )
-    assert report["passed"] is True, report
+    assert report["passed"] is False, report
     assert report["source_rows"] == 2
     assert report["target_rows"] == 2
     assert "CDC catch-up" in report["message"]
+    assert "Value fidelity was not compared" in report["message"]
+    assert "short of the live source image" not in report["message"]
     assert "Checksum mismatch" not in report["message"]
 
     conn = sqlite3.connect(db)

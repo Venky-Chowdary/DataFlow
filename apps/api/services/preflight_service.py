@@ -798,6 +798,17 @@ def run_transfer_policy_gates(
     )
     if snap_gate:
         gates.append(snap_gate)
+    if sync == "cdc" and kind not in {"file", "cloud"}:
+        gates.extend(
+            _cdc_log_capture_gates(
+                contracts,
+                source_type=product or src,
+                source_config=source_config,
+                source_table=source_table,
+                catalog_primary_key_columns=catalog_primary_key_columns,
+                mappings=mappings,
+            )
+        )
 
     cap = max(0, int(row_limit or 0))
     priority = str(priority_column or "").strip()
@@ -841,6 +852,76 @@ def run_transfer_policy_gates(
         gates.append(procedure_gate)
 
     return gates
+
+
+def _cdc_log_capture_gates(
+    contracts: list[dict[str, Any]],
+    *,
+    source_type: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+    catalog_primary_key_columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """One g9c gate per selected stream: can the run read the source change log."""
+    from services.cdc_log_capture_probe import build_log_capture_gate, probe_log_capture
+    from services.preflight_cursor_gate import (
+        catalog_identity_applies,
+        resolved_stream_identity_columns,
+    )
+
+    if not source_config:
+        return []
+    streams = contracts or [{"name": source_table}]
+    gates: list[dict[str, Any]] = []
+    for contract in streams[:5]:
+        table = str(
+            (source_table if len(streams) == 1 else "")
+            or contract.get("name")
+            or contract.get("stream")
+            or ""
+        ).strip()
+        keys = resolved_stream_identity_columns(
+            contract,
+            catalog_primary_key_columns=(
+                catalog_primary_key_columns
+                if catalog_identity_applies(contract, source_table, len(streams))
+                else None
+            ),
+            mappings=mappings,
+        )
+        if not table or not keys:
+            continue
+        probe = probe_log_capture(
+            source_type,
+            dict(source_config),
+            table=table,
+            schema=str(source_config.get("schema") or ""),
+            primary_key=",".join(keys),
+        )
+        gate = build_log_capture_gate(
+            probe,
+            cursor_field=str(contract.get("cursor_field") or contract.get("cursor") or ""),
+            cursor_semantics=str(contract.get("cursor_semantics") or ""),
+            primary_key_columns=keys,
+            pass_status=GateStatus.PASS.value,
+            block_status=GateStatus.BLOCK.value,
+        )
+        if gate is not None:
+            gates.append({**gate, "details": {**gate.get("details", {}), "stream": table}})
+    if len(gates) <= 1:
+        return gates
+    blocked = [g for g in gates if g.get("status") == GateStatus.BLOCK.value]
+    chosen = blocked or [g for g in gates if g.get("severity") == "warn"] or gates
+    return [
+        {
+            **chosen[0],
+            "message": " ".join(
+                f"{g['details'].get('stream')}: {g['message']}" for g in chosen
+            ),
+            "details": {"streams": [g["details"] for g in gates]},
+        }
+    ]
 
 
 def _iter_table_population_for_preflight(
